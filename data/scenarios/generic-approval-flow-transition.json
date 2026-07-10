@@ -1,0 +1,48 @@
+{
+  "id": "generic_approval_flow_transition",
+  "title": "通用审批流状态变更验收",
+  "capabilityKind": "approval_flow",
+  "genericTemplate": true,
+  "planObservation": "smoke -> core_path(approval transition) -> regression",
+  "summary": "验证审批流按钮会把业务状态推进到已批准并记录 DOM 证据。",
+  "matcher": {
+    "keywords": ["审批", "approval", "workflow", "状态流", "批准", "review"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["approval_flow", "state_transition", "playwright_mcp"]
+  },
+  "smoke": {
+    "pathId": "open_customer_portal",
+    "stepId": "open_customer_portal",
+    "title": "打开客户门户",
+    "headingName": "Customer Portal Lite",
+    "assertionName": "客户门户标题可见",
+    "expected": "Customer Portal Lite 标题出现"
+  },
+  "corePath": {
+    "pathId": "approval_flow_transition_path",
+    "stepId": "approve_pending_request",
+    "title": "审批待处理请求",
+    "action": "approval_flow_transition",
+    "triggerButtonName": "批准请求",
+    "targetLocator": "[data-testid='approval-status']",
+    "expectedTextIncludes": "approved",
+    "domAssertionName": "审批状态变为 approved",
+    "riskReason": "审批流是多步骤业务状态变化，需要明确状态 oracle。",
+    "oracles": [
+      {
+        "id": "approval_status_dom",
+        "name": "审批状态变为 approved",
+        "type": "dom_text",
+        "locator": "[data-testid='approval-status']",
+        "expectedTextIncludes": "approved",
+        "expected": "点击批准后审批状态展示 approved"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "approval_regression_snapshot",
+    "title": "保留审批回归截图",
+    "action": "visual_check"
+  }
+}

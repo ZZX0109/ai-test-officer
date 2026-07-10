@@ -1,0 +1,47 @@
+name: AI Test Officer
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    env:
+      HEADLESS: "1"
+      NODE_ENV: development
+      AGENT_API_TOKEN: ci-local-token
+      PROJECT_ID: local_demo_app
+      APP_URL: http://localhost:6173
+      SCENARIO_ID: task_filter_completed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run demo:verify
+      - name: Run CI gate contract
+        run: npm run commit-check || test "$?" -le 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai-test-officer-reports
+          path: |
+            reports/gate.json
+            reports/junit.xml
+            reports/pr-annotation.md
+            reports/pr-annotations.json
+            reports/artifact-upload-manifest.json
+            reports/run-bundle.zip
+            reports/run-bundle-download-manifest.json
+            reports/runs/**
+            reports/screenshots/**
+            reports/traces/**
+            reports/videos/**

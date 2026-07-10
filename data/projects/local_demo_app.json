@@ -1,0 +1,22 @@
+{
+  "id": "local_demo_app",
+  "name": "Local Demo App Under Test",
+  "projectPath": "app-under-test",
+  "allowExternalProjectPath": false,
+  "installCommand": "",
+  "startCommand": "npm run dev",
+  "healthCheckUrl": "http://127.0.0.1:6173",
+  "frontendUrl": "http://localhost:6173",
+  "backendUrl": "http://127.0.0.1:6172/api/health",
+  "login": {
+    "method": "none"
+  },
+  "env": {
+    "VITE_TASK_FILTER_FIXTURE_BUG": "1",
+    "VITE_APP_API_URL": "http://localhost:6172"
+  },
+  "cleanupCommand": "",
+  "timeoutMs": 25000,
+  "createdAt": "2026-07-07T00:00:00.000Z",
+  "updatedAt": "2026-07-07T00:00:00.000Z"
+}

@@ -1,0 +1,48 @@
+{
+  "id": "task_edit_title",
+  "title": "编辑任务标题流程验收",
+  "planObservation": "smoke -> core_path(edit first task title) -> regression(all filter)",
+  "summary": "验证复杂列表中的单项编辑会落到 DOM 状态，而不只是点击按钮。",
+  "matcher": {
+    "keywords": ["编辑任务", "edit task", "修改标题", "update task", "列表编辑"],
+    "riskLevel": "medium",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["playwright_mcp", "state_transition", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "edit_task_title_path",
+    "stepId": "edit_first_task_title",
+    "retryStepId": "retry_edit_first_task_title",
+    "title": "编辑第一条任务标题",
+    "action": "edit_task_title",
+    "triggerButtonName": "编辑准备答辩材料",
+    "targetLocator": "[data-testid='task-title']",
+    "expectedTextIncludes": "准备答辩材料（已编辑）",
+    "domAssertionName": "编辑后任务标题更新",
+    "riskReason": "复杂列表的编辑/状态变更路径是接入真实业务项目时的核心场景。",
+    "oracles": [
+      {
+        "id": "edit_task_title_dom",
+        "name": "编辑后任务标题更新",
+        "type": "dom_text",
+        "locator": "[data-testid='task-title']",
+        "expectedTextIncludes": "准备答辩材料（已编辑）",
+        "expected": "点击编辑后列表展示准备答辩材料（已编辑）"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "id": "generic_file_upload_validation",
+  "title": "通用文件上传校验验收",
+  "capabilityKind": "file_upload",
+  "genericTemplate": true,
+  "planObservation": "smoke -> core_path(upload fixture file) -> regression",
+  "summary": "验证文件上传控件能接受测试附件并把文件名反馈到页面状态。",
+  "matcher": {
+    "keywords": ["文件上传", "上传附件", "file upload", "attachment", "multipart"],
+    "riskLevel": "medium",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["file_upload", "playwright_mcp", "artifact_evidence"]
+  },
+  "smoke": {
+    "pathId": "open_customer_portal",
+    "stepId": "open_customer_portal",
+    "title": "打开客户门户",
+    "headingName": "Customer Portal Lite",
+    "assertionName": "客户门户标题可见",
+    "expected": "Customer Portal Lite 标题出现"
+  },
+  "corePath": {
+    "pathId": "file_upload_validation_path",
+    "stepId": "upload_invoice_attachment",
+    "title": "上传附件并验证页面反馈",
+    "action": "file_upload_validate",
+    "inputLabel": "上传附件",
+    "submitButtonName": "确认上传",
+    "targetLocator": "[data-testid='upload-state']",
+    "expectedTextIncludes": "invoice-fixture.txt",
+    "domAssertionName": "附件上传后展示文件名",
+    "riskReason": "上传流程需要验证 input、文件名反馈和证据归档。",
+    "oracles": [
+      {
+        "id": "file_upload_state",
+        "name": "附件上传后展示文件名",
+        "type": "file_upload_state",
+        "locator": "[data-testid='upload-state']",
+        "expectedTextIncludes": "invoice-fixture.txt",
+        "expected": "上传附件后页面展示 invoice-fixture.txt"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "upload_regression_snapshot",
+    "title": "保留上传回归截图",
+    "action": "visual_check"
+  }
+}

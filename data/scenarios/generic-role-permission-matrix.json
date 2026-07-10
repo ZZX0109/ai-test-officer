@@ -1,0 +1,50 @@
+{
+  "id": "generic_role_permission_matrix",
+  "title": "通用多角色权限矩阵验收",
+  "capabilityKind": "role_permission_matrix",
+  "genericTemplate": true,
+  "planObservation": "smoke -> core_path(switch role and assert permission) -> regression",
+  "summary": "验证切换角色后页面权限状态符合矩阵预期。",
+  "matcher": {
+    "keywords": ["多角色", "权限矩阵", "role matrix", "RBAC", "permission matrix", "admin", "viewer"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["role_permission_matrix", "rbac", "permission_boundary"]
+  },
+  "smoke": {
+    "pathId": "open_customer_portal",
+    "stepId": "open_customer_portal",
+    "title": "打开客户门户",
+    "headingName": "Customer Portal Lite",
+    "assertionName": "客户门户标题可见",
+    "expected": "Customer Portal Lite 标题出现"
+  },
+  "corePath": {
+    "pathId": "role_permission_matrix_path",
+    "stepId": "switch_viewer_role",
+    "title": "切换 viewer 角色并验证权限",
+    "action": "role_permission_matrix",
+    "selectLabel": "切换角色",
+    "selectValue": "viewer",
+    "submitButtonName": "应用角色",
+    "targetLocator": "[data-testid='permission-matrix']",
+    "expectedTextIncludes": "viewer: read-only",
+    "domAssertionName": "viewer 角色只读权限生效",
+    "riskReason": "真实项目的 RBAC 需要以角色矩阵方式验证，而不是只测单账号登录。",
+    "oracles": [
+      {
+        "id": "role_permission_dom",
+        "name": "viewer 角色只读权限生效",
+        "type": "role_permission_state",
+        "locator": "[data-testid='permission-matrix']",
+        "expectedTextIncludes": "viewer: read-only",
+        "expected": "切换 viewer 后权限矩阵展示 viewer: read-only"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "role_permission_regression_snapshot",
+    "title": "保留权限矩阵回归截图",
+    "action": "visual_check"
+  }
+}

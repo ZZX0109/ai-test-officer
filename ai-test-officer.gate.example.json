@@ -1,0 +1,7 @@
+{
+  "strictGate": false,
+  "flakyMode": "warn",
+  "quarantinedScenarios": [
+    "legacy_login_flow"
+  ]
+}

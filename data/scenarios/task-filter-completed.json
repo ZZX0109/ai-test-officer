@@ -1,0 +1,59 @@
+{
+  "id": "task_filter_completed",
+  "title": "任务列表已完成筛选验收",
+  "planObservation": "smoke -> core_path(click completed filter) -> regression(all filter)",
+  "summary": "验证已完成任务筛选是否正确传递 status=completed，并检查 DOM 只展示 completed 任务。",
+  "matcher": {
+    "keywords": ["filter", "筛选", "status=completed", "completed", "已完成"],
+    "riskLevel": "high",
+    "sourceHints": ["diff", "requirement", "tapd_bug"],
+    "capabilities": ["mcp_git_diff", "playwright_mcp", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "completed_filter_path",
+    "stepId": "click_completed",
+    "retryStepId": "retry_completed_filter_path",
+    "title": "点击已完成并验证筛选结果",
+    "action": "click_filter",
+    "triggerButtonName": "已完成",
+    "networkUrlIncludes": "/api/tasks",
+    "expectedQueryFragment": "status=completed",
+    "statusLocator": "[data-testid='task-status']",
+    "expectedStatusText": "completed",
+    "queryAssertionName": "已完成筛选请求携带 status=completed",
+    "domAssertionName": "页面只展示 completed 任务",
+    "riskReason": "diff 修改了筛选请求逻辑",
+    "oracles": [
+      {
+        "id": "completed_filter_query",
+        "name": "已完成筛选请求携带 status=completed",
+        "type": "network_query",
+        "networkUrlIncludes": "/api/tasks",
+        "expectedQueryFragment": "status=completed",
+        "expected": "GET /api/tasks?status=completed"
+      },
+      {
+        "id": "completed_filter_dom",
+        "name": "页面只展示 completed 任务",
+        "type": "dom_all_text",
+        "locator": "[data-testid='task-status']",
+        "expectedStatusText": "completed",
+        "expected": "列表中所有任务状态均为 completed"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

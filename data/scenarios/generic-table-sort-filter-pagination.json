@@ -1,0 +1,63 @@
+{
+  "id": "generic_table_sort_filter_pagination",
+  "title": "通用表格排序筛选分页验收",
+  "capabilityKind": "table",
+  "genericTemplate": true,
+  "planObservation": "smoke -> core_path(sort/filter/paginate table) -> regression",
+  "summary": "验证真实项目中的表格可以排序、筛选并翻页，且结果有 DOM 与 network evidence 支撑。",
+  "matcher": {
+    "keywords": ["table", "表格", "排序", "筛选", "分页", "pagination", "sort", "filter"],
+    "riskLevel": "medium",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["table", "data_grid", "playwright_mcp", "network_evidence"]
+  },
+  "smoke": {
+    "pathId": "open_customer_portal",
+    "stepId": "open_customer_portal",
+    "title": "打开客户门户",
+    "headingName": "Customer Portal Lite",
+    "assertionName": "客户门户标题可见",
+    "expected": "Customer Portal Lite 标题出现"
+  },
+  "corePath": {
+    "pathId": "table_sort_filter_pagination_path",
+    "stepId": "table_sort_filter_pagination",
+    "title": "表格排序筛选并翻页",
+    "action": "table_sort_filter_paginate",
+    "triggerButtonName": "按金额排序",
+    "inputLabel": "客户筛选",
+    "input": "Acme",
+    "submitButtonName": "筛选客户",
+    "retryButtonName": "下一页",
+    "networkUrlIncludes": "/api/customers",
+    "expectedQueryFragment": "query=Acme",
+    "targetLocator": "[data-testid='customer-table']",
+    "expectedTextIncludes": "Acme Renewal",
+    "queryAssertionName": "表格筛选请求携带 query=Acme",
+    "domAssertionName": "表格展示 Acme Renewal",
+    "riskReason": "真实项目接入需要覆盖数据表格的排序、筛选和分页组合行为。",
+    "oracles": [
+      {
+        "id": "table_filter_query",
+        "name": "表格筛选请求携带 query=Acme",
+        "type": "network_query",
+        "networkUrlIncludes": "/api/customers",
+        "expectedQueryFragment": "query=Acme",
+        "expected": "GET /api/customers?query=Acme"
+      },
+      {
+        "id": "table_acme_dom",
+        "name": "表格展示 Acme Renewal",
+        "type": "dom_text",
+        "locator": "[data-testid='customer-table']",
+        "expectedTextIncludes": "Acme Renewal",
+        "expected": "表格中展示 Acme Renewal"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "table_regression_snapshot",
+    "title": "保留表格回归截图",
+    "action": "visual_check"
+  }
+}

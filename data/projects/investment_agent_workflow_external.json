@@ -1,0 +1,72 @@
+{
+  "id": "investment_agent_workflow_external",
+  "name": "Investment Agent Workflow External Project",
+  "projectPath": "/Users/afa/Desktop/Hack/project-01-investment-agent-workflow",
+  "allowExternalProjectPath": true,
+  "installCommand": "",
+  "startCommand": "",
+  "processes": [
+    {
+      "name": "investment-agent-api",
+      "command": "npm run dev:api",
+      "healthCheckUrl": "http://127.0.0.1:8000/api/health",
+      "required": true
+    },
+    {
+      "name": "investment-agent-web",
+      "command": "npm run dev -- --port 5173",
+      "healthCheckUrl": "http://127.0.0.1:5173",
+      "required": true
+    }
+  ],
+  "healthCheckUrl": "http://127.0.0.1:8000/api/health",
+  "frontendUrl": "http://127.0.0.1:5173",
+  "backendUrl": "http://127.0.0.1:8000/api/health",
+  "login": {
+    "method": "form",
+    "usernameEnv": "INVESTMENT_AGENT_WORKFLOW_SMOKE_EMAIL",
+    "passwordEnv": "INVESTMENT_AGENT_WORKFLOW_SMOKE_PASSWORD",
+    "loginUrl": "http://127.0.0.1:5173"
+  },
+  "env": {},
+  "cleanupCommand": "",
+  "timeoutMs": 35000,
+  "externalSmokeProfile": {
+    "login": {
+      "usernameEnv": "INVESTMENT_AGENT_WORKFLOW_SMOKE_EMAIL",
+      "passwordEnv": "INVESTMENT_AGENT_WORKFLOW_SMOKE_PASSWORD",
+      "expectedText": "组合风险与 Agent 投研闭环"
+    },
+    "keyPages": [
+      {
+        "id": "dashboard",
+        "path": "/",
+        "expectedHeading": "组合风险与 Agent 投研闭环"
+      }
+    ],
+    "apiSteps": [
+      {
+        "id": "health",
+        "method": "GET",
+        "path": "/api/health",
+        "expectedStatus": 200
+      },
+      {
+        "id": "portfolio",
+        "method": "GET",
+        "path": "/api/portfolio?preference=balanced",
+        "expectedStatus": 200,
+        "requiresAuth": true
+      },
+      {
+        "id": "research",
+        "method": "GET",
+        "path": "/api/research/NVDA?preference=balanced",
+        "expectedStatus": 200,
+        "requiresAuth": true
+      }
+    ]
+  },
+  "createdAt": "2026-07-08T00:00:00.000Z",
+  "updatedAt": "2026-07-08T00:00:00.000Z"
+}

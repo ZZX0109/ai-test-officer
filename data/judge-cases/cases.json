@@ -1,0 +1,22 @@
+[
+  { "id": "product_bug_missing_query_completed", "category": "product_bug", "signal": "missing_query", "expectedReleaseVerdict": "fail" },
+  { "id": "product_bug_missing_query_search", "category": "product_bug", "signal": "missing_query", "expectedReleaseVerdict": "fail" },
+  { "id": "product_bug_wrong_dom_status", "category": "product_bug", "signal": "wrong_dom", "expectedReleaseVerdict": "fail" },
+  { "id": "product_bug_empty_state_missing", "category": "product_bug", "signal": "wrong_dom", "expectedReleaseVerdict": "fail" },
+  { "id": "product_bug_error_not_shown", "category": "product_bug", "signal": "wrong_dom", "expectedReleaseVerdict": "fail" },
+  { "id": "test_bug_locator_timeout", "category": "test_bug", "signal": "test_script_issue", "expectedReleaseVerdict": "needs_review" },
+  { "id": "test_bug_bad_selector", "category": "test_bug", "signal": "test_script_issue", "expectedReleaseVerdict": "needs_review" },
+  { "id": "evidence_insufficient_no_dom", "category": "evidence_insufficient", "signal": "insufficient", "expectedReleaseVerdict": "needs_review" },
+  { "id": "evidence_insufficient_no_screenshot", "category": "evidence_insufficient", "signal": "insufficient", "expectedReleaseVerdict": "needs_review" },
+  { "id": "environment_console_error", "category": "environment_error", "signal": "console_error", "expectedReleaseVerdict": "needs_review" },
+  { "id": "environment_network_503_without_assertion", "category": "environment_error", "signal": "console_error", "expectedReleaseVerdict": "needs_review" },
+  { "id": "harness_gap_unexecuted_core", "category": "harness_gap", "signal": "plan_gap", "expectedReleaseVerdict": "needs_review" },
+  { "id": "harness_gap_missing_requirement", "category": "harness_gap", "signal": "missing_context", "expectedReleaseVerdict": "needs_review" },
+  { "id": "flaky_recent_history", "category": "flaky", "signal": "flaky", "expectedReleaseVerdict": "needs_review" },
+  { "id": "flaky_conflict_packet", "category": "flaky", "signal": "flaky", "expectedReleaseVerdict": "needs_review" },
+  { "id": "pass_search_keyword", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" },
+  { "id": "pass_required_validation", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" },
+  { "id": "pass_empty_state", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" },
+  { "id": "pass_error_recovery", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" },
+  { "id": "pass_active_filter", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" }
+]

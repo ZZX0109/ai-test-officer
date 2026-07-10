@@ -1,0 +1,54 @@
+{
+  "id": "visual_regression_basic",
+  "title": "视觉回归基础检查",
+  "planObservation": "smoke -> core_path(capture stable task list) -> regression(all filter)",
+  "summary": "验证页面关键标题和任务列表容器存在，并要求 screenshot、DOM、console evidence 共同支撑基础视觉检查。",
+  "matcher": {
+    "keywords": ["视觉回归", "visual regression", "screenshot", "布局", "页面样式"],
+    "riskLevel": "low",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["playwright_mcp", "screenshot_evidence", "console_oracle"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "visual_baseline_path",
+    "stepId": "capture_visual_baseline",
+    "retryStepId": "retry_capture_visual_baseline",
+    "title": "采集任务列表视觉基线",
+    "action": "visual_check",
+    "triggerButtonName": "全部",
+    "targetLocator": "[data-testid='task-list']",
+    "expectedTextIncludes": "准备答辩材料",
+    "domAssertionName": "任务列表视觉基线内容存在",
+    "riskReason": "视觉基础检查不做像素门禁，但必须证明关键内容、截图和 console 状态被采集。",
+    "oracles": [
+      {
+        "id": "visual_baseline_dom",
+        "name": "任务列表视觉基线内容存在",
+        "type": "dom_text",
+        "locator": "[data-testid='task-list']",
+        "expectedTextIncludes": "准备答辩材料",
+        "expected": "任务列表包含准备答辩材料"
+      },
+      {
+        "id": "visual_baseline_console",
+        "name": "视觉基础检查无 console error",
+        "type": "console_no_error",
+        "expected": "浏览器 console 不出现 error/exception/failed"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

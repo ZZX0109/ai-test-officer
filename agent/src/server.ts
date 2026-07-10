@@ -1,0 +1,1140 @@
+import cors from "cors";
+import express from "express";
+import path from "node:path";
+import { z } from "zod";
+import {
+  createCredential,
+  deleteCredential,
+  getCredential,
+  listCredentials,
+  rotateCredential,
+  updateCredential
+} from "./credentialStore.js";
+import { fixedGrayPlan } from "./plan.js";
+import { generatePlan } from "./llmPlanner.js";
+import { analyzeIntake } from "./intakeAnalyzer.js";
+import { redactText, redactValue } from "./redaction.js";
+import { readConnectorContext } from "./sourceConnectors.js";
+import { readAuditLog } from "./auditLog.js";
+import { readEvidence, readLatestRunId, readRunBundle } from "./evidenceStore.js";
+import { readLatestLoopEvents, readLoopEvents } from "./loopEventStore.js";
+import { listRunHistory } from "./runHistory.js";
+import { proposePlanRefinement } from "./planRefinement.js";
+import { captureDesktopScreenshot, desktopCaptureStatus } from "./desktopCaptureAdapter.js";
+import { checkEnvironment } from "./environmentCheck.js";
+import { listPlatformCapabilities } from "./platformCapabilities.js";
+import {
+  assertSecurityConfig,
+  basicRateLimit,
+  createCorsOptions,
+  requireApiToken,
+  requireArtifactAccess,
+  securitySummary
+} from "./security.js";
+import { testCredentialConnection } from "./testConnection.js";
+import { runVisualGrayTest } from "./testRunner.js";
+import { listScenarios } from "./scenarios.js";
+import { buildDeliveryFromRun, listBotDeliveries } from "./botNotifier.js";
+import {
+  deletePatrolPlan,
+  listPatrolJobs,
+  listPatrolPlans,
+  patrolTrend,
+  runPatrolNow,
+  startPatrolJob,
+  stopPatrolJob,
+  upsertPatrolPlan
+} from "./patrolScheduler.js";
+import { listPatrolRuns } from "./patrolRunStore.js";
+import { runCommitCheck } from "./commitCheckOrchestrator.js";
+import { listCommitChecks } from "./commitCheckStore.js";
+import { runRequirementAcceptance } from "./requirementAcceptanceOrchestrator.js";
+import { listRequirementAcceptances } from "./requirementAcceptanceStore.js";
+import { buildRunBundleArchive } from "./runBundleArchive.js";
+import {
+  approveScenarioDraft,
+  createHarnessGapScenarioDraft,
+  installHarnessGapScenarioDraft,
+  listHarnessGaps,
+  listScenarioDrafts,
+  probeScenarioDraft,
+  updateHarnessGap
+} from "./harnessGapStore.js";
+import { readLatestDemoVerification } from "./demoVerificationStore.js";
+import { requireRunnableTarget, runnableTargetShape, targetRuntimeSchema } from "./runRequestContract.js";
+import {
+  getProject,
+  getProjectRuntimeStatus,
+  listProjects,
+  saveProject,
+  startProject,
+  stopProject,
+  testProjectConnection,
+  resolveProjectTarget
+} from "./projectAdapter.js";
+import { detectProject, diagnoseProject } from "./projectDetection.js";
+import { runDiscoveryScan } from "./discoveryScan.js";
+import { createProjectGrant, deleteProjectGrant, listProjectGrants } from "./projectAccess.js";
+import {
+  auditStoreStatus,
+  readEvidenceFromAuditStore,
+  readFindingsFromAuditStore,
+  readJudgeSummaryFromAuditStore
+} from "./sqliteAuditStore.js";
+import { listStorageArchives, runStorageRetention, storageStatus } from "./storageGovernance.js";
+import type { ProjectConfig } from "./types.js";
+
+const app = express();
+const port = Number(process.env.PORT ?? 4317);
+const host = process.env.HOST ?? (process.env.AGENT_API_TOKEN ? "0.0.0.0" : "127.0.0.1");
+const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
+const reportsDir = path.join(rootDir, "reports");
+
+function artifactUrl(filePath: string) {
+  return `/artifacts/${path.relative(reportsDir, filePath).split(path.sep).join("/")}`;
+}
+
+app.use(cors(createCorsOptions()));
+app.use(express.json({ limit: "2mb" }));
+app.use(basicRateLimit);
+app.get("/artifacts/*", requireArtifactAccess, (req, res, next) => {
+  const artifactPath = req.params[0] ?? "";
+  const resolved = path.resolve(reportsDir, artifactPath);
+  const relative = path.relative(reportsDir, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    res.status(403).json({ error: "Artifact path escapes reports directory" });
+    return;
+  }
+  res.sendFile(resolved, (error) => {
+    if (error) next(error);
+  });
+});
+app.use(requireApiToken);
+
+const credentialSchema = z.object({
+  name: z.string().min(1),
+  provider: z.enum(["openai-compatible", "openai", "anthropic", "openrouter", "custom"]),
+  baseUrl: z.string().url(),
+  apiKey: z.string().min(1),
+  model: z.string().min(1),
+  tags: z.array(z.string()).default([]),
+  isDefault: z.boolean().optional(),
+  owner: z.string().optional(),
+  scopes: z.array(z.string()).optional()
+});
+
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, service: "ai-test-officer-agent" });
+});
+
+app.get("/api/credentials", async (_req, res, next) => {
+  try {
+    res.json({ credentials: await listCredentials() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/credentials", async (req, res, next) => {
+  try {
+    const input = credentialSchema.parse(req.body);
+    res.status(201).json({ credential: await createCredential(input) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/credentials/:id", async (req, res, next) => {
+  try {
+    const input = credentialSchema.partial().parse(req.body);
+    const credential = await updateCredential(req.params.id, input);
+    if (!credential) {
+      res.status(404).json({ error: "Credential not found" });
+      return;
+    }
+    res.json({ credential });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/credentials/:id/rotate", async (req, res, next) => {
+  try {
+    const body = z.object({
+      apiKey: z.string().min(1),
+      reason: z.string().optional()
+    }).parse(req.body);
+    const credential = await rotateCredential(req.params.id, body);
+    if (!credential) {
+      res.status(404).json({ error: "Credential not found" });
+      return;
+    }
+    res.json({ credential });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/credentials/:id", async (req, res, next) => {
+  try {
+    const deleted = await deleteCredential(req.params.id);
+    res.json({ deleted });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/credentials/:id/test", async (req, res, next) => {
+  try {
+    const credential = await getCredential(req.params.id);
+    if (!credential) {
+      res.status(404).json({ error: "Credential not found" });
+      return;
+    }
+    res.json(await testCredentialConnection(credential));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/gray-plan", (_req, res) => {
+  res.json(fixedGrayPlan);
+});
+
+app.get("/api/platform-capabilities", (_req, res) => {
+  res.json({ capabilities: listPlatformCapabilities() });
+});
+
+app.get("/api/audit-store/status", (_req, res) => {
+  res.json({ auditStore: auditStoreStatus() });
+});
+
+app.get("/api/demo-verification/latest", async (_req, res, next) => {
+  try {
+    const verification = await readLatestDemoVerification();
+    if (!verification) {
+      res.status(404).json({ error: "No demo verification has been recorded yet" });
+      return;
+    }
+    res.json({ verification });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/scenarios", (_req, res) => {
+  res.json({ scenarios: listScenarios() });
+});
+
+app.get("/api/harness-gaps", async (_req, res, next) => {
+  try {
+    res.json({ gaps: await listHarnessGaps() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/harness-gaps/:id", async (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        status: z.enum(["open", "implemented", "dismissed"])
+      })
+      .parse(req.body);
+    const gap = await updateHarnessGap(req.params.id, body);
+    if (!gap) {
+      res.status(404).json({ error: "Harness gap not found" });
+      return;
+    }
+    res.json({ gap });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/harness-gaps/:id/draft-scenario", async (req, res, next) => {
+  try {
+    const draft = await createHarnessGapScenarioDraft(req.params.id);
+    if (!draft) {
+      res.status(404).json({ error: "Harness gap not found" });
+      return;
+    }
+    res.status(201).json({ draft });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/harness-gaps/:id/install-draft", async (req, res, next) => {
+  try {
+    const draft = await installHarnessGapScenarioDraft(req.params.id);
+    if (!draft) {
+      res.status(404).json({ error: "Harness gap not found" });
+      return;
+    }
+    if (draft.draftReviewStatus !== "approved") {
+      res.status(409).json({ error: "Scenario draft did not pass selector/oracle probe.", draft });
+      return;
+    }
+    res.status(201).json({ draft });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/scenario-drafts", async (_req, res, next) => {
+  try {
+    res.json({ drafts: await listScenarioDrafts() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/scenario-drafts/:id/probe", async (req, res, next) => {
+  try {
+    const draft = await probeScenarioDraft(req.params.id);
+    if (!draft) {
+      res.status(404).json({ error: "Scenario draft not found" });
+      return;
+    }
+    res.json({ draft });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/scenario-drafts/:id/approve", async (req, res, next) => {
+  try {
+    const draft = await approveScenarioDraft(req.params.id);
+    if (!draft) {
+      res.status(404).json({ error: "Scenario draft not found" });
+      return;
+    }
+    if (draft.draftReviewStatus !== "approved") {
+      res.status(409).json({ error: "Scenario draft probe failed; fix missingInfo before approving.", draft });
+      return;
+    }
+    res.status(201).json({ draft });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const connectorContextSchema = z.object({
+  requirementPath: z.string().optional(),
+  requirementUrl: z.string().url().optional(),
+  bugTicketPath: z.string().optional(),
+  bugTicketUrl: z.string().url().optional(),
+  openApiPath: z.string().optional(),
+  openApiUrl: z.string().url().optional(),
+  prUrl: z.string().optional(),
+  prDiffUrl: z.string().url().optional(),
+  gitBase: z.string().optional(),
+  gitHead: z.string().optional(),
+  staged: z.boolean().default(false),
+  fallbackDiff: z.string().optional(),
+  strictInput: z.boolean().default(false)
+});
+
+const permissionProfileSchema = z.object({
+  observe: z.boolean(),
+  browserControl: z.boolean(),
+  workspaceControl: z.boolean(),
+  ideTerminalControl: z.boolean(),
+  systemControl: z.boolean()
+});
+
+const projectSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  projectPath: z.string().min(1),
+  allowExternalProjectPath: z.boolean().optional(),
+  installCommand: z.string().optional(),
+  startCommand: z.string().optional(),
+  processes: z.array(z.object({
+    name: z.string().min(1),
+    command: z.string().min(1),
+    healthCheckUrl: z.string().url().optional(),
+    required: z.boolean().optional()
+  })).optional(),
+  healthCheckUrl: z.string().url().optional(),
+  frontendUrl: z.string().url(),
+  backendUrl: z.string().url().optional(),
+  login: z
+    .object({
+      method: z.enum(["none", "form", "storage_state", "env"]),
+      usernameEnv: z.string().optional(),
+      passwordEnv: z.string().optional(),
+      credentialId: z.string().optional(),
+      loginUrl: z.string().url().optional()
+    })
+    .optional(),
+  env: z.record(z.string()).optional(),
+  cleanupCommand: z.string().optional(),
+  timeoutMs: z.number().int().min(1000).optional(),
+  externalSmokeProfile: z.object({
+    login: z.object({
+      usernameEnv: z.string().optional(),
+      passwordEnv: z.string().optional(),
+      expectedText: z.string().optional()
+    }).optional(),
+    keyPages: z.array(z.object({
+      id: z.string(),
+      path: z.string(),
+      expectedHeading: z.string().optional()
+    })).optional(),
+    form: z.object({
+      path: z.string().optional(),
+      inputLabel: z.string(),
+      inputValue: z.string(),
+      submitButton: z.string(),
+      expectedText: z.string()
+    }).optional(),
+    table: z.object({
+      path: z.string().optional(),
+      sortButton: z.string().optional(),
+      filterLabel: z.string().optional(),
+      filterValue: z.string().optional(),
+      nextButton: z.string().optional(),
+      expectedText: z.string()
+    }).optional(),
+    permission: z.object({
+      roleControlLabel: z.string().optional(),
+      roleValue: z.string().optional(),
+      expectedText: z.string()
+    }).optional(),
+    apiSteps: z.array(z.object({
+      id: z.string(),
+      method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
+      path: z.string(),
+      expectedStatus: z.number().int().optional(),
+      requiresAuth: z.boolean().optional()
+    })).optional(),
+    browserSteps: z.array(z.object({
+      id: z.string(),
+      action: z.enum(["click", "fill", "upload", "assert_text"]),
+      label: z.string().optional(),
+      value: z.string().optional(),
+      expectedText: z.string().optional()
+    })).optional()
+  }).optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional()
+});
+
+app.get("/api/projects", async (_req, res, next) => {
+  try {
+    res.json({ projects: await listProjects() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/detect", async (req, res, next) => {
+  try {
+    const body = z.object({ projectPath: z.string().min(1) }).parse(req.body);
+    res.json({ detection: await detectProject(body.projectPath) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects", async (req, res, next) => {
+  try {
+    const project = await saveProject(projectSchema.parse(req.body) as ProjectConfig);
+    res.status(201).json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/projects/:id", async (req, res, next) => {
+  try {
+    const current = await getProject(req.params.id);
+    if (!current) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const project = await saveProject(projectSchema.parse({ ...current, ...req.body, id: req.params.id }) as ProjectConfig);
+    res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/projects/:id/runtime", (req, res) => {
+  res.json({ runtime: getProjectRuntimeStatus(req.params.id) });
+});
+
+app.post("/api/projects/:id/test-connection", async (req, res, next) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    res.json({ result: await testProjectConnection(project) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/:id/diagnose", async (req, res, next) => {
+  try {
+    res.json({ diagnosis: await diagnoseProject(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/projects/:id/grants", async (req, res, next) => {
+  try {
+    res.json({ grants: await listProjectGrants(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/:id/grants", async (req, res, next) => {
+  try {
+    const body = z.object({
+      subject: z.string().min(1),
+      role: z.enum(["viewer", "runner", "project_admin", "operator", "admin"]),
+      expiresAt: z.string().optional(),
+      scopes: z.array(z.enum(["read_project", "run_tests", "read_artifacts", "manage_project", "manage_credentials", "admin"])).optional()
+    }).parse(req.body);
+    res.status(201).json({ grant: await createProjectGrant({ ...body, projectId: req.params.id }) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/projects/:id/grants/:grantId", async (req, res, next) => {
+  try {
+    res.json({ deleted: await deleteProjectGrant(req.params.id, req.params.grantId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/:id/start", async (req, res, next) => {
+  try {
+    res.json({ runtime: await startProject(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/:id/stop", async (req, res, next) => {
+  try {
+    res.json({ runtime: await stopProject(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+function withConnectorDemoDefaults(input: z.infer<typeof connectorContextSchema>) {
+  if (input.strictInput) return input;
+  return {
+    ...input,
+    requirementPath:
+      input.requirementPath ?? (input.requirementUrl ? undefined : "data/fixtures/task-filter-requirement.md"),
+    bugTicketPath:
+      input.bugTicketPath ?? (input.bugTicketUrl ? undefined : "data/fixtures/tapd-task-filter-bug.md")
+  };
+}
+
+app.post("/api/connectors/context", async (req, res, next) => {
+  try {
+    const body = withConnectorDemoDefaults(connectorContextSchema.parse(req.body));
+    res.json({ context: await readConnectorContext(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/intake/analyze-connected", async (req, res, next) => {
+  try {
+    const body = withConnectorDemoDefaults(connectorContextSchema.parse(req.body));
+    const context = await readConnectorContext(body);
+    res.json({
+      context,
+      analysis: analyzeIntake({
+        requirement: context.requirement,
+        diff: context.diff,
+        bugTicket: context.bugTicket,
+        prUrl: context.prUrl,
+        sources: context.sources,
+        sourceContexts: context.sourceContexts
+      })
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/intake/analyze", (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        requirement: z.string().default(""),
+        diff: z.string().default(""),
+        bugTicket: z.string().optional(),
+        prUrl: z.string().optional()
+      })
+      .parse(req.body);
+    res.json({ analysis: analyzeIntake(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/generate-plan", async (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        requirement: z.string().min(1),
+        diff: z.string().min(1),
+        credentialId: z.string().optional()
+      })
+      .parse(req.body);
+    res.json(await generatePlan(body));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/commit-check/run", async (req, res, next) => {
+  try {
+    const body = connectorContextSchema
+      .extend({
+        ...runnableTargetShape,
+        scenarioId: z.string().optional(),
+        credentialId: z.string().optional(),
+        notify: z.array(z.string()).default(["oncall"]),
+        permissionProfile: permissionProfileSchema
+      })
+      .superRefine(requireRunnableTarget)
+      .parse(req.body);
+    res.json({ check: await runCommitCheck(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/commit-checks", async (_req, res, next) => {
+  try {
+    res.json({ checks: await listCommitChecks() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/requirement-acceptance/run", async (req, res, next) => {
+  try {
+    const body = connectorContextSchema
+      .extend({
+        ...runnableTargetShape,
+        requirement: z.string().optional(),
+        diff: z.string().optional(),
+        bugTicket: z.string().optional(),
+        scenarioId: z.string().optional(),
+        credentialId: z.string().optional(),
+        notify: z.array(z.string()).default(["product-owner", "qa-oncall"]),
+        permissionProfile: permissionProfileSchema
+      })
+      .superRefine(requireRunnableTarget)
+      .parse(req.body);
+    res.json({ acceptance: await runRequirementAcceptance(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/requirement-acceptances", async (_req, res, next) => {
+  try {
+    res.json({ acceptances: await listRequirementAcceptances() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/refine-plan", async (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        currentPlan: z.any(),
+        feedback: z.string().min(1),
+        failedAssertionNames: z.array(z.string()).default([])
+      })
+      .parse(req.body);
+    res.json(proposePlanRefinement(body));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/run-visual-test", async (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        ...runnableTargetShape,
+        planId: z.string().optional(),
+        keepProjectRunning: z.boolean().optional(),
+        scenarioId: z.string().optional(),
+        credentialId: z.string().optional(),
+        trigger: z.enum(["manual", "commit", "requirement", "patrol"]).optional(),
+        requirement: z.string().optional(),
+        diff: z.string().optional(),
+        bugTicket: z.string().optional(),
+        plan: z.any().optional(),
+        sourceContexts: z.array(z.any()).optional(),
+        impactAnalysis: z.any().optional(),
+        executablePlan: z.any().optional(),
+        permissionProfile: permissionProfileSchema
+      })
+      .superRefine(requireRunnableTarget)
+      .parse(req.body);
+    const result = await runVisualGrayTest(body);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/discovery/scan", async (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        ...runnableTargetShape,
+        sourceContexts: z.array(z.any()).optional()
+      })
+      .superRefine(requireRunnableTarget)
+      .parse(req.body);
+    res.json({ discovery: await runDiscoveryScan(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/patrol/jobs", (_req, res) => {
+  res.json({ jobs: listPatrolJobs() });
+});
+
+app.get("/api/patrol/plans", async (_req, res, next) => {
+  try {
+    res.json({ plans: await listPatrolPlans() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const patrolPlanSchema = z.object({
+  id: z.string().default("core_path_daily"),
+  title: z.string().optional(),
+  appUrl: z.string().url().optional(),
+  projectId: z.string().optional(),
+  target: targetRuntimeSchema.optional(),
+  scenarioId: z.string().optional(),
+  intervalMs: z.number().int().min(10_000).optional(),
+  cron: z.string().optional(),
+  notify: z.array(z.string()).optional(),
+  permissionProfile: permissionProfileSchema.optional(),
+  retryPolicy: z.object({
+    maxRetries: z.number().int().min(0),
+    backoffMs: z.number().int().min(0)
+  }).optional(),
+  escalationPolicy: z.object({
+    failureThreshold: z.number().int().min(1),
+    riskTrendThreshold: z.enum(["regressed", "stable", "any"]),
+    notify: z.array(z.string())
+  }).optional(),
+  status: z.enum(["running", "stopped"]).optional()
+});
+
+app.post("/api/patrol/plans", async (req, res, next) => {
+  try {
+    res.status(201).json({ plan: await upsertPatrolPlan(patrolPlanSchema.parse(req.body)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/patrol/plans/:id", async (req, res, next) => {
+  try {
+    res.json({ plan: await upsertPatrolPlan({ ...patrolPlanSchema.partial().parse(req.body), id: req.params.id }) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/patrol/plans/:id", async (req, res, next) => {
+  try {
+    res.json({ deleted: await deletePatrolPlan(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/patrol/runs", async (_req, res, next) => {
+  try {
+    res.json({ patrolRuns: await listPatrolRuns() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/patrol/start", (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        id: z.string().default("core_path_daily"),
+        title: z.string().optional(),
+        appUrl: z.string().url().optional(),
+        projectId: z.string().optional(),
+        target: targetRuntimeSchema.optional(),
+        scenarioId: z.string().optional(),
+        intervalMs: z.number().int().min(10_000).optional(),
+        notify: z.array(z.string()).optional(),
+        permissionProfile: permissionProfileSchema
+      })
+      .parse(req.body);
+    res.json({ job: startPatrolJob(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/patrol/stop", (req, res, next) => {
+  try {
+    const body = z.object({ id: z.string().default("core_path_daily") }).parse(req.body);
+    res.json({ job: stopPatrolJob(body.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/patrol/run-now", async (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        ...runnableTargetShape,
+        scenarioId: z.string().optional(),
+        credentialId: z.string().optional(),
+        requirement: z.string().optional(),
+        diff: z.string().optional(),
+        plan: z.any().optional(),
+        notify: z.array(z.string()).default(["oncall"]),
+        permissionProfile: permissionProfileSchema
+      })
+      .superRefine(requireRunnableTarget)
+      .parse(req.body);
+    const patrol = await runPatrolNow({
+      appUrl: body.appUrl,
+      projectId: body.projectId,
+      target: body.target,
+      scenarioId: body.scenarioId,
+      credentialId: body.credentialId,
+      requirement: body.requirement,
+      diff: body.diff,
+      plan: body.plan,
+      notify: body.notify,
+      permissionProfile: body.permissionProfile
+    });
+    res.json(patrol);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/patrol/plans/:id/run-now", async (req, res, next) => {
+  try {
+    const plan = (await listPatrolPlans()).find((item) => item.id === req.params.id);
+    if (!plan) {
+      res.status(404).json({ error: "Patrol plan not found" });
+      return;
+    }
+    res.json(await runPatrolNow({
+      appUrl: plan.appUrl,
+      projectId: plan.projectId,
+      target: plan.target,
+      jobId: plan.id,
+      scenarioId: plan.scenarioId,
+      notify: plan.notify,
+      permissionProfile: plan.permissionProfile
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/patrol/trends", async (req, res, next) => {
+  try {
+    res.json({ trend: await patrolTrend({
+      projectId: typeof req.query.projectId === "string" ? req.query.projectId : undefined,
+      scenarioId: typeof req.query.scenarioId === "string" ? req.query.scenarioId : undefined
+    }) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/bot/deliveries", async (_req, res, next) => {
+  try {
+    res.json({ deliveries: await listBotDeliveries() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/bot/deliveries", async (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        runId: z.string().optional(),
+        provider: z.enum(["wecom", "feishu", "slack", "github_pr_comment", "generic", "simulated"]).optional(),
+        channel: z.string().optional(),
+        recipients: z.array(z.string()).optional(),
+        includeScreenshots: z.boolean().optional(),
+        githubPrUrl: z.string().url().optional()
+      })
+      .parse(req.body);
+    const runId = body.runId ?? (await readLatestRunId());
+    if (!runId) {
+      res.status(404).json({ error: "No run has been recorded yet" });
+      return;
+    }
+    const bundle = await readRunBundle(runId);
+    const delivery = await buildDeliveryFromRun({
+      bundle,
+      provider: body.provider,
+      channel: body.channel,
+      recipients: body.recipients,
+      includeScreenshots: body.includeScreenshots,
+      githubPrUrl: body.githubPrUrl
+    });
+    res.status(201).json({ delivery });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/security/summary", (_req, res) => {
+  res.json({
+    security: {
+      ...securitySummary(),
+      grants: "project-scoped grants available",
+      credentialRotation: "supported",
+      artifactAccess: securitySummary().artifactAccess
+    }
+  });
+});
+
+app.get("/api/audit-log", async (_req, res, next) => {
+  try {
+    res.json({ events: await readAuditLog() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/runs/latest", async (_req, res, next) => {
+  try {
+    const runId = await readLatestRunId();
+    if (!runId) {
+      res.status(404).json({ error: "No run has been recorded yet" });
+      return;
+    }
+    res.json(await readRunBundle(runId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/runs/:runId", async (req, res, next) => {
+  try {
+    res.json(await readRunBundle(req.params.runId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/runs/:runId/evidence", async (req, res, next) => {
+  try {
+    const evidence = readEvidenceFromAuditStore(req.params.runId);
+    res.json({ evidence: evidence.length ? evidence : await readEvidence(req.params.runId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/runs/:runId/findings", (_req, res, next) => {
+  try {
+    res.json({ findings: readFindingsFromAuditStore(_req.params.runId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/runs/:runId/judge-summary", (req, res, next) => {
+  try {
+    res.json({ judge: readJudgeSummaryFromAuditStore(req.params.runId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/runs/:runId/download-bundle", async (req, res, next) => {
+  try {
+    const body = z.object({ maxInlineBytes: z.number().int().positive().optional() }).parse(req.body ?? {});
+    const bundle = await readRunBundle(req.params.runId);
+    const runDir = path.join(reportsDir, "runs", req.params.runId);
+    const archive = await buildRunBundleArchive({
+      bundle,
+      outputFile: path.join(runDir, "run-bundle.zip"),
+      manifestFile: path.join(runDir, "run-bundle-download-manifest.json"),
+      reportsDir,
+      maxInlineBytes: body.maxInlineBytes
+    });
+    res.json({
+      archive: {
+        zipFile: artifactUrl(archive.zipFile),
+        manifestFile: artifactUrl(archive.manifestFile),
+        manifest: archive.manifest
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/runs/:runId/loop-events", async (req, res, next) => {
+  try {
+    res.json({ events: await readLoopEvents(req.params.runId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/loop-events/latest", async (_req, res, next) => {
+  try {
+    res.json({ events: await readLatestLoopEvents() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/live-run/latest", async (_req, res, next) => {
+  try {
+    const events = await readLatestLoopEvents();
+    const runId = events.at(-1)?.runId ?? (await readLatestRunId());
+    const evidence = runId ? await readEvidence(runId) : [];
+    const latestScreenshot = [...evidence].reverse().find((item) => item.type === "screenshot")?.file;
+    const latestEvent = events.at(-1);
+    const finished = events.some((event) => event.action === "generate_report" || event.title.includes("报告已生成"));
+    res.json({
+      runId,
+      status: finished ? "finished" : runId ? "running" : "idle",
+      latestScreenshot,
+      latestEvent,
+      evidenceCount: evidence.length,
+      events,
+      evidence
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/run-history", async (_req, res, next) => {
+  try {
+    const projectId = typeof _req.query.projectId === "string" ? _req.query.projectId : undefined;
+    const scenarioId = typeof _req.query.scenarioId === "string" ? _req.query.scenarioId : undefined;
+    const verdict = typeof _req.query.verdict === "string" ? _req.query.verdict : undefined;
+    const from = typeof _req.query.from === "string" ? Date.parse(_req.query.from) : undefined;
+    const to = typeof _req.query.to === "string" ? Date.parse(_req.query.to) : undefined;
+    const limit = typeof _req.query.limit === "string" ? Number(_req.query.limit) : undefined;
+    let runs = await listRunHistory();
+    if (projectId) runs = runs.filter((run) => run.projectId === projectId);
+    if (scenarioId) runs = runs.filter((run) => run.scenarioId === scenarioId);
+    if (verdict) runs = runs.filter((run) => run.verdict === verdict);
+    if (Number.isFinite(from)) runs = runs.filter((run) => Date.parse(run.timestamp) >= from!);
+    if (Number.isFinite(to)) runs = runs.filter((run) => Date.parse(run.timestamp) <= to!);
+    if (Number.isFinite(limit) && limit && limit > 0) runs = runs.slice(-Math.min(limit, 500));
+    res.json({ runs });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/storage/status", async (_req, res, next) => {
+  try {
+    res.json({ storage: await storageStatus() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/storage/archives", async (_req, res, next) => {
+  try {
+    res.json({ archives: await listStorageArchives() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/storage/retention/run", async (req, res, next) => {
+  try {
+    const body = z.object({
+      apply: z.boolean().default(false),
+      archive: z.boolean().default(true)
+    }).parse(req.body ?? {});
+    res.json({ retention: await runStorageRetention(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/environment-check", async (req, res, next) => {
+  try {
+    const body = z.object(runnableTargetShape).superRefine(requireRunnableTarget).parse(req.body);
+    const target = await resolveProjectTarget(body);
+    res.json(await checkEnvironment(target.frontendUrl));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/desktop-capture/status", (_req, res) => {
+  res.json(desktopCaptureStatus());
+});
+
+app.post("/api/desktop-capture/screenshot", async (_req, res, next) => {
+  try {
+    res.json(await captureDesktopScreenshot());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (error instanceof z.ZodError) {
+    res.status(400).json({ error: "Validation failed", details: error.flatten() });
+    return;
+  }
+  if (error instanceof Error && error.message === "CORS origin not allowed") {
+    res.status(403).json({ error: "CORS origin not allowed" });
+    return;
+  }
+  const safeError = error instanceof Error
+    ? { name: error.name, message: redactText(error.message), stack: error.stack ? redactText(error.stack) : undefined }
+    : redactValue(error);
+  console.error("Unhandled agent error", safeError);
+  res.status(500).json({ error: error instanceof Error ? redactText(error.message) : "Internal server error" });
+});
+
+assertSecurityConfig(host);
+app.listen(port, host, () => {
+  console.log(`AI Test Officer agent listening on http://${host}:${port}`);
+  console.log("Security boundary:", securitySummary());
+});

@@ -1,0 +1,61 @@
+{
+  "id": "task_search_keyword",
+  "title": "任务搜索关键字验收",
+  "planObservation": "smoke -> core_path(search keyword) -> regression(all filter)",
+  "summary": "验证任务搜索会携带 keyword 查询参数，并且页面只展示匹配关键字的任务。",
+  "matcher": {
+    "keywords": ["搜索", "keyword", "search", "query", "关键字"],
+    "riskLevel": "medium",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["mcp_requirement_doc", "playwright_mcp", "network_evidence", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "search_keyword_path",
+    "stepId": "search_urgent_keyword",
+    "retryStepId": "retry_search_urgent_keyword",
+    "title": "搜索 urgent 并验证结果",
+    "action": "search_keyword",
+    "inputLabel": "搜索任务",
+    "input": "urgent",
+    "submitButtonName": "搜索",
+    "networkUrlIncludes": "/api/tasks",
+    "expectedQueryFragment": "keyword=urgent",
+    "targetLocator": "[data-testid='task-title']",
+    "expectedTextIncludes": "urgent",
+    "queryAssertionName": "搜索请求携带 keyword=urgent",
+    "domAssertionName": "搜索结果展示 urgent 任务",
+    "riskReason": "搜索关键字必须从需求传递到接口并反映到列表结果。",
+    "oracles": [
+      {
+        "id": "search_keyword_query",
+        "name": "搜索请求携带 keyword=urgent",
+        "type": "network_query",
+        "networkUrlIncludes": "/api/tasks",
+        "expectedQueryFragment": "keyword=urgent",
+        "expected": "GET /api/tasks?keyword=urgent"
+      },
+      {
+        "id": "search_keyword_dom",
+        "name": "搜索结果展示 urgent 任务",
+        "type": "dom_text",
+        "locator": "[data-testid='task-title']",
+        "expectedTextIncludes": "urgent",
+        "expected": "至少一个任务标题包含 urgent"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

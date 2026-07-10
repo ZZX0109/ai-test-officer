@@ -1,0 +1,62 @@
+import { testConnectorEnvelope } from "./connector.test.js";
+import { testDiscoveryScanDrafts } from "./discoveryScan.test.js";
+import { testCiCliErrorReports } from "./ciCliErrorReports.test.js";
+import { testCiContract } from "./ciContract.test.js";
+import { testCiGatePolicy } from "./ciGatePolicy.test.js";
+import { testCiShellExitContract } from "./ciShellExit.test.js";
+import { testExternalProjectSmoke } from "./externalProjectSmoke.test.js";
+import { testGovernanceSecurityBot } from "./governanceSecurityBot.test.js";
+import { testArtifactIntegrity } from "./artifactIntegrity.test.js";
+import { testJudgeSchema } from "./judgeSchema.test.js";
+import { testLocalConfigInit } from "./localConfigInit.test.js";
+import { testPlanStepSchema } from "./planStepSchema.test.js";
+import { testProjectDetectionWizard } from "./projectDetection.test.js";
+import { testProjectAdapter } from "./projectAdapter.test.js";
+import { testReportRendererRedaction } from "./reportRenderer.test.js";
+import { testReportsRetention } from "./reportsRetention.test.js";
+import { testRunRequestContract } from "./runRequestContract.test.js";
+import { testRunBundleArchive } from "./runBundleArchive.test.js";
+import { testRunHistoryComparison } from "./runHistory.test.js";
+import { testRunLockGovernance } from "./runLock.test.js";
+import { testScenarioDraftLifecycle } from "./scenarioDraft.test.js";
+import { testScenarioParser } from "./scenarioParser.test.js";
+import { testSecurityBoundaries } from "./security.test.js";
+import { testServiceHealthContract } from "./serviceHealth.test.js";
+import { testRunnerExecutablePlanBinding, testRunnerLifecyclePolicy } from "./testRunnerLifecycle.test.js";
+import { testInvestmentAgentWorkflowExternalSmoke } from "./investmentAgentWorkflowSmoke.test.js";
+
+async function main() {
+  await testConnectorEnvelope();
+  await testProjectDetectionWizard();
+  await testDiscoveryScanDrafts();
+  await testGovernanceSecurityBot();
+  testCiContract();
+  await testCiGatePolicy();
+  await testCiCliErrorReports();
+  await testCiShellExitContract();
+  await testProjectAdapter();
+  await testExternalProjectSmoke();
+  await testInvestmentAgentWorkflowExternalSmoke();
+  testRunnerLifecyclePolicy();
+  testRunnerExecutablePlanBinding();
+  await testScenarioDraftLifecycle();
+  testScenarioParser();
+  testPlanStepSchema();
+  testJudgeSchema();
+  testReportRendererRedaction();
+  testSecurityBoundaries();
+  await testRunHistoryComparison();
+  await testRunLockGovernance();
+  await testReportsRetention();
+  testRunRequestContract();
+  await testArtifactIntegrity();
+  await testLocalConfigInit();
+  await testServiceHealthContract();
+  await testRunBundleArchive();
+  await import("../src/selfTest.js");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

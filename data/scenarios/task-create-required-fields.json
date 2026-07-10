@@ -1,0 +1,48 @@
+{
+  "id": "task_create_required_fields",
+  "title": "新增任务必填校验验收",
+  "planObservation": "smoke -> core_path(submit empty task form) -> regression(all filter)",
+  "summary": "验证新增任务时标题为空必须给出必填校验，不能静默失败。",
+  "matcher": {
+    "keywords": ["新增", "创建", "create", "required", "必填", "form", "标题"],
+    "riskLevel": "medium",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["mcp_requirement_doc", "playwright_mcp", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "create_required_fields_path",
+    "stepId": "submit_empty_task_form",
+    "retryStepId": "retry_submit_empty_task_form",
+    "title": "空标题提交并验证必填提示",
+    "action": "submit_empty_form",
+    "submitButtonName": "新增",
+    "validationLocator": "[data-testid='title-error']",
+    "expectedValidationText": "请输入任务标题",
+    "domAssertionName": "空标题提交展示必填校验",
+    "riskReason": "表单必填校验属于需求验收和回归高频漏测点。",
+    "oracles": [
+      {
+        "id": "create_required_title_validation",
+        "name": "空标题提交展示必填校验",
+        "type": "validation_text",
+        "locator": "[data-testid='title-error']",
+        "expectedTextIncludes": "请输入任务标题",
+        "expected": "标题为空提交后展示请输入任务标题"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

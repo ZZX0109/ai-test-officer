@@ -1,0 +1,49 @@
+{
+  "id": "auth_login_failure",
+  "title": "登录失败提示验收",
+  "planObservation": "smoke -> core_path(logout and invalid login) -> regression(login valid user)",
+  "summary": "验证错误账号登录会展示明确失败提示，避免权限流程被误判为成功。",
+  "matcher": {
+    "keywords": ["登录失败", "错误账号", "密码错误", "invalid login", "auth failure"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["playwright_mcp", "auth_boundary", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "auth_login_failure_path",
+    "stepId": "invalid_login",
+    "retryStepId": "retry_invalid_login",
+    "title": "错误账号登录并验证错误提示",
+    "action": "login_invalid_user",
+    "triggerButtonName": "退出登录",
+    "submitButtonName": "错误账号登录",
+    "targetLocator": "[data-testid='login-error']",
+    "expectedTextIncludes": "账号或密码错误",
+    "domAssertionName": "错误账号登录展示失败提示",
+    "riskReason": "登录失败路径需要明确 oracle，避免真实项目接入时把失败态当作环境问题。",
+    "oracles": [
+      {
+        "id": "auth_login_failure_dom",
+        "name": "错误账号登录展示失败提示",
+        "type": "dom_text",
+        "locator": "[data-testid='login-error']",
+        "expectedTextIncludes": "账号或密码错误",
+        "expected": "错误账号登录后展示账号或密码错误"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "auth_relogin_regression",
+    "title": "继续执行登录成功回归路径",
+    "action": "login_as_test_user",
+    "triggerButtonName": "登录测试账号"
+  }
+}

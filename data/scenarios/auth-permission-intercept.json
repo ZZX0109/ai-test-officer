@@ -1,0 +1,48 @@
+{
+  "id": "auth_permission_intercept",
+  "title": "未登录权限拦截验收",
+  "planObservation": "smoke -> core_path(logout and expect permission lock) -> regression(login valid user)",
+  "summary": "验证访客态访问任务列表时展示权限拦截提示，而不是继续暴露业务数据。",
+  "matcher": {
+    "keywords": ["权限拦截", "未登录", "访客", "session", "permission intercept", "403"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["playwright_mcp", "auth_boundary", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "permission_intercept_path",
+    "stepId": "logout_expect_permission_state",
+    "retryStepId": "retry_logout_expect_permission_state",
+    "title": "退出登录并验证权限拦截",
+    "action": "require_permission",
+    "triggerButtonName": "退出登录",
+    "targetLocator": "[data-testid='permission-state']",
+    "expectedTextIncludes": "请先登录测试账号",
+    "domAssertionName": "访客态展示权限拦截",
+    "riskReason": "真实项目接入时权限和会话边界必须被证据化，不允许默认放行。",
+    "oracles": [
+      {
+        "id": "permission_intercept_dom",
+        "name": "访客态展示权限拦截",
+        "type": "dom_text",
+        "locator": "[data-testid='permission-state']",
+        "expectedTextIncludes": "请先登录测试账号",
+        "expected": "退出登录后页面展示请先登录测试账号"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "auth_relogin_regression",
+    "title": "继续执行登录成功回归路径",
+    "action": "login_as_test_user",
+    "triggerButtonName": "登录测试账号"
+  }
+}

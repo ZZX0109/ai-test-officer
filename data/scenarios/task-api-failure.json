@@ -1,0 +1,60 @@
+{
+  "id": "task_api_failure",
+  "title": "任务接口失败独立验收",
+  "planObservation": "smoke -> core_path(simulate api failure) -> regression(retry recovery)",
+  "summary": "验证接口失败本身会产生 network evidence、错误 DOM 和结构化失败分类。",
+  "matcher": {
+    "keywords": ["接口失败", "api failure", "network failure", "503", "后端错误"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["playwright_mcp", "network_evidence", "failure_attribution"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "task_api_failure_path",
+    "stepId": "simulate_task_api_failure",
+    "retryStepId": "retry_task_api_failure",
+    "title": "模拟任务接口失败并验证错误态",
+    "action": "simulate_error_and_retry",
+    "triggerButtonName": "模拟错误",
+    "retryButtonName": "重试",
+    "networkUrlIncludes": "/api/tasks",
+    "expectedQueryFragment": "status=error",
+    "errorLocator": "[data-testid='error-state']",
+    "expectedErrorText": "任务接口失败",
+    "queryAssertionName": "接口失败请求携带 status=error",
+    "domAssertionName": "接口失败后展示错误态",
+    "riskReason": "失败定位需要明确 network failure 与 DOM 错误态的对应关系。",
+    "oracles": [
+      {
+        "id": "task_api_failure_query",
+        "name": "接口失败请求携带 status=error",
+        "type": "network_query",
+        "networkUrlIncludes": "/api/tasks",
+        "expectedQueryFragment": "status=error",
+        "expected": "GET /api/tasks?status=error"
+      },
+      {
+        "id": "task_api_failure_dom",
+        "name": "接口失败后展示错误态",
+        "type": "error_text",
+        "locator": "[data-testid='error-state']",
+        "expectedTextIncludes": "任务接口失败",
+        "expected": "页面展示任务接口失败"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

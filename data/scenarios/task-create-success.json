@@ -1,0 +1,52 @@
+{
+  "id": "task_create_success",
+  "title": "新增任务成功提交流程验收",
+  "planObservation": "smoke -> core_path(fill and submit task form) -> regression(all filter)",
+  "summary": "验证真实表单提交流程会把新任务插入列表，而不只是验证必填错误。",
+  "matcher": {
+    "keywords": ["新增成功", "提交表单", "create success", "form submit", "保存任务", "表单提交"],
+    "riskLevel": "medium",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["playwright_mcp", "form_flow", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "create_success_path",
+    "stepId": "submit_valid_task_form",
+    "retryStepId": "retry_submit_valid_task_form",
+    "title": "填写并提交新任务",
+    "action": "fill_and_submit",
+    "inputLabel": "新任务标题",
+    "input": "合规检查任务",
+    "selectLabel": "新任务状态",
+    "selectValue": "completed",
+    "submitButtonName": "新增",
+    "targetLocator": "[data-testid='task-title']",
+    "expectedTextIncludes": "合规检查任务",
+    "domAssertionName": "新增任务提交后出现在列表",
+    "riskReason": "真实业务接入必须覆盖表单成功提交和结果落地，不只覆盖校验失败。",
+    "oracles": [
+      {
+        "id": "create_success_dom",
+        "name": "新增任务提交后出现在列表",
+        "type": "dom_text",
+        "locator": "[data-testid='task-title']",
+        "expectedTextIncludes": "合规检查任务",
+        "expected": "提交新任务后列表中出现合规检查任务"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

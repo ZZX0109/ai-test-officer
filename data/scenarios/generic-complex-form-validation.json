@@ -1,0 +1,48 @@
+{
+  "id": "generic_complex_form_validation",
+  "title": "通用复杂表单校验验收",
+  "capabilityKind": "complex_form",
+  "genericTemplate": true,
+  "planObservation": "smoke -> core_path(validate complex form) -> regression",
+  "summary": "验证复杂表单提交前能拦截缺失字段并展示可解释错误。",
+  "matcher": {
+    "keywords": ["复杂表单", "表单校验", "form validation", "required fields", "multi step form"],
+    "riskLevel": "medium",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["complex_form", "validation", "playwright_mcp"]
+  },
+  "smoke": {
+    "pathId": "open_customer_portal",
+    "stepId": "open_customer_portal",
+    "title": "打开客户门户",
+    "headingName": "Customer Portal Lite",
+    "assertionName": "客户门户标题可见",
+    "expected": "Customer Portal Lite 标题出现"
+  },
+  "corePath": {
+    "pathId": "complex_form_validation_path",
+    "stepId": "submit_incomplete_order_form",
+    "title": "提交缺失字段的复杂表单",
+    "action": "complex_form_validate",
+    "submitButtonName": "提交订单",
+    "validationLocator": "[data-testid='form-error']",
+    "expectedValidationText": "请填写客户名称和订单金额",
+    "domAssertionName": "复杂表单展示必填错误",
+    "riskReason": "真实业务表单常因必填、联动和格式校验遗漏产生回归。",
+    "oracles": [
+      {
+        "id": "complex_form_required_error",
+        "name": "复杂表单展示必填错误",
+        "type": "validation_text",
+        "locator": "[data-testid='form-error']",
+        "expectedTextIncludes": "请填写客户名称和订单金额",
+        "expected": "提交缺失字段后展示请填写客户名称和订单金额"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "form_regression_snapshot",
+    "title": "保留表单回归截图",
+    "action": "visual_check"
+  }
+}

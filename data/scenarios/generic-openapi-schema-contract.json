@@ -1,0 +1,59 @@
+{
+  "id": "generic_openapi_schema_contract",
+  "title": "通用 OpenAPI Schema 契约验收",
+  "capabilityKind": "openapi_contract",
+  "genericTemplate": true,
+  "planObservation": "smoke -> core_path(check API schema contract) -> regression",
+  "summary": "验证页面触发接口契约检查后，network 与 DOM 都能证明 schema 校验通过。",
+  "matcher": {
+    "keywords": ["OpenAPI", "schema", "接口契约", "contract", "接口文档"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["openapi_contract", "network_evidence", "schema_validation"]
+  },
+  "smoke": {
+    "pathId": "open_customer_portal",
+    "stepId": "open_customer_portal",
+    "title": "打开客户门户",
+    "headingName": "Customer Portal Lite",
+    "assertionName": "客户门户标题可见",
+    "expected": "Customer Portal Lite 标题出现"
+  },
+  "corePath": {
+    "pathId": "openapi_schema_contract_path",
+    "stepId": "check_openapi_contract",
+    "title": "触发接口契约检查",
+    "action": "openapi_schema_contract",
+    "triggerButtonName": "校验接口 Schema",
+    "networkUrlIncludes": "/api/schema-check",
+    "expectedQueryFragment": "contract=customer",
+    "targetLocator": "[data-testid='schema-state']",
+    "expectedTextIncludes": "schema ok",
+    "queryAssertionName": "Schema 检查请求携带 contract=customer",
+    "domAssertionName": "Schema 检查展示通过状态",
+    "riskReason": "接口文档和运行时响应需要能被同一 run bundle 追踪。",
+    "oracles": [
+      {
+        "id": "openapi_schema_query",
+        "name": "Schema 检查请求携带 contract=customer",
+        "type": "network_query",
+        "networkUrlIncludes": "/api/schema-check",
+        "expectedQueryFragment": "contract=customer",
+        "expected": "GET /api/schema-check?contract=customer"
+      },
+      {
+        "id": "openapi_schema_dom",
+        "name": "Schema 检查展示通过状态",
+        "type": "api_schema",
+        "locator": "[data-testid='schema-state']",
+        "expectedTextIncludes": "schema ok",
+        "expected": "Schema 检查后页面展示 schema ok"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "schema_regression_snapshot",
+    "title": "保留接口契约回归截图",
+    "action": "visual_check"
+  }
+}

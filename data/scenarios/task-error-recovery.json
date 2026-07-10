@@ -1,0 +1,70 @@
+{
+  "id": "task_error_recovery",
+  "title": "任务接口异常恢复验收",
+  "planObservation": "smoke -> core_path(simulate 503 and retry) -> regression(all filter)",
+  "summary": "验证接口失败时页面展示错误提示，并能通过重试恢复到可用列表。",
+  "matcher": {
+    "keywords": ["错误", "异常", "500", "503", "timeout", "error", "重试", "recovery"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["playwright_mcp", "network_evidence", "failure_recovery_loop", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "error_recovery_path",
+    "stepId": "simulate_task_api_error",
+    "retryStepId": "retry_task_api_error",
+    "title": "模拟接口失败并验证重试恢复",
+    "action": "simulate_error_and_retry",
+    "triggerButtonName": "模拟错误",
+    "retryButtonName": "重试",
+    "networkUrlIncludes": "/api/tasks",
+    "expectedQueryFragment": "status=error",
+    "errorLocator": "[data-testid='error-state']",
+    "expectedErrorText": "任务接口失败",
+    "targetLocator": "[data-testid='task-title']",
+    "expectedTextIncludes": "准备答辩材料",
+    "queryAssertionName": "异常路径请求触发 status=error",
+    "domAssertionName": "接口失败后展示错误提示并可重试恢复",
+    "riskReason": "线上巡检必须区分产品错误、环境错误和可恢复异常。",
+    "oracles": [
+      {
+        "id": "error_recovery_query",
+        "name": "异常路径请求触发 status=error",
+        "type": "network_query",
+        "networkUrlIncludes": "/api/tasks",
+        "expectedQueryFragment": "status=error",
+        "expected": "GET /api/tasks?status=error"
+      },
+      {
+        "id": "error_recovery_error_text",
+        "name": "接口失败后展示错误提示",
+        "type": "error_text",
+        "locator": "[data-testid='error-state']",
+        "expectedTextIncludes": "任务接口失败",
+        "expected": "接口失败后展示任务接口失败"
+      },
+      {
+        "id": "error_recovery_retry_dom",
+        "name": "重试后任务列表恢复",
+        "type": "dom_text",
+        "locator": "[data-testid='task-title']",
+        "expectedTextIncludes": "准备答辩材料",
+        "expected": "重试后任务列表重新出现"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

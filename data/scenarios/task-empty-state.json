@@ -1,0 +1,61 @@
+{
+  "id": "task_empty_state",
+  "title": "任务列表空状态验收",
+  "planObservation": "smoke -> core_path(search no-result keyword) -> regression(all filter)",
+  "summary": "验证无匹配任务时页面展示明确空状态，而不是空白列表。",
+  "matcher": {
+    "keywords": ["空状态", "无数据", "empty", "no data", "暂无任务", "no-result"],
+    "riskLevel": "low",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["mcp_requirement_doc", "playwright_mcp", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "empty_state_path",
+    "stepId": "search_no_result_keyword",
+    "retryStepId": "retry_search_no_result_keyword",
+    "title": "搜索无结果关键字并验证空状态",
+    "action": "expect_empty_state",
+    "inputLabel": "搜索任务",
+    "input": "no-result-fixture",
+    "submitButtonName": "搜索",
+    "networkUrlIncludes": "/api/tasks",
+    "expectedQueryFragment": "keyword=no-result-fixture",
+    "emptyStateLocator": "[data-testid='empty-state']",
+    "expectedEmptyText": "暂无任务",
+    "queryAssertionName": "空状态搜索请求携带 keyword=no-result-fixture",
+    "domAssertionName": "无匹配任务时展示空状态",
+    "riskReason": "无结果路径需要显式 oracle，否则容易被误判为测试未覆盖。",
+    "oracles": [
+      {
+        "id": "empty_state_query",
+        "name": "空状态搜索请求携带 keyword=no-result-fixture",
+        "type": "network_query",
+        "networkUrlIncludes": "/api/tasks",
+        "expectedQueryFragment": "keyword=no-result-fixture",
+        "expected": "GET /api/tasks?keyword=no-result-fixture"
+      },
+      {
+        "id": "empty_state_dom",
+        "name": "无匹配任务时展示空状态",
+        "type": "empty_state",
+        "locator": "[data-testid='empty-state']",
+        "expectedTextIncludes": "暂无任务",
+        "expected": "页面展示暂无任务"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

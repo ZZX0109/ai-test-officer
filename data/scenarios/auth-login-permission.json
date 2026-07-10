@@ -1,0 +1,49 @@
+{
+  "id": "auth_login_permission",
+  "title": "登录权限流程验收",
+  "planObservation": "smoke -> core_path(logout then login test user) -> regression(all filter)",
+  "summary": "验证访客态需要登录，测试账号登录后恢复任务操作权限。",
+  "matcher": {
+    "keywords": ["login", "登录", "权限", "账号", "auth", "permission", "未登录"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["playwright_mcp", "permission_boundary", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "auth_login_path",
+    "stepId": "login_test_user",
+    "retryStepId": "retry_login_test_user",
+    "title": "切换到访客态后登录测试账号",
+    "action": "login_as_test_user",
+    "triggerButtonName": "退出登录",
+    "submitButtonName": "登录测试账号",
+    "targetLocator": "[data-testid='auth-state']",
+    "expectedTextIncludes": "已登录 qa.officer@example.com",
+    "domAssertionName": "测试账号登录后恢复授权状态",
+    "riskReason": "真实项目接入必须能验证登录和权限边界，而不是默认开放页面。",
+    "oracles": [
+      {
+        "id": "auth_login_state",
+        "name": "测试账号登录后恢复授权状态",
+        "type": "dom_text",
+        "locator": "[data-testid='auth-state']",
+        "expectedTextIncludes": "已登录 qa.officer@example.com",
+        "expected": "登录测试账号后 auth-state 显示已登录 qa.officer@example.com"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "all_filter_regression",
+    "title": "登录后继续执行全部筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "全部"
+  }
+}

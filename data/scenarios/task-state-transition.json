@@ -1,0 +1,48 @@
+{
+  "id": "task_state_transition",
+  "title": "复杂列表状态变更流程验收",
+  "planObservation": "smoke -> core_path(change task status) -> regression(completed filter)",
+  "summary": "验证列表项从 active 变更为 completed 后，DOM 状态和筛选回归仍然可解释。",
+  "matcher": {
+    "keywords": ["状态变更", "状态流", "state transition", "标记完成", "复杂列表", "列表状态"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "tapd_bug"],
+    "capabilities": ["playwright_mcp", "state_transition", "evidence_store"]
+  },
+  "smoke": {
+    "pathId": "open_task_page",
+    "stepId": "open_task_page",
+    "title": "打开任务列表页",
+    "headingName": "任务管理系统",
+    "assertionName": "页面标题可见",
+    "expected": "任务管理系统标题出现"
+  },
+  "corePath": {
+    "pathId": "task_state_transition_path",
+    "stepId": "mark_task_completed",
+    "retryStepId": "retry_mark_task_completed",
+    "title": "把进行中任务标记为已完成",
+    "action": "change_task_status",
+    "triggerButtonName": "标记准备答辩材料为已完成",
+    "targetLocator": "[data-testid='task-1-status']",
+    "expectedTextIncludes": "status=completed",
+    "domAssertionName": "任务状态从 active 变更为 completed",
+    "riskReason": "复杂列表和状态变更是接入真实项目时最常见的回归路径。",
+    "oracles": [
+      {
+        "id": "task_state_transition_dom",
+        "name": "任务状态从 active 变更为 completed",
+        "type": "dom_text",
+        "locator": "[data-testid='task-1-status']",
+        "expectedTextIncludes": "status=completed",
+        "expected": "点击标记完成后目标任务状态展示为 status=completed"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "completed_filter_regression",
+    "title": "继续执行已完成筛选回归路径",
+    "action": "click_filter",
+    "triggerButtonName": "已完成"
+  }
+}

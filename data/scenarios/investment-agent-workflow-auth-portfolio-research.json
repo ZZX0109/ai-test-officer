@@ -1,0 +1,59 @@
+{
+  "id": "investment_agent_workflow_auth_portfolio_research",
+  "title": "投资研究 Agent 工作流平台真实登录持仓投研闭环验收",
+  "capabilityKind": "domain_specific",
+  "genericTemplate": false,
+  "planObservation": "smoke -> core_path(register/login + onboarding + portfolio/research) -> refresh recovery",
+  "summary": "验证真实外部 AI Agent 工作流平台样例可以完成注册/登录、前测持仓、组合与投研页面加载，并采集 API 与 DOM 证据。",
+  "matcher": {
+    "keywords": ["investment agent workflow", "agent workflow", "portfolio", "research", "onboarding", "真实登录", "投研", "持仓"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["external_project", "auth_flow", "portfolio_api", "research_api", "playwright_mcp"]
+  },
+  "smoke": {
+    "pathId": "open_investment_agent_auth",
+    "stepId": "open_investment_agent_auth",
+    "title": "打开投资研究 Agent 工作流平台登录页",
+    "headingName": "先建立你的投研账户",
+    "assertionName": "投资研究 Agent 工作流平台登录页标题可见",
+    "expected": "先建立你的投研账户 标题出现"
+  },
+  "corePath": {
+    "pathId": "investment_agent_workflow_auth_portfolio_research_path",
+    "stepId": "investment_agent_register_onboard_dashboard",
+    "title": "注册登录并生成投研面板",
+    "action": "investment_agent_workflow_auth_portfolio_research",
+    "targetLocator": "body",
+    "expectedTextIncludes": "组合风险与 Agent 投研闭环",
+    "networkUrlIncludes": "/api/portfolio",
+    "expectedQueryFragment": "preference=balanced",
+    "queryAssertionName": "投资研究工作流平台 portfolio API 被真实调用",
+    "domAssertionName": "投资研究工作流平台投研面板加载完成",
+    "riskReason": "真实外部项目必须证明登录、后端 API、前端 dashboard 和失败恢复入口都能被同一 run bundle 采集。",
+    "waitMs": 1200,
+    "oracles": [
+      {
+        "id": "investment_agent_portfolio_query",
+        "name": "投资研究工作流平台 portfolio API 被真实调用",
+        "type": "network_query",
+        "networkUrlIncludes": "/api/portfolio",
+        "expectedQueryFragment": "preference=balanced",
+        "expected": "GET /api/portfolio?preference=balanced"
+      },
+      {
+        "id": "investment_agent_dashboard_dom",
+        "name": "投资研究工作流平台投研面板加载完成",
+        "type": "dom_text",
+        "locator": "body",
+        "expectedTextIncludes": "组合风险与 Agent 投研闭环",
+        "expected": "完成注册和前测后进入投研 dashboard"
+      }
+    ]
+  },
+  "regressionPath": {
+    "stepId": "investment_agent_dashboard_snapshot",
+    "title": "保留投资研究 Agent 工作流平台 dashboard 截图",
+    "action": "visual_check"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "ai-test-officer",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "agent",
+    "app-under-test",
+    "workbench-ui"
+  ],
+  "scripts": {
+    "dev": "npm run dev:agent & npm run dev:app & npm run dev:workbench",
+    "dev:all": "npm run dev",
+    "stop:dev": "node scripts/stop-dev-services.mjs",
+    "health:check": "node scripts/dev-service-health.mjs",
+    "dev:agent": "npm --workspace agent run dev",
+    "dev:app": "npm --workspace app-under-test run dev",
+    "dev:workbench": "npm --workspace workbench-ui run dev",
+    "build": "npm --workspaces run build",
+    "typecheck": "npm --workspaces run typecheck",
+    "test": "npm --workspaces run test",
+    "test:visual": "npm --workspace agent run test:visual",
+    "commit-check": "npm --workspace agent run commit-check",
+    "commit-check:strict": "npm --workspace agent run commit-check:strict",
+    "requirement-acceptance": "npm --workspace agent run requirement-acceptance",
+    "patrol": "npm --workspace agent run patrol",
+    "demo:verify": "npm --workspace agent run demo:verify",
+    "init:local-config": "node scripts/init-local-config.mjs",
+    "judge:eval": "npm --workspace agent run judge:eval",
+    "hooks:install": "sh scripts/install-ai-test-officer-hook.sh",
+    "reports:retention": "node scripts/reports-retention.mjs",
+    "reports:retention:apply": "node scripts/reports-retention.mjs --apply",
+    "reports:retention:archive": "node scripts/reports-retention.mjs --apply --archive",
+    "clean": "rm -rf agent/dist app-under-test/dist workbench-ui/dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
