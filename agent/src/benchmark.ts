@@ -92,6 +92,15 @@ function ratio(numerator: number, denominator: number) {
   return denominator ? numerator / denominator : null;
 }
 
+function totalKnownCost(usage: Array<JudgeLaneRecord["usage"] | undefined>) {
+  const known = usage.filter((item): item is NonNullable<JudgeLaneRecord["usage"]> => Boolean(item));
+  // A provider without published/verified pricing must remain unpriced.  Treating
+  // it as zero makes a paid experiment look free in the benchmark dashboard.
+  return known.length && known.every((item) => typeof item.estimatedCostUsd === "number")
+    ? known.reduce((sum, item) => sum + (item.estimatedCostUsd ?? 0), 0)
+    : null;
+}
+
 function setScore(actual: string[], expected: string[]) {
   const actualSet = new Set(actual);
   const expectedSet = new Set(expected);
@@ -137,7 +146,7 @@ function laneMetrics(records: BenchmarkRunRecord[], labels: Map<string, HumanBen
     notConfiguredRate: lane === "llm" ? ratio(available.filter((item) => item.lane.status === "not_configured").length, available.length) : 0,
     promptTokens: usage.length ? usage.reduce((sum, item) => sum + (item?.promptTokens ?? 0), 0) : null,
     completionTokens: usage.length ? usage.reduce((sum, item) => sum + (item?.completionTokens ?? 0), 0) : null,
-    estimatedCostUsd: usage.length ? usage.reduce((sum, item) => sum + (item?.estimatedCostUsd ?? 0), 0) : null
+    estimatedCostUsd: totalKnownCost(usage)
     ,averageDurationMs: compared.length ? compared.reduce((sum, item) => sum + (item.lane.durationMs ?? 0), 0) / compared.length : null
   };
 }
@@ -248,7 +257,7 @@ export function evaluateExperiment(input: {
       p95DurationMs: percentile(durations, 0.95),
       promptTokens: usage.length ? usage.reduce((sum, item) => sum + (item?.promptTokens ?? 0), 0) : null,
       completionTokens: usage.length ? usage.reduce((sum, item) => sum + (item?.completionTokens ?? 0), 0) : null,
-      estimatedCostUsd: usage.length ? usage.reduce((sum, item) => sum + (item?.estimatedCostUsd ?? 0), 0) : null
+      estimatedCostUsd: totalKnownCost(usage)
       ,estimatedManualMinutesAvoided: input.roi ? Math.max(0, baselineMinutes - automatedMinutes - reviewMinutes) : null
       ,estimatedHumanReviewMinutes: input.roi ? reviewMinutes : null
     };
