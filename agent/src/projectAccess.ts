@@ -1,11 +1,19 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { Pool } from "pg";
 import type { ProjectGrant } from "./types.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const grantDir = path.join(rootDir, "reports", "security");
 const grantFile = path.join(grantDir, "project-grants.json");
+let postgresPool: Pool | undefined;
+
+function pool() {
+  if (!process.env.DATABASE_URL) return undefined;
+  postgresPool ??= new Pool({ connectionString: process.env.DATABASE_URL });
+  return postgresPool;
+}
 
 async function readGrants(): Promise<ProjectGrant[]> {
   try {
@@ -45,6 +53,14 @@ export async function hasProjectScope(input: { projectId: string; subject: strin
 }
 
 export async function listProjectGrants(projectId?: string) {
+  const database = pool();
+  if (database) {
+    const result = await database.query<{ grant_json: ProjectGrant }>(
+      `SELECT grant_json FROM project_grants_v1 ${projectId ? "WHERE project_id = $1" : ""} ORDER BY created_at ASC`,
+      projectId ? [projectId] : []
+    );
+    return result.rows.map((row) => row.grant_json);
+  }
   const grants = await readGrants();
   return projectId ? grants.filter((grant) => grant.projectId === projectId) : grants;
 }
@@ -67,12 +83,25 @@ export async function createProjectGrant(input: {
     expiresAt: input.expiresAt
   };
   const grants = await readGrants();
+  const database = pool();
+  if (database) {
+    await database.query(
+      "INSERT INTO project_grants_v1 (id, project_id, subject, grant_json, created_at) VALUES ($1, $2, $3, $4::jsonb, $5) ON CONFLICT (id) DO UPDATE SET grant_json = EXCLUDED.grant_json",
+      [grant.id, grant.projectId, grant.subject, JSON.stringify(grant), grant.createdAt]
+    );
+    return grant;
+  }
   grants.push(grant);
   await writeGrants(grants);
   return grant;
 }
 
 export async function deleteProjectGrant(projectId: string, grantId: string) {
+  const database = pool();
+  if (database) {
+    const result = await database.query("DELETE FROM project_grants_v1 WHERE project_id = $1 AND id = $2", [projectId, grantId]);
+    return (result.rowCount ?? 0) > 0;
+  }
   const grants = await readGrants();
   const next = grants.filter((grant) => !(grant.projectId === projectId && grant.id === grantId));
   await writeGrants(next);
