@@ -179,7 +179,7 @@ export type ProjectManifest = z.infer<typeof projectManifestSchema>;
 
 const transitions: Record<RunState, Partial<Record<RunEventType, RunState>>> = {
   draft: { run_cancelled: "cancelled" },
-  planning: { plan_generated: "awaiting-plan-approval", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
+  planning: { plan_generated: "awaiting-plan-approval", human_review_requested: "awaiting-human-review", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
   "awaiting-plan-approval": { plan_approved: "awaiting-permission", run_cancelled: "cancelled" },
   "awaiting-permission": { permission_granted: "queued", run_cancelled: "cancelled", run_blocked: "blocked" },
   queued: { run_preparing: "preparing", run_cancelled: "cancelled", run_blocked: "blocked" },
@@ -231,6 +231,50 @@ export type MachineGate = z.infer<typeof machineGateSchema>;
 export type JudgeRecommendation = z.infer<typeof judgeRecommendationSchema>;
 export type HumanDecision = z.infer<typeof humanDecisionSchema>;
 
+export const plannerModeSchema = z.enum(["deterministic", "llm"]);
+export const judgeModeSchema = z.enum(["deterministic", "llm-assisted"]);
+export type PlannerMode = z.infer<typeof plannerModeSchema>;
+export type JudgeMode = z.infer<typeof judgeModeSchema>;
+
+export const llmCallSchema = z.object({
+  id: z.string().min(1),
+  runId: z.string().min(1).optional(),
+  experimentId: z.string().min(1).optional(),
+  purpose: z.enum(["planning", "judging"]),
+  provider: z.enum(["openai-compatible", "openai", "anthropic", "openrouter", "custom"]),
+  model: z.string().min(1),
+  requestId: z.string().min(1).optional(),
+  startedAt: z.string().datetime(),
+  durationMs: z.number().int().nonnegative(),
+  status: z.enum(["passed", "failed", "blocked"]),
+  usage: z.object({
+    promptTokens: z.number().int().nonnegative().optional(),
+    completionTokens: z.number().int().nonnegative().optional(),
+    totalTokens: z.number().int().nonnegative().optional(),
+    estimatedCostUsd: z.number().nonnegative().optional()
+  }).default({}),
+  errorCode: z.string().min(1).optional()
+});
+export type LlmCall = z.infer<typeof llmCallSchema>;
+
+export const planProvenanceSchema = z.object({
+  source: z.enum(["deterministic", "llm"]),
+  promptVersion: z.string().min(1),
+  modelProfileId: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  llmCallId: z.string().min(1).optional(),
+  compilationStatus: z.enum(["validated", "rejected"]),
+  fallbackReason: z.string().min(1).optional()
+}).superRefine((value, context) => {
+  if (value.source === "llm" && (!value.model || !value.llmCallId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "LLM plan provenance requires model and llmCallId." });
+  }
+  if (value.source === "llm" && value.fallbackReason) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["fallbackReason"], message: "LLM plans cannot silently fall back." });
+  }
+});
+export type PlanProvenance = z.infer<typeof planProvenanceSchema>;
+
 export function resolveFinalStatus(input: {
   machineGate: MachineGate;
   judgeRecommendation?: JudgeRecommendation;
@@ -255,6 +299,18 @@ export const actionDslSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("assert"), oracleId: z.string().min(1) }),
   z.object({ action: z.literal("wait"), durationMs: z.number().int().min(0).max(45_000) })
 ]);
+export type ActionDsl = z.infer<typeof actionDslSchema>;
+
+export const compiledPlanSchema = z.object({
+  scenarioId: z.string().min(1),
+  steps: z.array(z.object({
+    id: z.string().min(1),
+    action: actionDslSchema
+  })).min(1).max(50),
+  requiredOracleIds: z.array(z.string().min(1)).min(1),
+  requiredEvidenceKinds: z.array(artifactKindV2Schema).min(1)
+});
+export type CompiledPlan = z.infer<typeof compiledPlanSchema>;
 
 export const createRunRequestSchema = z.object({
   runId: z.string().min(1).optional(),
@@ -267,6 +323,13 @@ export const createRunRequestSchema = z.object({
     scenarioId: z.string().optional(),
     requirement: z.string().optional(),
     diff: z.string().optional(),
+    plannerMode: plannerModeSchema.default("deterministic"),
+    judgeMode: judgeModeSchema.default("deterministic"),
+    modelProfileId: z.string().min(1).optional(),
+    experimentId: z.string().min(1).optional(),
+    repetition: z.number().int().min(1).max(10).optional(),
+    promptVersion: z.string().min(1).default("plan-v1"),
+    faultProfile: z.enum(["wrong-status", "api-503", "label-rename", "permission-bypass", "drop-trace", "ambiguous-oracle"]).optional(),
     permissionProfile: z.object({
       observe: z.boolean().default(true),
       browserControl: z.boolean().default(true),
@@ -277,7 +340,15 @@ export const createRunRequestSchema = z.object({
     executionMode: z.enum(["oci", "trusted-local"]).default("oci"),
     capabilities: z.array(z.enum(["browser", "desktop"])).default(["browser"])
   })
-}).refine((value) => Boolean(value.projectId || value.input.appUrl), { message: "Provide projectId or appUrl" });
+}).superRefine((value, context) => {
+  if (!value.projectId && !value.input.appUrl) context.addIssue({ code: z.ZodIssueCode.custom, message: "Provide projectId or appUrl" });
+  if ((value.input.plannerMode === "llm" || value.input.judgeMode === "llm-assisted") && !value.input.modelProfileId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["input", "modelProfileId"], message: "LLM modes require modelProfileId." });
+  }
+  if (value.input.experimentId && !value.input.repetition) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["input", "repetition"], message: "Experiment runs require repetition." });
+  }
+});
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>;
 
 export const runStreamEventSchema = z.object({

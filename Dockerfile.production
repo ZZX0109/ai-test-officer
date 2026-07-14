@@ -1,0 +1,17 @@
+FROM mcr.microsoft.com/playwright:v1.61.1-noble
+ARG VITE_AGENT_URL=http://localhost:14317
+ARG VITE_OIDC_ISSUER=http://localhost:18080/realms/ai-test-officer
+ARG VITE_OIDC_CLIENT_ID=ai-test-officer-local
+ENV VITE_AGENT_URL=$VITE_AGENT_URL VITE_OIDC_ISSUER=$VITE_OIDC_ISSUER VITE_OIDC_CLIENT_ID=$VITE_OIDC_CLIENT_ID
+WORKDIR /app
+COPY --chown=pwuser:pwuser package.json package-lock.json ./
+COPY --chown=pwuser:pwuser agent/package.json agent/package.json
+COPY --chown=pwuser:pwuser app-under-test/package.json app-under-test/package.json
+COPY --chown=pwuser:pwuser workbench-ui/package.json workbench-ui/package.json
+COPY --chown=pwuser:pwuser packages packages
+RUN npm ci
+COPY --chown=pwuser:pwuser . .
+RUN npm run build
+USER pwuser
+ENV NODE_ENV=production HOST=0.0.0.0
+CMD ["node", "agent/dist/server.js"]

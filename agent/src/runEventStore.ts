@@ -3,7 +3,8 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Pool } from "pg";
-import { runEventSchema, transitionRunState, type GateStatus, type HumanDecision, type JudgeRecommendation, type MachineGate, type RunEvent, type RunEventType, type RunState } from "@ai-test-officer/contracts";
+import { runEventSchema, transitionRunState, type CompiledPlan, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunState } from "@ai-test-officer/contracts";
+import type { GrayPlan } from "./types.js";
 
 export interface RunProjection {
   id: string;
@@ -17,6 +18,11 @@ export interface RunProjection {
   judgeRecommendation?: JudgeRecommendation;
   humanDecision?: HumanDecision;
   resultRunId?: string;
+  plan?: GrayPlan;
+  compiledPlan?: CompiledPlan;
+  planProvenance?: PlanProvenance;
+  plannerCall?: LlmCall;
+  selectedScenarioId?: string;
   override?: { originalDecision: string; newLabel: string; reason: string; actor: string; createdAt: string };
 }
 
@@ -42,6 +48,13 @@ function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
   if (event.payload.machineGate) projection.machineGate = event.payload.machineGate as MachineGate;
   if (event.payload.judgeRecommendation) projection.judgeRecommendation = event.payload.judgeRecommendation as JudgeRecommendation;
   if (event.payload.resultRunId) projection.resultRunId = String(event.payload.resultRunId);
+  if (event.type === "plan_generated") {
+    if (event.payload.plan) projection.plan = event.payload.plan as GrayPlan;
+    if (event.payload.compiledPlan) projection.compiledPlan = event.payload.compiledPlan as CompiledPlan;
+    if (event.payload.provenance) projection.planProvenance = event.payload.provenance as PlanProvenance;
+    if (event.payload.llmCall) projection.plannerCall = event.payload.llmCall as LlmCall;
+    if (event.payload.scenarioId) projection.selectedScenarioId = String(event.payload.scenarioId);
+  }
   if (event.type === "run_completed") projection.gateStatus = (event.payload.finalStatus as GateStatus | undefined) ?? "pass";
   if (event.type === "run_failed") projection.gateStatus = "fail";
   if (event.type === "run_blocked") projection.gateStatus = "blocked";
@@ -196,6 +209,8 @@ class PostgresRunEventStore implements RunEventStore {
       await client.query("BEGIN");
       await client.query("INSERT INTO run_control_events VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [event.id, runId, event.type, 1, event.createdAt, event.actor, event.idempotencyKey, event]);
       await client.query("INSERT INTO run_projections VALUES ($1,$2,$3,$4,$5,$6)", [runId, projection.state, projection.version, projection.createdAt, projection.updatedAt, projection]);
+      await client.query("INSERT INTO runs_v1 (id, organization_id, project_id, state, version, input, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING", [runId, String(projection.input.organizationId ?? "local"), projection.input.projectId ?? null, projection.state, projection.version, projection.input, projection.createdAt, projection.updatedAt]);
+      await client.query("INSERT INTO run_events_v1 (id, run_id, payload, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING", [event.id, runId, event, event.createdAt]);
       await client.query("COMMIT");
       return projection;
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
@@ -215,6 +230,8 @@ class PostgresRunEventStore implements RunEventStore {
       const projection = applyEvent(current, event);
       await client.query("INSERT INTO run_control_events VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [event.id, event.runId, event.type, event.version, event.createdAt, event.actor, event.idempotencyKey, event]);
       await client.query("UPDATE run_projections SET state=$2, version=$3, updated_at=$4, projection_json=$5 WHERE run_id=$1", [input.runId, projection.state, projection.version, projection.updatedAt, projection]);
+      await client.query("UPDATE runs_v1 SET state=$2, version=$3, final_status=$4, updated_at=$5 WHERE id=$1", [input.runId, projection.state, projection.version, projection.gateStatus ?? null, projection.updatedAt]);
+      await client.query("INSERT INTO run_events_v1 (id, run_id, payload, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING", [event.id, event.runId, event, event.createdAt]);
       await client.query("COMMIT");
       return projection;
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
@@ -226,7 +243,9 @@ class PostgresRunEventStore implements RunEventStore {
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 export const runEventStore: RunEventStore = process.env.DATABASE_URL
   ? new PostgresRunEventStore(process.env.DATABASE_URL)
-  : new SqliteRunEventStore(path.join(rootDir, "reports", "run-state.sqlite"));
+  : process.env.NODE_ENV === "production"
+    ? (() => { throw new Error("DATABASE_URL is required in production"); })()
+    : new SqliteRunEventStore(path.join(rootDir, "reports", "run-state.sqlite"));
 
 export async function appendSystemRunEvent(runId: string, type: RunEventType, payload: Record<string, unknown> = {}) {
   for (let attempt = 0; attempt < 4; attempt += 1) {

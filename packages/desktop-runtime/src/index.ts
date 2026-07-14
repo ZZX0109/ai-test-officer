@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
@@ -28,6 +30,7 @@ export class MacOSWindowDesktopAdapter implements DesktopAdapter {
       helperPath: string;
       allowedBundleIds: string[];
       helperSignatureSha256?: string;
+      designatedRequirement?: string;
     }
   ) {}
 
@@ -38,6 +41,12 @@ export class MacOSWindowDesktopAdapter implements DesktopAdapter {
       if (this.options.helperSignatureSha256) {
         const actual = createHash("sha256").update(await readFile(this.options.helperPath)).digest("hex");
         if (actual !== this.options.helperSignatureSha256) throw new Error("desktop_helper_signature_mismatch");
+      }
+      if (this.options.designatedRequirement) {
+        const run = promisify(execFile);
+        const result = await run("/usr/bin/codesign", ["-d", "-r-", this.options.helperPath], { encoding: "utf8" });
+        const details = `${result.stdout}\n${result.stderr}`;
+        if (!details.includes(this.options.designatedRequirement)) throw new Error("desktop_helper_designated_requirement_mismatch");
       }
       return true;
     } catch {

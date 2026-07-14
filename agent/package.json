@@ -21,7 +21,8 @@
     "worker": "tsx src/workerCli.ts",
     "migrate": "node-pg-migrate -m migrations up",
     "contracts:openapi": "tsx src/generateOpenApi.ts",
-    "benchmark:run": "tsx src/benchmarkRunner.ts && tsx src/benchmarkCli.ts"
+    "benchmark:run": "tsx src/benchmarkRunner.ts",
+    "benchmark:evaluate": "tsx src/benchmarkExperimentCli.ts"
   },
   "dependencies": {
     "@ai-test-officer/contracts": "0.2.0",

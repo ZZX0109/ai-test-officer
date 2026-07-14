@@ -8,6 +8,8 @@ import {
   transitionRunState,
   validateEvidenceArtifactLinks,
   resolveFinalStatus
+  ,createRunRequestSchema
+  ,planProvenanceSchema
 } from "../src/index.js";
 
 const artifact = artifactV2Schema.parse({
@@ -59,4 +61,6 @@ assert.equal(resolveFinalStatus({
 }), "fail");
 assert.equal(defaultResourceBudget.maxAttempts, 2);
 assert.throws(() => projectManifestSchema.parse({ schemaVersion: "1.0", projectId: "demo", workspaceRoot: ".", commandAllowlist: ["npm"], commands: { start: { executable: "npm && rm", args: [] } } }));
+assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "llm-without-model", projectId: "demo", input: { plannerMode: "llm" } }));
+assert.throws(() => planProvenanceSchema.parse({ source: "llm", promptVersion: "v1", model: "model", llmCallId: "call", compilationStatus: "validated", fallbackReason: "silent fallback" }));
 console.log("contracts tests passed");

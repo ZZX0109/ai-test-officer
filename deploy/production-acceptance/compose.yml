@@ -1,0 +1,118 @@
+name: ai-test-officer-acceptance
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ai_test_officer
+      POSTGRES_USER: ai_test_officer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U ai_test_officer"], interval: 3s, timeout: 3s, retries: 30 }
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    networks: [control]
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    healthcheck: { test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"], interval: 3s, timeout: 3s, retries: 30 }
+    environment: { REDIS_PASSWORD: "${REDIS_PASSWORD:?set REDIS_PASSWORD}" }
+    volumes: ["redis-data:/data"]
+    networks: [control]
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}
+    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"], interval: 3s, timeout: 3s, retries: 30 }
+    volumes: ["minio-data:/data"]
+    networks: [control]
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on: { minio: { condition: service_healthy } }
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://minio:9000 $$MINIO_ACCESS_KEY $$MINIO_SECRET_KEY && mc mb --ignore-existing local/ai-test-officer && mc anonymous set none local/ai-test-officer"]
+    environment: { MINIO_ACCESS_KEY: "${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY}", MINIO_SECRET_KEY: "${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}" }
+    networks: [control]
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1
+    command: ["start-dev", "--import-realm", "--health-enabled=true"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:?set KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+      KC_HOSTNAME: http://localhost:18080
+    volumes: ["./keycloak-realm.json:/opt/keycloak/data/import/ai-test-officer-realm.json:ro"]
+    ports: ["127.0.0.1:18080:8080"]
+    networks: [control]
+  todo-lite:
+    build: { context: ../.., dockerfile: Dockerfile.production }
+    command: ["node", "fixtures/todo-lite/server.mjs"]
+    environment: { HOST: 0.0.0.0, PORT: 7101 }
+    read_only: true
+    tmpfs: ["/tmp"]
+    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:7101/health"], interval: 3s, timeout: 3s, retries: 30 }
+    networks: [targets]
+  order-portal-lite:
+    build: { context: ../.., dockerfile: Dockerfile.production }
+    command: ["node", "fixtures/order-portal-lite/server.mjs"]
+    environment: { HOST: 0.0.0.0, PORT: 7102 }
+    read_only: true
+    tmpfs: ["/tmp"]
+    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:7102/health"], interval: 3s, timeout: 3s, retries: 30 }
+    networks: [targets]
+  agent-api: &agent
+    build: { context: ../.., dockerfile: Dockerfile.production }
+    command: ["/bin/sh", "-c", "npm --workspace @ai-test-officer/agent run migrate && node agent/dist/server.js"]
+    environment: &agent-env
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 4317
+      DATABASE_URL: postgresql://ai_test_officer:${POSTGRES_PASSWORD}@postgres:5432/ai_test_officer
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      RUN_WORKER_IN_PROCESS: "0"
+      OIDC_ISSUER: http://localhost:18080/realms/ai-test-officer
+      OIDC_AUDIENCE: ai-test-officer-api
+      OIDC_JWKS_URL: http://keycloak:8080/realms/ai-test-officer/protocol/openid-connect/certs
+      OIDC_ROLE_CLAIM: roles
+      OIDC_ORGANIZATION_CLAIM: organization_id
+      ARTIFACT_S3_BUCKET: ai-test-officer
+      ARTIFACT_S3_ENDPOINT: http://minio:9000
+      ARTIFACT_S3_FORCE_PATH_STYLE: "1"
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY}
+      AWS_REGION: us-east-1
+      INTERNAL_WORKER_TOKEN: ${INTERNAL_WORKER_TOKEN:?set INTERNAL_WORKER_TOKEN}
+      ALLOWED_ORIGINS: http://localhost:16174
+      HEADLESS: "1"
+      TRACE: "1"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+      keycloak: { condition: service_started }
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes: ["agent-reports:/app/reports"]
+    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:4317/api/health"], interval: 5s, timeout: 3s, retries: 30 }
+    ports: ["127.0.0.1:14317:4317"]
+    networks: [control, targets]
+    deploy: { resources: { limits: { cpus: "2", memory: 4G, pids: 512 } } }
+  worker:
+    <<: *agent
+    command: ["node", "agent/dist/workerCli.js"]
+    environment:
+      <<: *agent-env
+      RUN_WORKER_IN_PROCESS: "0"
+    depends_on:
+      agent-api: { condition: service_healthy }
+    ports: []
+    healthcheck: { disable: true }
+  workbench:
+    build: { context: ../.., dockerfile: Dockerfile.production }
+    command: ["npm", "--workspace", "workbench-ui", "exec", "vite", "--", "preview", "--host", "0.0.0.0", "--port", "6174"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    ports: ["127.0.0.1:16174:6174"]
+    networks: [control]
+volumes: { postgres-data: {}, redis-data: {}, minio-data: {}, agent-reports: {} }
+networks:
+  control: { internal: false }
+  targets: { internal: true }

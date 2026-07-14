@@ -2,7 +2,9 @@ import { Queue, Worker, type Job } from "bullmq";
 import { resolveFinalStatus, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
 import { appendSystemRunEvent, runEventStore } from "./runEventStore.js";
 import { runVisualGrayTest } from "./testRunner.js";
+import type { RunRequest } from "./types.js";
 import { persistExecutionResult } from "./executionPersistence.js";
+import { acquireExecutionLease } from "./executionLease.js";
 
 const queueName = process.env.RUN_QUEUE_NAME ?? "ai-test-officer-runs";
 const activeControllers = new Map<string, AbortController>();
@@ -46,8 +48,11 @@ function recommendationFromResult(result: Awaited<ReturnType<typeof runVisualGra
 }
 
 export async function executeQueuedRun(runId: string) {
+  const lease = await acquireExecutionLease(runId);
+  if (!lease) return runEventStore.get(runId);
+  const heartbeat = setInterval(() => void lease.heartbeat().then((active) => { if (!active) activeControllers.get(runId)?.abort(); }).catch(() => activeControllers.get(runId)?.abort()), Math.max(1_000, Number(process.env.EXECUTION_LEASE_TTL_MS ?? 30_000) / 3));
   const projection = await runEventStore.get(runId);
-  if (!projection || ["cancelled", "completed", "failed", "blocked"].includes(projection.state)) return projection;
+  if (!projection || ["cancelled", "completed", "failed", "blocked"].includes(projection.state)) { clearInterval(heartbeat); await lease.release(); return projection; }
   if (projection.state === "queued") await appendSystemRunEvent(runId, "run_preparing");
   const beforeStart = await runEventStore.get(runId);
   if (beforeStart?.state === "preparing") await appendSystemRunEvent(runId, "run_started");
@@ -58,9 +63,16 @@ export async function executeQueuedRun(runId: string) {
     const result = await runVisualGrayTest({
       appUrl: typeof input.appUrl === "string" ? input.appUrl : undefined,
       projectId: typeof input.projectId === "string" ? input.projectId : undefined,
-      scenarioId: typeof input.scenarioId === "string" ? input.scenarioId : undefined,
+      scenarioId: projection.selectedScenarioId ?? (typeof input.scenarioId === "string" ? input.scenarioId : undefined),
       requirement: typeof input.requirement === "string" ? input.requirement : undefined,
       diff: typeof input.diff === "string" ? input.diff : undefined,
+      plan: projection.plan,
+      credentialId: typeof input.modelProfileId === "string" ? input.modelProfileId : undefined,
+      judgeMode: input.judgeMode === "llm-assisted" ? "llm-assisted" : "deterministic",
+      experimentId: typeof input.experimentId === "string" ? input.experimentId : undefined,
+      repetition: typeof input.repetition === "number" ? input.repetition : undefined,
+      planProvenance: projection.planProvenance,
+      faultProfile: typeof input.faultProfile === "string" ? input.faultProfile as RunRequest["faultProfile"] : undefined,
       permissionProfile: (input.permissionProfile as { observe: boolean; browserControl: boolean; workspaceControl: boolean; ideTerminalControl: boolean; systemControl: boolean }) ?? {
         observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false
       },
@@ -88,6 +100,8 @@ export async function executeQueuedRun(runId: string) {
     });
   } finally {
     activeControllers.delete(runId);
+    clearInterval(heartbeat);
+    await lease.release();
   }
 }
 

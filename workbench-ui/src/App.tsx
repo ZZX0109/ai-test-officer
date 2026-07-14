@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { initializeOidc, oidcConfigured } from "./auth";
+import { OidcSessionPanel } from "./components/OidcSessionPanel";
 import {
   Activity,
   CalendarClock,
@@ -170,6 +172,7 @@ function auditStoreSummary(auditStore: AuditStoreStatus | null) {
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
 
 export function App() {
+  const [oidcAuthenticated, setOidcAuthenticated] = useState(false);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [plan, setPlan] = useState<GrayPlan | null>(null);
   const [result, setResult] = useState<RunResult | null>(null);
@@ -384,7 +387,7 @@ export function App() {
   }
 
   useEffect(() => {
-    refresh().catch((error) => setMessage(error.message));
+    initializeOidc().then((session) => { setOidcAuthenticated(session.authenticated); if (!session.configured || session.authenticated) return refresh(); return undefined; }).catch((error) => setMessage(error.message));
   }, []);
 
   useEffect(() => {
@@ -1349,6 +1352,7 @@ export function App() {
           <h1>测试官工作台</h1>
         </div>
         <div className="minimal-topbar-actions">
+          <OidcSessionPanel configured={oidcConfigured()} authenticated={oidcAuthenticated} />
           <button className="ghost-button" onClick={() => refresh()} type="button">
             <RefreshCw size={15} />
             刷新

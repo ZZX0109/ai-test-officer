@@ -12,7 +12,7 @@ import {
   rotateCredential,
   updateCredential
 } from "./credentialStore.js";
-import { fixedGrayPlan } from "./plan.js";
+import { buildScenarioGrayPlan, fixedGrayPlan } from "./plan.js";
 import { generatePlan } from "./llmPlanner.js";
 import { analyzeIntake } from "./intakeAnalyzer.js";
 import { redactText, redactValue } from "./redaction.js";
@@ -27,6 +27,7 @@ import { checkEnvironment } from "./environmentCheck.js";
 import { listPlatformCapabilities } from "./platformCapabilities.js";
 import {
   assertSecurityConfig,
+  authContext,
   basicRateLimit,
   createCorsOptions,
   requireApiToken,
@@ -36,7 +37,7 @@ import {
 } from "./security.js";
 import { testCredentialConnection } from "./testConnection.js";
 import { runVisualGrayTest } from "./testRunner.js";
-import { listScenarios } from "./scenarios.js";
+import { getScenario, listScenarios } from "./scenarios.js";
 import { buildDeliveryFromRun, listBotDeliveries } from "./botNotifier.js";
 import {
   deletePatrolPlan,
@@ -101,6 +102,12 @@ const host = process.env.HOST ?? (process.env.AGENT_API_TOKEN ? "0.0.0.0" : "127
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
 
+function assertOrganizationAccess(req: express.Request, organizationId: unknown) {
+  const context = authContext(req);
+  if (!context || context.subject === "local-dev" || context.roles.includes("admin")) return;
+  if (!organizationId || String(organizationId) !== context.organizationId) throw new Error("organization_forbidden");
+}
+
 function artifactUrl(filePath: string) {
   return `/artifacts/${path.relative(reportsDir, filePath).split(path.sep).join("/")}`;
 }
@@ -124,6 +131,7 @@ app.use(requireApiToken);
 app.use("/api/credentials", requireRole(["admin"]));
 app.use("/api/projects/grants", requireRole(["admin"]));
 app.post("/v1/runs", requireRole(["admin", "runner"]));
+for (const action of ["plan-approval", "permissions", "pause", "resume", "cancel"]) app.post(`/v1/runs/:id/${action}`, requireRole(["admin", "runner"]));
 app.post("/v1/runs/:id/decision-override", requireRole(["admin", "reviewer"]));
 
 const credentialSchema = z.object({
@@ -369,12 +377,31 @@ const runControlSchema = z.object({
 app.post("/v1/runs", async (req, res, next) => {
   try {
     const body = createRunRequestSchema.parse(req.body);
+    assertOrganizationAccess(req, body.organizationId);
     const created = await runEventStore.create({
       runId: body.runId,
       actor: body.actor,
       idempotencyKey: body.idempotencyKey,
       payload: { ...body.input, projectId: body.projectId, organizationId: body.organizationId }
     });
+    let planPayload: Record<string, unknown> = {};
+    if (created.state === "planning") {
+      if (body.input.plannerMode === "llm") {
+        try {
+          const generated = await generatePlan({ requirement: body.input.requirement ?? "", diff: body.input.diff ?? "", credentialId: body.input.modelProfileId, requireLlm: true, runId: created.id, experimentId: body.input.experimentId, promptVersion: body.input.promptVersion });
+          planPayload = { plan: generated.plan, compiledPlan: generated.compiledPlan, provenance: generated.provenance, llmCall: generated.llmCall, scenarioId: generated.scenarioId };
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "llm_planner_failed";
+          const review = reason.startsWith("llm_plan_") || reason.includes("schema") || reason.includes("parse");
+          const run = await runEventStore.append({ runId: created.id, type: review ? "human_review_requested" : "run_blocked", expectedVersion: created.version, actor: "planner", idempotencyKey: `${body.idempotencyKey}:planner-failed`, payload: { finalStatus: review ? "needs-human-review" : "blocked", error: redactText(reason), provenance: { source: "llm", promptVersion: body.input.promptVersion, modelProfileId: body.input.modelProfileId, compilationStatus: "rejected", fallbackReason: redactText(reason) } } });
+          res.status(201).json({ run });
+          return;
+        }
+      } else {
+        const scenarioId = body.input.scenarioId ?? "task_filter_completed";
+        planPayload = { plan: buildScenarioGrayPlan(getScenario(scenarioId)), provenance: { source: "deterministic", promptVersion: body.input.promptVersion, compilationStatus: "validated" }, scenarioId };
+      }
+    }
     const run = created.state === "planning"
       ? await runEventStore.append({
         runId: created.id,
@@ -382,7 +409,7 @@ app.post("/v1/runs", async (req, res, next) => {
         expectedVersion: created.version,
         actor: "planner",
         idempotencyKey: `${body.idempotencyKey}:generated`,
-        payload: { plan: { source: "validated-scenario", scenarioId: body.input.scenarioId } }
+        payload: planPayload
       })
       : created;
     res.status(201).json({ run });
@@ -393,12 +420,13 @@ app.get("/v1/runs/:id", async (req, res, next) => {
   try {
     const run = await runEventStore.get(req.params.id);
     if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
     res.json({ run });
   } catch (error) { next(error); }
 });
 
 app.get("/v1/runs/:id/events", async (req, res, next) => {
-  try { res.json({ events: await runEventStore.events(req.params.id) }); } catch (error) { next(error); }
+  try { const run = await runEventStore.get(req.params.id); if (!run) return void res.status(404).json({ error: "run_not_found" }); assertOrganizationAccess(req, run.input.organizationId); res.json({ events: await runEventStore.events(req.params.id) }); } catch (error) { next(error); }
 });
 
 const controlEvents: Record<string, RunEventType> = {
@@ -414,6 +442,9 @@ for (const [action, eventType] of Object.entries(controlEvents)) {
   app.post(`/v1/runs/:id/${action}`, async (req, res, next) => {
     try {
       const body = runControlSchema.parse(req.body);
+      const existing = await runEventStore.get(req.params.id);
+      if (!existing) return void res.status(404).json({ error: "run_not_found" });
+      assertOrganizationAccess(req, existing.input.organizationId);
       if (eventType === "decision_overridden") {
         z.object({ status: z.enum(["approved", "blocked", "accepted-risk"]), reason: z.string().min(1), originalDecision: z.string().optional(), newLabel: z.string().optional() }).parse(body.payload);
       }
@@ -434,6 +465,8 @@ for (const [action, eventType] of Object.entries(controlEvents)) {
 app.get("/v1/runs/:id/artifacts", async (req, res, next) => {
   try {
     const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
     const bundle = await readRunBundle(run?.resultRunId ?? req.params.id);
     res.json({ artifacts: bundle.artifactsV2 ?? [], legacyEvidence: bundle.evidence.filter((item) => !item.artifactIds?.length) });
   } catch (error) { next(error); }
@@ -442,14 +475,18 @@ app.get("/v1/runs/:id/artifacts", async (req, res, next) => {
 app.get("/v1/runs/:id/report", async (req, res, next) => {
   try {
     const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
     const result = (await readRunBundle(run?.resultRunId ?? req.params.id)).result;
-    res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision } });
+    res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision, planProvenance: run?.planProvenance, plannerCall: run?.plannerCall } });
   } catch (error) { next(error); }
 });
 
 app.get("/v1/runs/:id/stream", async (req, res, next) => {
   try {
-    if (!(await runEventStore.get(req.params.id))) return void res.status(404).json({ error: "run_not_found" });
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
@@ -605,24 +642,34 @@ app.post("/v1/impact/code-graph", async (req, res, next) => {
 app.get("/api/benchmark/summary", async (_req, res, next) => {
   try {
     const cases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Array<{ projectId: string; category: string }>;
+    const blindCases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8")) as Array<{ projectId: string; category: string }>;
     const executionMap = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "execution-map.json"), "utf8")) as { mappings: Array<{ logicalProjectId: string; executionProjectId: string }> };
     const challengeCases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "challenge-cases.json"), "utf8")) as Array<{ projectId: string }>;
     const projectIds = Array.from(new Set(cases.map((item) => item.projectId)));
     const byProject = Object.fromEntries(projectIds.map((projectId) => [projectId, cases.filter((item) => item.projectId === projectId).length]));
-    const evaluation = await readFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), "utf8").then((value) => JSON.parse(value) as { completedRuns: number; metrics: Record<string, number | null>; lanes: { deterministic?: { falseReleaseRate?: number | null; falseBlockRate?: number | null } } }).catch(() => undefined);
+    const evaluation = await readFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), "utf8").then((value) => JSON.parse(value) as { experimentId?: string; status?: string; conclusion?: string; completedRuns?: number; plannedRuns?: number; blockers?: string[]; evaluations?: Array<{ split: string; completedRuns: number; plannedRuns: number; acceptance: { proven: boolean; reasons: string[] }; lanes: Record<string, Record<string, number | null>> }> }).catch(() => undefined);
+    const blindEvaluation = evaluation?.evaluations?.find((item) => item.split === "blind");
     res.json({
       version: "benchmark-v1",
       status: "catalog_ready",
       caseCount: cases.length,
+      blindCaseCount: blindCases.length,
       projectCount: new Set(["local_demo_app", ...executionMap.mappings.map((item) => item.executionProjectId), ...challengeCases.map((item) => item.projectId)]).size,
       fixtureProjects: ["local_demo_app", "customer_portal_lite"],
       executionMap,
       challengeCases: { count: challengeCases.length, projectIds: challengeCases.map((item) => item.projectId) },
       byProject,
       categories: Array.from(new Set(cases.map((item) => item.category))).sort(),
-      runtimeMetrics: evaluation?.completedRuns === cases.length
-        ? { status: "completed", ...evaluation.metrics, falseReleaseRate: evaluation.lanes.deterministic?.falseReleaseRate ?? null, falseBlockRate: evaluation.lanes.deterministic?.falseBlockRate ?? null }
-        : { status: "awaiting_agent_runs", requirementCoverage: evaluation?.metrics.requirementCoverage ?? null, evidenceCompleteness: evaluation?.metrics.evidenceCompleteness ?? null, falseReleaseRate: null, falseBlockRate: null }
+      runtimeMetrics: {
+        status: evaluation?.status ?? "awaiting_agent_runs",
+        experimentId: evaluation?.experimentId,
+        conclusion: evaluation?.conclusion,
+        completedRuns: evaluation?.completedRuns ?? evaluation?.evaluations?.reduce((sum, item) => sum + item.completedRuns, 0) ?? 0,
+        plannedRuns: evaluation?.plannedRuns ?? evaluation?.evaluations?.reduce((sum, item) => sum + item.plannedRuns, 0) ?? 0,
+        blockers: evaluation?.blockers ?? [],
+        acceptance: blindEvaluation?.acceptance,
+        lanes: blindEvaluation?.lanes ?? {}
+      }
     });
   } catch (error) {
     next(error);
@@ -1348,6 +1395,10 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   }
   if (error instanceof Error && error.message === "CORS origin not allowed") {
     res.status(403).json({ error: "CORS origin not allowed" });
+    return;
+  }
+  if (error instanceof Error && error.message === "organization_forbidden") {
+    res.status(403).json({ error: "organization_forbidden" });
     return;
   }
   const safeError = error instanceof Error

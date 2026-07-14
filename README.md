@@ -183,13 +183,32 @@ npm run judge:eval            # Judge 基准 case 评估
 npm run worker                # 启动 BullMQ execution worker
 npm run contracts:generate    # 生成 OpenAPI 和 Workbench TypeScript 类型
 npm run benchmark:run         # 通过 /v1/runs 执行真实 Benchmark
+npm run benchmark:evaluate    # 在隔离 evaluator 中挂载人工标签并计算增益
 npm run test:unified-run      # /v1/runs -> Playwright -> Artifact v2 闭环
+npm run acceptance:production # PostgreSQL/Redis/MinIO/OIDC/worker 生产栈验收
 
 npm run reports:retention     # 只预览报告清理计划
 npm run reports:retention:archive
 ```
 
 `demo:verify` 会写入本地 `reports/`。该目录只用于运行时证据和调试，不作为源代码提交；需要给面试官展示时，建议通过 README 截图、脱敏后的单次 run bundle 或 GitHub Actions artifact 分享。
+
+## 真实 AI 实验
+
+`data/benchmark/cases.json` 是18条开发输入，`blind-cases.json` 是6条冻结盲测输入；两者均不包含答案。标签只存在于 `evaluation/benchmark-labels/`，该目录被 `.dockerignore` 排除，Agent/worker 镜像无法读取。正式实验包含 test-command、规则、LLM Planner、LLM Judge 和完整 LLM 五条通道，两个固定模型各重复3次。
+
+运行前先在凭据管理中创建对应模型，并注入 `BENCHMARK_OPENAI_CREDENTIAL_ID` 与 `BENCHMARK_ANTHROPIC_CREDENTIAL_ID`。Runner 不得获得 `BENCHMARK_LABELS_ROOT`；运行结束后只在 evaluator 进程挂载标签：
+
+```bash
+BENCHMARK_EXPERIMENT_ID=competition-v1 npm run benchmark:run
+BENCHMARK_EXPERIMENT_ID=competition-v1 \
+BENCHMARK_LABELS_ROOT="$PWD/evaluation/benchmark-labels" \
+npm run benchmark:evaluate
+```
+
+缺少模型、凭据、Docker daemon 或生产服务时命令以 `blocked` 结束；Workbench 保留 `awaiting_agent_runs`/blocker，不用 fallback 或空指标冒充 AI 结果。
+
+生产验收栈位于 `deploy/production-acceptance/`。复制其中 `.env.example`、替换所有值后运行 `npm run acceptance:production`。它会验证 OIDC runner、BullMQ worker、PostgreSQL 重启恢复、MinIO Artifact v2 提交和 Redis 可用性，并在默认情况下自动清理容器与卷。
 
 ## Judge 与证据模型
 

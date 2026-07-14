@@ -317,6 +317,51 @@
               "diff": {
                 "type": "string"
               },
+              "plannerMode": {
+                "type": "string",
+                "enum": [
+                  "deterministic",
+                  "llm"
+                ],
+                "default": "deterministic"
+              },
+              "judgeMode": {
+                "type": "string",
+                "enum": [
+                  "deterministic",
+                  "llm-assisted"
+                ],
+                "default": "deterministic"
+              },
+              "modelProfileId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "experimentId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "repetition": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "promptVersion": {
+                "type": "string",
+                "minLength": 1,
+                "default": "plan-v1"
+              },
+              "faultProfile": {
+                "type": "string",
+                "enum": [
+                  "wrong-status",
+                  "api-503",
+                  "label-rename",
+                  "permission-bypass",
+                  "drop-trace",
+                  "ambiguous-oracle"
+                ]
+              },
               "permissionProfile": {
                 "type": "object",
                 "properties": {

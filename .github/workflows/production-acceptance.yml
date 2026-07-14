@@ -1,0 +1,40 @@
+name: Production acceptance
+on:
+  schedule: [{ cron: "30 17 * * *" }]
+  workflow_dispatch:
+permissions: { contents: read }
+jobs:
+  infrastructure-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      POSTGRES_PASSWORD: acceptance-postgres-${{ github.run_id }}
+      REDIS_PASSWORD: acceptance-redis-${{ github.run_id }}
+      MINIO_ACCESS_KEY: acceptance-${{ github.run_id }}
+      MINIO_SECRET_KEY: acceptance-minio-${{ github.run_id }}-secret
+      KEYCLOAK_ADMIN: acceptance-admin
+      KEYCLOAK_ADMIN_PASSWORD: acceptance-keycloak-${{ github.run_id }}
+      INTERNAL_WORKER_TOKEN: acceptance-worker-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Mandatory external-project browser smoke
+        run: RUN_EXTERNAL_PROJECT_SMOKE=1 npm --workspace @ai-test-officer/agent test
+      - run: npm run acceptance:production
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: production-acceptance, path: reports/production-acceptance/latest.json }
+  macos-helper-contract:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build -c release --package-path native/macos-desktop-helper
+      - run: codesign --force --sign - native/macos-desktop-helper/.build/release/ai-test-officer-desktop-helper
+      - run: codesign --verify --strict --verbose=2 native/macos-desktop-helper/.build/release/ai-test-officer-desktop-helper
+      - name: Verify permission denial is fail-closed
+        run: |
+          set +e
+          printf '%s' '{"action":{"type":"keyboard-input","bundleId":"invalid.bundle","windowId":"0","text":"secret","sensitive":true},"approvalEventId":"ci"}' | native/macos-desktop-helper/.build/release/ai-test-officer-desktop-helper
+          test "$?" -ne 0

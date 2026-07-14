@@ -34,6 +34,7 @@ import type {
   TargetAppRuntime,
   PatrolTrend
 } from "./types";
+import { getAccessToken } from "./auth";
 
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
 
@@ -54,6 +55,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers);
   headers.set("content-type", "application/json");
   if (AGENT_TOKEN) headers.set("x-agent-token", AGENT_TOKEN);
+  const accessToken = getAccessToken();
+  if (accessToken) headers.set("authorization", `Bearer ${accessToken}`);
   const response = await fetch(`${AGENT_URL}${path}`, {
     credentials: "include",
     ...options,

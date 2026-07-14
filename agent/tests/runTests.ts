@@ -33,6 +33,8 @@ import { testRetryPolicy } from "./retryPolicy.test.js";
 import { testGithubChecks } from "./githubChecks.test.js";
 import { testCodeImpactGraph } from "./codeImpactGraph.test.js";
 import { testMissionPreview } from "./missionPreview.test.js";
+import { testProductionAcceptanceContract } from "./productionAcceptanceContract.test.js";
+import { testLlmPlannerFailClosed } from "./llmPlanner.test.js";
 
 async function main() {
   await testConnectorEnvelope();
@@ -47,6 +49,8 @@ async function main() {
   await testExternalProjectSmoke();
   await testInvestmentAgentWorkflowExternalSmoke();
   await testBenchmarkContract();
+  await testProductionAcceptanceContract();
+  await testLlmPlannerFailClosed();
   testBenchmarkEvaluation();
   await testIndependentFixtures();
   testRepairProposals();

@@ -875,16 +875,20 @@ export interface BenchmarkSummary {
   version: string;
   status: string;
   caseCount: number;
+  blindCaseCount: number;
   projectCount: number;
   fixtureProjects: string[];
   byProject: Record<string, number>;
   categories: string[];
   runtimeMetrics: {
     status: string;
-    requirementCoverage: number | null;
-    evidenceCompleteness: number | null;
-    falseReleaseRate: number | null;
-    falseBlockRate: number | null;
+    experimentId?: string;
+    conclusion?: string;
+    completedRuns: number;
+    plannedRuns: number;
+    blockers: string[];
+    acceptance?: { proven: boolean; reasons: string[] };
+    lanes: Record<string, Record<string, number | null>>;
   };
 }
 

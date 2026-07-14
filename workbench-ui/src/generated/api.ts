@@ -173,6 +173,23 @@ export interface components {
                 scenarioId?: string;
                 requirement?: string;
                 diff?: string;
+                /**
+                 * @default deterministic
+                 * @enum {string}
+                 */
+                plannerMode: "deterministic" | "llm";
+                /**
+                 * @default deterministic
+                 * @enum {string}
+                 */
+                judgeMode: "deterministic" | "llm-assisted";
+                modelProfileId?: string;
+                experimentId?: string;
+                repetition?: number;
+                /** @default plan-v1 */
+                promptVersion: string;
+                /** @enum {string} */
+                faultProfile?: "wrong-status" | "api-503" | "label-rename" | "permission-bypass" | "drop-trace" | "ambiguous-oracle";
                 /** @default {} */
                 permissionProfile: {
                     /** @default true */

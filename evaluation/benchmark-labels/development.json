@@ -1,0 +1,8 @@
+[
+  {"benchmarkId":"todo-create-valid","verdict":"pass"},{"benchmarkId":"todo-filter-completed","verdict":"pass"},{"benchmarkId":"todo-search-keyword","verdict":"pass"},{"benchmarkId":"todo-empty-title","verdict":"pass"},
+  {"benchmarkId":"todo-viewer-permission","verdict":"needs_review","failureClass":"insufficient_evidence"},{"benchmarkId":"todo-api-failure","verdict":"needs_review","failureClass":"environment_issue"},
+  {"benchmarkId":"order-filter-pending","verdict":"pass"},{"benchmarkId":"order-approve-pending","verdict":"pass"},{"benchmarkId":"order-reject-approved","verdict":"needs_review","failureClass":"product_bug"},
+  {"benchmarkId":"order-missing-order","verdict":"pass"},{"benchmarkId":"order-viewer-permission","verdict":"needs_review","failureClass":"product_bug"},{"benchmarkId":"order-api-failure","verdict":"needs_review","failureClass":"environment_issue"},
+  {"benchmarkId":"todo-requirement-diff","verdict":"pass"},{"benchmarkId":"todo-visual-regression","verdict":"pass"},{"benchmarkId":"todo-pagination-contract","verdict":"pass"},
+  {"benchmarkId":"order-requirement-diff","verdict":"pass"},{"benchmarkId":"order-visual-regression","verdict":"pass"},{"benchmarkId":"order-openapi-contract","verdict":"pass"}
+]

@@ -1,0 +1,11 @@
+{
+  "schemaVersion":"1.0",
+  "repetitions":3,
+  "promptVersion":"plan-v2-dsl",
+  "models":[
+    {"id":"openai-gpt-5.1","credentialIdEnv":"BENCHMARK_OPENAI_CREDENTIAL_ID","provider":"openai","model":"gpt-5.1-2025-11-13"},
+    {"id":"anthropic-sonnet-4.6","credentialIdEnv":"BENCHMARK_ANTHROPIC_CREDENTIAL_ID","provider":"anthropic","model":"claude-sonnet-4-6"}
+  ],
+  "lanes":["test-command","rules-deterministic","llm-plan-deterministic-judge","rules-plan-llm-judge","full-llm"],
+  "acceptance":{"blindFalseReleaseMax":0,"artifactIntegrityMin":1,"evidenceReferenceMin":1,"macroF1GainMin":0.08,"taskSuccessGainMin":0.10,"humanReviewRelativeReductionMin":0.20,"consistencyMin":0.85,"modelFailureMax":0.05}
+}

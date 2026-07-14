@@ -4,10 +4,8 @@
     "projectId": "investment_agent_workflow_external",
     "category": "complex_external_project",
     "requirement": "在一个包含认证、组合风险和研究 API 的复杂外部项目中，完成登录、组合读取和研究结果证据链验证。",
-    "expectedVerdict": "needs_review",
     "risk": "high",
     "source": "project-01-investment-research-system",
-    "evaluationScope": "challenge_only",
-    "humanLabel": "复杂外部项目挑战集，不计入 18 条基础 Benchmark。"
+    "evaluationScope": "challenge_only"
   }
 ]

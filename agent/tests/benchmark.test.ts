@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { evaluateBenchmark, type BenchmarkCase, type BenchmarkRunRecord, type HumanBenchmarkLabel } from "../src/benchmark.js";
+import { evaluateBenchmark, evaluateExperiment, type BenchmarkCase, type BenchmarkRunRecord, type HumanBenchmarkLabel } from "../src/benchmark.js";
 
 function fixtures() {
   const cases: BenchmarkCase[] = Array.from({ length: 18 }, (_, index) => ({
@@ -59,4 +59,15 @@ export function testBenchmarkEvaluation() {
   assert.equal(completed.lanes.llm.estimatedCostUsd, 0.001);
   assert.equal(evaluateBenchmark(cases.slice(0, 17), labels.slice(0, 17), []).totalCases, 17);
   assert.equal(evaluateBenchmark(cases, labels, [{ ...record, benchmarkId: "bm-2", executionOrigin: "static-report" }]).completedRuns, 0);
+
+  const experimentRecords: BenchmarkRunRecord[] = [
+    { ...record, experimentId: "exp-1", split: "blind", lane: "rules-deterministic", benchmarkId: "bm-1", repetition: 1 },
+    ...[1, 2, 3].map((repetition) => ({ ...record, experimentId: "exp-1", split: "blind" as const, lane: "full-llm" as const, modelProfileId: "model-a", benchmarkId: "bm-1", repetition }))
+  ];
+  const experiment = evaluateExperiment({ experimentId: "exp-1", split: "blind", cases: cases.slice(0, 1), labels: labels.slice(0, 1), records: experimentRecords, plannedRuns: 4, thresholds: { blindFalseReleaseMax: 0, artifactIntegrityMin: 1, evidenceReferenceMin: 1, macroF1GainMin: 0.08, taskSuccessGainMin: 0.1, humanReviewRelativeReductionMin: 0.2, consistencyMin: 0.85, modelFailureMax: 0.05 } });
+  assert.equal(experiment.status, "completed");
+  assert.equal(experiment.lanes["full-llm:model-a"].meanConsistency, 1);
+  assert.equal(experiment.lanes["full-llm:model-a"].artifactIntegrityRate, 1);
+  assert.equal(experiment.acceptance.proven, false);
+  assert.ok(experiment.acceptance.reasons.includes("no_measured_llm_gain"));
 }

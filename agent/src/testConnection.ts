@@ -19,10 +19,17 @@ export async function testCredentialConnection(record: CredentialRecord) {
   try {
     const response = await fetch(url, { headers, signal: controller.signal });
     clearTimeout(timeout);
+    let modelAvailable = false;
+    if (response.ok) {
+      const payload = await response.json().catch(() => undefined) as { data?: Array<{ id?: string }> } | undefined;
+      modelAvailable = Boolean(payload?.data?.some((model) => model.id === record.model));
+    }
     return {
-      ok: response.ok,
+      ok: response.ok && modelAvailable,
       status: response.status,
-      message: response.ok ? "连接成功" : `连接失败，HTTP ${response.status}`
+      model: record.model,
+      modelAvailable,
+      message: response.ok ? modelAvailable ? "连接成功，固定模型可访问" : "连接成功，但固定模型不可访问" : `连接失败，HTTP ${response.status}`
     };
   } catch (error) {
     clearTimeout(timeout);
@@ -33,4 +40,3 @@ export async function testCredentialConnection(record: CredentialRecord) {
     };
   }
 }
-

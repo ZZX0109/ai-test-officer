@@ -9,6 +9,7 @@ function configuredAdapter(allowedBundleIds?: string[]) {
     helperPath: process.env.AI_TEST_OFFICER_DESKTOP_HELPER ?? path.join(rootDir, "bin", "ai-test-officer-desktop-helper"),
     allowedBundleIds: allowedBundleIds ?? (process.env.DESKTOP_ALLOWED_BUNDLE_IDS ?? "").split(",").map((item) => item.trim()).filter(Boolean),
     helperSignatureSha256: process.env.DESKTOP_HELPER_SHA256
+    ,designatedRequirement: process.env.DESKTOP_HELPER_DESIGNATED_REQUIREMENT
   });
 }
 

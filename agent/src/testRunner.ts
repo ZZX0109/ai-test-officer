@@ -127,7 +127,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const evidenceWrites: Promise<unknown>[] = [];
   const headless = envFlag("HEADLESS");
   const recordVideo = envFlag("RECORD_VIDEO");
-  const recordTrace = envFlag("TRACE");
+  const recordTrace = envFlag("TRACE") && input.faultProfile !== "drop-trace";
   const configuredProject = input.projectId ? await getProject(input.projectId) : undefined;
   const budgetTracker = new BudgetTracker(configuredProject?.budget);
   const runDeadline = Date.now() + (configuredProject?.budget?.runTimeoutMs ?? budgetTracker.budget.runTimeoutMs);
@@ -1030,24 +1030,29 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     },
     evidence: latestEvidence
   });
-  const assistedJudgeReport = await buildLlmJudgeReport({
-    credentialId: input.credentialId,
-    baseline: baselineJudgeReport,
-    plan: input.plan,
-    requirement: input.requirement,
-    diff: input.diff,
-    result: {
-      steps,
-      assertions,
-      network,
-      console: consoleEvents,
-      riskCoverageMatrix,
-      aggregatedVerdict,
-      conflictPacket,
-      verdict: failed ? "hold_for_review" : "continue"
-    },
-    evidence: latestEvidence
-  });
+  const assistedJudgeReport = input.judgeMode === "llm-assisted"
+    ? await buildLlmJudgeReport({
+      credentialId: input.credentialId,
+      baseline: baselineJudgeReport,
+      plan: input.plan,
+      requirement: input.requirement,
+      diff: input.diff,
+      result: {
+        steps,
+        assertions,
+        network,
+        console: consoleEvents,
+        riskCoverageMatrix,
+        aggregatedVerdict,
+        conflictPacket,
+        verdict: failed ? "hold_for_review" : "continue"
+      },
+      evidence: latestEvidence,
+      runId: id,
+      experimentId: input.experimentId,
+      requireLlm: true
+    })
+    : baselineJudgeReport;
   const machineGateStatus = artifactGate.status !== "pass"
     ? artifactGate.status
     : failed

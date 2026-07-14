@@ -1,4 +1,4 @@
-import type { ArtifactV2, CommandSpec, GateStatus, HumanDecision, JudgeRecommendation, MachineGate, ProjectManifest, ResourceBudget } from "@ai-test-officer/contracts";
+import type { ArtifactV2, CommandSpec, GateStatus, HumanDecision, JudgeRecommendation, LlmCall, MachineGate, PlanProvenance, ProjectManifest, ResourceBudget } from "@ai-test-officer/contracts";
 
 export type ProviderKind = "openai-compatible" | "openai" | "anthropic" | "openrouter" | "custom";
 
@@ -441,6 +441,11 @@ export interface RunRequest {
   keepProjectRunning?: boolean;
   scenarioId?: string;
   credentialId?: string;
+  judgeMode?: "deterministic" | "llm-assisted";
+  experimentId?: string;
+  repetition?: number;
+  planProvenance?: PlanProvenance;
+  faultProfile?: "wrong-status" | "api-503" | "label-rename" | "permission-bypass" | "drop-trace" | "ambiguous-oracle";
   trigger?: "manual" | "commit" | "requirement" | "patrol";
   requirement?: string;
   diff?: string;
@@ -923,6 +928,7 @@ export interface LayeredJudgeReport {
   executionMode: "deterministic" | "llm_assisted" | "fallback_baseline";
   llmStatus: "not_configured" | "passed" | "failed";
   llmError?: string;
+  llmCall?: LlmCall;
   policyVersion: string;
   createdAt: string;
   planJudge: JudgeResult;
