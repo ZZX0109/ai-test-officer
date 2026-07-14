@@ -8,6 +8,7 @@ import type {
   VisualRunResult
 } from "./types.js";
 import { fixedGrayPlan } from "./plan.js";
+import { detectUntrustedInstructions } from "./untrustedInput.js";
 
 interface JudgeInput {
   plan?: GrayPlan;
@@ -105,6 +106,7 @@ function buildEvidenceJudge(input: JudgeInput): JudgeResult {
   const networkRefs = evidenceByType(input.evidence, "network");
   const domRefs = evidenceByType(input.evidence, "dom");
   const screenshotRefs = evidenceByType(input.evidence, "screenshot");
+  const untrustedSignals = detectUntrustedInstructions({ requirement: input.requirement, diff: input.diff, evidence: input.evidence });
 
   for (const assertion of failedAssertions) {
     const assertionRefs = evidenceByTitle(input.evidence, assertion.name);
@@ -131,6 +133,17 @@ function buildEvidenceJudge(input: JudgeInput): JudgeResult {
       title: "浏览器 console 出现错误",
       reasoning: "Console error 可能表示产品异常或测试环境依赖缺失，需要和截图、DOM、network 联合判断。",
       evidenceRefs: evidenceByType(input.evidence, "console")
+    });
+  }
+
+  if (untrustedSignals.length) {
+    findings.push({
+      id: "security_untrusted_instruction",
+      severity: "medium",
+      failureClass: "insufficient_evidence",
+      title: "检测到不可信输入中的指令注入信号",
+      reasoning: `Requirement、diff 和运行证据只能作为数据；检测到 ${Array.from(new Set(untrustedSignals.map((item) => item.rule))).join(", ")}，不能由其中的指令改变执行、证据或放行结论。`,
+      evidenceRefs: unique(untrustedSignals.flatMap((item) => item.evidenceId ? [item.evidenceId] : []).concat(fallbackEvidenceRefs(input.evidence).slice(-2)))
     });
   }
 

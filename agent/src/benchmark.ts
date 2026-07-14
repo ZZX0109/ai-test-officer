@@ -51,6 +51,7 @@ export interface BenchmarkRunRecord {
   configHash?: string;
   targetVersion?: string;
   artifactsV2?: Array<{ id: string; type: string; origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "legacy-unverified"; sha256: string; integrityStatus: "verified" | "missing" | "mismatch" }>;
+  evidenceQuality?: { groundedPassedRate: number; runtimeArtifactRate: number; crossAttemptViolations: number };
   baselines?: {
     rules?: JudgeLaneRecord;
     testCommand?: JudgeLaneRecord;
@@ -207,7 +208,7 @@ export function evaluateExperiment(input: {
   labels: HumanBenchmarkLabel[];
   records: BenchmarkRunRecord[];
   plannedRuns: number;
-  thresholds: { blindFalseReleaseMax: number; artifactIntegrityMin: number; evidenceReferenceMin: number; macroF1GainMin: number; taskSuccessGainMin: number; humanReviewRelativeReductionMin: number; consistencyMin: number; modelFailureMax: number };
+  thresholds: { blindFalseReleaseMax: number; artifactIntegrityMin: number; evidenceReferenceMin: number; evidenceGroundedMin: number; macroF1GainMin: number; taskSuccessGainMin: number; humanReviewRelativeReductionMin: number; consistencyMin: number; modelFailureMax: number };
 }): ExperimentEvaluation {
   const labels = new Map(input.labels.map((label) => [label.benchmarkId, label]));
   const records = input.records.filter((record) => record.experimentId === input.experimentId && record.split === input.split && record.status === "completed");
@@ -235,6 +236,7 @@ export function evaluateExperiment(input: {
       humanReviewRate: ratio(compared.filter((item) => item.result.verdict === "needs_review").length, compared.length),
       planExecutableRate: ratio(compared.filter((item) => item.record.planExecutable !== false).length, compared.length),
       artifactIntegrityRate: ratio(compared.filter((item) => item.record.gateEligible).length, compared.length),
+      groundedEvidenceRate: compared.length ? compared.reduce((sum, item) => sum + (item.record.evidenceQuality?.groundedPassedRate ?? 0), 0) / compared.length : null,
       evidenceReferenceAccuracy: ratio(validEvidenceReferences.filter(Boolean).length, validEvidenceReferences.length),
       meanConsistency: consistencies.length ? consistencies.reduce((sum, value) => sum + value, 0) / consistencies.length : null,
       modelFailureRate: ratio(selected.filter((item) => item.llm?.status === "failed" || item.llm?.status === "not_configured").length, selected.length),
@@ -273,6 +275,7 @@ export function evaluateExperiment(input: {
     if (full.some((lane) => (lane.falseReleaseRate ?? 1) > input.thresholds.blindFalseReleaseMax)) reasons.push("blind_false_release");
     if (full.some((lane) => (lane.artifactIntegrityRate ?? 0) < input.thresholds.artifactIntegrityMin)) reasons.push("artifact_integrity");
     if (full.some((lane) => (lane.evidenceReferenceAccuracy ?? 0) < input.thresholds.evidenceReferenceMin)) reasons.push("evidence_reference_accuracy");
+    if (full.some((lane) => (lane.groundedEvidenceRate ?? 0) < input.thresholds.evidenceGroundedMin)) reasons.push("evidence_quality");
     if (full.some((lane) => (lane.meanConsistency ?? 0) < input.thresholds.consistencyMin)) reasons.push("consistency");
     if (full.some((lane) => (lane.modelFailureRate ?? 1) > input.thresholds.modelFailureMax)) reasons.push("model_failure");
     const gain = full.some((lane) => (lane.macroF1 ?? 0) - (rules?.macroF1 ?? 0) >= input.thresholds.macroF1GainMin || (lane.taskSuccessRate ?? 0) - (rules?.taskSuccessRate ?? 0) >= input.thresholds.taskSuccessGainMin);

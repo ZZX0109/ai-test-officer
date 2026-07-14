@@ -36,6 +36,7 @@ import { testMissionPreview } from "./missionPreview.test.js";
 import { testProductionAcceptanceContract } from "./productionAcceptanceContract.test.js";
 import { testLlmPlannerFailClosed } from "./llmPlanner.test.js";
 import { testEvidenceQuality } from "./evidenceQuality.test.js";
+import { testUntrustedInputDefense } from "./untrustedInput.test.js";
 
 async function main() {
   await testConnectorEnvelope();
@@ -53,6 +54,7 @@ async function main() {
   await testProductionAcceptanceContract();
   await testLlmPlannerFailClosed();
   testEvidenceQuality();
+  testUntrustedInputDefense();
   testBenchmarkEvaluation();
   await testIndependentFixtures();
   testRepairProposals();
