@@ -8,7 +8,7 @@ const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.
 const apiUrl = (process.env.AGENT_URL ?? "http://127.0.0.1:4317").replace(/\/$/, "");
 const token = process.env.AGENT_API_TOKEN ?? "dev-local-token";
 type Lane = "test-command" | "rules-deterministic" | "llm-plan-deterministic-judge" | "rules-plan-llm-judge" | "full-llm";
-type Case = { id: string; split: "development" | "blind"; projectId: string; scenarioId: string; category: string; requirement: string; risk: string; faultProfile?: string };
+type Case = { id: string; split: "development" | "blind"; projectId: string; scenarioId: string; category: string; requirement: string; diff: string; risk: string; faultProfile?: string };
 type Model = { id: string; credentialIdEnv: string; provider: string; model: string };
 const terminalRunStates = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
 
@@ -61,7 +61,7 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const judgeMode = input.lane === "rules-plan-llm-judge" || input.lane === "full-llm" ? "llm-assisted" : "deterministic";
   let run = (await request<{ run: { id: string; state: string; version: number; gateStatus?: string } }>("/v1/runs", {
     method: "POST",
-    body: JSON.stringify({ organizationId: "benchmark", projectId: input.appUrl ? undefined : input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?faultProfile=${encodeURIComponent(input.item.faultProfile ?? "")}` : undefined, scenarioId: input.item.scenarioId, requirement: input.item.requirement, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, faultProfile: input.item.faultProfile, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false } } })
+    body: JSON.stringify({ organizationId: "benchmark", projectId: input.appUrl ? undefined : input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?faultProfile=${encodeURIComponent(input.item.faultProfile ?? "")}` : undefined, scenarioId: input.item.scenarioId, requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, faultProfile: input.item.faultProfile, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
   })).run;
   // A rejected LLM plan deliberately blocks the run.  It is an experiment result,
   // not a transport failure: preserve it and do not issue invalid approval events.
@@ -120,6 +120,8 @@ export async function runBenchmarkExperiment() {
   const unknownCaseIds = requestedCaseIds.filter((id) => !catalogCases.some((item) => item.id === id));
   if (unknownCaseIds.length) throw new Error(`benchmark_case_not_declared:${unknownCaseIds.join(",")}`);
   const cases = requestedCaseIds.length ? catalogCases.filter((item) => requestedCaseIds.includes(item.id)) : catalogCases;
+  const missingChangeContext = cases.filter((item) => !item.diff?.trim()).map((item) => item.id);
+  if (missingChangeContext.length) throw new Error(`benchmark_case_diff_missing:${missingChangeContext.join(",")}`);
   const mapping = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "execution-map.json"), "utf8")) as { mappings: Array<{ logicalProjectId: string; executionProjectId: string; targetUrl?: string }> };
   const projectMap = new Map(mapping.mappings.map((item) => [item.logicalProjectId, item]));
   const experimentId = process.env.BENCHMARK_EXPERIMENT_ID ?? `experiment_${new Date().toISOString().replace(/[:.]/g, "-")}`;

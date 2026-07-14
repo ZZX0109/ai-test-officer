@@ -1,7 +1,7 @@
 {
   "schemaVersion":"1.0",
   "repetitions":3,
-  "promptVersion":"plan-v3-strict-dsl",
+  "promptVersion":"plan-v4-path-bound",
   "models":[
     {"id":"openai-gpt-5.1","credentialIdEnv":"BENCHMARK_OPENAI_CREDENTIAL_ID","provider":"openai","model":"gpt-5.1-2025-11-13"},
     {"id":"anthropic-sonnet-4.6","credentialIdEnv":"BENCHMARK_ANTHROPIC_CREDENTIAL_ID","provider":"anthropic","model":"claude-sonnet-4-6"},

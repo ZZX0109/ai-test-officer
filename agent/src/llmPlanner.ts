@@ -24,7 +24,11 @@ const grayPlanSchema = z.object({
     title: z.string().min(1),
     description: z.string().min(1),
     paths: z.array(z.object({ id: z.string().min(1), title: z.string().min(1), riskReason: z.string().min(1), expectedFrom: z.enum(["requirement", "diff", "existing_test", "llm_inferred"]), steps: z.array(z.string()), retry: z.number().int().min(0).max(1) }))
-  })).length(4)
+  // A scenario may expose only smoke/core/regression paths.  Requiring an
+  // invented edge path makes the plan look comprehensive while guaranteeing an
+  // unverifiable coverage gap.  Three executable levels are the minimum; an
+  // edge level is allowed only when the selected scenario actually exposes one.
+  })).min(3).max(4)
 });
 
 const llmPlanResponseSchema = z.object({
@@ -56,6 +60,16 @@ async function resolveCredential(id?: string) {
 }
 
 function buildPrompt(input: GeneratePlanInput) {
+  const executableScenarios = listExecutableScenarios().map((scenario) => ({
+    id: scenario.id,
+    selectorRefs: Object.keys(scenario.corePath).filter((key) => /ButtonName|Label|Locator/.test(key)),
+    oracleIds: scenario.corePath.oracles.map((oracle) => oracle.id),
+    planPaths: [
+      { levelId: "smoke", pathId: scenario.smoke.pathId },
+      { levelId: "core_path", pathId: scenario.corePath.pathId },
+      ...(scenario.regressionPath ? [{ levelId: "regression", pathId: scenario.regressionPath.stepId }] : [])
+    ]
+  }));
   return `你是 AI 测试官。请根据需求和 Git diff 生成显式灰度测试 plan。必须只输出一个可被 JSON.parse 解析的 JSON 对象，不要输出 Markdown、解释、注释或额外字段。
 
 JSON schema:
@@ -74,10 +88,10 @@ JSON schema:
   ]
 }
 
-必须包含四层：smoke、core_path、edge_case、regression。断言预期来源不清楚时 expectedFrom 必须用 llm_inferred。
+每个 plan 的 levels 必须只使用所选 scenario 的 planPaths 中列出的 levelId/pathId 配对，且每一条列出的 path 必须恰好出现一次。绝不能编造 path id，也不得添加 edge_case，除非该 scenario 的 planPaths 明确列出了它。断言预期来源不清楚时 expectedFrom 必须用 llm_inferred。
 actions 的 action 字段只能精确为 navigate、click、fill、upload、assert、wait 六者之一。不得使用 screenshot、scroll、hover、press、type、select、evaluate、command 或任何其他值。每个 action 只可含上面该动作所需字段；navigate 的 path 必须以 / 开头；wait 的 durationMs 为 0 到 45000 的整数。不得生成命令、CSS、XPath、任意 URL、文件路径或额外 capability。
 只能选择以下已注册场景、selectorRef 和 oracleId：
-${JSON.stringify(listExecutableScenarios().map((scenario) => ({ id: scenario.id, selectorRefs: Object.keys(scenario.corePath).filter((key) => /ButtonName|Label|Locator/.test(key)), oracleIds: scenario.corePath.oracles.map((oracle) => oracle.id) })))}
+${JSON.stringify(executableScenarios)}
 
 需求:
 ${input.requirement}
@@ -91,6 +105,20 @@ function compile(candidate: z.infer<typeof llmPlanResponseSchema>) {
   const scenario = getScenario(candidate.scenarioId);
   const selectorRefs = new Set(Object.keys(scenario.corePath).filter((key) => /ButtonName|Label|Locator/.test(key)));
   const oracleIds = new Set(scenario.corePath.oracles.map((oracle) => oracle.id));
+  const expectedPlanPaths = new Map<string, string>([
+    ["smoke", scenario.smoke.pathId],
+    ["core_path", scenario.corePath.pathId],
+    ...(scenario.regressionPath ? [["regression", scenario.regressionPath.stepId] as const] : [])
+  ]);
+  const suppliedPlanPaths = candidate.plan.levels.flatMap((level) => level.paths.map((path) => ({ levelId: level.id, pathId: path.id })));
+  if (candidate.plan.levels.length !== expectedPlanPaths.size || suppliedPlanPaths.length !== expectedPlanPaths.size) {
+    throw new Error("llm_plan_path_coverage_invalid");
+  }
+  for (const [levelId, pathId] of expectedPlanPaths) {
+    if (!suppliedPlanPaths.some((item) => item.levelId === levelId && item.pathId === pathId)) {
+      throw new Error(`llm_plan_path_not_bound:${levelId}:${pathId}`);
+    }
+  }
   for (const action of candidate.actions as ActionDsl[]) {
     if ("selectorRef" in action && !selectorRefs.has(action.selectorRef)) throw new Error(`llm_plan_unknown_selector:${action.selectorRef}`);
     if (action.action === "assert" && !oracleIds.has(action.oracleId)) throw new Error(`llm_plan_unknown_oracle:${action.oracleId}`);
