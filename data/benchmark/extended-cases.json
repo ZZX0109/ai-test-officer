@@ -1,0 +1,8 @@
+[
+  {"id":"customer-table-filter","split":"development","projectId":"customer_portal_lite","scenarioId":"generic_table_sort_filter_pagination","category":"data_table","requirement":"Customer table sorting, filtering and pagination preserve the selected customer result","risk":"high"},
+  {"id":"customer-form-required","split":"development","projectId":"customer_portal_lite","scenarioId":"generic_complex_form_validation","category":"complex_form","requirement":"Submitting an incomplete customer order displays required-field validation","risk":"high"},
+  {"id":"customer-file-upload","split":"development","projectId":"customer_portal_lite","scenarioId":"generic_file_upload_validation","category":"file_upload","requirement":"Uploading an invoice fixture displays the uploaded filename","risk":"medium"},
+  {"id":"customer-approval","split":"development","projectId":"customer_portal_lite","scenarioId":"generic_approval_flow_transition","category":"approval_workflow","requirement":"Approving a pending customer request persists the approved state","risk":"high"},
+  {"id":"customer-role-matrix","split":"development","projectId":"customer_portal_lite","scenarioId":"generic_role_permission_matrix","category":"rbac","requirement":"Switching to viewer displays a read-only permission matrix","risk":"high"},
+  {"id":"customer-openapi-contract","split":"development","projectId":"customer_portal_lite","scenarioId":"generic_openapi_schema_contract","category":"api_contract","requirement":"Customer schema validation emits a contract request and displays schema ok","risk":"high"}
+]

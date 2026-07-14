@@ -13,13 +13,17 @@ async function main() {
   if (!labelsRoot) throw new Error("BENCHMARK_LABELS_ROOT is required and must only be mounted into the evaluator");
   const config = await json<{ acceptance: Parameters<typeof evaluateExperiment>[0]["thresholds"]; roi?: { manualMinutesPerCase: number; reviewMinutesPerCase: number } }>(path.join(rootDir, "data", "benchmark", "experiment.json"));
   const directory = path.join(rootDir, "reports", "benchmarks", "experiments", experimentId);
-  const manifest = await json<{ plannedRuns: number; split: string; status: string }>(path.join(directory, "manifest.json"));
+  const manifest = await json<{ plannedRuns: number; split: string; suites?: string[]; status: string }>(path.join(directory, "manifest.json"));
   if (manifest.status !== "awaiting_evaluation") throw new Error(`experiment_not_ready:${manifest.status}`);
   const files = (await readdir(path.join(directory, "runs"))).filter((file) => file.endsWith(".json"));
   const records = await Promise.all(files.map((file) => json<BenchmarkRunRecord>(path.join(directory, "runs", file))));
   const developmentCases = await json<Array<BenchmarkCase & { projectId: string }>>(path.join(rootDir, "data", "benchmark", "cases.json"));
+  const extendedCases = manifest.suites?.includes("extended") ? await json<Array<BenchmarkCase & { projectId: string }>>(path.join(rootDir, "data", "benchmark", "extended-cases.json")) : [];
   const developmentLabels = (await json<Array<HumanBenchmarkLabel & { requiredEvidenceTypes?: string[] }>>(path.join(labelsRoot, "development.json"))).map((item) => ({ ...item, requiredEvidenceTypes: item.requiredEvidenceTypes ?? ["screenshot", "dom", "network", "console", "trace"] }));
-  const evaluations = [evaluateExperiment({ experimentId, split: "development", cases: developmentCases, labels: developmentLabels, records, plannedRuns: records.filter((record) => record.split === "development").length, thresholds: config.acceptance, roi: config.roi })];
+  const extendedLabels = extendedCases.length ? (await json<Array<HumanBenchmarkLabel & { requiredEvidenceTypes?: string[] }>>(path.join(labelsRoot, "extended.json"))).map((item) => ({ ...item, requiredEvidenceTypes: item.requiredEvidenceTypes ?? ["screenshot", "dom", "network", "console", "trace"] })) : [];
+  const allDevelopmentCases = [...developmentCases, ...extendedCases];
+  const allDevelopmentLabels = [...developmentLabels, ...extendedLabels];
+  const evaluations = [evaluateExperiment({ experimentId, split: "development", cases: allDevelopmentCases, labels: allDevelopmentLabels, records, plannedRuns: records.filter((record) => record.split === "development").length, thresholds: config.acceptance, roi: config.roi })];
   if (manifest.split.includes("blind")) {
     const blindCases = await json<Array<BenchmarkCase & { projectId: string }>>(path.join(rootDir, "data", "benchmark", "blind-cases.json"));
     const blindLabels = (await json<Array<HumanBenchmarkLabel & { requiredEvidenceTypes?: string[] }>>(path.join(labelsRoot, "blind.json"))).map((item) => ({ ...item, requiredEvidenceTypes: item.requiredEvidenceTypes ?? ["screenshot", "dom", "network", "console", "trace"] }));

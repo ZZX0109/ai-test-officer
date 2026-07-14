@@ -15,6 +15,13 @@
       "targetUrl": "http://order-portal-lite:7102",
       "targetKind": "independent-fixture",
       "note": "保留 order_portal_lite 作为逻辑标签，运行时映射到独立 customer-portal-lite。"
+    },
+    {
+      "logicalProjectId": "customer_portal_lite",
+      "executionProjectId": "customer_portal_lite",
+      "targetUrl": "http://customer-portal-lite:7103",
+      "targetKind": "independent-fixture",
+      "note": "扩展集使用独立的客户门户，覆盖表格、表单、上传、审批、RBAC 与 OpenAPI。"
     }
   ]
 }

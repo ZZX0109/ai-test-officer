@@ -78,9 +78,11 @@ export async function runBenchmarkExperiment() {
   if (process.env.BENCHMARK_LABELS_ROOT) throw new Error("benchmark_runner_must_not_receive_label_mount");
   const config = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "experiment.json"), "utf8")) as { repetitions: number; promptVersion: string; models: Model[]; acceptance: Record<string, number> };
   const includeBlind = process.env.BENCHMARK_ENABLE_BLIND === "1";
+  const includeExtended = process.env.BENCHMARK_EXTENDED === "1";
   const development = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Case[];
+  const extended = includeExtended ? JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "extended-cases.json"), "utf8")) as Case[] : [];
   const blind = includeBlind ? JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8")) as Case[] : [];
-  const cases = [...development, ...blind];
+  const cases = [...development, ...extended, ...blind];
   const mapping = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "execution-map.json"), "utf8")) as { mappings: Array<{ logicalProjectId: string; executionProjectId: string; targetUrl?: string }> };
   const projectMap = new Map(mapping.mappings.map((item) => [item.logicalProjectId, item]));
   const experimentId = process.env.BENCHMARK_EXPERIMENT_ID ?? `experiment_${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -89,7 +91,7 @@ export async function runBenchmarkExperiment() {
   await mkdir(runsDir, { recursive: true });
   const check = await preflight(config.models);
   const plannedRuns = cases.length * (2 + config.models.length * config.repetitions * 3);
-  const manifest = { experimentId, createdAt: new Date().toISOString(), split: includeBlind ? "development+blind" : "development", caseCount: cases.length, plannedRuns, repetitions: config.repetitions, promptVersion: config.promptVersion, models: config.models.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), status: check.failures.length ? "blocked" : "running", blockers: check.failures };
+  const manifest = { experimentId, createdAt: new Date().toISOString(), split: includeBlind ? "development+blind" : "development", suites: ["core", ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : [])], caseCount: cases.length, plannedRuns, repetitions: config.repetitions, promptVersion: config.promptVersion, models: config.models.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), status: check.failures.length ? "blocked" : "running", blockers: check.failures };
   await writeFile(path.join(directory, "manifest.json"), JSON.stringify(manifest, null, 2));
   await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify({ experimentId, status: manifest.status, completedRuns: 0, plannedRuns, blockers: check.failures }, null, 2));
   if (check.failures.length) throw new Error(`benchmark_preflight_blocked:${check.failures.join(",")}`);

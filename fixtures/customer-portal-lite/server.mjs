@@ -122,6 +122,6 @@ const server = http.createServer((request, response) => {
   return html(response);
 });
 
-server.listen(port, "127.0.0.1");
+server.listen(port, process.env.HOST ?? "127.0.0.1");
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 process.on("SIGINT", () => server.close(() => process.exit(0)));

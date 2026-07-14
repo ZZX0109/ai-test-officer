@@ -58,6 +58,14 @@ services:
     tmpfs: ["/tmp"]
     healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:7102/health"], interval: 3s, timeout: 3s, retries: 30 }
     networks: [targets]
+  customer-portal-lite:
+    build: { context: ../.., dockerfile: Dockerfile.production }
+    command: ["node", "fixtures/customer-portal-lite/server.mjs"]
+    environment: { HOST: 0.0.0.0, PORT: 7103 }
+    read_only: true
+    tmpfs: ["/tmp"]
+    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:7103/health"], interval: 3s, timeout: 3s, retries: 30 }
+    networks: [targets]
   agent-api: &agent
     build: { context: ../.., dockerfile: Dockerfile.production }
     command: ["/bin/sh", "-c", "npm --workspace @ai-test-officer/agent run migrate && node agent/dist/server.js"]
