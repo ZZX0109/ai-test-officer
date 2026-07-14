@@ -105,18 +105,57 @@ function buildAffectedApis(context: ConnectorContext): ImpactAnalysisItem[] {
   return Array.from(apis.values()).map((api) => item(api));
 }
 
+function riskSignals(context: ConnectorContext) {
+  const text = `${context.requirement}\n${context.diff}\n${context.bugTicket}`.toLowerCase();
+  const files = diffFiles(context.diff);
+  const signals: Array<{ id: string; label: string; pattern: RegExp; weight: number }> = [
+    { id: "authorization", label: "权限/RBAC 变更", pattern: /auth|login|permission|role|rbac|权限|登录/, weight: 24 },
+    { id: "state_transition", label: "状态机/审批变更", pattern: /approve|reject|transition|workflow|state|状态|审批/, weight: 20 },
+    { id: "data_contract", label: "数据模型或迁移变更", pattern: /migration|schema|model|database|openapi|迁移|数据表|接口契约/, weight: 18 },
+    { id: "api", label: "API/路由变更", pattern: /\/api\/|router|handler|endpoint|fetch|请求|接口/, weight: 16 },
+    { id: "async", label: "异步/重试/队列变更", pattern: /queue|worker|async|retry|timeout|任务|重试|超时/, weight: 14 },
+    { id: "historical_bug", label: "缺陷上下文", pattern: /bug|regression|defect|缺陷|回归/, weight: 12 }
+  ];
+  const active = signals.filter((signal) => signal.pattern.test(text));
+  if (files.length >= 8) active.push({ id: "change_breadth", label: `变更范围 ${files.length} 个文件`, pattern: /$^/, weight: 12 });
+  else if (files.length >= 3) active.push({ id: "change_breadth", label: `变更范围 ${files.length} 个文件`, pattern: /$^/, weight: 6 });
+  return active;
+}
+
+function priorityFor(score: number): "critical" | "high" | "medium" | "low" {
+  if (score >= 65) return "critical";
+  if (score >= 40) return "high";
+  if (score >= 20) return "medium";
+  return "low";
+}
+
 export function buildImpactAnalysis(context: ConnectorContext): ImpactAnalysis {
   const scenarioMatches = matchScenariosForContext({
     requirement: context.requirement,
     diff: context.diff,
     bugTicket: context.bugTicket
   });
-  const recommendedScenarios = scenarioMatches.slice(0, 8).map((match) => ({
-    scenarioId: match.scenario.id,
-    reason: `${match.scenario.summary ?? match.scenario.title} matched keywords: ${match.matchedKeywords.join(", ") || "registry fallback"}.`,
-    confidence: match.score > 35 ? "high" as const : match.score > 12 ? "medium" as const : "low" as const,
-    sourceContextIds: sourceIds(context, /diff|requirement|bug|issue|jira|openapi|pull request|pr/i)
-  }));
+  const signals = riskSignals(context);
+  const recommendedScenarios = scenarioMatches.map((match) => {
+    const scenarioText = `${match.scenario.id} ${match.scenario.title} ${match.scenario.summary ?? ""} ${(match.scenario.matcher?.capabilities ?? []).join(" ")}`.toLowerCase();
+    const relevantSignals = signals.filter((signal) => scenarioText.includes(signal.id.replace("_", " ")) ||
+      (signal.id === "authorization" && /auth|permission|role|rbac/.test(scenarioText)) ||
+      (signal.id === "state_transition" && /approval|workflow|transition|state/.test(scenarioText)) ||
+      (signal.id === "data_contract" && /openapi|schema|contract/.test(scenarioText)) ||
+      (signal.id === "api" && /api|network|contract/.test(scenarioText)) ||
+      (signal.id === "async" && /error|retry|patrol/.test(scenarioText)) ||
+      signal.id === "change_breadth" || signal.id === "historical_bug");
+    const score = Math.min(100, match.score + relevantSignals.reduce((sum, signal) => sum + signal.weight, 0) + (match.riskLevel === "high" ? 8 : 0));
+    return {
+      scenarioId: match.scenario.id,
+      reason: `${match.scenario.summary ?? match.scenario.title} matched keywords: ${match.matchedKeywords.join(", ") || "registry fallback"}; risk drivers: ${relevantSignals.map((signal) => signal.label).join("、") || "keyword match"}.`,
+      confidence: score >= 45 ? "high" as const : score >= 18 ? "medium" as const : "low" as const,
+      priority: priorityFor(score),
+      score,
+      riskDrivers: relevantSignals.map((signal) => signal.id),
+      sourceContextIds: sourceIds(context, /diff|requirement|bug|issue|jira|openapi|pull request|pr/i)
+    };
+  }).sort((left, right) => (right.score ?? 0) - (left.score ?? 0)).slice(0, 8);
   const affectedComponents = buildAffectedComponents(context);
   const affectedApis = buildAffectedApis(context);
   const affectedPages = buildAffectedPages(context);

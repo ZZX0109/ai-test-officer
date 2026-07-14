@@ -30,6 +30,8 @@ export function testPlanStepSchema() {
   };
   const impact = buildImpactAnalysis(context);
   assert.ok(impact.affectedApis.some((item) => item.target === "/api/tasks"));
+  assert.ok(impact.recommendedScenarios.some((item) => item.riskDrivers?.includes("api")));
+  assert.ok(impact.recommendedScenarios.every((item) => item.priority && typeof item.score === "number"));
   const plan = buildExecutablePlan({
     plan: buildScenarioGrayPlan(getScenario("task_api_failure")),
     selectedScenarioId: "task_api_failure",

@@ -356,6 +356,9 @@ export interface ImpactAnalysis {
     reason: string;
     confidence: "high" | "medium" | "low";
     sourceContextIds: string[];
+    priority?: "critical" | "high" | "medium" | "low";
+    score?: number;
+    riskDrivers?: string[];
   }>;
   uncoveredRisks: Array<{
     id: string;
