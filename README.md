@@ -9,7 +9,7 @@ AI Test Officer 是一个面向提交前质量验证的 AI 测试工作台。它
 ## 项目亮点
 
 - **需求到执行闭环**：需求/PR/diff -> 影响面 -> 灰度计划 -> Playwright 执行 -> 证据包 -> release gate。
-- **独立目标项目**：除 `app-under-test` 外，仓库还提供 `todo_lite` 和 `order_portal_lite` 两个独立目标应用，用于验证跨项目接入和 Benchmark。
+- **独立目标项目**：除 `app-under-test` 外，仓库还提供 `todo_lite`、`order_portal_lite` 和 `customer_portal_lite` 三个独立目标应用；Customer Portal 扩展集覆盖表格、复杂表单、上传、审批、RBAC 与 OpenAPI。
 - **结构化证据链**：每一步测试动作都可以关联 screenshot、DOM、network、console、trace、断言和 source context。
 - **分层 Judge**：plan Judge、evidence Judge、release Judge 分开输出，并显式展示 `llm_assisted`、`fallback_baseline` 或 deterministic 的执行模式。
 - **失败归因**：尝试区分 `product_bug`、`test_script_issue`、`environment_issue`、`insufficient_evidence` 和未知失败。
@@ -63,7 +63,7 @@ CI gate / Workbench report / human decision
 | Judge | 已实现 | deterministic baseline + 可选 LLM assisted，多层报告和 schema 校验 |
 | Workbench | 已实现 | 上下文、计划、Live View、Evidence、Judge、CI、连接器和权限面板 |
 | CI gate | 已实现 | commit check、strict gate、JUnit、PR annotation 和报告 artifact |
-| Benchmark | 已实现 | 可扩展开发集目录（当前 18 条）、运行映射、两个执行目标、1 条复杂外部项目 challenge case |
+| Benchmark | 已实现 | 冻结核心开发集 18 条、盲测 6 条、可选 Customer Portal 扩展集 6 条、三类执行目标、1 条复杂外部项目 challenge case |
 | 长期巡检 | Demo 级 | patrol scheduler、趋势和报告保留策略已具备骨架 |
 
 ## 架构
@@ -196,6 +196,8 @@ npm run reports:retention:archive
 ## 真实 AI 实验
 
 `data/benchmark/cases.json` 是18条开发输入，`blind-cases.json` 是6条冻结盲测输入；两者均不包含答案。标签只存在于 `evaluation/benchmark-labels/`，该目录被 `.dockerignore` 排除，Agent/worker 镜像无法读取。正式实验包含 test-command、规则、LLM Planner、LLM Judge 和完整 LLM 五条通道，两个固定模型各重复3次。
+
+可通过 `BENCHMARK_EXTENDED=1` 加入 Customer Portal 的6条扩展案例；核心命题、门禁规则与可证伪的验收标准见 [Evidence-Grounded Testing 方法说明](docs/evidence-grounded-method.md)。
 
 运行前先在凭据管理中创建对应模型，并注入 `BENCHMARK_OPENAI_CREDENTIAL_ID` 与 `BENCHMARK_ANTHROPIC_CREDENTIAL_ID`。Runner 不得获得 `BENCHMARK_LABELS_ROOT`；运行结束后只在 evaluator 进程挂载标签：
 
