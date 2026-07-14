@@ -121,6 +121,34 @@ function artifactUrl(filePath: string) {
   return `/artifacts/${path.relative(reportsDir, filePath).split(path.sep).join("/")}`;
 }
 
+function isMissingRunBundle(error: unknown) {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+}
+
+function unavailableRunReport(run: NonNullable<Awaited<ReturnType<typeof runEventStore.get>>>) {
+  const finalStatus = run.gateStatus ?? (run.state === "blocked" ? "blocked" : run.state === "failed" ? "fail" : "needs-human-review");
+  return {
+    runId: run.id,
+    state: run.state,
+    finalStatus,
+    gateStatus: finalStatus,
+    machineGate: run.machineGate ?? {
+      status: finalStatus,
+      reasons: ["run_bundle_unavailable"],
+      assertionFailures: [],
+      evidenceComplete: false
+    },
+    judgeRecommendation: run.judgeRecommendation ?? {
+      status: finalStatus === "fail" ? "fail" : "needs-human-review",
+      summary: "Run reached a terminal state before a report bundle was committed.",
+      evidenceRefs: []
+    },
+    reportAvailability: "unavailable" as const,
+    artifacts: [],
+    evidence: []
+  };
+}
+
 app.use(cors(createCorsOptions()));
 app.use(express.json({ limit: "2mb" }));
 app.use(basicRateLimit);
@@ -501,8 +529,13 @@ app.get("/v1/runs/:id/artifacts", async (req, res, next) => {
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, run.input.projectId, "read_artifacts");
-    const bundle = await readRunBundle(run?.resultRunId ?? req.params.id);
-    res.json({ artifacts: bundle.artifactsV2 ?? [], legacyEvidence: bundle.evidence.filter((item) => !item.artifactIds?.length) });
+    try {
+      const bundle = await readRunBundle(run?.resultRunId ?? req.params.id);
+      res.json({ artifacts: bundle.artifactsV2 ?? [], legacyEvidence: bundle.evidence.filter((item) => !item.artifactIds?.length) });
+    } catch (error) {
+      if (!isMissingRunBundle(error)) throw error;
+      res.json({ artifacts: [], legacyEvidence: [], reportAvailability: "unavailable" });
+    }
   } catch (error) { next(error); }
 });
 
@@ -512,8 +545,13 @@ app.get("/v1/runs/:id/report", async (req, res, next) => {
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, run.input.projectId, "read_artifacts");
-    const result = (await readRunBundle(run?.resultRunId ?? req.params.id)).result;
-    res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision, planProvenance: run?.planProvenance, plannerCall: run?.plannerCall, impactAnalysis: run?.impactAnalysis } });
+    try {
+      const result = (await readRunBundle(run?.resultRunId ?? req.params.id)).result;
+      res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision, planProvenance: run?.planProvenance, plannerCall: run?.plannerCall, impactAnalysis: run?.impactAnalysis } });
+    } catch (error) {
+      if (!isMissingRunBundle(error)) throw error;
+      res.json({ report: { ...unavailableRunReport(run), humanDecision: run.humanDecision, planProvenance: run.planProvenance, plannerCall: run.plannerCall, impactAnalysis: run.impactAnalysis } });
+    }
   } catch (error) { next(error); }
 });
 
