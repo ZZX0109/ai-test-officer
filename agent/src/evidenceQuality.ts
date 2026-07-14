@@ -3,7 +3,7 @@ import type { AssertionEvidenceQuality, EvidenceItem, EvidenceQualityReport, Vis
 
 function requiredKinds(assertion: VisualRunResult["assertions"][number]): ArtifactV2["kind"][] {
   if (assertion.fact?.kind === "network.url_contains") return ["network", "screenshot"];
-  if (assertion.fact?.kind === "console.no_error" || assertion.fact?.kind === "console.error") return ["console", "trace"];
+  if (assertion.fact?.kind === "console.no_error" || assertion.fact?.kind === "console.error") return ["console", "screenshot"];
   return ["dom", "screenshot"];
 }
 

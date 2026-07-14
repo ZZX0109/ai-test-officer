@@ -22,4 +22,11 @@ export function testEvidenceQuality() {
   });
   assert.equal(missing.assertions[0]?.status, "insufficient");
   assert.match(missing.assertions[0]?.reasons.join(" ") ?? "", /attempt_missing/);
+
+  const consoleReport = buildEvidenceQualityReport({
+    assertions: [{ name: "console", passed: true, expected: "none", actual: "none", fact: { kind: "console.no_error", target: "console", operator: "not_present", expected: "none", actual: "none", severity: "medium", evidenceRefs: ["console-assertion"] } }],
+    evidence: [{ id: "console-assertion", runId: "run-1", type: "assertion", title: "console", timestamp: "2026-01-01T00:00:00.000Z", attempt: 1, payload: {} }],
+    artifacts: [{ ...identity, id: "console", kind: "console" as const }, { ...identity, id: "screenshot", kind: "screenshot" as const }]
+  });
+  assert.equal(consoleReport.assertions[0]?.status, "grounded");
 }

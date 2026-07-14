@@ -1055,10 +1055,15 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       requireLlm: true
     })
     : baselineJudgeReport;
+  const qualityReasons = evidenceQuality.assertions
+    .filter((item) => item.passed && item.status !== "grounded")
+    .flatMap((item) => [`assertion_evidence_incomplete:${item.assertionName}`, ...item.reasons.map((reason) => `${item.assertionName}:${reason}`)]);
   const machineGateStatus = artifactGate.status !== "pass"
     ? artifactGate.status
     : failed
       ? "fail" as const
+      : qualityReasons.length
+        ? "needs-human-review" as const
       : attempts.length > 1
         ? "needs-human-review" as const
         : "pass" as const;
@@ -1076,9 +1081,9 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   });
   const machineGate: MachineGate = {
     status: machineGateStatus,
-    reasons: artifactGate.reasons,
+    reasons: [...artifactGate.reasons, ...qualityReasons],
     assertionFailures: assertions.filter((item) => !item.passed).map((item) => item.name),
-    evidenceComplete: artifactGate.status === "pass"
+    evidenceComplete: artifactGate.status === "pass" && qualityReasons.length === 0
   };
   const judgeRecommendation: JudgeRecommendation = {
     status: judgeReport.releaseJudge.verdict === "needs_review" ? "needs-human-review" : judgeReport.releaseJudge.verdict,
