@@ -44,7 +44,7 @@ export async function testInvestmentAgentWorkflowExternalSmoke() {
         id: "source_investment_agent_workflow_smoke",
         kind: "local_file",
         title: "Investment agent workflow smoke source",
-        uri: "/Users/afa/Desktop/Hack/project-01-investment-agent-workflow",
+        uri: "/workspace/project-01-investment-agent-workflow",
         status: "connected",
         summary: "真实外部 AI Agent 工作流平台样例，含 Vite 前端、FastAPI 后端、SQLite、登录和投研业务流；不代表任何第三方同名产品。",
         permissionState: "not_required",

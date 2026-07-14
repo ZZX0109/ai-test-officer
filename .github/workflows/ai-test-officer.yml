@@ -4,9 +4,45 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Immutable fork commit SHA approved by a maintainer
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: read
+
+concurrency:
+  group: ai-test-officer-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  fork-policy:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'AI Test Officer',
+              head_sha: context.payload.pull_request.head.sha,
+              status: 'completed',
+              conclusion: 'action_required',
+              output: {
+                title: 'Fork PR requires maintainer approval',
+                summary: 'Untrusted fork code was not checked out or executed. Dispatch the controlled workflow with the approved immutable commit SHA.'
+              }
+            })
   gate:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     env:
       HEADLESS: "1"
@@ -15,8 +51,13 @@ jobs:
       PROJECT_ID: local_demo_app
       APP_URL: http://localhost:6173
       SCENARIO_ID: task_filter_completed
+      TRACE: "1"
+      PR_IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+      TARGET_SHA: ${{ inputs.commit_sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -26,9 +67,14 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - run: npm run demo:verify
+      - run: npm run test:unified-run
       - name: Run CI gate contract
-        run: npm run commit-check || test "$?" -le 3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_SHA: ${{ env.TARGET_SHA }}
+        run: npm run commit-check
+      - name: Verify clean reproducible worktree
+        run: test -z "$(git status --porcelain)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -58,7 +58,7 @@ export async function appendEvidence(
   return next;
 }
 
-export async function readEvidence(runId: string) {
+export async function readEvidence(runId: string): Promise<EvidenceItem[]> {
   const auditEvidence = readEvidenceFromAuditStore(runId);
   if (auditEvidence.length > 0) return auditEvidence;
   try {

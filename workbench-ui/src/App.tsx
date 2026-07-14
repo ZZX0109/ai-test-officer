@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { ConnectorPanel } from "./components/ConnectorPanel";
 import { BotDeliveryPanel } from "./components/BotDeliveryPanel";
+import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { DiscoveryPanel } from "./components/DiscoveryPanel";
 import { EvidencePanel } from "./components/EvidencePanel";
 import { HistoryPanel } from "./components/HistoryPanel";
@@ -54,8 +55,9 @@ import {
   diagnoseProject,
   generatePlan,
   getAuditStoreStatus,
+  getBenchmarkSummary,
   getLatestDemoVerification,
-  getLatestLiveRun,
+  subscribeRunEvents,
   getGrayPlan,
   getPatrolTrend,
   getSecuritySummary,
@@ -123,6 +125,7 @@ import type {
   RunResult,
   ScenarioSummary,
   SecuritySummary,
+  BenchmarkSummary,
   StorageArchive,
   StorageStatus
 } from "./types";
@@ -164,15 +167,17 @@ function auditStoreSummary(auditStore: AuditStoreStatus | null) {
   return `${auditStore.journalMode} · ${version} · ${health.length ? health.join(" · ") : "healthy"} · runs ${auditStore.runs}`;
 }
 
+const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
+
 export function App() {
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [plan, setPlan] = useState<GrayPlan | null>(null);
   const [result, setResult] = useState<RunResult | null>(null);
-  const [appUrl, setAppUrl] = useState("http://localhost:6173");
+  const [appUrl, setAppUrl] = useState(viteEnv.VITE_APP_URL ?? "http://localhost:6173");
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [projectDraft, setProjectDraft] = useState<ProjectConfig | null>(null);
-  const [projectPathInput, setProjectPathInput] = useState("/Users/afa/Desktop/Hack/project-02-ai-test-officer/app-under-test");
+  const [projectPathInput, setProjectPathInput] = useState(viteEnv.VITE_PROJECT_PATH ?? "app-under-test");
   const [projectDetection, setProjectDetection] = useState<ProjectDetectionResult | null>(null);
   const [projectDiagnosis, setProjectDiagnosis] = useState<ProjectDiagnosis | null>(null);
   const [projectGrants, setProjectGrants] = useState<ProjectGrant[]>([]);
@@ -209,10 +214,12 @@ export function App() {
   const [commitCheck, setCommitCheck] = useState<CommitCheckResult | null>(null);
   const [requirementAcceptance, setRequirementAcceptance] = useState<RequirementAcceptanceResult | null>(null);
   const [liveRun, setLiveRun] = useState<LiveRunState | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [auditStore, setAuditStore] = useState<AuditStoreStatus | null>(null);
   const [storageStatus, setStorageStatus] = useState<StorageStatus | null>(null);
   const [storageArchives, setStorageArchives] = useState<StorageArchive[]>([]);
   const [securitySummary, setSecuritySummary] = useState<SecuritySummary | null>(null);
+  const [benchmarkSummary, setBenchmarkSummary] = useState<BenchmarkSummary | null>(null);
   const [message, setMessage] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [isPatrolling, setIsPatrolling] = useState(false);
@@ -267,7 +274,7 @@ export function App() {
   const evidenceCount = result?.evidence?.length ?? 0;
   const sourceContextCount = analysis?.sourceContexts?.length ?? 0;
   const planStepCount = activeExecutablePlan?.steps.length ?? plan?.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0) ?? 0;
-  const latestDecision = result?.verdict ?? commitCheck?.run?.verdict ?? requirementAcceptance?.run?.verdict ?? "未运行";
+  const latestDecision = result?.finalStatus ?? result?.gateStatus ?? commitCheck?.run?.finalStatus ?? commitCheck?.run?.gateStatus ?? requirementAcceptance?.run?.finalStatus ?? requirementAcceptance?.run?.gateStatus ?? "未运行";
   const primaryReason = selectedCandidate?.reason ?? selectedScenario?.summary ?? "当前场景来自 Scenario Registry，可先读取输入来源或执行 Discovery 生成更准确的测试点。";
   const nextSuggestion = result?.failureAttributions?.[0]?.suggestedFix ??
     result?.failureAttributions?.[0]?.topSuspects?.[0]?.suggestedFix ??
@@ -308,7 +315,8 @@ export function App() {
       storageData,
       archiveData,
       securityData,
-      trendData
+      trendData,
+      benchmarkData
     ] = await Promise.all([
       listCredentials(),
       getGrayPlan(),
@@ -326,7 +334,8 @@ export function App() {
       getStorageStatus().catch(() => ({ storage: null })),
       listStorageArchives().catch(() => ({ archives: [] })),
       getSecuritySummary().catch(() => ({ security: null })),
-      getPatrolTrend({ projectId: selectedProjectId || undefined, scenarioId }).catch(() => ({ trend: null }))
+      getPatrolTrend({ projectId: selectedProjectId || undefined, scenarioId }).catch(() => ({ trend: null })),
+      getBenchmarkSummary().catch(() => null)
     ]);
     setCredentials(credentialData.credentials);
     setPlan(planData);
@@ -345,6 +354,7 @@ export function App() {
     setStorageArchives(archiveData.archives);
     setSecuritySummary(securityData.security);
     setPatrolTrend(trendData.trend);
+    setBenchmarkSummary(benchmarkData);
     const activeProjectId = selectedProjectId || projectData.projects[0]?.id;
     if (projectData.projects.length && !selectedProjectId) {
       const firstProject = projectData.projects[0];
@@ -378,23 +388,20 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!isBusy) return;
-    let stopped = false;
-    const poll = async () => {
-      try {
-        const live = await getLatestLiveRun();
-        if (!stopped) setLiveRun(live);
-      } catch {
-        // Live polling is best-effort.
-      }
-    };
-    poll();
-    const timer = window.setInterval(poll, 1000);
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [isBusy]);
+    if (!isBusy || !activeRunId) return;
+    return subscribeRunEvents(activeRunId, ({ type, payload }) => {
+      if (type !== "state") return;
+      const event = payload as { type?: string };
+      const finished = ["run_completed", "run_failed", "run_blocked", "run_cancelled", "human_review_requested"].includes(event.type ?? "");
+      setLiveRun((current) => ({
+        runId: activeRunId,
+        status: finished ? "finished" : "running",
+        evidenceCount: current?.evidenceCount ?? 0,
+        events: current?.events ?? [],
+        evidence: current?.evidence ?? []
+      }));
+    });
+  }, [isBusy, activeRunId]);
 
   async function submitCredential(event: React.FormEvent) {
     event.preventDefault();
@@ -721,7 +728,7 @@ export function App() {
         trigger: "manual",
         credentialId: defaultCredential?.id,
         projectId: selectedProjectId || projectDraft?.id
-      });
+      }, setActiveRunId);
       setResult(run);
       setMessage(run.summary);
     } catch (error) {
@@ -1566,6 +1573,7 @@ export function App() {
               />
 
               <StoragePanel storage={storageStatus} archives={storageArchives} onDryRunRetention={runRetentionDryRun} />
+              <BenchmarkPanel summary={benchmarkSummary} />
               <HistoryPanel runs={runHistory} activeRunId={result?.id} onOpenRun={openHistoricalRun} />
 
               <section className="capability-grid">

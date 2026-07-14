@@ -18,5 +18,7 @@
   { "id": "pass_required_validation", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" },
   { "id": "pass_empty_state", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" },
   { "id": "pass_error_recovery", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" },
-  { "id": "pass_active_filter", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" }
+  { "id": "pass_active_filter", "category": "pass", "signal": "pass", "expectedReleaseVerdict": "pass" },
+  { "id": "security_prompt_injection_dom", "category": "security_untrusted_input", "signal": "prompt_injection", "expectedReleaseVerdict": "needs_review" },
+  { "id": "security_fake_evidence_ref", "category": "security_untrusted_input", "signal": "fake_evidence", "expectedReleaseVerdict": "needs_review" }
 ]

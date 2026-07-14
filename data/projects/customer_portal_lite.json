@@ -1,0 +1,19 @@
+{
+  "id": "customer_portal_lite",
+  "name": "Customer Portal Lite Independent Fixture",
+  "projectPath": "fixtures/customer-portal-lite",
+  "allowExternalProjectPath": false,
+  "installCommand": "",
+  "startCommand": "npm start",
+  "startCommandSpec": { "executable": "npm", "args": ["start"] },
+  "healthCheckUrl": "http://127.0.0.1:6284/health",
+  "frontendUrl": "http://127.0.0.1:6284",
+  "backendUrl": "http://127.0.0.1:6284/health",
+  "login": { "method": "none" },
+  "env": { "PORT": "6284" },
+  "cleanupCommand": "",
+  "timeoutMs": 15000,
+  "allowedOrigins": ["http://127.0.0.1:6284"],
+  "createdAt": "2026-07-14T00:00:00.000Z",
+  "updatedAt": "2026-07-14T00:00:00.000Z"
+}

@@ -9,15 +9,19 @@ import type {
   ProjectProcessConfig,
   ProjectRuntimeFailureReason,
   ProjectRuntimeStatus,
-  TargetAppRuntime
+  TargetAppRuntime,
+  TargetProjectConfig
 } from "./types.js";
-import { redactRecord } from "./redaction.js";
+import { redactRecord, redactText } from "./redaction.js";
+import { commandSpecSchema, type CommandSpec } from "@ai-test-officer/contracts";
+import { buildOciInvocation, classifyRuntimeFailure } from "@ai-test-officer/execution-worker";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const projectDir = path.join(rootDir, "data", "projects");
 type RunningProcess = { config: ProjectProcessConfig; process: ChildProcess };
 type RunningProject = { process?: ChildProcess; processes?: RunningProcess[]; status: ProjectRuntimeStatus };
 const runningProjects = new Map<string, RunningProject>();
+const processLogs = new WeakMap<ChildProcess, { stdout: string; stderr: string }>();
 const activeRuntimeStatuses = new Set<ProjectRuntimeStatus["status"]>(["installing", "starting", "running"]);
 
 function now() {
@@ -73,10 +77,12 @@ export function defaultProjectConfig(): ProjectConfig {
     projectPath: "app-under-test",
     allowExternalProjectPath: false,
     installCommand: "",
+    installCommandSpec: undefined,
     startCommand: "npm run dev",
     healthCheckUrl: "http://127.0.0.1:6173",
     frontendUrl: "http://localhost:6173",
     backendUrl: "http://127.0.0.1:6172/api/health",
+    allowedOrigins: ["http://127.0.0.1:6173", "http://localhost:6173"],
     login: { method: "none" },
     env: {
       VITE_TASK_FILTER_FIXTURE_BUG: "1",
@@ -86,6 +92,18 @@ export function defaultProjectConfig(): ProjectConfig {
     timeoutMs: 25_000,
     createdAt: timestamp,
     updatedAt: timestamp
+  };
+}
+
+export function toTargetProjectConfig(project: ProjectConfig): TargetProjectConfig {
+  return {
+    ...project,
+    projectId: project.id,
+    rootDir: safeProjectPath(project),
+    appUrl: project.frontendUrl,
+    apiUrl: project.backendUrl,
+    testCommand: project.testCommand,
+    allowedOrigins: project.allowedOrigins ?? []
   };
 }
 
@@ -249,15 +267,46 @@ export async function testProjectConnection(project: ProjectConfig): Promise<Pro
 function spawnManagedProcess(input: {
   project: ProjectConfig;
   cwd: string;
-  command: string;
+  command: string | CommandSpec;
 }) {
-  const child = spawn(input.command, {
-    cwd: input.cwd,
-    shell: true,
-    detached: process.platform !== "win32",
-    stdio: "ignore",
-    env: commandEnv(input.project)
-  });
+  const isLegacy = typeof input.command === "string";
+  if (isLegacy && process.env.NODE_ENV === "production" && process.env.ALLOW_LEGACY_SHELL_COMMANDS !== "1") {
+    throw new Error("legacy_shell_command_forbidden");
+  }
+  const useOci = input.project.manifest?.execution.mode === "oci";
+  if (useOci && typeof input.command === "string") throw new Error("oci_structured_command_required");
+  const child = useOci
+    ? (() => {
+      const execution = input.project.manifest!.execution;
+      const invocation = buildOciInvocation({ engine: execution.engine, image: execution.image!, manifest: input.project.manifest!, repositoryRoot: input.cwd, command: commandSpecSchema.parse(input.command) });
+      return spawn(invocation.executable, invocation.args, { cwd: input.cwd, shell: false, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
+    })()
+    : typeof input.command === "string"
+    ? spawn(input.command, {
+      cwd: input.cwd,
+      shell: true,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: commandEnv(input.project)
+    })
+    : (() => {
+      const command = commandSpecSchema.parse(input.command);
+      if (input.project.manifest && !input.project.manifest.commandAllowlist.includes(command.executable)) {
+        throw new Error(`command_not_allowed:${command.executable}`);
+      }
+      return spawn(command.executable, command.args, {
+        cwd: input.cwd,
+        shell: false,
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: commandEnv(input.project)
+      });
+    })();
+  const logs = { stdout: "", stderr: "" };
+  const append = (current: string, chunk: unknown) => redactText(`${current}${String(chunk)}`).slice(-50 * 1024 * 1024);
+  child.stdout?.on("data", (chunk) => { logs.stdout = append(logs.stdout, chunk); });
+  child.stderr?.on("data", (chunk) => { logs.stderr = append(logs.stderr, chunk); });
+  processLogs.set(child, logs);
   child.unref();
   return child;
 }
@@ -287,11 +336,12 @@ async function runManagedCommand(input: {
   projectId: string;
   project: ProjectConfig;
   command: string;
+  commandSpec?: CommandSpec;
   cwd: string;
   timeoutMs: number;
   status?: ProjectRuntimeStatus;
 }) {
-  const child = spawnManagedProcess({ project: input.project, cwd: input.cwd, command: input.command });
+  const child = spawnManagedProcess({ project: input.project, cwd: input.cwd, command: input.commandSpec ?? input.command });
   if (input.status) {
     runningProjects.set(input.projectId, { process: child, status: { ...input.status, pid: child.pid } });
   }
@@ -353,8 +403,8 @@ async function terminateRunningProject(running: RunningProject) {
 
 function projectProcesses(project: ProjectConfig): ProjectProcessConfig[] {
   if (project.processes?.length) return project.processes;
-  return project.startCommand?.trim()
-    ? [{ name: "main", command: project.startCommand, healthCheckUrl: project.healthCheckUrl, required: true }]
+  return project.startCommandSpec || project.startCommand?.trim()
+    ? [{ name: "main", command: project.startCommand ?? "", commandSpec: project.startCommandSpec, healthCheckUrl: project.healthCheckUrl, required: true }]
     : [];
 }
 
@@ -378,6 +428,9 @@ export async function startProject(id: string): Promise<ProjectRuntimeStatus> {
   const project = await getProject(id);
   if (!project) {
     return { projectId: id, status: "failed", failureReason: "config_missing", message: "Project config not found." };
+  }
+  if (process.env.NODE_ENV === "production" && !project.manifest) {
+    return { projectId: id, status: "failed", failureReason: "permission_denied", message: "Production execution requires a versioned project manifest and defaults to OCI isolation." };
   }
   const existing = runningProjects.get(id);
   if (existing) {
@@ -413,7 +466,7 @@ export async function startProject(id: string): Promise<ProjectRuntimeStatus> {
       message: health.message
     };
   }
-  if (project.installCommand?.trim()) {
+  if (project.installCommandSpec || project.installCommand?.trim()) {
     const installing: ProjectRuntimeStatus = {
       projectId: id,
       status: "installing",
@@ -426,7 +479,8 @@ export async function startProject(id: string): Promise<ProjectRuntimeStatus> {
     const installOk = await runManagedCommand({
       projectId: id,
       project,
-      command: project.installCommand,
+      command: project.installCommand ?? "",
+      commandSpec: project.installCommandSpec,
       cwd,
       timeoutMs: project.timeoutMs ?? 20_000,
       status: installing
@@ -445,7 +499,7 @@ export async function startProject(id: string): Promise<ProjectRuntimeStatus> {
   }
   const processes = configuredProcesses.map((processConfig) => ({
     config: processConfig,
-    process: spawnManagedProcess({ project, cwd, command: processConfig.command })
+    process: spawnManagedProcess({ project, cwd, command: processConfig.commandSpec ?? processConfig.command })
   }));
   const status: ProjectRuntimeStatus = {
     projectId: id,
@@ -460,17 +514,32 @@ export async function startProject(id: string): Promise<ProjectRuntimeStatus> {
   };
   runningProjects.set(id, { process: processes[0]?.process, processes, status });
   for (const managed of processes) {
+    managed.process.once("error", (error) => {
+      const current = runningProjects.get(id);
+      if (!current) return;
+      const reason = classifyRuntimeFailure(error, processLogs.get(managed.process)?.stderr);
+      current.status = {
+        ...current.status,
+        status: "failed",
+        stoppedAt: now(),
+        failureReason: reason,
+        message: `Project process ${managed.config.name} failed to start: ${reason}.`
+      };
+    });
     managed.process.once("exit", (code) => {
       const current = runningProjects.get(id);
       if (!current || current.status.status === "stopped") return;
       const required = managed.config.required ?? true;
       if (!required && code === 0) return;
+      const logs = processLogs.get(managed.process);
+      const classified = code === 0 ? "none" : classifyRuntimeFailure(`exit code ${code}`, logs?.stderr);
+      const reason = classified === "unknown" ? "early_exit" : classified;
       current.status = {
         ...current.status,
         status: code === 0 ? "stopped" : "failed",
         stoppedAt: now(),
-        failureReason: code === 0 ? "none" : "start_failed",
-        message: `Project process ${managed.config.name} exited with code ${code ?? "unknown"}.`
+        failureReason: reason,
+        message: `Project process ${managed.config.name} exited with code ${code ?? "unknown"}.${logs?.stderr ? ` stderr=${logs.stderr.slice(-2000)}` : ""}`
       };
     });
   }
@@ -507,11 +576,12 @@ export async function stopProject(id: string): Promise<ProjectRuntimeStatus> {
   }
   await terminateRunningProject(running);
   runningProjects.delete(id);
-  if (project?.cleanupCommand?.trim()) {
+  if (project?.cleanupCommandSpec || project?.cleanupCommand?.trim()) {
     const cleanupOk = await runManagedCommand({
       projectId: id,
       project,
-      command: project.cleanupCommand,
+      command: project.cleanupCommand ?? "",
+      commandSpec: project.cleanupCommandSpec,
       cwd: safeProjectPath(project),
       timeoutMs: project.timeoutMs ?? 20_000
     });

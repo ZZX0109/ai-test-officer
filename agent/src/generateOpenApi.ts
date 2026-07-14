@@ -1,0 +1,20 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { extendZodWithOpenApi, OpenAPIRegistry, OpenApiGeneratorV3 } from "@asteasolutions/zod-to-openapi";
+import { z } from "zod";
+import { apiErrorSchema, artifactV2Schema, createRunRequestSchema, runEventSchema } from "@ai-test-officer/contracts";
+
+const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
+extendZodWithOpenApi(z);
+const registry = new OpenAPIRegistry();
+const Run = registry.register("Run", z.object({ id: z.string(), state: z.string(), version: z.number().int(), gateStatus: z.string().optional() }));
+const ApiError = registry.register("ApiError", apiErrorSchema);
+registry.register("ArtifactV2", artifactV2Schema);
+registry.register("RunEvent", runEventSchema);
+const CreateRun = registry.register("CreateRunRequest", createRunRequestSchema);
+registry.registerPath({ method: "post", path: "/v1/runs", request: { body: { content: { "application/json": { schema: CreateRun } } } }, responses: { 201: { description: "Created", content: { "application/json": { schema: z.object({ run: Run }) } } }, 400: { description: "Invalid request", content: { "application/json": { schema: ApiError } } } } });
+registry.registerPath({ method: "get", path: "/v1/runs/{id}", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Run", content: { "application/json": { schema: z.object({ run: Run }) } } } } });
+const document = new OpenApiGeneratorV3(registry.definitions).generateDocument({ openapi: "3.0.3", info: { title: "AI Test Officer API", version: "1.0.0" }, servers: [{ url: "/" }] });
+const output = path.join(rootDir, "docs", "openapi.json");
+await mkdir(path.dirname(output), { recursive: true });
+await writeFile(output, JSON.stringify(document, null, 2));

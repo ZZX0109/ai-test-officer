@@ -156,7 +156,8 @@ export async function buildDeliveryFromRun(input: {
       confidence: item.confidence,
       suggestedFix: item.suggestedFix
     }));
-  const blockedRelease = ["fail", "needs_review"].includes(releaseJudge.verdict) || input.bundle.result.verdict !== "continue";
+  const finalStatus = input.bundle.result.finalStatus ?? input.bundle.result.gateStatus ?? "needs-human-review";
+  const blockedRelease = finalStatus !== "pass";
   const delivery: BotDelivery = {
     id: `bot_${Date.now()}`,
     createdAt: new Date().toISOString(),
@@ -168,6 +169,7 @@ export async function buildDeliveryFromRun(input: {
       `runId=${input.bundle.runId}`,
       `verdict=${input.bundle.result.verdict}`,
       `releaseJudge=${releaseJudge.verdict}`,
+      `finalStatus=${finalStatus}`,
       `blockedRelease=${blockedRelease ? "yes" : "no"}`,
       `summary=${releaseJudge.summary}`,
       `readableReport=${input.bundle.result.htmlReportFile ?? input.bundle.result.markdownReportFile ?? input.bundle.result.reportFile}`,
@@ -181,7 +183,7 @@ export async function buildDeliveryFromRun(input: {
     reportUrl: redactUrl(input.bundle.result.htmlReportFile ?? input.bundle.result.markdownReportFile ?? input.bundle.result.runBundleFile),
     blockedRelease,
     topSuspects,
-    payloadSummary: redactText(`${provider}:${releaseJudge.verdict}:${input.bundle.runId}`),
+    payloadSummary: redactText(`${provider}:${finalStatus}:${input.bundle.runId}`),
     status: "queued"
   };
   const deliveryStatus = await sendWebhook(delivery, input.githubPrUrl);

@@ -1,0 +1,20 @@
+{
+  "id": "order_portal_lite",
+  "name": "Order Portal Lite independent target",
+  "projectPath": "fixtures/order-portal-lite",
+  "allowExternalProjectPath": false,
+  "installCommand": "npm install --ignore-scripts",
+  "installCommandSpec": { "executable": "npm", "args": ["install", "--ignore-scripts"] },
+  "startCommand": "npm start",
+  "startCommandSpec": { "executable": "npm", "args": ["start"] },
+  "healthCheckUrl": "http://127.0.0.1:6183/health",
+  "frontendUrl": "http://127.0.0.1:6183",
+  "backendUrl": "http://127.0.0.1:6183",
+  "allowedOrigins": ["http://127.0.0.1:6183"],
+  "testCommand": "npm test",
+  "login": { "method": "none" },
+  "env": { "PORT": "6183" },
+  "timeoutMs": 30000,
+  "createdAt": "2026-07-13T00:00:00.000Z",
+  "updatedAt": "2026-07-13T00:00:00.000Z"
+}

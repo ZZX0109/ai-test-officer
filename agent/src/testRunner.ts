@@ -3,9 +3,17 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type { EvidenceItem, RunBundle, RunRequest, RunStepEvidence, VisualRunResult } from "./types.js";
+import { resolveFinalStatus, type ArtifactV2, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
+import {
+  AttemptClock,
+  PlaywrightAttemptTrace,
+  bindAttemptTelemetry,
+  captureScreenshotAtomic,
+  commitCapturedFile
+} from "@ai-test-officer/playwright-runtime";
 import { appendAudit } from "./auditLog.js";
 import { requireBrowserControl } from "./permissionGate.js";
-import { appendEvidence, readEvidence, writeRunBundle } from "./evidenceStore.js";
+import { appendEvidence as appendEvidenceToStore, readEvidence, writeRunBundle } from "./evidenceStore.js";
 import { appendLoopEvent, readLoopEvents } from "./loopEventStore.js";
 import { buildScenarioOracles } from "./oracleBuilder.js";
 import { buildRiskCoverageMatrix } from "./riskCoverage.js";
@@ -20,6 +28,10 @@ import { buildFailureAttributions } from "./failureAttribution.js";
 import { writeArtifactIntegrityReport } from "./artifactIntegrity.js";
 import { assertExecutablePlan } from "./executablePlan.js";
 import { withProjectRunLock } from "./runLock.js";
+import { assessArtifactGate, enforceMachineGate } from "./evidencePolicy.js";
+import { BudgetTracker } from "@ai-test-officer/execution-worker";
+import { classifyRetry } from "./retryPolicy.js";
+import { mirrorArtifactsToConfiguredStore } from "./artifactObjectStore.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
@@ -68,15 +80,6 @@ export function assertRunRequestExecutablePlan(input: Pick<RunRequest, "scenario
   }
 }
 
-async function safeTraceStop(context: BrowserContext, file: string) {
-  try {
-    await context.tracing.stop({ path: file });
-    return file;
-  } catch {
-    return undefined;
-  }
-}
-
 export async function runVisualGrayTest(input: RunRequest): Promise<VisualRunResult> {
   const lockProjectId = input.projectId ?? input.target?.projectId;
   if (!lockProjectId) return runVisualGrayTestUnlocked(input);
@@ -90,6 +93,29 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const targetRuntime = await resolveProjectTarget(input);
   const id = `run_${Date.now()}`;
   const startedAt = new Date().toISOString();
+  const attemptClock = new AttemptClock();
+  const artifactsV2: ArtifactV2[] = [];
+  let activeAttempt = 1;
+  const attempts: NonNullable<VisualRunResult["attempts"]> = [{
+    id: `${id}_attempt_1`,
+    runId: id,
+    scenarioId: scenario.id,
+    attempt: 1,
+    startedAt,
+    status: "running",
+    artifactIds: []
+  }];
+  const attemptIdentity = () => ({ runId: id, scenarioId: scenario.id, attemptId: `${id}_attempt_${activeAttempt}`, attempt: activeAttempt });
+  const appendEvidence = (runId: string, evidence: Omit<EvidenceItem, "id" | "runId" | "timestamp">) => {
+    const stamp = attemptClock.next();
+    return appendEvidenceToStore(runId, {
+      scenarioId: scenario.id,
+      attemptId: attemptIdentity().attemptId,
+      attempt: activeAttempt,
+      sequence: stamp.sequence,
+      ...evidence
+    });
+  };
   await ensureReportDirs(id);
 
   const steps: RunStepEvidence[] = [];
@@ -98,12 +124,17 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const assertions: VisualRunResult["assertions"] = [];
   const screenshotDir = path.join(reportsDir, "screenshots", id);
   const runDir = path.join(reportsDir, "runs", id);
-  const traceFile = path.join(reportsDir, "traces", `${id}.zip`);
   const evidenceWrites: Promise<unknown>[] = [];
   const headless = envFlag("HEADLESS");
   const recordVideo = envFlag("RECORD_VIDEO");
   const recordTrace = envFlag("TRACE");
   const configuredProject = input.projectId ? await getProject(input.projectId) : undefined;
+  const budgetTracker = new BudgetTracker(configuredProject?.budget);
+  const runDeadline = Date.now() + (configuredProject?.budget?.runTimeoutMs ?? budgetTracker.budget.runTimeoutMs);
+  const assertWithinRunBudget = () => {
+    if (input.signal?.aborted) throw new Error("cancelled:run_abort_requested");
+    if (Date.now() > runDeadline) throw new Error("budget_exceeded:run_timeout");
+  };
   let projectWasStartedByRunner = false;
   let runtimeStatus: VisualRunResult["runtimeStatus"];
   const healthResult = configuredProject
@@ -186,11 +217,57 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     viewport: { width: 1280, height: 820 },
     ...(recordVideo ? { recordVideo: { dir: path.join(reportsDir, "videos") } } : {})
   });
-  if (recordTrace) {
-    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
-  }
+  let attemptTrace: PlaywrightAttemptTrace | undefined;
+  const startAttemptTrace = async () => {
+    if (!recordTrace) return;
+    attemptTrace = new PlaywrightAttemptTrace(context);
+    await attemptTrace.start();
+  };
+  const finishAttemptTrace = async () => {
+    if (!attemptTrace) return;
+    const finalPath = path.join(reportsDir, "traces", id, `attempt-${activeAttempt}.zip`);
+    const temporaryPath = `${finalPath}.partial`;
+    try {
+      await attemptTrace.stop(temporaryPath);
+      const artifact = await commitCapturedFile({
+        temporaryPath,
+        finalPath,
+        id: `${id}_trace_attempt_${activeAttempt}`,
+        identity: attemptIdentity(),
+        kind: "trace",
+        mediaType: "application/zip",
+        storageUri: artifactUrl(finalPath),
+        clock: attemptClock,
+        collectorVersion: "0.2.0"
+      });
+      artifactsV2.push(artifact);
+      budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
+      attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
+      await appendEvidence(id, {
+        type: "trace",
+        title: `Playwright trace attempt ${activeAttempt}`,
+        file: artifact.storageUri,
+        artifactIds: [artifact.id],
+        payload: { file: artifact.storageUri, attempt: activeAttempt }
+      });
+    } finally {
+      attemptTrace = undefined;
+    }
+  };
+  await startAttemptTrace();
   const page = await context.newPage();
   const pageVideo = page.video();
+  const unbindTelemetry = bindAttemptTelemetry({
+    context,
+    clock: attemptClock,
+    onEvent: (event) => {
+      evidenceWrites.push(appendEvidence(id, {
+        type: "operation",
+        title: `Browser ${event.type}`,
+        payload: { ...event.payload, eventType: event.type, capturedAt: event.capturedAt, monotonicOffsetMs: event.monotonicOffsetMs }
+      }));
+    }
+  });
 
   page.on("console", (event) => {
     const item = { type: event.type(), text: event.text() };
@@ -227,20 +304,35 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   });
 
   async function screenshot(stepId: string) {
+    assertWithinRunBudget();
+    budgetTracker.consume({ screenshots: 1 });
     const file = path.join(screenshotDir, `${stepId}.png`);
-    await page.screenshot({ path: file, fullPage: true });
     const url = artifactUrl(file);
+    const artifact = await captureScreenshotAtomic({
+      page,
+      finalPath: file,
+      id: `${id}_screenshot_${activeAttempt}_${stepId}`,
+      identity: attemptIdentity(),
+      stepId,
+      storageUri: url,
+      clock: attemptClock
+    });
+    artifactsV2.push(artifact);
+    budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
+    attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
     await appendEvidence(id, {
       type: "screenshot",
       title: `Screenshot ${stepId}`,
       stepId,
       file: url,
+      artifactIds: [artifact.id],
       payload: { file: url }
     });
     return url;
   }
 
   async function recordAssertion(assertion: VisualRunResult["assertions"][number], pathId: string) {
+    assertWithinRunBudget();
     const evidence = await appendEvidence(id, {
       type: "assertion",
       title: assertion.name,
@@ -356,6 +448,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   }
 
   async function runCoreAction(action: ScenarioAction) {
+    assertWithinRunBudget();
+    budgetTracker.consume({ steps: 1 });
     const core = scenario.corePath;
     if (action === "click_filter") {
       await clickButton(core.triggerButtonName);
@@ -593,6 +687,25 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
 
   async function runFailureRetry() {
     const core = scenario.corePath;
+    await finishAttemptTrace();
+    attempts[activeAttempt - 1] = {
+      ...attempts[activeAttempt - 1],
+      status: "failed",
+      finishedAt: new Date().toISOString(),
+      retryReason: "retryable_execution_failure"
+    };
+    activeAttempt += 1;
+    attempts.push({
+      id: `${id}_attempt_${activeAttempt}`,
+      runId: id,
+      scenarioId: scenario.id,
+      attempt: activeAttempt,
+      startedAt: new Date().toISOString(),
+      status: "running",
+      retryReason: "retryable_execution_failure",
+      artifactIds: []
+    });
+    await startAttemptTrace();
     await appendLoopEvent(id, {
       loopType: "failure_recovery_loop",
       iteration: 1,
@@ -605,15 +718,18 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       evidenceRefs: assertions.filter((item) => !item.passed).map((item) => item.name)
     });
     await page.reload({ waitUntil: "networkidle" });
+    const assertionStart = assertions.length;
     await runCoreAction(core.action);
     await page.waitForTimeout(core.waitMs ?? 700);
+    for (const oracle of core.oracles) await evaluateOracle(oracle, core.retryStepId ?? core.stepId);
+    const retryPassed = assertions.slice(assertionStart).length > 0 && assertions.slice(assertionStart).every((assertion) => assertion.passed);
     steps.push({
       stepId: core.retryStepId ?? `retry_${core.pathId}`,
       title: "失败路径自动重试",
-      status: "warning",
+      status: retryPassed ? "warning" : "failed",
       action: "retry",
       screenshot: await screenshot(core.retryStepId ?? `retry_${core.pathId}`),
-      details: "重试路径已执行，失败结论仍以首轮结构化断言为准。"
+      details: retryPassed ? "重试通过，但首轮失败仍保留并标记 flaky/timing-sensitive。" : "重试仍失败，首轮与重试证据均已保留。"
     });
     await appendLoopEvent(id, {
       loopType: "failure_recovery_loop",
@@ -626,6 +742,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       decisionReason: "fail_fast=false，需要收集更多证据",
       evidenceRefs: []
     });
+    attempts[activeAttempt - 1] = { ...attempts[activeAttempt - 1], status: retryPassed ? "passed" : "failed", finishedAt: new Date().toISOString() };
   }
 
   async function runRegressionPath() {
@@ -726,7 +843,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     });
 
     const corePassed = await executeCorePath();
-    if (!corePassed && scenario.corePath.action !== "simulate_error_and_retry") {
+    const retryDecision = classifyRetry({ assertions: assertions.filter((assertion) => !assertion.passed), attempt: activeAttempt, maxAttempts: budgetTracker.budget.maxAttempts });
+    if (!corePassed && scenario.corePath.action !== "simulate_error_and_retry" && retryDecision.retryable) {
       await runFailureRetry();
     }
     await runRegressionPath();
@@ -734,34 +852,61 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     try {
       try {
         const html = await page.content();
+        const finalPath = path.join(runDir, `attempt-${activeAttempt}-dom.html`);
+        const temporaryPath = `${finalPath}.partial`;
+        await writeFile(temporaryPath, html);
+        const artifact = await commitCapturedFile({
+          temporaryPath,
+          finalPath,
+          id: `${id}_dom_attempt_${activeAttempt}`,
+          identity: attemptIdentity(),
+          kind: "dom",
+          mediaType: "text/html",
+          storageUri: artifactUrl(finalPath),
+          clock: attemptClock,
+          collectorVersion: "0.2.0"
+        });
+        artifactsV2.push(artifact);
+        budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
+        attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
         await appendEvidence(id, {
           type: "dom",
           title: "Full DOM snapshot",
-          payload: { html: html.slice(0, 60_000), truncated: html.length > 60_000 }
+          file: artifact.storageUri,
+          artifactIds: [artifact.id],
+          payload: { file: artifact.storageUri, html: html.slice(0, 60_000), truncated: html.length > 60_000 }
         });
       } catch {
         // Page may already be closed after a hard browser failure; other evidence remains available.
       }
-      if (recordTrace) {
-        const stoppedTrace = await safeTraceStop(context, traceFile);
-        if (stoppedTrace) {
-          await appendEvidence(id, {
-            type: "trace",
-            title: "Playwright trace",
-            file: artifactUrl(stoppedTrace),
-            payload: { file: artifactUrl(stoppedTrace) }
-          });
-        }
-      }
+      await finishAttemptTrace().catch(() => undefined);
+      unbindTelemetry();
       await context.close();
       if (recordVideo && pageVideo) {
         try {
           const videoPath = await pageVideo.path();
+          const finalPath = path.join(runDir, `attempt-${activeAttempt}.webm`);
+          const artifact = await commitCapturedFile({
+            temporaryPath: videoPath,
+            finalPath,
+            id: `${id}_video_attempt_${activeAttempt}`,
+            identity: attemptIdentity(),
+            kind: "video",
+            mediaType: "video/webm",
+            storageUri: artifactUrl(finalPath),
+            clock: attemptClock,
+            collectorVersion: "0.2.0"
+          });
+          artifactsV2.push(artifact);
+          if (artifact.integrity.sizeBytes > budgetTracker.budget.maxVideoBytes) throw new Error("budget_exceeded:video_size");
+          budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
+          attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
           await appendEvidence(id, {
             type: "video",
             title: "Playwright video",
-            file: artifactUrl(videoPath),
-            payload: { file: artifactUrl(videoPath) }
+            file: artifact.storageUri,
+            artifactIds: [artifact.id],
+            payload: { file: artifact.storageUri }
           });
         } catch {
           // Video is optional; screenshots and trace remain authoritative evidence.
@@ -803,7 +948,47 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const failed = assertions.some((assertion) => !assertion.passed);
   const finishedAt = new Date().toISOString();
   await Promise.allSettled(evidenceWrites);
+  for (const [kind, value, mediaType] of [
+    ["network", network, "application/json"],
+    ["console", consoleEvents, "application/json"]
+  ] as const) {
+    const finalPath = path.join(runDir, `attempt-${activeAttempt}-${kind}.json`);
+    const temporaryPath = `${finalPath}.partial`;
+    await writeFile(temporaryPath, JSON.stringify(value, null, 2));
+    const artifact = await commitCapturedFile({
+      temporaryPath,
+      finalPath,
+      id: `${id}_${kind}_attempt_${activeAttempt}`,
+      identity: attemptIdentity(),
+      kind,
+      mediaType,
+      storageUri: artifactUrl(finalPath),
+      clock: attemptClock,
+      collectorVersion: "0.2.0"
+    });
+    artifactsV2.push(artifact);
+    budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
+    attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
+    await appendEvidence(id, {
+      type: kind,
+      title: `${kind} artifact attempt ${activeAttempt}`,
+      file: artifact.storageUri,
+      artifactIds: [artifact.id],
+      payload: { file: artifact.storageUri, count: value.length }
+    });
+  }
+  attempts[activeAttempt - 1] = {
+    ...attempts[activeAttempt - 1],
+    status: attempts.length > 1 ? attempts[activeAttempt - 1].status : failed ? "failed" : "passed",
+    finishedAt
+  };
   const latestEvidence: EvidenceItem[] = await readEvidence(id);
+  const requiredKinds = (input.executablePlan?.steps.find((step) => step.scenarioId === scenario.id)?.evidenceRequirements
+    ?? ["screenshot", "dom", "network", "console"])
+    .filter((kind) => ["screenshot", "dom", "network", "console", "trace", "video"].includes(kind)) as ArtifactV2["kind"][];
+  const mirroredArtifacts = await mirrorArtifactsToConfiguredStore(artifactsV2, reportsDir);
+  artifactsV2.splice(0, artifactsV2.length, ...mirroredArtifacts);
+  const artifactGate = assessArtifactGate({ artifacts: artifactsV2, requiredKinds });
   const partialResult = {
     assertions,
     steps,
@@ -817,7 +1002,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     action: scenario.corePath.action,
     oracles: scenario.corePath.oracles
   });
-  const aggregatedVerdict = await appendRunHistory({
+  const historicalVerdict = await appendRunHistory({
     runId: id,
     appUrl: targetRuntime.frontendUrl,
     projectId: targetRuntime.projectId ?? configuredProject?.id,
@@ -825,6 +1010,10 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     scenarioFingerprint: runScenarioFingerprint,
     result: partialResult
   });
+  const retryRecovered = attempts.length > 1 && attempts[0]?.status === "failed" && attempts.at(-1)?.status === "passed";
+  const aggregatedVerdict = retryRecovered
+    ? { ...historicalVerdict, flaky: true, verdict: "needs_review" as const, reason: "First attempt failed and a retry passed; marked timing-sensitive." }
+    : historicalVerdict;
   const baselineJudgeReport = buildLayeredJudgeReport({
     plan: input.plan,
     requirement: input.requirement,
@@ -841,7 +1030,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     },
     evidence: latestEvidence
   });
-  const judgeReport = await buildLlmJudgeReport({
+  const assistedJudgeReport = await buildLlmJudgeReport({
     credentialId: input.credentialId,
     baseline: baselineJudgeReport,
     plan: input.plan,
@@ -859,6 +1048,37 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     },
     evidence: latestEvidence
   });
+  const machineGateStatus = artifactGate.status !== "pass"
+    ? artifactGate.status
+    : failed
+      ? "fail" as const
+      : attempts.length > 1
+        ? "needs-human-review" as const
+        : "pass" as const;
+  const machineGateEvidenceRefs = latestEvidence
+    .filter((item) => item.type === "assertion" || item.artifactIds?.some((id) =>
+      artifactGate.rejectedArtifactIds.includes(id) || artifactGate.eligibleArtifactIds.includes(id)
+    ))
+    .map((item) => item.id)
+    .slice(-20);
+  const judgeReport = enforceMachineGate({
+    report: assistedJudgeReport,
+    status: machineGateStatus,
+    assessment: artifactGate,
+    evidenceRefs: machineGateEvidenceRefs.length ? machineGateEvidenceRefs : latestEvidence.slice(-5).map((item) => item.id)
+  });
+  const machineGate: MachineGate = {
+    status: machineGateStatus,
+    reasons: artifactGate.reasons,
+    assertionFailures: assertions.filter((item) => !item.passed).map((item) => item.name),
+    evidenceComplete: artifactGate.status === "pass"
+  };
+  const judgeRecommendation: JudgeRecommendation = {
+    status: judgeReport.releaseJudge.verdict === "needs_review" ? "needs-human-review" : judgeReport.releaseJudge.verdict,
+    summary: judgeReport.releaseJudge.summary,
+    evidenceRefs: Array.from(new Set(judgeReport.releaseJudge.findings.flatMap((finding) => finding.evidenceRefs)))
+  };
+  const finalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
   const failureAttributions = buildFailureAttributions({
     assertions,
     steps,
@@ -917,6 +1137,22 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     reflectionNote,
     conflictPacket,
     failureAttributions,
+    attempts,
+    artifactsV2,
+    gateStatus: finalStatus,
+    machineGate,
+    judgeRecommendation,
+    finalStatus,
+    repairAttempts: loopEvents
+      .filter((event) => event.loopType === "failure_recovery_loop" && event.status === "retrying")
+      .slice(0, Math.max(0, Math.min(input.maxAutoRepairs ?? 2, 2)))
+      .map((event, index) => ({
+        attempt: index + 1,
+        kind: "execution_retry" as const,
+        status: "completed" as const,
+        reason: event.decisionReason ?? "受控执行重试",
+        evidenceRefs: event.evidenceRefs
+      })),
     runtimeStatus,
     judgeReport,
     reportFile: artifactUrl(path.join(runDir, "report.json")),
@@ -938,6 +1174,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     input,
     result,
     evidence: latestEvidence,
+    artifactsV2,
+    attempts,
     loopEvents,
     oracles,
     riskCoverageMatrix,

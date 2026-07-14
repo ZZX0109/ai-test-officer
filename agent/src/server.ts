@@ -1,7 +1,9 @@
 import cors from "cors";
 import express from "express";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { commandSpecSchema } from "@ai-test-officer/contracts";
 import {
   createCredential,
   deleteCredential,
@@ -29,6 +31,7 @@ import {
   createCorsOptions,
   requireApiToken,
   requireArtifactAccess,
+  requireRole,
   securitySummary
 } from "./security.js";
 import { testCredentialConnection } from "./testConnection.js";
@@ -70,7 +73,8 @@ import {
   startProject,
   stopProject,
   testProjectConnection,
-  resolveProjectTarget
+  resolveProjectTarget,
+  toTargetProjectConfig
 } from "./projectAdapter.js";
 import { detectProject, diagnoseProject } from "./projectDetection.js";
 import { runDiscoveryScan } from "./discoveryScan.js";
@@ -83,6 +87,13 @@ import {
 } from "./sqliteAuditStore.js";
 import { listStorageArchives, runStorageRetention, storageStatus } from "./storageGovernance.js";
 import type { ProjectConfig } from "./types.js";
+import { loadProjectManifest, manifestToProjectConfig } from "./projectManifest.js";
+import { runEventStore } from "./runEventStore.js";
+import type { RunEventType } from "@ai-test-officer/contracts";
+import { createRunRequestSchema } from "@ai-test-officer/contracts";
+import { buildCodeImpactGraph } from "./codeImpactGraph.js";
+import { createMissionPreview } from "./missionPreview.js";
+import { enqueueRun, executeQueuedRun, interruptRun } from "./runOrchestrator.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4317);
@@ -110,6 +121,10 @@ app.get("/artifacts/*", requireArtifactAccess, (req, res, next) => {
   });
 });
 app.use(requireApiToken);
+app.use("/api/credentials", requireRole(["admin"]));
+app.use("/api/projects/grants", requireRole(["admin"]));
+app.post("/v1/runs", requireRole(["admin", "runner"]));
+app.post("/v1/runs/:id/decision-override", requireRole(["admin", "reviewer"]));
 
 const credentialSchema = z.object({
   name: z.string().min(1),
@@ -344,22 +359,146 @@ const permissionProfileSchema = z.object({
   systemControl: z.boolean()
 });
 
+const runControlSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  actor: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  payload: z.record(z.unknown()).optional()
+});
+
+app.post("/v1/runs", async (req, res, next) => {
+  try {
+    const body = createRunRequestSchema.parse(req.body);
+    const created = await runEventStore.create({
+      runId: body.runId,
+      actor: body.actor,
+      idempotencyKey: body.idempotencyKey,
+      payload: { ...body.input, projectId: body.projectId, organizationId: body.organizationId }
+    });
+    const run = created.state === "planning"
+      ? await runEventStore.append({
+        runId: created.id,
+        type: "plan_generated",
+        expectedVersion: created.version,
+        actor: "planner",
+        idempotencyKey: `${body.idempotencyKey}:generated`,
+        payload: { plan: { source: "validated-scenario", scenarioId: body.input.scenarioId } }
+      })
+      : created;
+    res.status(201).json({ run });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    res.json({ run });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/events", async (req, res, next) => {
+  try { res.json({ events: await runEventStore.events(req.params.id) }); } catch (error) { next(error); }
+});
+
+const controlEvents: Record<string, RunEventType> = {
+  "plan-approval": "plan_approved",
+  permissions: "permission_granted",
+  pause: "run_paused",
+  resume: "run_resumed",
+  cancel: "run_cancelled",
+  "decision-override": "decision_overridden"
+};
+
+for (const [action, eventType] of Object.entries(controlEvents)) {
+  app.post(`/v1/runs/:id/${action}`, async (req, res, next) => {
+    try {
+      const body = runControlSchema.parse(req.body);
+      if (eventType === "decision_overridden") {
+        z.object({ status: z.enum(["approved", "blocked", "accepted-risk"]), reason: z.string().min(1), originalDecision: z.string().optional(), newLabel: z.string().optional() }).parse(body.payload);
+      }
+      const run = await runEventStore.append({ runId: req.params.id, type: eventType, ...body, payload: body.payload ?? {} });
+      if (eventType === "permission_granted" || eventType === "run_resumed") await enqueueRun(run.id, run.version);
+      if (eventType === "run_paused" || eventType === "run_cancelled") interruptRun(run.id);
+      res.json({ run });
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("run_version_conflict:")) {
+        res.status(409).json({ error: "run_version_conflict", actualVersion: Number(error.message.split(":")[1]) });
+        return;
+      }
+      next(error);
+    }
+  });
+}
+
+app.get("/v1/runs/:id/artifacts", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    const bundle = await readRunBundle(run?.resultRunId ?? req.params.id);
+    res.json({ artifacts: bundle.artifactsV2 ?? [], legacyEvidence: bundle.evidence.filter((item) => !item.artifactIds?.length) });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/report", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    const result = (await readRunBundle(run?.resultRunId ?? req.params.id)).result;
+    res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision } });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/stream", async (req, res, next) => {
+  try {
+    if (!(await runEventStore.get(req.params.id))) return void res.status(404).json({ error: "run_not_found" });
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+    let sentVersion = Number(req.header("last-event-id") ?? 0);
+    const send = async () => {
+      const events = await runEventStore.events(req.params.id);
+      for (const event of events.filter((item) => item.version > sentVersion)) {
+        res.write(`id: ${event.version}\nevent: state\ndata: ${JSON.stringify(event)}\n\n`);
+        sentVersion = event.version;
+      }
+      res.write(`event: heartbeat\ndata: ${JSON.stringify({ runId: req.params.id, at: new Date().toISOString() })}\n\n`);
+    };
+    await send();
+    const timer = setInterval(() => void send().catch(() => undefined), 1_000);
+    req.once("close", () => clearInterval(timer));
+  } catch (error) { next(error); }
+});
+
+app.post("/internal/v1/executions/:runId", async (req, res, next) => {
+  try {
+    if (!process.env.INTERNAL_WORKER_TOKEN || req.header("x-internal-worker-token") !== process.env.INTERNAL_WORKER_TOKEN) {
+      return void res.status(403).json({ error: "internal_worker_identity_required" });
+    }
+    res.json({ run: await executeQueuedRun(req.params.runId) });
+  } catch (error) { next(error); }
+});
+
 const projectSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   projectPath: z.string().min(1),
   allowExternalProjectPath: z.boolean().optional(),
   installCommand: z.string().optional(),
+  installCommandSpec: commandSpecSchema.optional(),
   startCommand: z.string().optional(),
+  startCommandSpec: commandSpecSchema.optional(),
   processes: z.array(z.object({
     name: z.string().min(1),
     command: z.string().min(1),
+    commandSpec: commandSpecSchema.optional(),
     healthCheckUrl: z.string().url().optional(),
     required: z.boolean().optional()
   })).optional(),
   healthCheckUrl: z.string().url().optional(),
   frontendUrl: z.string().url(),
   backendUrl: z.string().url().optional(),
+  testCommand: z.string().optional(),
+  allowedOrigins: z.array(z.string().url()).optional(),
   login: z
     .object({
       method: z.enum(["none", "form", "storage_state", "env"]),
@@ -371,6 +510,7 @@ const projectSchema = z.object({
     .optional(),
   env: z.record(z.string()).optional(),
   cleanupCommand: z.string().optional(),
+  cleanupCommandSpec: commandSpecSchema.optional(),
   timeoutMs: z.number().int().min(1000).optional(),
   externalSmokeProfile: z.object({
     login: z.object({
@@ -430,6 +570,65 @@ app.get("/api/projects", async (_req, res, next) => {
   }
 });
 
+app.get("/v1/projects/manifest", async (req, res, next) => {
+  try {
+    const repositoryRoot = typeof req.query.repositoryRoot === "string" ? req.query.repositoryRoot : rootDir;
+    const manifestPath = typeof req.query.manifestPath === "string" ? req.query.manifestPath : undefined;
+    const manifest = await loadProjectManifest({ repositoryRoot, manifestPath });
+    res.json({ manifest, project: manifestToProjectConfig(manifest, repositoryRoot) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/v1/mission-preview", (req, res, next) => {
+  try {
+    res.json(createMissionPreview(req.body));
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/impact/code-graph", async (req, res, next) => {
+  try {
+    const body = z.object({
+      repositoryRoot: z.string().min(1).default(rootDir),
+      files: z.array(z.string().min(1)).max(1000),
+      historicalBugs: z.array(z.object({ id: z.string(), title: z.string(), files: z.array(z.string()) })).max(500).optional()
+    }).parse(req.body);
+    const allowedRoot = path.resolve(process.env.WORKSPACE_ROOT ?? rootDir);
+    const repositoryRoot = path.resolve(body.repositoryRoot);
+    if (repositoryRoot !== allowedRoot && !repositoryRoot.startsWith(`${allowedRoot}${path.sep}`)) throw new Error("impact_repository_outside_workspace");
+    const scenarios = listScenarios().map((scenario) => ({ id: scenario.id, keywords: scenario.matcher?.keywords ?? [scenario.id] }));
+    res.json({ graph: await buildCodeImpactGraph({ repositoryRoot, files: body.files, scenarios, historicalBugs: body.historicalBugs }) });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/benchmark/summary", async (_req, res, next) => {
+  try {
+    const cases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Array<{ projectId: string; category: string }>;
+    const executionMap = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "execution-map.json"), "utf8")) as { mappings: Array<{ logicalProjectId: string; executionProjectId: string }> };
+    const challengeCases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "challenge-cases.json"), "utf8")) as Array<{ projectId: string }>;
+    const projectIds = Array.from(new Set(cases.map((item) => item.projectId)));
+    const byProject = Object.fromEntries(projectIds.map((projectId) => [projectId, cases.filter((item) => item.projectId === projectId).length]));
+    const evaluation = await readFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), "utf8").then((value) => JSON.parse(value) as { completedRuns: number; metrics: Record<string, number | null>; lanes: { deterministic?: { falseReleaseRate?: number | null; falseBlockRate?: number | null } } }).catch(() => undefined);
+    res.json({
+      version: "benchmark-v1",
+      status: "catalog_ready",
+      caseCount: cases.length,
+      projectCount: new Set(["local_demo_app", ...executionMap.mappings.map((item) => item.executionProjectId), ...challengeCases.map((item) => item.projectId)]).size,
+      fixtureProjects: ["local_demo_app", "customer_portal_lite"],
+      executionMap,
+      challengeCases: { count: challengeCases.length, projectIds: challengeCases.map((item) => item.projectId) },
+      byProject,
+      categories: Array.from(new Set(cases.map((item) => item.category))).sort(),
+      runtimeMetrics: evaluation?.completedRuns === cases.length
+        ? { status: "completed", ...evaluation.metrics, falseReleaseRate: evaluation.lanes.deterministic?.falseReleaseRate ?? null, falseBlockRate: evaluation.lanes.deterministic?.falseBlockRate ?? null }
+        : { status: "awaiting_agent_runs", requirementCoverage: evaluation?.metrics.requirementCoverage ?? null, evidenceCompleteness: evaluation?.metrics.evidenceCompleteness ?? null, falseReleaseRate: null, falseBlockRate: null }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/projects/detect", async (req, res, next) => {
   try {
     const body = z.object({ projectPath: z.string().min(1) }).parse(req.body);
@@ -464,6 +663,19 @@ app.patch("/api/projects/:id", async (req, res, next) => {
 
 app.get("/api/projects/:id/runtime", (req, res) => {
   res.json({ runtime: getProjectRuntimeStatus(req.params.id) });
+});
+
+app.get("/api/projects/:id/target-contract", async (req, res, next) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    res.json({ contract: toTargetProjectConfig(project) });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/api/projects/:id/test-connection", async (req, res, next) => {
@@ -676,6 +888,11 @@ app.post("/api/refine-plan", async (req, res, next) => {
 
 app.post("/api/run-visual-test", async (req, res, next) => {
   try {
+    res.setHeader("Deprecation", "true");
+    res.setHeader("Sunset", "Wed, 14 Oct 2026 00:00:00 GMT");
+    if (!process.env.INTERNAL_WORKER_TOKEN || req.header("x-internal-worker-token") !== process.env.INTERNAL_WORKER_TOKEN) {
+      return void res.status(403).json({ error: "deprecated_internal_execution_only", replacement: "/v1/runs" });
+    }
     const body = z
       .object({
         ...runnableTargetShape,
@@ -1105,13 +1322,20 @@ app.post("/api/environment-check", async (req, res, next) => {
   }
 });
 
-app.get("/api/desktop-capture/status", (_req, res) => {
-  res.json(desktopCaptureStatus());
+app.get("/api/desktop-capture/status", async (_req, res, next) => {
+  try { res.json(await desktopCaptureStatus()); } catch (error) { next(error); }
 });
 
-app.post("/api/desktop-capture/screenshot", async (_req, res, next) => {
+app.post("/api/desktop-capture/screenshot", async (req, res, next) => {
   try {
-    res.json(await captureDesktopScreenshot());
+    const body = z.object({
+      bundleId: z.string().min(1),
+      windowId: z.string().min(1),
+      approvalEventId: z.string().min(1),
+      outputPath: z.string().startsWith("reports/"),
+      allowedBundleIds: z.array(z.string().min(1)).optional()
+    }).parse(req.body);
+    res.json(await captureDesktopScreenshot(body));
   } catch (error) {
     next(error);
   }

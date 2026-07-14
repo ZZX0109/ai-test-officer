@@ -67,8 +67,8 @@ export function EvidencePanel({
       <div className="drawer-header">
         <h2>证据与裁决</h2>
         <div className="drawer-toggles">
-          <span className={`verdict ${result?.verdict ?? liveRun?.status ?? "idle"}`}>
-            {isBusy ? liveStatusText : result?.verdict ?? "idle"}
+          <span className={`verdict ${result?.gateStatus ?? result?.verdict ?? liveRun?.status ?? "idle"}`}>
+            {isBusy ? liveStatusText : result?.gateStatus ?? result?.verdict ?? "idle"}
           </span>
           <button className="icon-button" onClick={onClose} type="button" title="关闭">
             <X size={16} />
@@ -89,7 +89,7 @@ export function EvidencePanel({
             </article>
             <article className="passed">
               <strong>Evidence Rule</strong>
-              <span>no evidenceRefs, no conclusion</span>
+              <span>Artifact v2 only · no verified artifact, no pass</span>
             </article>
             <article className={auditStoreClass(auditStore)}>
               <strong>Audit Store</strong>
@@ -103,6 +103,18 @@ export function EvidencePanel({
         <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
 
         <ArtifactIntegrityPanel result={result} />
+
+        <section>
+          <h3>Artifact v2 / Attempts</h3>
+          <div className="network-list">
+            {result?.attempts?.map((attempt) => (
+              <code key={attempt.id}>attempt {attempt.attempt} · {attempt.status} · artifacts={attempt.artifactIds.length}{attempt.retryReason ? ` · ${attempt.retryReason}` : ""}</code>
+            )) ?? <p className="empty">暂无 attempt 记录。</p>}
+            {result?.artifactsV2?.slice(-12).map((artifact) => (
+              <code key={artifact.id}>{artifact.kind} · {artifact.origin} · attempt={artifact.attempt} · sha256={artifact.integrity.sha256.slice(0, 12)}…</code>
+            ))}
+          </div>
+        </section>
 
         <section>
           <h3>Assertions</h3>

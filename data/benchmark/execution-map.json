@@ -1,0 +1,18 @@
+{
+  "version": "benchmark-execution-map-v1",
+  "catalogVersion": "benchmark-v1",
+  "mappings": [
+    {
+      "logicalProjectId": "todo_lite",
+      "executionProjectId": "local_demo_app",
+      "targetKind": "app-under-test",
+      "note": "保留 todo_lite 作为逻辑标签，运行时映射到仓库内 app-under-test。"
+    },
+    {
+      "logicalProjectId": "order_portal_lite",
+      "executionProjectId": "customer_portal_lite",
+      "targetKind": "independent-fixture",
+      "note": "保留 order_portal_lite 作为逻辑标签，运行时映射到独立 customer-portal-lite。"
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import type { CommitCheckResult } from "./types.js";
+import { normalizeLegacyGateStatus } from "@ai-test-officer/contracts";
 
 export type CiExitCode = 0 | 1 | 2 | 3 | 4;
 export type CiGateReport = ReturnType<typeof buildCiGateReport> | ReturnType<typeof buildCiErrorGateReport>;
@@ -35,6 +36,7 @@ export function computeCiGateDecision(check: CommitCheckResult, policy: CiGatePo
   const selectedScenarioId = check.selectedScenarioId;
   const quarantined = Boolean(selectedScenarioId && normalized.quarantinedScenarios.includes(selectedScenarioId));
   const flaky = Boolean(check.run?.aggregatedVerdict.flaky);
+  const gateStatus = check.run?.gateStatus ?? normalizeLegacyGateStatus(check.run?.judgeReport.releaseJudge.verdict ?? "needs_review");
   if (check.run?.runtimeStatus?.status === "failed") {
     reasons.push("runtime_unavailable");
     return { exitCode: 3 as CiExitCode, exitMeaning: ciExitMeaning(3), policy: normalized, policyReasons: reasons, quarantined, flaky };
@@ -56,6 +58,19 @@ export function computeCiGateDecision(check: CommitCheckResult, policy: CiGatePo
     reasons.push(normalized.flakyMode === "fail" ? "flaky_fail" : "flaky_warn");
     const exitCode = normalized.flakyMode === "fail" ? 1 : 2;
     return { exitCode: exitCode as CiExitCode, exitMeaning: ciExitMeaning(exitCode as CiExitCode), policy: normalized, policyReasons: reasons, quarantined, flaky };
+  }
+  if (gateStatus === "blocked") {
+    reasons.push("machine_gate_blocked");
+    return { exitCode: 3 as CiExitCode, exitMeaning: ciExitMeaning(3), policy: normalized, policyReasons: reasons, quarantined, flaky };
+  }
+  if (gateStatus === "needs-human-review") {
+    reasons.push("machine_gate_needs_human_review");
+    const exitCode = normalized.strictGate ? 1 : 2;
+    return { exitCode: exitCode as CiExitCode, exitMeaning: ciExitMeaning(exitCode as CiExitCode), policy: normalized, policyReasons: reasons, quarantined, flaky };
+  }
+  if (gateStatus === "fail") {
+    reasons.push("machine_gate_fail");
+    return { exitCode: 1 as CiExitCode, exitMeaning: ciExitMeaning(1), policy: normalized, policyReasons: reasons, quarantined, flaky };
   }
   if (verdict === "pass") {
     reasons.push("release_pass");
@@ -83,7 +98,15 @@ export function buildCiGateReport(check: CommitCheckResult, policy: CiGatePolicy
     schemaVersion: 1,
     id: check.id,
     runId: check.run?.id,
+    commitSha: process.env.GITHUB_SHA ?? "local",
+    projectId: check.run?.runtimeStatus?.projectId,
     selectedScenarioId: check.selectedScenarioId,
+    scenarioVersion: check.executablePlan?.id ?? "unavailable",
+    judgePolicyVersion: check.run?.judgeReport.policyVersion ?? "unavailable",
+    executionMode: check.run?.judgeReport.executionMode ?? "not_available",
+    llmStatus: check.run?.judgeReport.llmStatus ?? "not_available",
+    fallbackUsed: check.run?.judgeReport.executionMode === "fallback_baseline",
+    autoRepairCount: check.run?.repairAttempts?.length ?? 0,
     planSource: check.planSource,
     executablePlanId: check.executablePlan?.id,
     verdict: check.run?.verdict ?? "skipped",
@@ -115,6 +138,14 @@ export function buildCiErrorGateReport(input: {
   return {
     schemaVersion: 1,
     id: input.id ?? `commit_check_error_${Date.now()}`,
+    commitSha: process.env.GITHUB_SHA ?? "local",
+    projectId: undefined,
+    scenarioVersion: "not_available",
+    judgePolicyVersion: "not_available",
+    executionMode: "not_available",
+    llmStatus: "not_available",
+    fallbackUsed: false,
+    autoRepairCount: 0,
     runId: undefined,
     selectedScenarioId: undefined,
     planSource: "not_available",
@@ -153,6 +184,11 @@ export function buildCiAnnotationMarkdown(gate: Pick<CiGateReport, "verdict" | "
     `- verdict: ${gate.verdict}`,
     `- releaseJudge: ${gate.releaseJudge}`,
     `- scenario: ${gate.selectedScenarioId ?? "not selected"}`,
+    "commitSha" in gate && gate.commitSha ? `- commit: ${gate.commitSha}` : undefined,
+    "projectId" in gate && gate.projectId ? `- project: ${gate.projectId}` : undefined,
+    "judgePolicyVersion" in gate && gate.judgePolicyVersion ? `- judgePolicy: ${gate.judgePolicyVersion}` : undefined,
+    "executionMode" in gate && gate.executionMode ? `- executionMode: ${gate.executionMode}` : undefined,
+    "fallbackUsed" in gate ? `- fallback: ${String(gate.fallbackUsed)}` : undefined,
     `- exitCode: ${gate.exitCode} (${gate.exitMeaning})`,
     gate.policyReasons?.length ? `- policyReasons: ${gate.policyReasons.join(", ")}` : undefined,
     gate.quarantined ? "- quarantine: true" : undefined,

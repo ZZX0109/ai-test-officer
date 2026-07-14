@@ -1,3 +1,5 @@
+import type { ArtifactV2, CommandSpec, GateStatus, HumanDecision, JudgeRecommendation, MachineGate, ProjectManifest, ResourceBudget } from "@ai-test-officer/contracts";
+
 export type ProviderKind = "openai-compatible" | "openai" | "anthropic" | "openrouter" | "custom";
 
 export interface CredentialInput {
@@ -93,6 +95,13 @@ export type ProjectRuntimeFailureReason =
   | "backend_unreachable"
   | "credential_missing"
   | "cleanup_failed"
+  | "command_not_found"
+  | "dependency_missing"
+  | "port_conflict"
+  | "early_exit"
+  | "permission_denied"
+  | "budget_exceeded"
+  | "cancelled"
   | "unknown";
 
 export interface ProjectLoginConfig {
@@ -106,6 +115,7 @@ export interface ProjectLoginConfig {
 export interface ProjectProcessConfig {
   name: string;
   command: string;
+  commandSpec?: CommandSpec;
   healthCheckUrl?: string;
   required?: boolean;
 }
@@ -116,19 +126,36 @@ export interface ProjectConfig {
   projectPath: string;
   allowExternalProjectPath?: boolean;
   installCommand?: string;
+  installCommandSpec?: CommandSpec;
   startCommand?: string;
+  startCommandSpec?: CommandSpec;
   processes?: ProjectProcessConfig[];
   healthCheckUrl?: string;
   frontendUrl: string;
   backendUrl?: string;
+  testCommand?: string;
+  allowedOrigins?: string[];
   login?: ProjectLoginConfig;
   env?: Record<string, string>;
   cleanupCommand?: string;
+  cleanupCommandSpec?: CommandSpec;
   timeoutMs?: number;
   externalSmokeProfile?: ExternalSmokeProfile;
+  manifest?: ProjectManifest;
+  budget?: ResourceBudget;
   createdAt: string;
   updatedAt: string;
 }
+
+export type TargetProjectConfig = Pick<
+  ProjectConfig,
+  "id" | "projectPath" | "frontendUrl" | "backendUrl" | "startCommand" | "cleanupCommand" | "healthCheckUrl" | "testCommand" | "allowedOrigins"
+> & {
+  projectId: string;
+  rootDir: string;
+  appUrl: string;
+  apiUrl?: string;
+};
 
 export interface ProjectDetectionResult {
   projectPath: string;
@@ -422,7 +449,34 @@ export interface RunRequest {
   sourceContexts?: SourceReadEnvelope[];
   impactAnalysis?: ImpactAnalysis;
   executablePlan?: ExecutableTestPlan;
+  maxAutoRepairs?: number;
   permissionProfile: PermissionProfile;
+  signal?: AbortSignal;
+}
+
+export interface RepairAttempt {
+  attempt: number;
+  kind: "selector_recovery" | "wait_adjustment" | "evidence_completion" | "execution_retry";
+  status: "started" | "completed" | "failed";
+  reason: string;
+  evidenceRefs: string[];
+}
+
+export interface RepairProposal {
+  id: string;
+  kind:
+    | "selector_recovery"
+    | "wait_strategy_adjustment"
+    | "evidence_completion"
+    | "environment_diagnosis"
+    | "bounded_retry";
+  status: "proposed" | "approved" | "rejected" | "applied";
+  originalFailure: string;
+  proposedChange: string;
+  safeguards: string[];
+  beforeEvidenceRefs: string[];
+  afterEvidenceRefs: string[];
+  outcome: "pending" | "passed" | "failed" | "blocked";
 }
 
 export interface DiscoveryScanSuggestion {
@@ -527,6 +581,14 @@ export interface VisualRunResult {
   reflectionNote: string;
   conflictPacket: ConflictPacket;
   failureAttributions: FailureAttribution[];
+  attempts?: RunAttempt[];
+  artifactsV2?: ArtifactV2[];
+  gateStatus?: GateStatus;
+  machineGate?: MachineGate;
+  judgeRecommendation?: JudgeRecommendation;
+  humanDecision?: HumanDecision;
+  finalStatus?: GateStatus;
+  repairAttempts?: RepairAttempt[];
   runtimeStatus?: ProjectRuntimeStatus;
   judgeReport: LayeredJudgeReport;
   reportFile: string;
@@ -556,11 +618,28 @@ export interface EvidenceItem {
   type: EvidenceType;
   title: string;
   timestamp: string;
+  scenarioId?: string;
+  attemptId?: string;
+  attempt?: number;
+  sequence?: number;
+  artifactIds?: string[];
   pathId?: string;
   stepId?: string;
   url?: string;
   file?: string;
   payload: Record<string, unknown>;
+}
+
+export interface RunAttempt {
+  id: string;
+  runId: string;
+  scenarioId: string;
+  attempt: number;
+  startedAt: string;
+  finishedAt?: string;
+  status: "running" | "passed" | "failed" | "blocked" | "cancelled";
+  retryReason?: string;
+  artifactIds: string[];
 }
 
 export type LoopType =
@@ -682,7 +761,8 @@ export interface ArtifactIntegrityItem {
   artifactUri: string;
   kind: EvidenceType | "report" | "run_bundle" | "unknown";
   evidenceId?: string;
-  status: "present" | "missing" | "unreadable" | "path_escape" | "self_reference";
+  status: "present" | "missing" | "unreadable" | "path_escape" | "self_reference" | "hash_mismatch";
+  origin?: ArtifactV2["origin"];
   sizeBytes?: number;
   sha256?: string;
   reason?: string;
@@ -700,9 +780,18 @@ export interface ArtifactIntegrityReport {
     unreadable: number;
     pathEscapes: number;
     selfReferences: number;
+    hashMismatches: number;
     hashed: number;
   };
   items: ArtifactIntegrityItem[];
+}
+
+export interface ArtifactGateAssessment {
+  status: GateStatus;
+  eligibleArtifactIds: string[];
+  rejectedArtifactIds: string[];
+  missingKinds: string[];
+  reasons: string[];
 }
 
 export interface RunBundle {
@@ -716,6 +805,8 @@ export interface RunBundle {
   executablePlan?: ExecutableTestPlan;
   result: Omit<VisualRunResult, "evidence" | "loopEvents" | "oracles" | "riskCoverageMatrix">;
   evidence: EvidenceItem[];
+  artifactsV2?: ArtifactV2[];
+  attempts?: RunAttempt[];
   loopEvents: LoopEvent[];
   oracles: OracleDefinition[];
   riskCoverageMatrix: RiskCoverageItem[];

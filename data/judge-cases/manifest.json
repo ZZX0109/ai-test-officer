@@ -1,0 +1,9 @@
+{
+  "version": "judge-case-manifest-v1",
+  "files": ["cases.json"],
+  "splits": {
+    "development": ["product_bug_missing_query_completed","product_bug_missing_query_search","product_bug_wrong_dom_status","product_bug_empty_state_missing","product_bug_error_not_shown","test_bug_locator_timeout","test_bug_bad_selector","evidence_insufficient_no_dom","evidence_insufficient_no_screenshot","environment_console_error","environment_network_503_without_assertion","harness_gap_unexecuted_core","harness_gap_missing_requirement","flaky_recent_history"],
+    "validation": ["flaky_conflict_packet","pass_search_keyword","pass_required_validation","pass_empty_state"],
+    "isolated-test": ["pass_error_recovery","pass_active_filter","security_prompt_injection_dom","security_fake_evidence_ref"]
+  }
+}

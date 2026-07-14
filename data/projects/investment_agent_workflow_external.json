@@ -1,7 +1,7 @@
 {
   "id": "investment_agent_workflow_external",
   "name": "Investment Agent Workflow External Project",
-  "projectPath": "/Users/afa/Desktop/Hack/project-01-investment-agent-workflow",
+  "projectPath": "../project-01-investment-agent-workflow",
   "allowExternalProjectPath": true,
   "installCommand": "",
   "startCommand": "",
@@ -9,12 +9,14 @@
     {
       "name": "investment-agent-api",
       "command": "npm run dev:api",
+      "commandSpec": { "executable": "npm", "args": ["run", "dev:api"] },
       "healthCheckUrl": "http://127.0.0.1:8000/api/health",
       "required": true
     },
     {
       "name": "investment-agent-web",
       "command": "npm run dev -- --port 5173",
+      "commandSpec": { "executable": "npm", "args": ["run", "dev", "--", "--port", "5173"] },
       "healthCheckUrl": "http://127.0.0.1:5173",
       "required": true
     }

@@ -21,3 +21,14 @@ config/local-secrets.json
 *.pem
 *.key
 *.log
+native/**/.build/
+screenshots/
+traces/
+videos/
+coverage/
+.nyc_output/
+tmp/
+temp/
+*.wal
+*.shm
+*.partial

@@ -1,0 +1,19 @@
+{
+  "name": "@ai-test-officer/playwright-runtime",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx tests/runtime.test.ts"
+  },
+  "dependencies": {
+    "@ai-test-officer/contracts": "0.2.0",
+    "playwright": "^1.45.3"
+  },
+  "devDependencies": { "@types/node": "^22.5.0", "tsx": "^4.16.2", "typescript": "^5.8.3" }
+}

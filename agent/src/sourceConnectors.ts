@@ -468,6 +468,34 @@ function shouldRetryStatus(status: number) {
   return status === 429 || status === 502 || status === 503 || status === 504;
 }
 
+async function readResponseTextLimited(response: Response) {
+  const maxBytes = Number(process.env.CONNECTOR_MAX_RESPONSE_BYTES ?? 2 * 1024 * 1024);
+  const declared = Number(response.headers.get("content-length") ?? 0);
+  if (declared > maxBytes) throw new Error(`connector_response_too_large:${declared}`);
+  const contentType = (response.headers.get("content-type") ?? "text/plain").toLowerCase();
+  const allowed = (process.env.CONNECTOR_ALLOWED_CONTENT_TYPES ?? "text/,application/json,application/xml,application/yaml,application/octet-stream")
+    .split(",").map((item) => item.trim()).filter(Boolean);
+  if (!allowed.some((prefix) => contentType.startsWith(prefix))) throw new Error(`connector_content_type_rejected:${contentType}`);
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      await reader.cancel("response byte limit exceeded");
+      throw new Error(`connector_response_too_large:${received}`);
+    }
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder().decode(merged);
+}
+
 async function delay(ms: number) {
   if (ms <= 0) return;
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -562,7 +590,7 @@ async function readTextUrl(inputUrl: string | undefined, label: string) {
         readMeta
       };
     }
-    const raw = await response.text();
+    const raw = await readResponseTextLimited(response);
     const text = summarizeRemoteText(raw);
     const read = {
       text,

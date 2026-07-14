@@ -5,6 +5,7 @@
   "allowExternalProjectPath": false,
   "installCommand": "",
   "startCommand": "npm run dev",
+  "startCommandSpec": { "executable": "npm", "args": ["run", "dev"] },
   "healthCheckUrl": "http://127.0.0.1:6173",
   "frontendUrl": "http://localhost:6173",
   "backendUrl": "http://127.0.0.1:6172/api/health",

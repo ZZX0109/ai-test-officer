@@ -1,0 +1,14 @@
+{
+  "version": "judge-repeat-policy-v1",
+  "caseCount": 22,
+  "caseSelection": "manifest-all-cases",
+  "repetitionsPerCase": 3,
+  "maxTokensPerCall": 3200,
+  "batchTokenBudget": 211200,
+  "estimatedOutputCostPer1kUsd": 0.02,
+  "estimatedInputCostPer1kUsd": 0.005,
+  "maxEstimatedCostUsd": 25,
+  "onBudgetExceeded": "budget_exhausted",
+  "enabledByDefault": false,
+  "reason": "普通测试不得隐式消耗 LLM 额度；显式运行 judge:repeat 才执行。"
+}

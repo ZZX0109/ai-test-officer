@@ -47,6 +47,31 @@ export interface RunResult {
   scenarioFingerprint?: string;
   verdict: "continue" | "hold_for_review" | "stop_and_fix";
   summary: string;
+  gateStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
+  finalStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
+  attempts?: Array<{
+    id: string;
+    attempt: number;
+    status: "running" | "passed" | "failed" | "blocked" | "cancelled";
+    startedAt: string;
+    finishedAt?: string;
+    retryReason?: string;
+    artifactIds: string[];
+  }>;
+  artifactsV2?: Array<{
+    id: string;
+    schemaVersion: "2.0";
+    runId: string;
+    scenarioId: string;
+    stepId?: string;
+    attemptId: string;
+    attempt: number;
+    kind: string;
+    origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "legacy-unverified";
+    storageUri: string;
+    replicaUris: string[];
+    integrity: { sha256: string; sizeBytes: number; mediaType: string; capturedAt: string; collector: { name: string; version: string } };
+  }>;
   steps: Array<{
     stepId: string;
     title: string;
@@ -760,7 +785,8 @@ export interface ArtifactIntegrityItem {
   artifactUri: string;
   kind: string;
   evidenceId?: string;
-  status: "present" | "missing" | "unreadable" | "path_escape" | "self_reference";
+  status: "present" | "missing" | "unreadable" | "path_escape" | "self_reference" | "hash_mismatch";
+  origin?: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "legacy-unverified";
   sizeBytes?: number;
   sha256?: string;
   reason?: string;
@@ -778,6 +804,7 @@ export interface ArtifactIntegrityReport {
     unreadable: number;
     pathEscapes: number;
     selfReferences: number;
+    hashMismatches: number;
     hashed: number;
   };
   items: ArtifactIntegrityItem[];
@@ -842,6 +869,23 @@ export interface StorageStatus {
   retentionManifest?: Record<string, unknown>;
   lastRetentionResult?: Record<string, unknown>;
   activeLocks: Array<{ projectId: string; status: string; startedAt?: string }>;
+}
+
+export interface BenchmarkSummary {
+  version: string;
+  status: string;
+  caseCount: number;
+  projectCount: number;
+  fixtureProjects: string[];
+  byProject: Record<string, number>;
+  categories: string[];
+  runtimeMetrics: {
+    status: string;
+    requirementCoverage: number | null;
+    evidenceCompleteness: number | null;
+    falseReleaseRate: number | null;
+    falseBlockRate: number | null;
+  };
 }
 
 export interface StorageArchive {

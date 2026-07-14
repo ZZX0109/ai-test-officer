@@ -2,7 +2,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const ports = [4317, 6172, 6173, 6174];
+const ports = [
+  Number(process.env.PORT ?? 4317),
+  Number(process.env.APP_API_PORT ?? 6172),
+  Number(process.env.APP_WEB_PORT ?? 6173),
+  Number(process.env.WORKBENCH_PORT ?? 6174)
+];
 
 async function pidsForPort(port) {
   try {

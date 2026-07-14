@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "1.0",
+  "projectId": "local_demo_app",
+  "workspaceRoot": "app-under-test",
+  "commands": {
+    "start": {
+      "executable": "npm",
+      "args": ["run", "dev"],
+      "timeoutMs": 300000
+    },
+    "test": {
+      "executable": "npm",
+      "args": ["test"],
+      "timeoutMs": 300000
+    }
+  },
+  "commandAllowlist": ["npm", "node"],
+  "ports": [
+    { "name": "app-api", "env": "APP_API_PORT", "purpose": "backend" },
+    { "name": "app-web", "env": "APP_WEB_PORT", "purpose": "frontend" }
+  ],
+  "healthCheck": {
+    "path": "/",
+    "timeoutMs": 25000
+  },
+  "environmentAllowlist": ["VITE_TASK_FILTER_FIXTURE_BUG", "VITE_APP_API_URL"],
+  "network": {
+    "mode": "allow-target",
+    "allowedHosts": ["127.0.0.1", "localhost"]
+  },
+  "fixtures": [],
+  "capabilities": {
+    "browser": true,
+    "desktop": false,
+    "allowedBundleIds": []
+  },
+  "execution": {
+    "mode": "trusted-local",
+    "engine": "docker"
+  },
+  "budget": {
+    "runTimeoutMs": 1200000,
+    "prepareTimeoutMs": 300000,
+    "scenarioTimeoutMs": 300000,
+    "stepTimeoutMs": 45000,
+    "maxSteps": 50,
+    "maxAttempts": 2,
+    "maxScreenshots": 100,
+    "maxVideoBytes": 524288000,
+    "maxLogBytes": 52428800,
+    "maxArtifactBytes": 1073741824,
+    "maxConcurrency": 2
+  }
+}

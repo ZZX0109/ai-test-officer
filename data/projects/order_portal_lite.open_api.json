@@ -1,0 +1,5 @@
+{
+  "openapi": "3.0.0",
+  "info": {"title": "Order Portal Lite", "version": "0.1.0"},
+  "paths": {"/api/orders": {"get": {"operationId": "listOrders"}}, "/api/orders/{id}/approve": {"post": {"operationId": "approveOrder"}}}
+}

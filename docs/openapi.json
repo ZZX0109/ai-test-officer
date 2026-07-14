@@ -1,0 +1,457 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AI Test Officer API",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "Run": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "gateStatus": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "version"
+        ]
+      },
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            }
+          },
+          "requestId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "ArtifactV2": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "2.0"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scenarioId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "stepId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "screenshot",
+              "dom",
+              "network",
+              "console",
+              "trace",
+              "video",
+              "download",
+              "operation-log",
+              "report",
+              "attachment"
+            ]
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "runtime-captured",
+              "fixture",
+              "simulated",
+              "user-uploaded",
+              "legacy-unverified"
+            ]
+          },
+          "storageUri": {
+            "type": "string",
+            "minLength": 1
+          },
+          "replicaUris": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default": []
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "monotonicOffsetMs": {
+            "type": "number",
+            "minimum": 0
+          },
+          "integrity": {
+            "type": "object",
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "sizeBytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "mediaType": {
+                "type": "string",
+                "minLength": 1
+              },
+              "capturedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "collector": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "name",
+                  "version"
+                ]
+              }
+            },
+            "required": [
+              "sha256",
+              "sizeBytes",
+              "mediaType",
+              "capturedAt",
+              "collector"
+            ]
+          },
+          "fixtureManifestSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "id",
+          "runId",
+          "scenarioId",
+          "attemptId",
+          "attempt",
+          "kind",
+          "origin",
+          "storageUri",
+          "sequence",
+          "monotonicOffsetMs",
+          "integrity"
+        ]
+      },
+      "RunEvent": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "run_created",
+              "plan_generated",
+              "plan_approved",
+              "permission_granted",
+              "run_queued",
+              "run_preparing",
+              "run_started",
+              "run_paused",
+              "run_resumed",
+              "evidence_collecting",
+              "run_judging",
+              "human_review_requested",
+              "decision_overridden",
+              "run_completed",
+              "run_failed",
+              "run_blocked",
+              "run_cancelled"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "actor": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            },
+            "default": {}
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "id",
+          "runId",
+          "type",
+          "version",
+          "createdAt",
+          "actor",
+          "idempotencyKey"
+        ]
+      },
+      "CreateRunRequest": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "organizationId": {
+            "type": "string",
+            "minLength": 1,
+            "default": "local"
+          },
+          "projectId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actor": {
+            "type": "string",
+            "minLength": 1,
+            "default": "api-user"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "input": {
+            "type": "object",
+            "properties": {
+              "appUrl": {
+                "type": "string",
+                "format": "uri"
+              },
+              "scenarioId": {
+                "type": "string"
+              },
+              "requirement": {
+                "type": "string"
+              },
+              "diff": {
+                "type": "string"
+              },
+              "permissionProfile": {
+                "type": "object",
+                "properties": {
+                  "observe": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "browserControl": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "workspaceControl": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "ideTerminalControl": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "systemControl": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "default": {}
+              },
+              "executionMode": {
+                "type": "string",
+                "enum": [
+                  "oci",
+                  "trusted-local"
+                ],
+                "default": "oci"
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "browser",
+                    "desktop"
+                  ]
+                },
+                "default": [
+                  "browser"
+                ]
+              }
+            }
+          }
+        },
+        "required": [
+          "idempotencyKey",
+          "input"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/v1/runs": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "run": {
+                      "$ref": "#/components/schemas/Run"
+                    }
+                  },
+                  "required": [
+                    "run"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "run": {
+                      "$ref": "#/components/schemas/Run"
+                    }
+                  },
+                  "required": [
+                    "run"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

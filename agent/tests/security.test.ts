@@ -9,7 +9,7 @@ import {
 
 type EnvPatch = Record<string, string | undefined>;
 
-function withEnv<T>(patch: EnvPatch, fn: () => T): T {
+async function withEnv<T>(patch: EnvPatch, fn: () => T | Promise<T>): Promise<T> {
   const previous = new Map<string, string | undefined>();
   for (const key of Object.keys(patch)) {
     previous.set(key, process.env[key]);
@@ -20,7 +20,7 @@ function withEnv<T>(patch: EnvPatch, fn: () => T): T {
     }
   }
   try {
-    return fn();
+    return await fn();
   } finally {
     for (const [key, value] of previous) {
       if (value === undefined) {
@@ -67,15 +67,15 @@ function mockRes() {
   } as Response & { statusCode: number; body: unknown };
 }
 
-export function testSecurityBoundaries() {
-  withEnv({ NODE_ENV: "production", AGENT_API_TOKEN: "dev-local-token" }, () => {
+export async function testSecurityBoundaries() {
+  await withEnv({ NODE_ENV: "production", AGENT_API_TOKEN: "dev-local-token" }, () => {
     assert.throws(() => assertSecurityConfig("0.0.0.0"), /must not use dev-local-token/);
   });
 
-  withEnv({ NODE_ENV: "development", AGENT_API_TOKEN: undefined, ALLOW_QUERY_TOKEN_AUTH: undefined }, () => {
+  await withEnv({ NODE_ENV: "development", AGENT_API_TOKEN: undefined, ALLOW_QUERY_TOKEN_AUTH: undefined }, async () => {
     const res = mockRes();
     let nextCalled = false;
-    requireApiToken(mockReq({ query: { token: "dev-local-token" } }), res, (() => {
+    await requireApiToken(mockReq({ query: { token: "dev-local-token" } }), res, (() => {
       nextCalled = true;
     }) as NextFunction);
     assert.equal(nextCalled, false);
@@ -83,10 +83,10 @@ export function testSecurityBoundaries() {
     assert.equal(securitySummary().queryTokenAuth, "disabled");
   });
 
-  withEnv({ NODE_ENV: "development", AGENT_API_TOKEN: undefined, ALLOW_QUERY_TOKEN_AUTH: "1" }, () => {
+  await withEnv({ NODE_ENV: "development", AGENT_API_TOKEN: undefined, ALLOW_QUERY_TOKEN_AUTH: "1" }, async () => {
     const res = mockRes();
     let nextCalled = false;
-    requireApiToken(mockReq({ query: { token: "dev-local-token" } }), res, (() => {
+    await requireApiToken(mockReq({ query: { token: "dev-local-token" } }), res, (() => {
       nextCalled = true;
     }) as NextFunction);
     assert.equal(nextCalled, true);
@@ -94,10 +94,10 @@ export function testSecurityBoundaries() {
     assert.equal(securitySummary().queryTokenAuth, "development-explicitly-enabled");
   });
 
-  withEnv({ NODE_ENV: "production", AGENT_API_TOKEN: "real-token" }, () => {
+  await withEnv({ NODE_ENV: "production", AGENT_API_TOKEN: "real-token" }, async () => {
     const res = mockRes();
     let nextCalled = false;
-    requireArtifactAccess(mockReq({ path: "/artifacts/run.json", remoteAddress: "127.0.0.1" }), res, (() => {
+    await requireArtifactAccess(mockReq({ path: "/artifacts/run.json", remoteAddress: "127.0.0.1" }), res, (() => {
       nextCalled = true;
     }) as NextFunction);
     assert.equal(nextCalled, false);
@@ -105,10 +105,10 @@ export function testSecurityBoundaries() {
     assert.equal(securitySummary().artifactAccess, "token-required");
   });
 
-  withEnv({ NODE_ENV: "development", AGENT_API_TOKEN: undefined }, () => {
+  await withEnv({ NODE_ENV: "development", AGENT_API_TOKEN: undefined }, async () => {
     const res = mockRes();
     let nextCalled = false;
-    requireArtifactAccess(mockReq({ path: "/artifacts/run.json", remoteAddress: "127.0.0.1" }), res, (() => {
+    await requireArtifactAccess(mockReq({ path: "/artifacts/run.json", remoteAddress: "127.0.0.1" }), res, (() => {
       nextCalled = true;
     }) as NextFunction);
     assert.equal(nextCalled, true);

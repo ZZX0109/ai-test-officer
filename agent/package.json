@@ -1,5 +1,5 @@
 {
-  "name": "agent",
+  "name": "@ai-test-officer/agent",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -16,19 +16,36 @@
     "requirement-acceptance": "tsx src/requirementAcceptanceCli.ts",
     "patrol": "tsx src/patrolCli.ts",
     "demo:verify": "tsx src/demoVerifier.ts",
-    "judge:eval": "tsx src/judgeEval.ts"
+    "judge:eval": "tsx src/judgeEval.ts",
+    "judge:repeat": "tsx src/judgeRepeatEval.ts",
+    "worker": "tsx src/workerCli.ts",
+    "migrate": "node-pg-migrate -m migrations up",
+    "contracts:openapi": "tsx src/generateOpenApi.ts",
+    "benchmark:run": "tsx src/benchmarkRunner.ts && tsx src/benchmarkCli.ts"
   },
   "dependencies": {
+    "@ai-test-officer/contracts": "0.2.0",
+    "@ai-test-officer/desktop-runtime": "0.2.0",
+    "@ai-test-officer/execution-worker": "0.2.0",
+    "@ai-test-officer/playwright-runtime": "0.2.0",
+    "@asteasolutions/zod-to-openapi": "^7.3.4",
+    "@aws-sdk/client-s3": "^3.1086.0",
+    "bullmq": "^5.80.2",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "jose": "^6.2.3",
+    "pg": "^8.22.0",
     "playwright": "^1.45.3",
+    "typescript": "^5.9.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^22.5.0",
-    "tsx": "^4.16.2",
-    "typescript": "^5.8.3"
+    "@types/pg": "^8.20.0",
+    "node-pg-migrate": "^8.0.4",
+    "openapi-typescript": "^7.13.0",
+    "tsx": "^4.16.2"
   }
 }

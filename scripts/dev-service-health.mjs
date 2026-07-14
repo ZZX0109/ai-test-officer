@@ -1,10 +1,17 @@
 import net from "node:net";
 
+const configured = (name, fallback) => Number(process.env[name] ?? fallback);
+const ports = {
+  agent: configured("PORT", 4317),
+  appApi: configured("APP_API_PORT", 6172),
+  appWeb: configured("APP_WEB_PORT", 6173),
+  workbench: configured("WORKBENCH_PORT", 6174)
+};
 const services = [
-  { id: "agent", port: 4317, url: "http://127.0.0.1:4317/api/health" },
-  { id: "appApi", port: 6172, url: "http://127.0.0.1:6172/api/health" },
-  { id: "appWeb", port: 6173, url: "http://127.0.0.1:6173" },
-  { id: "workbench", port: 6174, url: "http://127.0.0.1:6174" }
+  { id: "agent", port: ports.agent, url: process.env.AGENT_HEALTH_URL ?? `http://127.0.0.1:${ports.agent}/api/health` },
+  { id: "appApi", port: ports.appApi, url: process.env.APP_API_HEALTH_URL ?? `http://127.0.0.1:${ports.appApi}/api/health` },
+  { id: "appWeb", port: ports.appWeb, url: process.env.APP_URL ?? `http://127.0.0.1:${ports.appWeb}` },
+  { id: "workbench", port: ports.workbench, url: process.env.WORKBENCH_URL ?? `http://127.0.0.1:${ports.workbench}` }
 ];
 
 function isListening(port) {

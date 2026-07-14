@@ -22,6 +22,9 @@ interface ArtifactReference {
   artifactUri: string;
   kind: ArtifactIntegrityItem["kind"];
   evidenceId?: string;
+  expectedSha256?: string;
+  expectedSizeBytes?: number;
+  origin?: ArtifactIntegrityItem["origin"];
 }
 
 interface ArtifactIntegrityInput {
@@ -95,6 +98,15 @@ function collectPayloadArtifactUris(value: unknown, references: Map<string, Arti
 
 function collectArtifactReferences(result: VisualRunResult) {
   const references = new Map<string, ArtifactReference>();
+  for (const artifact of result.artifactsV2 ?? []) {
+    addReference(references, {
+      artifactUri: artifact.storageUri,
+      kind: artifact.kind === "operation-log" || artifact.kind === "download" || artifact.kind === "attachment" ? "unknown" : artifact.kind,
+      expectedSha256: artifact.integrity.sha256,
+      expectedSizeBytes: artifact.integrity.sizeBytes,
+      origin: artifact.origin
+    });
+  }
   addReference(references, { artifactUri: result.reportFile, kind: "report" });
   addReference(references, { artifactUri: result.markdownReportFile ?? "", kind: "report" });
   addReference(references, { artifactUri: result.htmlReportFile ?? "", kind: "report" });
@@ -123,6 +135,7 @@ async function checkReference(reference: ArtifactReference, reportsDir: string):
       artifactUri: reference.artifactUri,
       kind: reference.kind,
       evidenceId: reference.evidenceId,
+      origin: reference.origin,
       status: "path_escape",
       reason: resolved.reason
     };
@@ -134,20 +147,39 @@ async function checkReference(reference: ArtifactReference, reportsDir: string):
       artifactUri: reference.artifactUri,
       kind: reference.kind,
       evidenceId: reference.evidenceId,
+      origin: reference.origin,
       status: "self_reference",
       reason: "Excluded from hashing because run metadata can be rewritten after integrity generation."
     };
   }
   try {
     const fileStat = await stat(resolved.filePath);
+    const actualSha256 = await sha256File(resolved.filePath);
+    if ((reference.expectedSha256 && reference.expectedSha256 !== actualSha256) ||
+        (reference.expectedSizeBytes !== undefined && reference.expectedSizeBytes !== fileStat.size)) {
+      return {
+        id,
+        artifactUri: reference.artifactUri,
+        kind: reference.kind,
+        evidenceId: reference.evidenceId,
+        origin: reference.origin,
+        status: "hash_mismatch",
+        sizeBytes: fileStat.size,
+        sha256: actualSha256,
+        reason: reference.expectedSizeBytes !== undefined && reference.expectedSizeBytes !== fileStat.size
+          ? "artifact_size_mismatch"
+          : "artifact_sha256_mismatch"
+      };
+    }
     return {
       id,
       artifactUri: reference.artifactUri,
       kind: reference.kind,
       evidenceId: reference.evidenceId,
+      origin: reference.origin,
       status: "present",
       sizeBytes: fileStat.size,
-      sha256: await sha256File(resolved.filePath)
+      sha256: actualSha256
     };
   } catch (error) {
     const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
@@ -156,6 +188,7 @@ async function checkReference(reference: ArtifactReference, reportsDir: string):
       artifactUri: reference.artifactUri,
       kind: reference.kind,
       evidenceId: reference.evidenceId,
+      origin: reference.origin,
       status: code === "ENOENT" ? "missing" : "unreadable",
       reason: code || "artifact_unreadable"
     };
@@ -170,6 +203,7 @@ function summarize(items: ArtifactIntegrityItem[]): ArtifactIntegrityReport["sum
     unreadable: items.filter((item) => item.status === "unreadable").length,
     pathEscapes: items.filter((item) => item.status === "path_escape").length,
     selfReferences: items.filter((item) => item.status === "self_reference").length,
+    hashMismatches: items.filter((item) => item.status === "hash_mismatch").length,
     hashed: items.filter((item) => item.sha256).length
   };
 }

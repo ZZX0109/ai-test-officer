@@ -10,7 +10,7 @@ import type {
 
 const judgePolicyVersion = "judge-policy-v2-layered-trust";
 
-interface LlmJudgeInput {
+export interface LlmJudgeInput {
   credentialId?: string;
   baseline: LayeredJudgeReport;
   plan?: GrayPlan;
@@ -21,6 +21,7 @@ interface LlmJudgeInput {
     "steps" | "assertions" | "network" | "console" | "riskCoverageMatrix" | "aggregatedVerdict" | "conflictPacket" | "verdict"
   >;
   evidence: EvidenceItem[];
+  maxTokens?: number;
 }
 
 async function resolveCredential(id?: string) {
@@ -129,7 +130,7 @@ DETERMINISTIC BASELINE
 ${JSON.stringify(input.baseline)}`;
 }
 
-async function callOpenAICompatible(record: CredentialRecord, apiKey: string, prompt: string) {
+async function callOpenAICompatible(record: CredentialRecord, apiKey: string, prompt: string, maxTokens: number) {
   const response = await fetch(`${record.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -140,6 +141,7 @@ async function callOpenAICompatible(record: CredentialRecord, apiKey: string, pr
       model: record.model,
       temperature: 0,
       response_format: { type: "json_object" },
+      max_tokens: maxTokens,
       messages: [
         {
           role: "system",
@@ -154,7 +156,7 @@ async function callOpenAICompatible(record: CredentialRecord, apiKey: string, pr
   return data.choices?.[0]?.message?.content ?? "";
 }
 
-async function callAnthropic(record: CredentialRecord, apiKey: string, prompt: string) {
+async function callAnthropic(record: CredentialRecord, apiKey: string, prompt: string, maxTokens: number) {
   const response = await fetch(`${record.baseUrl}/messages`, {
     method: "POST",
     headers: {
@@ -164,7 +166,7 @@ async function callAnthropic(record: CredentialRecord, apiKey: string, prompt: s
     },
     body: JSON.stringify({
       model: record.model,
-      max_tokens: 3200,
+      max_tokens: maxTokens,
       temperature: 0,
       messages: [{ role: "user", content: prompt }]
     })
@@ -216,6 +218,33 @@ function validateReport(candidate: LayeredJudgeReport, evidence: EvidenceItem[])
   return candidate;
 }
 
+function reconcileWithDeterministic(candidate: LayeredJudgeReport, baseline: LayeredJudgeReport): LayeredJudgeReport {
+  const baselineVerdict = baseline.releaseJudge.verdict;
+  const candidateVerdict = candidate.releaseJudge.verdict;
+  if (baselineVerdict === candidateVerdict) return candidate;
+  const finalVerdict = baselineVerdict === "fail" ? "fail" : "needs_review";
+  const deterministicRefs = baseline.releaseJudge.findings.flatMap((finding) => finding.evidenceRefs);
+  return {
+    ...candidate,
+    releaseJudge: {
+      ...candidate.releaseJudge,
+      verdict: finalVerdict,
+      summary: `${candidate.releaseJudge.summary} Deterministic and LLM judges disagreed; deterministic policy prevents an automatic upgrade.`,
+      findings: [
+        ...candidate.releaseJudge.findings,
+        {
+          id: "deterministic_llm_conflict",
+          severity: baselineVerdict === "fail" ? "high" : "medium",
+          failureClass: baselineVerdict === "fail" ? baseline.releaseJudge.findings.find((finding) => finding.failureClass)?.failureClass : "insufficient_evidence",
+          title: "Deterministic 与 LLM Judge 结论冲突",
+          reasoning: `deterministic=${baselineVerdict}; llm=${candidateVerdict}; final=${finalVerdict}`,
+          evidenceRefs: Array.from(new Set(deterministicRefs))
+        }
+      ]
+    }
+  };
+}
+
 export async function buildLlmJudgeReport(input: LlmJudgeInput) {
   const credential = await resolveCredential(input.credentialId);
   if (!credential) return withNoCredentialStatus(input.baseline);
@@ -225,9 +254,9 @@ export async function buildLlmJudgeReport(input: LlmJudgeInput) {
     const prompt = buildPrompt(input);
     const raw =
       credential.provider === "anthropic"
-        ? await callAnthropic(credential, apiKey, prompt)
-        : await callOpenAICompatible(credential, apiKey, prompt);
-    return validateReport(extractJson(raw), input.evidence);
+        ? await callAnthropic(credential, apiKey, prompt, input.maxTokens ?? 3200)
+        : await callOpenAICompatible(credential, apiKey, prompt, input.maxTokens ?? 3200);
+    return reconcileWithDeterministic(validateReport(extractJson(raw), input.evidence), input.baseline);
   } catch (error) {
     return withFallbackStatus(input.baseline, error instanceof Error ? error.message : String(error));
   }

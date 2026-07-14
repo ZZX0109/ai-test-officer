@@ -16,6 +16,8 @@ import { runCommitCheck } from "./commitCheckOrchestrator.js";
 import { buildRunBundleArchive } from "./runBundleArchive.js";
 import { redactText } from "./redaction.js";
 import type { RunBundle } from "./types.js";
+import { githubCheckIdempotencyKey, publishGithubCheck } from "./githubChecks.js";
+import { createHash } from "node:crypto";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.resolve(process.env.REPORTS_DIR ?? path.join(rootDir, "reports"));
@@ -110,6 +112,24 @@ async function writeCiReports(check: Awaited<ReturnType<typeof runCommitCheck>>,
   await writeFile(path.join(reportsDir, "pr-annotation.md"), annotation);
   await writeFile(path.join(reportsDir, "pr-annotations.json"), JSON.stringify(annotations, null, 2));
   await writeFile(path.join(reportsDir, "artifact-upload-manifest.json"), JSON.stringify(uploadManifest, null, 2));
+  if (process.env.GITHUB_TOKEN && process.env.GITHUB_REPOSITORY && process.env.GITHUB_SHA && process.env.PR_IS_FORK !== "true") {
+    const manifestHash = await readFile(path.join(rootDir, "ai-test-officer.project.json"), "utf8")
+      .then((value) => createHash("sha256").update(value).digest("hex"))
+      .catch(() => "manifest-unavailable");
+    const agentVersion = process.env.AGENT_VERSION ?? "0.2.0";
+    await publishGithubCheck({
+      token: process.env.GITHUB_TOKEN,
+      repository: process.env.GITHUB_REPOSITORY,
+      commitSha: process.env.GITHUB_SHA,
+      gateStatus: check.run?.gateStatus,
+      exitCode: enrichedGate.exitCode,
+      title: `AI Test Officer: ${check.run?.gateStatus ?? enrichedGate.exitMeaning}`,
+      summary: annotation,
+      detailsUrl: process.env.GITHUB_SERVER_URL && process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}` : undefined,
+      annotations,
+      externalId: githubCheckIdempotencyKey({ commitSha: process.env.GITHUB_SHA, manifestHash, agentVersion })
+    });
+  }
   return enrichedGate;
 }
 

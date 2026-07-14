@@ -1,6 +1,7 @@
 import type {
   BotDelivery,
   AuditStoreStatus,
+  BenchmarkSummary,
   CommitCheckResult,
   ConnectorContext,
   Credential,
@@ -37,7 +38,11 @@ import type {
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
 
 export const AGENT_URL = viteEnv.VITE_AGENT_URL ?? "http://localhost:4317";
-export const AGENT_TOKEN = viteEnv.VITE_AGENT_TOKEN ?? "dev-local-token";
+export const AGENT_TOKEN = viteEnv.VITE_AGENT_TOKEN;
+
+export function getBenchmarkSummary() {
+  return request<BenchmarkSummary>("/api/benchmark/summary");
+}
 
 interface RunTargetPayload {
   appUrl?: string;
@@ -46,9 +51,13 @@ interface RunTargetPayload {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers = new Headers(options?.headers);
+  headers.set("content-type", "application/json");
+  if (AGENT_TOKEN) headers.set("x-agent-token", AGENT_TOKEN);
   const response = await fetch(`${AGENT_URL}${path}`, {
-    headers: { "content-type": "application/json", "x-agent-token": AGENT_TOKEN, ...(options?.headers ?? {}) },
-    ...options
+    credentials: "include",
+    ...options,
+    headers
   });
   if (!response.ok) {
     const detail = await response.text();
@@ -234,12 +243,73 @@ export function runVisualTest(
     trigger?: "manual" | "commit" | "requirement" | "patrol";
     credentialId?: string;
     keepProjectRunning?: boolean;
-  }
+  },
+  onCreated?: (runId: string) => void
 ) {
-  return request<RunResult>("/api/run-visual-test", {
+  return runThroughV1({ appUrl, scenarioId, permissionProfile, ...(context ?? {}) }, onCreated);
+}
+
+type RunProjection = { id: string; state: string; version: number; gateStatus?: string };
+
+async function runThroughV1(payload: Record<string, unknown>, onCreated?: (runId: string) => void) {
+  const idempotencyKey = crypto.randomUUID();
+  let run = (await request<{ run: RunProjection }>("/v1/runs", {
     method: "POST",
-    body: JSON.stringify({ appUrl, scenarioId, permissionProfile, ...(context ?? {}) })
-  });
+    body: JSON.stringify({
+      organizationId: "local",
+      projectId: payload.projectId,
+      actor: "workbench-user",
+      idempotencyKey,
+      input: {
+        appUrl: payload.appUrl,
+        scenarioId: payload.scenarioId,
+        requirement: payload.requirement,
+        diff: payload.diff,
+        permissionProfile: payload.permissionProfile,
+        executionMode: "trusted-local",
+        capabilities: ["browser"]
+      }
+    })
+  })).run;
+  onCreated?.(run.id);
+  run = (await request<{ run: RunProjection }>(`/v1/runs/${run.id}/plan-approval`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "workbench-user", idempotencyKey: `${idempotencyKey}:plan` }) })).run;
+  run = (await request<{ run: RunProjection }>(`/v1/runs/${run.id}/permissions`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "workbench-user", idempotencyKey: `${idempotencyKey}:permission` }) })).run;
+  const terminal = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
+  const deadline = Date.now() + 20 * 60_000;
+  while (!terminal.has(run.state)) {
+    if (Date.now() > deadline) throw new Error("run_wait_timeout");
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    run = (await request<{ run: RunProjection }>(`/v1/runs/${run.id}`)).run;
+  }
+  if (run.state === "cancelled") throw new Error("run_cancelled");
+  return (await request<{ report: RunResult }>(`/v1/runs/${run.id}/report`)).report;
+}
+
+export function subscribeRunEvents(runId: string, onEvent: (event: { type: string; payload: Record<string, unknown> }) => void) {
+  const controller = new AbortController();
+  void fetch(`${AGENT_URL}/v1/runs/${encodeURIComponent(runId)}/stream`, {
+    credentials: "include",
+    headers: AGENT_TOKEN ? { "x-agent-token": AGENT_TOKEN } : {},
+    signal: controller.signal
+  }).then(async (response) => {
+    if (!response.ok || !response.body) throw new Error(`stream_http_${response.status}`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const eventType = frame.match(/^event: (.+)$/m)?.[1] ?? "message";
+        const data = frame.match(/^data: (.+)$/m)?.[1];
+        if (data) onEvent({ type: eventType, payload: JSON.parse(data) as Record<string, unknown> });
+      }
+    }
+  }).catch((error) => { if (!controller.signal.aborted) console.warn("run stream closed", error); });
+  return () => controller.abort();
 }
 
 export function runPatrol(payload: RunTargetPayload & {
@@ -515,7 +585,7 @@ export function createRunBundleDownload(runId: string, payload?: { maxInlineByte
 
 export async function downloadArtifactBlob(artifactUrl: string) {
   const response = await fetch(`${AGENT_URL}${artifactUrl}`, {
-    headers: { "x-agent-token": AGENT_TOKEN }
+    headers: AGENT_TOKEN ? { "x-agent-token": AGENT_TOKEN } : {}
   });
   if (!response.ok) {
     const detail = await response.text();

@@ -1,5 +1,6 @@
 import type { CorsOptions } from "cors";
 import type { NextFunction, Request, Response } from "express";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
 const defaultDevToken = "dev-local-token";
 const defaultAllowedOrigins = [
@@ -10,6 +11,10 @@ const defaultAllowedOrigins = [
 ];
 
 const rateBuckets = new Map<string, { resetAt: number; count: number }>();
+export type AuthRole = "admin" | "runner" | "reviewer";
+export interface AuthContext { subject: string; organizationId: string; roles: AuthRole[]; claims: JWTPayload }
+const authContexts = new WeakMap<Request, AuthContext>();
+let remoteJwks: ReturnType<typeof createRemoteJWKSet> | undefined;
 
 function parseCsv(value: string | undefined, fallback: string[]) {
   const items = value
@@ -53,18 +58,19 @@ function providedToken(req: Request) {
 }
 
 export function assertSecurityConfig(host: string) {
+  const oidcConfigured = Boolean(process.env.OIDC_ISSUER && process.env.OIDC_AUDIENCE && process.env.OIDC_JWKS_URL);
   if (!isDevelopment() && process.env.AGENT_API_TOKEN === defaultDevToken) {
     throw new Error("AGENT_API_TOKEN must not use dev-local-token outside NODE_ENV=development.");
   }
-  if (!process.env.AGENT_API_TOKEN && (!isDevelopment() || !isLoopbackHost(host))) {
+  if (!oidcConfigured && !process.env.AGENT_API_TOKEN && (!isDevelopment() || !isLoopbackHost(host))) {
     throw new Error("Default dev-local-token requires NODE_ENV=development and HOST bound to 127.0.0.1/localhost.");
   }
 }
 
 export function securitySummary() {
   return {
-    auth: "x-agent-token or bearer token",
-    tokenSource: process.env.AGENT_API_TOKEN ? "AGENT_API_TOKEN" : "development-loopback-default",
+    auth: process.env.OIDC_ISSUER ? "OIDC bearer JWT" : "development shared token",
+    tokenSource: process.env.OIDC_ISSUER ? "OIDC_JWKS_URL" : process.env.AGENT_API_TOKEN ? "AGENT_API_TOKEN" : "development-loopback-default",
     nodeEnv: process.env.NODE_ENV ?? "development",
     allowedOrigins: parseCsv(process.env.ALLOWED_ORIGINS, defaultAllowedOrigins),
     queryTokenAuth: allowQueryTokenAuth() ? "development-explicitly-enabled" : "disabled",
@@ -115,13 +121,47 @@ export function basicRateLimit(req: Request, res: Response, next: NextFunction) 
   next();
 }
 
-export function requireApiToken(req: Request, res: Response, next: NextFunction) {
+async function verifyOidc(req: Request) {
+  const issuer = process.env.OIDC_ISSUER;
+  const audience = process.env.OIDC_AUDIENCE;
+  const jwksUrl = process.env.OIDC_JWKS_URL;
+  if (!issuer || !audience || !jwksUrl) return false;
+  const token = providedToken(req);
+  if (!token) return false;
+  remoteJwks ??= createRemoteJWKSet(new URL(jwksUrl));
+  const verified = await jwtVerify(token, remoteJwks, { issuer, audience });
+  const roleClaim = process.env.OIDC_ROLE_CLAIM ?? "roles";
+  const orgClaim = process.env.OIDC_ORGANIZATION_CLAIM ?? "organization_id";
+  const rawRoles = verified.payload[roleClaim];
+  const roles = (Array.isArray(rawRoles) ? rawRoles : typeof rawRoles === "string" ? rawRoles.split(/[ ,]/) : [])
+    .filter((role): role is AuthRole => ["admin", "runner", "reviewer"].includes(String(role)));
+  authContexts.set(req, {
+    subject: verified.payload.sub ?? "unknown",
+    organizationId: String(verified.payload[orgClaim] ?? ""),
+    roles,
+    claims: verified.payload
+  });
+  return Boolean(verified.payload.sub && verified.payload[orgClaim] && roles.length);
+}
+
+export function authContext(req: Request) { return authContexts.get(req); }
+
+export async function requireApiToken(req: Request, res: Response, next: NextFunction) {
   if (isPublicRoute(req)) {
     next();
     return;
   }
 
-  if (providedToken(req) === expectedToken()) {
+  try {
+    if (await verifyOidc(req)) {
+      next();
+      return;
+    }
+  } catch {
+    // Fail closed and use the common 401 response below.
+  }
+  if (isDevelopment() && providedToken(req) === expectedToken()) {
+    authContexts.set(req, { subject: "local-dev", organizationId: "local", roles: ["admin", "runner", "reviewer"], claims: {} });
     next();
     return;
   }
@@ -132,8 +172,21 @@ export function requireApiToken(req: Request, res: Response, next: NextFunction)
   });
 }
 
-export function requireArtifactAccess(req: Request, res: Response, next: NextFunction) {
-  if (providedToken(req) === expectedToken() || (allowLoopbackArtifactBypass() && isLoopbackAddress(req.socket.remoteAddress))) {
+export function requireRole(allowed: AuthRole[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const context = authContext(req);
+    if (context && context.roles.some((role) => allowed.includes(role))) return next();
+    res.status(403).json({ error: "Forbidden", message: `Required role: ${allowed.join(" or ")}` });
+  };
+}
+
+export async function requireArtifactAccess(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (await verifyOidc(req)) return next();
+  } catch {
+    // Fail closed below.
+  }
+  if ((isDevelopment() && providedToken(req) === expectedToken()) || (allowLoopbackArtifactBypass() && isLoopbackAddress(req.socket.remoteAddress))) {
     next();
     return;
   }

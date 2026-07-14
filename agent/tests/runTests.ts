@@ -24,6 +24,15 @@ import { testSecurityBoundaries } from "./security.test.js";
 import { testServiceHealthContract } from "./serviceHealth.test.js";
 import { testRunnerExecutablePlanBinding, testRunnerLifecyclePolicy } from "./testRunnerLifecycle.test.js";
 import { testInvestmentAgentWorkflowExternalSmoke } from "./investmentAgentWorkflowSmoke.test.js";
+import { testBenchmarkContract } from "./benchmarkContract.test.js";
+import { testBenchmarkEvaluation } from "./benchmark.test.js";
+import { testIndependentFixtures } from "./independentFixtures.test.js";
+import { testRepairProposals } from "./repairProposal.test.js";
+import { testRunEventStore } from "./runEventStore.test.js";
+import { testRetryPolicy } from "./retryPolicy.test.js";
+import { testGithubChecks } from "./githubChecks.test.js";
+import { testCodeImpactGraph } from "./codeImpactGraph.test.js";
+import { testMissionPreview } from "./missionPreview.test.js";
 
 async function main() {
   await testConnectorEnvelope();
@@ -37,6 +46,15 @@ async function main() {
   await testProjectAdapter();
   await testExternalProjectSmoke();
   await testInvestmentAgentWorkflowExternalSmoke();
+  await testBenchmarkContract();
+  testBenchmarkEvaluation();
+  await testIndependentFixtures();
+  testRepairProposals();
+  await testRunEventStore();
+  testRetryPolicy();
+  testGithubChecks();
+  await testCodeImpactGraph();
+  testMissionPreview();
   testRunnerLifecyclePolicy();
   testRunnerExecutablePlanBinding();
   await testScenarioDraftLifecycle();
@@ -44,7 +62,7 @@ async function main() {
   testPlanStepSchema();
   testJudgeSchema();
   testReportRendererRedaction();
-  testSecurityBoundaries();
+  await testSecurityBoundaries();
   await testRunHistoryComparison();
   await testRunLockGovernance();
   await testReportsRetention();

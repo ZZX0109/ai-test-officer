@@ -1550,6 +1550,47 @@ select:focus {
   padding: 10px 0 12px;
 }
 
+.benchmark-box {
+  border: 1px solid var(--line, #2a3444);
+  background: var(--panel, #121923);
+  padding: 16px;
+  margin-top: 16px;
+}
+
+.benchmark-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.benchmark-metrics article,
+.benchmark-projects span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--line, #2a3444);
+  color: var(--muted, #9ba8bb);
+  font-size: 12px;
+}
+
+.benchmark-metrics strong {
+  color: var(--text, #eef4ff);
+  font-size: 16px;
+}
+
+.benchmark-projects {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .benchmark-metrics,
+  .benchmark-projects { grid-template-columns: 1fr; }
+}
+
 .agent-focus-grid,
 .discovery-box,
 .bot-box {

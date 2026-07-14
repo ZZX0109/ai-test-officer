@@ -9,7 +9,7 @@ AI Test Officer 是一个面向提交前质量验证的 AI 测试工作台。它
 ## 项目亮点
 
 - **需求到执行闭环**：需求/PR/diff -> 影响面 -> 灰度计划 -> Playwright 执行 -> 证据包 -> release gate。
-- **独立被测应用**：`app-under-test` 是独立的任务管理应用和 mock API，不是 Agent 自己渲染出来的假测试结果。
+- **独立目标项目**：除 `app-under-test` 外，仓库还提供 `todo_lite` 和 `order_portal_lite` 两个独立目标应用，用于验证跨项目接入和 Benchmark。
 - **结构化证据链**：每一步测试动作都可以关联 screenshot、DOM、network、console、trace、断言和 source context。
 - **分层 Judge**：plan Judge、evidence Judge、release Judge 分开输出，并显式展示 `llm_assisted`、`fallback_baseline` 或 deterministic 的执行模式。
 - **失败归因**：尝试区分 `product_bug`、`test_script_issue`、`environment_issue`、`insufficient_evidence` 和未知失败。
@@ -22,7 +22,7 @@ AI Test Officer 是一个面向提交前质量验证的 AI 测试工作台。它
 
 ## Demo 场景
 
-仓库内置一个任务管理应用和一条“已完成筛选”场景：
+仓库内置一个任务管理应用和两个独立 fixture 目标应用。默认演示仍使用“已完成筛选”场景，跨项目验证使用 `data/benchmark/cases.json`：
 
 1. 输入任务筛选需求和一段 Git diff。
 2. Agent 分析受影响的组件、接口和边界场景。
@@ -56,25 +56,30 @@ CI gate / Workbench report / human decision
 | 模块 | 当前实现 | 说明 |
 | --- | --- | --- |
 | Context connectors | 已实现 | 本地文件、Git diff、GitHub PR diff、Issue/Jira/TAPD 类输入和 OpenAPI |
-| 项目适配 | 已实现 | 识别本地项目、目标地址、启动/停止和连接诊断 |
+| 项目适配 | 已实现 | 统一 target contract、项目发现、目标地址、启动/停止和连接诊断 |
 | 计划生成 | 已实现 | 场景 DSL、风险列表、测试层级、oracle 和 evidence requirements |
 | 浏览器执行 | 已实现 | Playwright、重试、操作事件、截图、trace、DOM/network/console 证据 |
 | 失败归因 | 已实现 | 结合失败结果、变更引用和证据输出候选原因 |
 | Judge | 已实现 | deterministic baseline + 可选 LLM assisted，多层报告和 schema 校验 |
 | Workbench | 已实现 | 上下文、计划、Live View、Evidence、Judge、CI、连接器和权限面板 |
 | CI gate | 已实现 | commit check、strict gate、JUnit、PR annotation 和报告 artifact |
+| Benchmark | 已实现 | 可扩展开发集目录（当前 18 条）、运行映射、两个执行目标、1 条复杂外部项目 challenge case |
 | 长期巡检 | Demo 级 | patrol scheduler、趋势和报告保留策略已具备骨架 |
 
 ## 架构
 
 ```text
 workbench-ui/              React + Vite operator workbench
-        | HTTP + JSON
-agent/src/server.ts        Express API and orchestration boundary
+        | OIDC session + /v1/runs + SSE
+agent/src/server.ts        Express control plane and authorization boundary
         |
+        +-- runEventStore          PostgreSQL event source and projections
+        +-- runOrchestrator        BullMQ dispatch, lease and cancellation
+        +-- executionPersistence   attempts/evidence/artifact metadata
         +-- sourceConnectors       requirement/diff/issue/OpenAPI inputs
         +-- intakeAnalyzer         context and impact analysis
         +-- plan/executablePlan    scenario DSL and gray plan
+        +-- execution worker       OCI/trusted-local execution boundary
         +-- testRunner             Playwright execution
         +-- evidenceStore          run bundle and evidence records
         +-- failureAttribution     failure classification
@@ -86,7 +91,7 @@ fixtures/                   standalone target projects
 data/scenarios/             executable scenarios and oracle fixtures
 ```
 
-关键边界是：`app-under-test` 只提供被测业务和 API，Agent 负责规划、执行、取证和判断，Workbench 负责展示与人工控制。这样 Demo 的闭环不会把被测结果直接写死在 UI 中。
+正式入口只有 `POST /v1/runs`；计划审批和权限批准后，控制面将 `runId` 投递到 BullMQ，worker 从 PostgreSQL 事件重建状态并执行。`/api/run-visual-test` 仅保留一个兼容周期，且只接受 worker service identity。Redis 不保存业务状态，大文件进入 S3/MinIO，Artifact 元数据和事件写 PostgreSQL。
 
 ## 快速开始
 
@@ -141,7 +146,12 @@ npm run stop:dev
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `AGENT_API_TOKEN` | `dev-local-token` | Agent API 访问令牌；生产环境必须显式替换 |
+| `AGENT_API_TOKEN` | 仅开发环境可用 | loopback 开发令牌；生产环境禁用 |
+| `DATABASE_URL` | 本地开发后端 | PostgreSQL 连接；生产环境必填且为运行状态唯一事实源 |
+| `REDIS_URL` | 本地进程队列 | BullMQ 连接；生产环境必填 |
+| `OIDC_ISSUER` / `OIDC_AUDIENCE` / `OIDC_JWKS_URL` | 无 | 生产 JWT 校验配置 |
+| `OIDC_ORGANIZATION_CLAIM` / `OIDC_ROLE_CLAIM` | `organization_id` / `roles` | 资源级授权 claim |
+| `INTERNAL_WORKER_TOKEN` | 无 | 内部执行端点的 service identity；不得下发 Workbench |
 | `HOST` | 本地模式为 `127.0.0.1` | Agent 监听地址 |
 | `PORT` | `4317` | Agent API 端口 |
 | `VITE_AGENT_API_URL` | `http://localhost:4317` | Workbench 连接的 Agent 地址 |
@@ -170,6 +180,10 @@ npm run commit-check          # 非严格发布检查
 npm run commit-check:strict   # 严格 gate，适合 CI
 npm run patrol                # 固定场景巡检
 npm run judge:eval            # Judge 基准 case 评估
+npm run worker                # 启动 BullMQ execution worker
+npm run contracts:generate    # 生成 OpenAPI 和 Workbench TypeScript 类型
+npm run benchmark:run         # 通过 /v1/runs 执行真实 Benchmark
+npm run test:unified-run      # /v1/runs -> Playwright -> Artifact v2 闭环
 
 npm run reports:retention     # 只预览报告清理计划
 npm run reports:retention:archive
@@ -179,24 +193,23 @@ npm run reports:retention:archive
 
 ## Judge 与证据模型
 
-系统将“判断”拆成三层：
+系统将裁决拆成三个互不覆盖的输入，并只向 CLI、Workbench、通知和 GitHub Check 暴露统一的 `finalStatus`：
 
-- **Plan Judge**：测试计划是否覆盖需求、风险和必要 oracle。
-- **Evidence Judge**：执行是否采集了足够证据，证据是否能支持断言。
-- **Release Judge**：结合失败归因、风险等级、回归和 gate 配置，给出 `pass`、`hold_for_review` 或阻塞建议。
+- **machineGate**：确定性断言、环境与 Artifact v2 完整性，是机器安全底线。
+- **judgeRecommendation**：LLM/规则的风险解释和归因，不能把 `fail` 或 `blocked` 升级为通过。
+- **humanDecision**：审核者的可追溯决定；机器失败仍不可升级。
 
 当 LLM provider 不可用、返回非法 JSON 或超时，系统可以回退到 deterministic baseline。报告必须展示 `executionMode`、`llmStatus`、`policyVersion` 和错误信息；fallback 不是“AI 已经判断成功”，而是“系统用可重复规则完成了降级判断”。
 
 ## 安全边界与当前限制
 
-这个仓库是可运行的工程 Demo，不是假装成已经完成企业级安全的平台。当前需要在 README 和面试中主动说明：
+生产部署必须满足以下边界；缺失能力时系统返回 `blocked`，不得生成模拟核心证据：
 
-1. 默认 token 只适合本机开发，部署前必须设置强 token、限制 CORS 和绑定受控 host。
-2. connector 支持远程 URL 和本地文件，生产环境还应增加 SSRF 防护、内网/metadata 地址拒绝、超时和响应大小上限。
-3. evidence 和 run bundle 目前包含 JSON/文件存储路径，单进程本地运行可用；多进程部署需要事务性数据库、run index 和并发锁。
-4. credential 的加密 key 默认放在用户目录，仍应替换为系统 secret manager 或 CI secret store。
-5. LLM 输入包含需求、diff 和运行证据，生产版需要做 prompt injection 分层、敏感信息脱敏和 provider 隔离。
-6. 当前场景 DSL 和 oracle 已经可复用，但真实项目接入仍需要项目适配器、selector registry、测试数据治理和权限审批。
+1. 生产环境强制 OIDC/JWT，并按 organization、project、role 校验；共享 Agent Token 仅允许 loopback 开发。
+2. 未知代码默认由 rootless Docker/Podman 以非 root、只读源码、受限 CPU/内存/PID/网络运行；可信本地执行必须由 manifest 显式声明。
+3. connector 采用流式硬上限并逐次校验重定向、最终域名、类型和大小；部署层仍须配置出口 allowlist。
+4. Judge 只能引用已原子提交、摘要验证且关联一致的 Artifact v2；`simulated` 和 `legacy-unverified` 不参与正式 Gate。
+5. 桌面能力只有在签名 helper、窗口 allowlist 和系统权限均满足时启用，否则返回 `blocked`。
 
 ## 测试策略
 
@@ -223,7 +236,8 @@ config/             只提交 config.example.json；本地 secrets 被忽略
 - 把 evidence store、run history 和 latest-run pointer 迁移到事务性存储。
 - 完成远程 connector 的 SSRF、域名白名单、响应大小和凭据隔离策略。
 - 为 scenario、oracle、selector 和 artifact 建立版本化 schema 与 registry。
-- 增加真实外部项目 onboarding，减少对固定 `task_filter_completed` fixture 的依赖。
+- 对当前开发集执行真实 Agent 批量运行，并用 `judge:repeat` 做 3 次 LLM Judge 一致性实验；最终评估使用隔离的独立测试集。
+- 将项目一作为第 19 条复杂外部项目挑战集单独评估，不混入基础 Benchmark 指标。
 - 将 LLM Judge 的输出与 deterministic 规则、人工 override 和历史误报率统一纳入评估。
 - 增加 GitHub App/PR webhook、隔离执行沙箱和可观测性指标。
 
