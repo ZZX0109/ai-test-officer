@@ -20,7 +20,7 @@ const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (file: st
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const auditDir = path.join(rootDir, "reports", "audit");
 const auditDbFile = path.join(auditDir, "audit.sqlite");
-const schemaVersion = 4;
+const schemaVersion = 5;
 const migrations = [
   {
     version: 1,
@@ -37,6 +37,10 @@ const migrations = [
   {
     version: 4,
     description: "Expose audit store user_version, migration records, and integrity check in health status."
+  },
+  {
+    version: 5,
+    description: "Persist immutable scenario, attempt, sequence, and artifact links for every evidence record."
   }
 ];
 
@@ -130,6 +134,11 @@ function openDb() {
       run_id TEXT NOT NULL,
       type TEXT NOT NULL,
       title TEXT,
+      scenario_id TEXT,
+      attempt_id TEXT,
+      attempt INTEGER,
+      sequence INTEGER,
+      artifact_ids_json TEXT,
       path_id TEXT,
       step_id TEXT,
       created_at TEXT NOT NULL,
@@ -354,8 +363,18 @@ function ensureJudgeResultColumns(database: DatabaseSync) {
 function ensureEvidenceColumns(database: DatabaseSync) {
   const rows = database.prepare("PRAGMA table_info(evidence)").all();
   const columns = new Set(rows.map((row) => String(row.name)));
-  if (!columns.has("title")) {
-    database.exec("ALTER TABLE evidence ADD COLUMN title TEXT;");
+  const additions = [
+    ["title", "TEXT"],
+    ["scenario_id", "TEXT"],
+    ["attempt_id", "TEXT"],
+    ["attempt", "INTEGER"],
+    ["sequence", "INTEGER"],
+    ["artifact_ids_json", "TEXT"]
+  ];
+  for (const [name, type] of additions) {
+    if (!columns.has(name)) {
+      database.exec(`ALTER TABLE evidence ADD COLUMN ${name} ${type};`);
+    }
   }
 }
 
@@ -377,6 +396,11 @@ export function appendEvidenceToAuditStore(item: EvidenceItem) {
     runId: item.runId,
     type: item.type,
     timestamp: item.timestamp,
+    scenarioId: item.scenarioId,
+    attemptId: item.attemptId,
+    attempt: item.attempt,
+    sequence: item.sequence,
+    artifactIds: item.artifactIds,
     pathId: item.pathId,
     stepId: item.stepId,
     url: item.url,
@@ -385,13 +409,18 @@ export function appendEvidenceToAuditStore(item: EvidenceItem) {
   });
   database.prepare(`
     INSERT OR IGNORE INTO evidence
-      (evidence_id, run_id, type, title, path_id, step_id, created_at, artifact_uri, url, producer, schema_version, payload_json, hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (evidence_id, run_id, type, title, scenario_id, attempt_id, attempt, sequence, artifact_ids_json, path_id, step_id, created_at, artifact_uri, url, producer, schema_version, payload_json, hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     item.id,
     item.runId,
     item.type,
     item.title,
+    item.scenarioId ?? null,
+    item.attemptId ?? null,
+    item.attempt ?? null,
+    item.sequence ?? null,
+    json(item.artifactIds ?? []),
     item.pathId ?? null,
     item.stepId ?? null,
     item.timestamp,
@@ -760,7 +789,7 @@ export function readSourceContextsFromAuditStore(runId: string) {
 export function readEvidenceFromAuditStore(runId: string) {
   const rows = openDb()
     .prepare(`
-      SELECT evidence_id, run_id, type, title, path_id, step_id, created_at, artifact_uri, url, payload_json
+      SELECT evidence_id, run_id, type, title, scenario_id, attempt_id, attempt, sequence, artifact_ids_json, path_id, step_id, created_at, artifact_uri, url, payload_json
       FROM evidence
       WHERE run_id = ?
       ORDER BY created_at ASC
@@ -772,6 +801,11 @@ export function readEvidenceFromAuditStore(runId: string) {
     type: String(row.type) as EvidenceItem["type"],
     title: typeof row.title === "string" && row.title ? row.title : `${String(row.type)} evidence`,
     timestamp: String(row.created_at),
+    scenarioId: typeof row.scenario_id === "string" ? row.scenario_id : undefined,
+    attemptId: typeof row.attempt_id === "string" ? row.attempt_id : undefined,
+    attempt: typeof row.attempt === "number" ? row.attempt : undefined,
+    sequence: typeof row.sequence === "number" ? row.sequence : undefined,
+    artifactIds: parseJson<string[]>(row.artifact_ids_json, []),
     pathId: typeof row.path_id === "string" ? row.path_id : undefined,
     stepId: typeof row.step_id === "string" ? row.step_id : undefined,
     url: typeof row.url === "string" ? row.url : undefined,

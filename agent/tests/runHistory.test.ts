@@ -148,7 +148,7 @@ export async function testRunHistoryComparison() {
   assert.equal(secondSources[0]?.runId, secondSourceRunId);
 
   const auditStatus = auditStoreStatus();
-  assert.equal(auditStatus.schemaVersion, 4);
+  assert.equal(auditStatus.schemaVersion, 5);
   assert.equal(auditStatus.userVersion, auditStatus.schemaVersion);
   assert.equal(auditStatus.schemaVersionMatches, true);
   assert.equal(auditStatus.migrationComplete, true);
