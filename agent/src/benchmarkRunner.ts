@@ -79,7 +79,7 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   return {
     benchmarkId: input.item.id, runId: run.id, experimentId: input.experimentId, split: input.item.split, lane: input.lane, modelProfileId: input.model?.id, repetition: input.repetition,
     status: "completed", startedAt, finishedAt: new Date().toISOString(), requirementCovered: Boolean(report.riskCoverageMatrix?.length), executionSucceeded: !["blocked", "cancelled"].includes(run.state), retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: report.planProvenance?.compilationStatus !== "rejected", planSource: plannerMode,
-    deterministic: { verdict: final, evidenceRefs: report.machineGate?.assertionFailures ?? [], status: "passed", durationMs },
+    deterministic: { verdict: final, evidenceRefs: report.judgeRecommendation?.evidenceRefs ?? report.evidence?.filter((item: any) => item.type === "assertion").map((item: any) => item.id) ?? [], status: "passed", durationMs },
     llm: plannerMode === "llm" || judgeMode === "llm-assisted" ? { verdict: final, evidenceRefs: report.judgeRecommendation?.evidenceRefs ?? [], failureClass: report.failureAttributions?.[0]?.failureClass, status: report.judgeReport?.llmStatus === "passed" || (plannerMode === "llm" && judgeMode === "deterministic") ? "passed" : "failed", fallback: report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
     evidence: (report.evidence ?? []).map((item: any) => ({ id: item.id, type: item.type })), attribution: { failureClass: report.failureAttributions?.[0]?.failureClass, suspectFiles: report.failureAttributions?.flatMap((entry: any) => entry.topSuspects?.map((suspect: any) => suspect.filePath) ?? []) ?? [], evidenceRefs: report.failureAttributions?.flatMap((entry: any) => entry.evidenceRefs ?? []) ?? [] },
     executionOrigin: "agent-run", gateEligible: artifacts.length > 0 && artifacts.every((artifact) => artifact.origin === "runtime-captured" || artifact.origin === "fixture") && artifacts.some((artifact) => artifact.origin === "runtime-captured"), evidenceQuality: report.evidenceQuality ? { groundedPassedRate: report.evidenceQuality.summary.groundedPassedRate, runtimeArtifactRate: report.evidenceQuality.summary.runtimeArtifactRate, crossAttemptViolations: report.evidenceQuality.summary.crossAttemptViolations } : undefined, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified" }))
@@ -89,7 +89,8 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
 export async function runBenchmarkExperiment() {
   if (process.env.BENCHMARK_LABELS_ROOT) throw new Error("benchmark_runner_must_not_receive_label_mount");
   const config = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "experiment.json"), "utf8")) as { repetitions: number; promptVersion: string; models: Model[]; acceptance: Record<string, number> };
-  const requestedModels = selectedModels(config.models);
+  const llmEnabled = process.env.BENCHMARK_SKIP_LLM !== "1";
+  const requestedModels = llmEnabled ? selectedModels(config.models) : [];
   const includeBlind = process.env.BENCHMARK_ENABLE_BLIND === "1";
   const includeExtended = process.env.BENCHMARK_EXTENDED === "1";
   const development = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Case[];
@@ -107,23 +108,26 @@ export async function runBenchmarkExperiment() {
   const allowPartialModels = process.env.BENCHMARK_ALLOW_PARTIAL_MODELS === "1";
   const requestedPlannedRuns = cases.length * (2 + requestedModels.length * config.repetitions * 3);
   const plannedRuns = cases.length * (2 + runnableModels.length * config.repetitions * 3);
-  const hardBlocked = !runnableModels.length || (check.failures.length > 0 && !allowPartialModels);
-  const manifest = { experimentId, createdAt: new Date().toISOString(), split: includeBlind ? "development+blind" : "development", suites: ["core", ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : [])], caseCount: cases.length, plannedRuns, requestedPlannedRuns, repetitions: config.repetitions, promptVersion: config.promptVersion, models: runnableModels.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), unavailableModels: requestedModels.filter((model) => !check.credentials.has(model.id)).map((model) => ({ id: model.id, provider: model.provider, model: model.model })), status: hardBlocked ? "blocked" : "running", blockers: check.failures, partial: check.failures.length > 0 };
+  const hardBlocked = llmEnabled && (!runnableModels.length || (check.failures.length > 0 && !allowPartialModels));
+  const manifest = { experimentId, createdAt: new Date().toISOString(), split: includeBlind ? "development+blind" : "development", suites: ["core", ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : [])], caseCount: cases.length, plannedRuns, requestedPlannedRuns, repetitions: config.repetitions, promptVersion: config.promptVersion, llmEnabled, models: runnableModels.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), unavailableModels: requestedModels.filter((model) => !check.credentials.has(model.id)).map((model) => ({ id: model.id, provider: model.provider, model: model.model })), status: hardBlocked ? "blocked" : "running", blockers: check.failures, partial: check.failures.length > 0 };
   await writeFile(path.join(directory, "manifest.json"), JSON.stringify(manifest, null, 2));
   await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify({ experimentId, status: manifest.status, completedRuns: 0, plannedRuns, blockers: check.failures }, null, 2));
   if (hardBlocked) throw new Error(`benchmark_preflight_blocked:${check.failures.join(",")}`);
   let completedRuns = 0;
+  const updateProgress = async () => {
+    await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify({ experimentId, status: "awaiting_agent_runs", completedRuns, plannedRuns, requestedPlannedRuns, blockers: check.failures, partial: check.failures.length > 0 }, null, 2));
+  };
   for (const item of cases) {
     const target = projectMap.get(item.projectId);
     const projectId = target?.executionProjectId ?? item.projectId;
     const rules = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane: "rules-deterministic", repetition: 1, experimentId, promptVersion: config.promptVersion });
-    await writeFile(path.join(runsDir, `${item.id}.rules-deterministic.none.1.json`), JSON.stringify(rules, null, 2)); completedRuns += 1;
+    await writeFile(path.join(runsDir, `${item.id}.rules-deterministic.none.1.json`), JSON.stringify(rules, null, 2)); completedRuns += 1; await updateProgress();
     const testCommand = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane: "test-command", repetition: 1, experimentId, promptVersion: config.promptVersion });
-    await writeFile(path.join(runsDir, `${item.id}.test-command.none.1.json`), JSON.stringify(testCommand, null, 2)); completedRuns += 1;
+    await writeFile(path.join(runsDir, `${item.id}.test-command.none.1.json`), JSON.stringify(testCommand, null, 2)); completedRuns += 1; await updateProgress();
     for (const model of runnableModels) for (let repetition = 1; repetition <= config.repetitions; repetition += 1) for (const lane of ["llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"] as Lane[]) {
       const record = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane, model, credentialId: check.credentials.get(model.id), repetition, experimentId, promptVersion: config.promptVersion });
       await writeFile(path.join(runsDir, `${item.id}.${lane}.${model.id}.${repetition}.json`), JSON.stringify(record, null, 2)); completedRuns += 1;
-      await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify({ experimentId, status: "awaiting_agent_runs", completedRuns, plannedRuns }, null, 2));
+      await updateProgress();
     }
   }
   await writeFile(path.join(directory, "manifest.json"), JSON.stringify({ ...manifest, status: "awaiting_evaluation", completedRuns, finishedAt: new Date().toISOString() }, null, 2));

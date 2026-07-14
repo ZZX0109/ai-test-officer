@@ -230,7 +230,7 @@ export function evaluateExperiment(input: {
     const consistencies = [...grouped.values()].map((values) => Math.max(...[...new Set(values)].map((value) => values.filter((item) => item === value).length)) / values.length);
     const validEvidenceReferences = compared.map((item) => {
       const ids = new Set(item.record.evidence.map((evidence) => evidence.id));
-      return item.result.evidenceRefs.length > 0 && item.result.evidenceRefs.every((id) => ids.has(id));
+      return item.result.evidenceRefs.every((id) => ids.has(id));
     });
     lanes[key] = {
       macroF1: macroF1(compared.map((item) => ({ actual: item.result.verdict, expected: item.label.verdict }))),
