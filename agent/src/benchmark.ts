@@ -209,6 +209,7 @@ export function evaluateExperiment(input: {
   records: BenchmarkRunRecord[];
   plannedRuns: number;
   thresholds: { blindFalseReleaseMax: number; artifactIntegrityMin: number; evidenceReferenceMin: number; evidenceGroundedMin: number; macroF1GainMin: number; taskSuccessGainMin: number; humanReviewRelativeReductionMin: number; consistencyMin: number; modelFailureMax: number };
+  roi?: { manualMinutesPerCase: number; reviewMinutesPerCase: number };
 }): ExperimentEvaluation {
   const labels = new Map(input.labels.map((label) => [label.benchmarkId, label]));
   const records = input.records.filter((record) => record.experimentId === input.experimentId && record.split === input.split && record.status === "completed");
@@ -221,6 +222,9 @@ export function evaluateExperiment(input: {
     const expectedPass = compared.filter((item) => item.label.verdict === "pass");
     const durations = compared.map((item) => item.result.durationMs ?? 0);
     const usage = compared.map((item) => item.result.usage).filter(Boolean);
+    const automatedMinutes = durations.reduce((sum, value) => sum + value, 0) / 60_000;
+    const reviewMinutes = compared.filter((item) => item.result.verdict === "needs_review").length * (input.roi?.reviewMinutesPerCase ?? 0);
+    const baselineMinutes = compared.length * (input.roi?.manualMinutesPerCase ?? 0);
     const grouped = new Map<string, string[]>();
     for (const item of compared) grouped.set(item.record.benchmarkId, [...(grouped.get(item.record.benchmarkId) ?? []), item.result.verdict]);
     const consistencies = [...grouped.values()].map((values) => Math.max(...[...new Set(values)].map((value) => values.filter((item) => item === value).length)) / values.length);
@@ -245,6 +249,8 @@ export function evaluateExperiment(input: {
       promptTokens: usage.length ? usage.reduce((sum, item) => sum + (item?.promptTokens ?? 0), 0) : null,
       completionTokens: usage.length ? usage.reduce((sum, item) => sum + (item?.completionTokens ?? 0), 0) : null,
       estimatedCostUsd: usage.length ? usage.reduce((sum, item) => sum + (item?.estimatedCostUsd ?? 0), 0) : null
+      ,estimatedManualMinutesAvoided: input.roi ? Math.max(0, baselineMinutes - automatedMinutes - reviewMinutes) : null
+      ,estimatedHumanReviewMinutes: input.roi ? reviewMinutes : null
     };
   }
   const rules = lanes["rules-deterministic:none"];

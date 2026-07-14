@@ -7,5 +7,6 @@
     {"id":"anthropic-sonnet-4.6","credentialIdEnv":"BENCHMARK_ANTHROPIC_CREDENTIAL_ID","provider":"anthropic","model":"claude-sonnet-4-6"}
   ],
   "lanes":["test-command","rules-deterministic","llm-plan-deterministic-judge","rules-plan-llm-judge","full-llm"],
+  "roi":{"manualMinutesPerCase":20,"reviewMinutesPerCase":8},
   "acceptance":{"blindFalseReleaseMax":0,"artifactIntegrityMin":1,"evidenceReferenceMin":1,"evidenceGroundedMin":1,"macroF1GainMin":0.08,"taskSuccessGainMin":0.10,"humanReviewRelativeReductionMin":0.20,"consistencyMin":0.85,"modelFailureMax":0.05}
 }
