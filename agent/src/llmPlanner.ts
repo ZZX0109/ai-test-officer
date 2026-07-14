@@ -56,7 +56,7 @@ async function resolveCredential(id?: string) {
 }
 
 function buildPrompt(input: GeneratePlanInput) {
-  return `你是 AI 测试官。请根据需求和 Git diff 生成显式灰度测试 plan。必须只输出 JSON，不要输出 Markdown。
+  return `你是 AI 测试官。请根据需求和 Git diff 生成显式灰度测试 plan。必须只输出一个可被 JSON.parse 解析的 JSON 对象，不要输出 Markdown、解释、注释或额外字段。
 
 JSON schema:
 {
@@ -64,11 +64,19 @@ JSON schema:
   "plan": {"sessionName": "string", "risks": [{"id":"string","level":"high|medium|low","title":"string","evidence":"string"}], "levels": [
     {"id":"smoke|core_path|edge_case|regression","title":"string","description":"string","paths":[{"id":"string","title":"string","riskReason":"string","expectedFrom":"requirement|diff|existing_test|llm_inferred","retry":1,"steps":["string"]}]}
   ]},
-  "actions": [{"action":"navigate|click|fill|upload|assert|wait", "path|selectorRef|valueRef|fixtureRef|oracleId|durationMs":"according to action"}]
+  "actions": [
+    {"action":"navigate","path":"/"},
+    {"action":"click","selectorRef":"an allowed selectorRef"},
+    {"action":"fill","selectorRef":"an allowed selectorRef","valueRef":"a fixture value key"},
+    {"action":"upload","selectorRef":"an allowed selectorRef","fixtureRef":"a fixture key"},
+    {"action":"assert","oracleId":"an allowed oracleId"},
+    {"action":"wait","durationMs":1000}
+  ]
 }
 
 必须包含四层：smoke、core_path、edge_case、regression。断言预期来源不清楚时 expectedFrom 必须用 llm_inferred。
-只能选择以下已注册场景、selectorRef 和 oracleId，不得生成命令或 CSS：
+actions 的 action 字段只能精确为 navigate、click、fill、upload、assert、wait 六者之一。不得使用 screenshot、scroll、hover、press、type、select、evaluate、command 或任何其他值。每个 action 只可含上面该动作所需字段；navigate 的 path 必须以 / 开头；wait 的 durationMs 为 0 到 45000 的整数。不得生成命令、CSS、XPath、任意 URL、文件路径或额外 capability。
+只能选择以下已注册场景、selectorRef 和 oracleId：
 ${JSON.stringify(listExecutableScenarios().map((scenario) => ({ id: scenario.id, selectorRefs: Object.keys(scenario.corePath).filter((key) => /ButtonName|Label|Locator/.test(key)), oracleIds: scenario.corePath.oracles.map((oracle) => oracle.id) })))}
 
 需求:

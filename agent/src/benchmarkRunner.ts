@@ -10,6 +10,7 @@ const token = process.env.AGENT_API_TOKEN ?? "dev-local-token";
 type Lane = "test-command" | "rules-deterministic" | "llm-plan-deterministic-judge" | "rules-plan-llm-judge" | "full-llm";
 type Case = { id: string; split: "development" | "blind"; projectId: string; scenarioId: string; category: string; requirement: string; risk: string; faultProfile?: string };
 type Model = { id: string; credentialIdEnv: string; provider: string; model: string };
+const terminalRunStates = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
 
 function selectedModels(models: Model[]) {
   const requested = (process.env.BENCHMARK_MODEL_IDS ?? "")
@@ -62,10 +63,15 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
     method: "POST",
     body: JSON.stringify({ organizationId: "benchmark", projectId: input.appUrl ? undefined : input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?faultProfile=${encodeURIComponent(input.item.faultProfile ?? "")}` : undefined, scenarioId: input.item.scenarioId, requirement: input.item.requirement, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, faultProfile: input.item.faultProfile, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false } } })
   })).run;
-  run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}/plan-approval`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "benchmark-runner", idempotencyKey: `${key}:plan` }) })).run;
-  run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}/permissions`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "benchmark-runner", idempotencyKey: `${key}:permission` }) })).run;
-  const terminal = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
-  while (!terminal.has(run.state)) {
+  // A rejected LLM plan deliberately blocks the run.  It is an experiment result,
+  // not a transport failure: preserve it and do not issue invalid approval events.
+  if (!terminalRunStates.has(run.state)) {
+    run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}/plan-approval`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "benchmark-runner", idempotencyKey: `${key}:plan` }) })).run;
+  }
+  if (!terminalRunStates.has(run.state)) {
+    run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}/permissions`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "benchmark-runner", idempotencyKey: `${key}:permission` }) })).run;
+  }
+  while (!terminalRunStates.has(run.state)) {
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}`)).run;
   }
@@ -73,14 +79,27 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const artifacts = (await request<{ artifacts: Array<Record<string, any>> }>(`/v1/runs/${run.id}/artifacts`)).artifacts;
   const judgeCall = report.judgeReport?.llmCall;
   const plannerCall = report.plannerCall;
-  const usage = [plannerCall?.usage, judgeCall?.usage].filter(Boolean).reduce((sum, item) => ({ promptTokens: (sum.promptTokens ?? 0) + (item.promptTokens ?? 0), completionTokens: (sum.completionTokens ?? 0) + (item.completionTokens ?? 0), totalTokens: (sum.totalTokens ?? 0) + (item.totalTokens ?? 0), estimatedCostUsd: (sum.estimatedCostUsd ?? 0) + (item.estimatedCostUsd ?? 0) }), {} as Record<string, number>);
+  const usageItems = [plannerCall?.usage, judgeCall?.usage].filter(Boolean) as Array<Record<string, number | undefined>>;
+  const usage = usageItems.length ? {
+    promptTokens: usageItems.reduce((sum, item) => sum + (item.promptTokens ?? 0), 0),
+    completionTokens: usageItems.reduce((sum, item) => sum + (item.completionTokens ?? 0), 0),
+    totalTokens: usageItems.reduce((sum, item) => sum + (item.totalTokens ?? 0), 0),
+    // Poe-compatible providers do not expose reliable pricing.  Unknown must stay
+    // unknown rather than becoming a misleading zero-dollar experiment.
+    estimatedCostUsd: usageItems.every((item) => typeof item.estimatedCostUsd === "number")
+      ? usageItems.reduce((sum, item) => sum + (item.estimatedCostUsd ?? 0), 0)
+      : undefined
+  } : undefined;
   const final = verdict(run.gateStatus);
   const durationMs = Date.now() - new Date(startedAt).getTime();
+  const plannerRejected = plannerMode === "llm" && report.planProvenance?.compilationStatus === "rejected";
+  const llmFailed = plannerRejected || (judgeMode === "llm-assisted" && judgeCall && report.judgeReport?.llmStatus !== "passed");
+  const hasRuntimeArtifacts = artifacts.some((artifact) => artifact.origin === "runtime-captured");
   return {
     benchmarkId: input.item.id, runId: run.id, experimentId: input.experimentId, split: input.item.split, lane: input.lane, modelProfileId: input.model?.id, repetition: input.repetition,
-    status: "completed", startedAt, finishedAt: new Date().toISOString(), requirementCovered: Boolean(report.riskCoverageMatrix?.length), executionSucceeded: !["blocked", "cancelled"].includes(run.state), retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: report.planProvenance?.compilationStatus !== "rejected", planSource: plannerMode,
+    status: "completed", startedAt, finishedAt: new Date().toISOString(), requirementCovered: Boolean(report.riskCoverageMatrix?.length), executionSucceeded: hasRuntimeArtifacts, retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: report.planProvenance?.compilationStatus !== "rejected", planSource: plannerMode,
     deterministic: { verdict: final, evidenceRefs: report.judgeRecommendation?.evidenceRefs ?? report.evidence?.filter((item: any) => item.type === "assertion").map((item: any) => item.id) ?? [], status: "passed", durationMs },
-    llm: plannerMode === "llm" || judgeMode === "llm-assisted" ? { verdict: final, evidenceRefs: report.judgeRecommendation?.evidenceRefs ?? [], failureClass: report.failureAttributions?.[0]?.failureClass, status: report.judgeReport?.llmStatus === "passed" || (plannerMode === "llm" && judgeMode === "deterministic") ? "passed" : "failed", fallback: report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
+    llm: plannerMode === "llm" || judgeMode === "llm-assisted" ? { verdict: final, evidenceRefs: report.judgeRecommendation?.evidenceRefs ?? [], failureClass: report.failureAttributions?.[0]?.failureClass, status: llmFailed ? "failed" : "passed", fallback: report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
     evidence: (report.evidence ?? []).map((item: any) => ({ id: item.id, type: item.type })), attribution: { failureClass: report.failureAttributions?.[0]?.failureClass, suspectFiles: report.failureAttributions?.flatMap((entry: any) => entry.topSuspects?.map((suspect: any) => suspect.filePath) ?? []) ?? [], evidenceRefs: report.failureAttributions?.flatMap((entry: any) => entry.evidenceRefs ?? []) ?? [] },
     executionOrigin: "agent-run", gateEligible: artifacts.length > 0 && artifacts.every((artifact) => artifact.origin === "runtime-captured" || artifact.origin === "fixture") && artifacts.some((artifact) => artifact.origin === "runtime-captured"), evidenceQuality: report.evidenceQuality ? { groundedPassedRate: report.evidenceQuality.summary.groundedPassedRate, runtimeArtifactRate: report.evidenceQuality.summary.runtimeArtifactRate, crossAttemptViolations: report.evidenceQuality.summary.crossAttemptViolations } : undefined, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified" }))
   };
