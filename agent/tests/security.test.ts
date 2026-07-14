@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import type { NextFunction, Request, Response } from "express";
 import {
   assertSecurityConfig,
+  isOrganizationAuthorized,
   requireApiToken,
   requireArtifactAccess,
+  requireInternalWorkerIdentity,
   securitySummary
 } from "../src/security.js";
 
@@ -68,6 +70,9 @@ function mockRes() {
 }
 
 export async function testSecurityBoundaries() {
+  assert.equal(isOrganizationAuthorized({ subject: "runner-a", organizationId: "org-a", roles: ["runner"], claims: {} }, "org-a"), true);
+  assert.equal(isOrganizationAuthorized({ subject: "runner-a", organizationId: "org-a", roles: ["runner"], claims: {} }, "org-b"), false);
+  assert.equal(isOrganizationAuthorized({ subject: "admin-a", organizationId: "org-a", roles: ["admin"], claims: {} }, "org-b"), true);
   await withEnv({ NODE_ENV: "production", AGENT_API_TOKEN: "dev-local-token" }, () => {
     assert.throws(() => assertSecurityConfig("0.0.0.0"), /must not use dev-local-token/);
   });
@@ -113,5 +118,16 @@ export async function testSecurityBoundaries() {
     }) as NextFunction);
     assert.equal(nextCalled, true);
     assert.equal(res.statusCode, 200);
+  });
+
+  await withEnv({ INTERNAL_WORKER_TOKEN: "worker-secret" }, async () => {
+    const denied = mockRes();
+    let nextCalled = false;
+    requireInternalWorkerIdentity(mockReq({}), denied, (() => { nextCalled = true; }) as NextFunction);
+    assert.equal(nextCalled, false);
+    assert.equal(denied.statusCode, 403);
+    const accepted = mockRes();
+    requireInternalWorkerIdentity(mockReq({ headers: { "x-internal-worker-token": "worker-secret" } }), accepted, (() => { nextCalled = true; }) as NextFunction);
+    assert.equal(nextCalled, true);
   });
 }

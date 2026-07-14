@@ -146,6 +146,21 @@ async function verifyOidc(req: Request) {
 
 export function authContext(req: Request) { return authContexts.get(req); }
 
+export function isOrganizationAuthorized(context: AuthContext | undefined, organizationId: unknown) {
+  if (!context) return false;
+  if (context.subject === "local-dev" || context.roles.includes("admin")) return true;
+  return Boolean(organizationId && String(organizationId) === context.organizationId);
+}
+
+export function requireInternalWorkerIdentity(req: Request, res: Response, next: NextFunction) {
+  const expected = process.env.INTERNAL_WORKER_TOKEN;
+  if (!expected || req.header("x-internal-worker-token") !== expected) {
+    res.status(403).json({ error: "internal_worker_identity_required" });
+    return;
+  }
+  next();
+}
+
 export async function requireApiToken(req: Request, res: Response, next: NextFunction) {
   if (isPublicRoute(req)) {
     next();

@@ -30,8 +30,10 @@ import {
   authContext,
   basicRateLimit,
   createCorsOptions,
+  isOrganizationAuthorized,
   requireApiToken,
   requireArtifactAccess,
+  requireInternalWorkerIdentity,
   requireRole,
   securitySummary
 } from "./security.js";
@@ -104,8 +106,7 @@ const reportsDir = path.join(rootDir, "reports");
 
 function assertOrganizationAccess(req: express.Request, organizationId: unknown) {
   const context = authContext(req);
-  if (!context || context.subject === "local-dev" || context.roles.includes("admin")) return;
-  if (!organizationId || String(organizationId) !== context.organizationId) throw new Error("organization_forbidden");
+  if (!isOrganizationAuthorized(context, organizationId)) throw new Error("organization_forbidden");
 }
 
 function artifactUrl(filePath: string) {
@@ -527,11 +528,8 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/internal/v1/executions/:runId", async (req, res, next) => {
+app.post("/internal/v1/executions/:runId", requireInternalWorkerIdentity, async (req, res, next) => {
   try {
-    if (!process.env.INTERNAL_WORKER_TOKEN || req.header("x-internal-worker-token") !== process.env.INTERNAL_WORKER_TOKEN) {
-      return void res.status(403).json({ error: "internal_worker_identity_required" });
-    }
     res.json({ run: await executeQueuedRun(req.params.runId) });
   } catch (error) { next(error); }
 });
@@ -955,13 +953,10 @@ app.post("/api/refine-plan", async (req, res, next) => {
   }
 });
 
-app.post("/api/run-visual-test", async (req, res, next) => {
+app.post("/api/run-visual-test", requireInternalWorkerIdentity, async (req, res, next) => {
   try {
     res.setHeader("Deprecation", "true");
     res.setHeader("Sunset", "Wed, 14 Oct 2026 00:00:00 GMT");
-    if (!process.env.INTERNAL_WORKER_TOKEN || req.header("x-internal-worker-token") !== process.env.INTERNAL_WORKER_TOKEN) {
-      return void res.status(403).json({ error: "deprecated_internal_execution_only", replacement: "/v1/runs" });
-    }
     const body = z
       .object({
         ...runnableTargetShape,
