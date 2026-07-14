@@ -29,7 +29,16 @@ try {
   if (!tokenResponse?.ok) throw new Error(`oidc_token_${tokenResponse?.status ?? "unavailable"}`);
   const token = (await tokenResponse.json()).access_token;
   const headers = { "content-type": "application/json", authorization: `Bearer ${token}` };
-  let run = (await (await fetch("http://localhost:14317/v1/runs", { method: "POST", headers, body: JSON.stringify({ organizationId: "benchmark", actor: "acceptance-runner", idempotencyKey: `acceptance:${Date.now()}`, input: { appUrl: "http://todo-lite:7101", scenarioId: "task_filter_completed", plannerMode: "deterministic", judgeMode: "deterministic", executionMode: "oci", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false } } }) })).json()).run;
+  const createPayload = { organizationId: "benchmark", actor: "acceptance-runner", idempotencyKey: `acceptance:${Date.now()}`, input: { appUrl: "http://todo-lite:7101", scenarioId: "task_filter_completed", plannerMode: "deterministic", judgeMode: "deterministic", executionMode: "oci", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false } } };
+  const createResponse = await fetch("http://localhost:14317/v1/runs", { method: "POST", headers, body: JSON.stringify(createPayload) });
+  if (!createResponse.ok) throw new Error(`run_create_${createResponse.status}`);
+  let run = (await createResponse.json()).run;
+  const duplicateResponse = await fetch("http://localhost:14317/v1/runs", { method: "POST", headers, body: JSON.stringify(createPayload) });
+  const duplicate = await duplicateResponse.json();
+  if (!duplicateResponse.ok || duplicate.run?.id !== run.id) throw new Error("idempotency_duplicate_run_failed");
+  const crossOrgResponse = await fetch("http://localhost:14317/v1/runs", { method: "POST", headers, body: JSON.stringify({ ...createPayload, organizationId: "other-organization", idempotencyKey: `${createPayload.idempotencyKey}:cross-org` }) });
+  if (crossOrgResponse.status !== 403) throw new Error(`organization_isolation_failed:${crossOrgResponse.status}`);
+  checks.push("idempotent_run_creation", "organization_isolation");
   run = (await (await fetch(`http://localhost:14317/v1/runs/${run.id}/plan-approval`, { method: "POST", headers, body: JSON.stringify({ expectedVersion: run.version, actor: "acceptance-runner", idempotencyKey: `${run.id}:plan` }) })).json()).run;
   run = (await (await fetch(`http://localhost:14317/v1/runs/${run.id}/permissions`, { method: "POST", headers, body: JSON.stringify({ expectedVersion: run.version, actor: "acceptance-runner", idempotencyKey: `${run.id}:permission` }) })).json()).run;
   while (!["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(run.state)) { await new Promise((resolve) => setTimeout(resolve, 1000)); run = (await (await fetch(`http://localhost:14317/v1/runs/${run.id}`, { headers })).json()).run; }

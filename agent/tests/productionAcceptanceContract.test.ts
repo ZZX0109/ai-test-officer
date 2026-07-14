@@ -15,4 +15,8 @@ export async function testProductionAcceptanceContract() {
   assert.doesNotMatch(compose, /AGENT_API_TOKEN:/);
   const dockerignore = await readFile(path.join(rootDir, ".dockerignore"), "utf8");
   assert.match(dockerignore, /^evaluation$/m);
+  const script = await readFile(path.join(rootDir, "scripts", "production-acceptance.mjs"), "utf8");
+  assert.match(script, /idempotency_duplicate_run_failed/);
+  assert.match(script, /organization_isolation_failed/);
+  assert.match(script, /postgres_restart_recovery/);
 }
