@@ -11,6 +11,18 @@ type Lane = "test-command" | "rules-deterministic" | "llm-plan-deterministic-jud
 type Case = { id: string; split: "development" | "blind"; projectId: string; scenarioId: string; category: string; requirement: string; risk: string; faultProfile?: string };
 type Model = { id: string; credentialIdEnv: string; provider: string; model: string };
 
+function selectedModels(models: Model[]) {
+  const requested = (process.env.BENCHMARK_MODEL_IDS ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!requested.length) return models;
+  const byId = new Map(models.map((model) => [model.id, model]));
+  const unknown = requested.filter((id) => !byId.has(id));
+  if (unknown.length) throw new Error(`benchmark_model_not_declared:${unknown.join(",")}`);
+  return requested.map((id) => byId.get(id)!);
+}
+
 async function request<T>(route: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json");
@@ -77,6 +89,7 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
 export async function runBenchmarkExperiment() {
   if (process.env.BENCHMARK_LABELS_ROOT) throw new Error("benchmark_runner_must_not_receive_label_mount");
   const config = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "experiment.json"), "utf8")) as { repetitions: number; promptVersion: string; models: Model[]; acceptance: Record<string, number> };
+  const requestedModels = selectedModels(config.models);
   const includeBlind = process.env.BENCHMARK_ENABLE_BLIND === "1";
   const includeExtended = process.env.BENCHMARK_EXTENDED === "1";
   const development = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Case[];
@@ -89,12 +102,16 @@ export async function runBenchmarkExperiment() {
   const directory = path.join(rootDir, "reports", "benchmarks", "experiments", experimentId);
   const runsDir = path.join(directory, "runs");
   await mkdir(runsDir, { recursive: true });
-  const check = await preflight(config.models);
-  const plannedRuns = cases.length * (2 + config.models.length * config.repetitions * 3);
-  const manifest = { experimentId, createdAt: new Date().toISOString(), split: includeBlind ? "development+blind" : "development", suites: ["core", ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : [])], caseCount: cases.length, plannedRuns, repetitions: config.repetitions, promptVersion: config.promptVersion, models: config.models.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), status: check.failures.length ? "blocked" : "running", blockers: check.failures };
+  const check = await preflight(requestedModels);
+  const runnableModels = requestedModels.filter((model) => check.credentials.has(model.id));
+  const allowPartialModels = process.env.BENCHMARK_ALLOW_PARTIAL_MODELS === "1";
+  const requestedPlannedRuns = cases.length * (2 + requestedModels.length * config.repetitions * 3);
+  const plannedRuns = cases.length * (2 + runnableModels.length * config.repetitions * 3);
+  const hardBlocked = !runnableModels.length || (check.failures.length > 0 && !allowPartialModels);
+  const manifest = { experimentId, createdAt: new Date().toISOString(), split: includeBlind ? "development+blind" : "development", suites: ["core", ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : [])], caseCount: cases.length, plannedRuns, requestedPlannedRuns, repetitions: config.repetitions, promptVersion: config.promptVersion, models: runnableModels.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), unavailableModels: requestedModels.filter((model) => !check.credentials.has(model.id)).map((model) => ({ id: model.id, provider: model.provider, model: model.model })), status: hardBlocked ? "blocked" : "running", blockers: check.failures, partial: check.failures.length > 0 };
   await writeFile(path.join(directory, "manifest.json"), JSON.stringify(manifest, null, 2));
   await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify({ experimentId, status: manifest.status, completedRuns: 0, plannedRuns, blockers: check.failures }, null, 2));
-  if (check.failures.length) throw new Error(`benchmark_preflight_blocked:${check.failures.join(",")}`);
+  if (hardBlocked) throw new Error(`benchmark_preflight_blocked:${check.failures.join(",")}`);
   let completedRuns = 0;
   for (const item of cases) {
     const target = projectMap.get(item.projectId);
@@ -103,14 +120,14 @@ export async function runBenchmarkExperiment() {
     await writeFile(path.join(runsDir, `${item.id}.rules-deterministic.none.1.json`), JSON.stringify(rules, null, 2)); completedRuns += 1;
     const testCommand = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane: "test-command", repetition: 1, experimentId, promptVersion: config.promptVersion });
     await writeFile(path.join(runsDir, `${item.id}.test-command.none.1.json`), JSON.stringify(testCommand, null, 2)); completedRuns += 1;
-    for (const model of config.models) for (let repetition = 1; repetition <= config.repetitions; repetition += 1) for (const lane of ["llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"] as Lane[]) {
+    for (const model of runnableModels) for (let repetition = 1; repetition <= config.repetitions; repetition += 1) for (const lane of ["llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"] as Lane[]) {
       const record = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane, model, credentialId: check.credentials.get(model.id), repetition, experimentId, promptVersion: config.promptVersion });
       await writeFile(path.join(runsDir, `${item.id}.${lane}.${model.id}.${repetition}.json`), JSON.stringify(record, null, 2)); completedRuns += 1;
       await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify({ experimentId, status: "awaiting_agent_runs", completedRuns, plannedRuns }, null, 2));
     }
   }
   await writeFile(path.join(directory, "manifest.json"), JSON.stringify({ ...manifest, status: "awaiting_evaluation", completedRuns, finishedAt: new Date().toISOString() }, null, 2));
-  await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify({ experimentId, status: "awaiting_evaluation", completedRuns, plannedRuns }, null, 2));
+  await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify({ experimentId, status: "awaiting_evaluation", completedRuns, plannedRuns, requestedPlannedRuns, blockers: check.failures, partial: check.failures.length > 0 }, null, 2));
 }
 
 if (import.meta.url === new URL(process.argv[1] ?? "", "file:").href) runBenchmarkExperiment().catch((error) => { console.error(error); process.exitCode = 2; });

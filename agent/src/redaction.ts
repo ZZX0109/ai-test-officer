@@ -1,4 +1,13 @@
-const sensitiveKeyPattern = /(authorization|cookie|set-cookie|api[-_]?key|token|password|passwd|secret|credential|private[-_]?key)/i;
+// Keep security secrets out of persisted evidence without destroying ordinary
+// telemetry such as promptTokens, completionTokens, totalTokens or apiVersion.
+// The previous broad `token` match made real benchmark cost/accounting data
+// unverifiable after report persistence.
+const sensitiveKeyPattern = /(authorization|cookie|set-cookie|api[-_]?key|password|passwd|secret|private[-_]?key|token)$/i;
+const safeTelemetryKeys = new Set(["prompttokens", "completiontokens", "totaltokens", "maxtokens"]);
+
+function isSensitiveKey(key: string) {
+  return !safeTelemetryKeys.has(key.replace(/[-_]/g, "").toLowerCase()) && sensitiveKeyPattern.test(key);
+}
 const bearerPattern = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const webhookUrlPattern = /\bhttps?:\/\/[^\s"'<>)]*(?:webhook|hooks?)[^\s"'<>)]*/gi;
 const keyValuePattern = /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|passwd|secret|authorization|cookie|session|webhook[_-]?key|key)=([^&\s]+)/gi;
@@ -15,7 +24,7 @@ export function redactUrl(value: string | undefined) {
   try {
     const parsed = new URL(value);
     for (const key of Array.from(parsed.searchParams.keys())) {
-      if (sensitiveKeyPattern.test(key)) {
+      if (isSensitiveKey(key)) {
         parsed.searchParams.set(key, "[REDACTED]");
       }
     }
@@ -31,7 +40,7 @@ export function redactValue(value: unknown): unknown {
   if (value && typeof value === "object") {
     const output: Record<string, unknown> = {};
     for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-      output[key] = sensitiveKeyPattern.test(key) ? "[REDACTED]" : redactValue(nested);
+      output[key] = isSensitiveKey(key) ? "[REDACTED]" : redactValue(nested);
     }
     return output;
   }

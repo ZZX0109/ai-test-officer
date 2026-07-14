@@ -4,7 +4,8 @@
   "promptVersion":"plan-v2-dsl",
   "models":[
     {"id":"openai-gpt-5.1","credentialIdEnv":"BENCHMARK_OPENAI_CREDENTIAL_ID","provider":"openai","model":"gpt-5.1-2025-11-13"},
-    {"id":"anthropic-sonnet-4.6","credentialIdEnv":"BENCHMARK_ANTHROPIC_CREDENTIAL_ID","provider":"anthropic","model":"claude-sonnet-4-6"}
+    {"id":"anthropic-sonnet-4.6","credentialIdEnv":"BENCHMARK_ANTHROPIC_CREDENTIAL_ID","provider":"anthropic","model":"claude-sonnet-4-6"},
+    {"id":"poe-gpt-5.4","credentialIdEnv":"BENCHMARK_POE_GPT_54_CREDENTIAL_ID","provider":"openai-compatible","model":"gpt-5.4"}
   ],
   "lanes":["test-command","rules-deterministic","llm-plan-deterministic-judge","rules-plan-llm-judge","full-llm"],
   "roi":{"manualMinutesPerCase":20,"reviewMinutesPerCase":8},
