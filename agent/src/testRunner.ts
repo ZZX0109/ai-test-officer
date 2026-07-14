@@ -17,6 +17,7 @@ import { appendEvidence as appendEvidenceToStore, readEvidence, writeRunBundle }
 import { appendLoopEvent, readLoopEvents } from "./loopEventStore.js";
 import { buildScenarioOracles } from "./oracleBuilder.js";
 import { buildRiskCoverageMatrix } from "./riskCoverage.js";
+import { buildEvidenceQualityReport } from "./evidenceQuality.js";
 import { appendRunHistory } from "./runHistory.js";
 import { buildConflictPacket } from "./conflictReplay.js";
 import { getScenario, type ScenarioAction, type ScenarioOracle } from "./scenarios.js";
@@ -988,6 +989,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     .filter((kind) => ["screenshot", "dom", "network", "console", "trace", "video"].includes(kind)) as ArtifactV2["kind"][];
   const mirroredArtifacts = await mirrorArtifactsToConfiguredStore(artifactsV2, reportsDir);
   artifactsV2.splice(0, artifactsV2.length, ...mirroredArtifacts);
+  const evidenceQuality = buildEvidenceQualityReport({ assertions, evidence: latestEvidence, artifacts: artifactsV2 });
   const artifactGate = assessArtifactGate({ artifacts: artifactsV2, requiredKinds });
   const partialResult = {
     assertions,
@@ -1159,6 +1161,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
         evidenceRefs: event.evidenceRefs
       })),
     runtimeStatus,
+    evidenceQuality,
     judgeReport,
     reportFile: artifactUrl(path.join(runDir, "report.json")),
     runBundleFile: artifactUrl(path.join(runDir, "run_bundle.json"))

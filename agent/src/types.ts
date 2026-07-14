@@ -602,6 +602,32 @@ export interface VisualRunResult {
   runBundleFile: string;
   artifactIntegrityReportFile?: string;
   artifactIntegrity?: ArtifactIntegrityReport;
+  evidenceQuality?: EvidenceQualityReport;
+}
+
+export interface AssertionEvidenceQuality {
+  assertionName: string;
+  passed: boolean;
+  attempt?: number;
+  requiredKinds: ArtifactV2["kind"][];
+  collectedKinds: ArtifactV2["kind"][];
+  artifactIds: string[];
+  evidenceRefs: string[];
+  status: "grounded" | "insufficient";
+  reasons: string[];
+}
+
+export interface EvidenceQualityReport {
+  generatedAt: string;
+  assertions: AssertionEvidenceQuality[];
+  summary: {
+    totalAssertions: number;
+    passedAssertions: number;
+    groundedPassedAssertions: number;
+    groundedPassedRate: number;
+    runtimeArtifactRate: number;
+    crossAttemptViolations: number;
+  };
 }
 
 export type EvidenceType =

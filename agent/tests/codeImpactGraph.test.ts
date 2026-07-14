@@ -14,6 +14,8 @@ export async function testCodeImpactGraph() {
     assert.ok(graph.nodes.some((node) => node.kind === "symbol" && node.label === "loadOrders"));
     assert.ok(graph.nodes.some((node) => node.kind === "api-route" && node.label === "/api/health"));
     assert.ok(graph.edges.some((edge) => edge.kind === "covered-by"));
+    assert.ok(graph.edges.some((edge) => edge.kind === "calls" && edge.reason.includes("resolves to API route")));
+    assert.ok(graph.edges.some((edge) => edge.kind === "renders" && edge.reason.includes("contains frontend call")));
     const cached = await buildCodeImpactGraph({ repositoryRoot: root, files: ["src/pages/orders.ts", "service.py"] });
     assert.equal(cached.cacheHits, 2);
   } finally { await rm(root, { recursive: true, force: true }); }

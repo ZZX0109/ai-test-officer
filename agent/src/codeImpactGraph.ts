@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
 
@@ -16,6 +16,22 @@ function digest(value: string) { return createHash("sha256").update(value).diges
 function id(kind: string, value: string) { return `${kind}_${digest(value).slice(0, 16)}`; }
 
 function lineOf(source: ts.SourceFile, node: ts.Node) { return source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1; }
+
+function normalizedApiPath(value: string) {
+  return value.replace(/^https?:\/\/[^/]+/i, "").replace(/[?#].*$/, "").replace(/\/:?[A-Za-z0-9_{}-]+/g, "/:param").replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+}
+
+async function discoverSourceFiles(root: string, directory = root, found: string[] = []): Promise<string[]> {
+  if (found.length >= 1_000) return found;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if ([".git", "node_modules", "dist", "build", "coverage", ".ai-test-officer"].includes(entry.name)) continue;
+    const absolute = path.join(directory, entry.name);
+    if (entry.isDirectory()) await discoverSourceFiles(root, absolute, found);
+    else if (entry.isFile() && /\.(?:tsx?|jsx?|py)$/.test(entry.name)) found.push(path.relative(root, absolute));
+    if (found.length >= 1_000) break;
+  }
+  return found;
+}
 
 function indexTypeScript(file: string, relative: string, sourceText: string): CachedFile {
   const source = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true, file.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
@@ -76,14 +92,15 @@ async function indexPython(script: string, root: string, files: string[]) {
   });
 }
 
-export async function buildCodeImpactGraph(input: { repositoryRoot: string; files: string[]; cacheFile?: string; scenarios?: Array<{ id: string; keywords: string[] }>; historicalBugs?: Array<{ id: string; title: string; files: string[] }> }): Promise<CodeImpactGraph> {
+export async function buildCodeImpactGraph(input: { repositoryRoot: string; files: string[]; cacheFile?: string; includeRepositorySources?: boolean; scenarios?: Array<{ id: string; keywords: string[] }>; historicalBugs?: Array<{ id: string; title: string; files: string[] }> }): Promise<CodeImpactGraph> {
   const root = path.resolve(input.repositoryRoot);
   const cacheFile = input.cacheFile ?? path.join(root, ".ai-test-officer", "impact-cache.json");
   const cache: GraphCache = await readFile(cacheFile, "utf8").then((raw) => JSON.parse(raw) as GraphCache).catch(() => ({ files: {} }));
   const nextCache: GraphCache = { files: { ...cache.files } };
   let cacheHits = 0;
   const pythonFiles: string[] = [];
-  for (const relative of Array.from(new Set(input.files)).sort()) {
+  const indexedFiles = Array.from(new Set(input.includeRepositorySources ? [...input.files, ...await discoverSourceFiles(root)] : input.files)).sort();
+  for (const relative of indexedFiles) {
     const absolute = path.resolve(root, relative);
     if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) throw new Error(`impact_path_escape:${relative}`);
     if (!(await stat(absolute).catch(() => undefined))?.isFile()) continue;
@@ -99,10 +116,21 @@ export async function buildCodeImpactGraph(input: { repositoryRoot: string; file
   }
   await mkdir(path.dirname(cacheFile), { recursive: true });
   await writeFile(cacheFile, JSON.stringify(nextCache, null, 2));
-  const selected = input.files.flatMap((file) => nextCache.files[file] ? [nextCache.files[file]] : []);
+  const selected = indexedFiles.flatMap((file) => nextCache.files[file] ? [nextCache.files[file]] : []);
   const nodes = selected.flatMap((item) => item.nodes);
   const edges = selected.flatMap((item) => item.edges);
   const fileNodes = nodes.filter((node) => node.kind === "file");
+  const apiRoutes = nodes.filter((node) => node.kind === "api-route");
+  const frontendCalls = nodes.filter((node) => node.kind === "frontend-call");
+  const pages = nodes.filter((node) => node.kind === "page");
+  for (const call of frontendCalls) {
+    for (const route of apiRoutes.filter((candidate) => normalizedApiPath(candidate.label) === normalizedApiPath(call.label))) {
+      edges.push({ from: call.id, to: route.id, kind: "calls", reason: `Frontend call ${call.label} resolves to API route ${route.label}.` });
+    }
+    for (const page of pages.filter((candidate) => candidate.file === call.file)) {
+      edges.push({ from: page.id, to: call.id, kind: "renders", reason: `Page ${page.label} contains frontend call ${call.label}.` });
+    }
+  }
   for (const scenario of input.scenarios ?? []) {
     const matches = nodes.filter((node) => scenario.keywords.some((keyword) => node.label.toLowerCase().includes(keyword.toLowerCase())));
     if (!matches.length) continue;

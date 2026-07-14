@@ -63,6 +63,16 @@ function integrityMarkdown(result: VisualRunResult) {
   ].join("\n");
 }
 
+function evidenceQualityMarkdown(result: VisualRunResult) {
+  const quality = result.evidenceQuality;
+  if (!quality) return "- Evidence-quality audit: pending";
+  return [
+    `- Grounded passed assertions: ${quality.summary.groundedPassedAssertions}/${quality.summary.passedAssertions} (${(quality.summary.groundedPassedRate * 100).toFixed(1)}%)`,
+    `- Runtime artifact rate: ${(quality.summary.runtimeArtifactRate * 100).toFixed(1)}%; cross-attempt violations: ${quality.summary.crossAttemptViolations}`,
+    ...quality.assertions.map((item) => `- \`${item.status}\` ${item.assertionName}: required=${item.requiredKinds.join(",")}; collected=${item.collectedKinds.join(",") || "none"}; artifacts=${item.artifactIds.join(",") || "none"}; evidence=${item.evidenceRefs.join(",") || "none"}${item.reasons.length ? `; reasons=${item.reasons.join(",")}` : ""}`)
+  ].join("\n");
+}
+
 export function renderMarkdownReport(result: VisualRunResult) {
   const releaseFinding = result.judgeReport.releaseJudge.findings[0];
   const failedAssertions = result.assertions.filter((item) => !item.passed);
@@ -113,6 +123,10 @@ ${mdList(result.evidence.slice(-30).map((item) => `\`${item.id}\` ${item.type} $
 ## Artifact Integrity
 
 ${integrityMarkdown(result)}
+
+## Assertion Evidence Quality
+
+${evidenceQualityMarkdown(result)}
 
 ## Reproduce
 

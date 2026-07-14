@@ -629,13 +629,14 @@ app.post("/v1/impact/code-graph", async (req, res, next) => {
     const body = z.object({
       repositoryRoot: z.string().min(1).default(rootDir),
       files: z.array(z.string().min(1)).max(1000),
+      scope: z.enum(["changed-files", "repository"]).default("repository"),
       historicalBugs: z.array(z.object({ id: z.string(), title: z.string(), files: z.array(z.string()) })).max(500).optional()
     }).parse(req.body);
     const allowedRoot = path.resolve(process.env.WORKSPACE_ROOT ?? rootDir);
     const repositoryRoot = path.resolve(body.repositoryRoot);
     if (repositoryRoot !== allowedRoot && !repositoryRoot.startsWith(`${allowedRoot}${path.sep}`)) throw new Error("impact_repository_outside_workspace");
     const scenarios = listScenarios().map((scenario) => ({ id: scenario.id, keywords: scenario.matcher?.keywords ?? [scenario.id] }));
-    res.json({ graph: await buildCodeImpactGraph({ repositoryRoot, files: body.files, scenarios, historicalBugs: body.historicalBugs }) });
+    res.json({ graph: await buildCodeImpactGraph({ repositoryRoot, files: body.files, includeRepositorySources: body.scope === "repository", scenarios, historicalBugs: body.historicalBugs }) });
   } catch (error) { next(error); }
 });
 
