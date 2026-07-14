@@ -1,0 +1,18 @@
+{
+  "id": "generic_visual_regression_basic",
+  "title": "通用客户门户视觉基础检查",
+  "capabilityKind": "visual_regression",
+  "genericTemplate": true,
+  "planObservation": "smoke -> core_path(customer table visual baseline) -> screenshot regression",
+  "summary": "验证客户表容器和关键内容可见，并采集 screenshot、DOM、console 证据。",
+  "matcher": {"keywords":["视觉回归","visual regression","布局","screenshot"],"riskLevel":"low","sourceHints":["requirement","diff","llm_inferred"],"capabilities":["screenshot_evidence","console_oracle"]},
+  "smoke": {"pathId":"open_customer_portal","stepId":"open_customer_portal","title":"打开客户门户","headingName":"Customer Portal Lite","assertionName":"客户门户标题可见","expected":"Customer Portal Lite 标题出现"},
+  "corePath": {
+    "pathId":"customer_visual_baseline_path","stepId":"capture_customer_visual_baseline","title":"采集客户表视觉基线","action":"visual_check","triggerButtonName":"按金额排序","targetLocator":"[data-testid='customer-table']","expectedTextIncludes":"Globex Expansion","domAssertionName":"客户表视觉基线内容存在","riskReason":"视觉检查必须由截图、DOM 与 console 共同支撑。",
+    "oracles":[
+      {"id":"customer_visual_dom","name":"客户表视觉基线内容存在","type":"dom_text","locator":"[data-testid='customer-table']","expectedTextIncludes":"Globex Expansion","expected":"客户表包含 Globex Expansion"},
+      {"id":"customer_visual_console","name":"客户视觉基础检查无 console error","type":"console_no_error","expected":"浏览器 console 不出现 error/exception/failed"}
+    ]
+  },
+  "regressionPath":{"stepId":"customer_visual_regression_snapshot","title":"保留客户视觉回归截图","action":"visual_check"}
+}

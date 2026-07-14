@@ -96,7 +96,11 @@ export async function runBenchmarkExperiment() {
   const development = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Case[];
   const extended = includeExtended ? JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "extended-cases.json"), "utf8")) as Case[] : [];
   const blind = includeBlind ? JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8")) as Case[] : [];
-  const cases = [...development, ...extended, ...blind];
+  const catalogCases = [...development, ...extended, ...blind];
+  const requestedCaseIds = (process.env.BENCHMARK_CASE_IDS ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+  const unknownCaseIds = requestedCaseIds.filter((id) => !catalogCases.some((item) => item.id === id));
+  if (unknownCaseIds.length) throw new Error(`benchmark_case_not_declared:${unknownCaseIds.join(",")}`);
+  const cases = requestedCaseIds.length ? catalogCases.filter((item) => requestedCaseIds.includes(item.id)) : catalogCases;
   const mapping = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "execution-map.json"), "utf8")) as { mappings: Array<{ logicalProjectId: string; executionProjectId: string; targetUrl?: string }> };
   const projectMap = new Map(mapping.mappings.map((item) => [item.logicalProjectId, item]));
   const experimentId = process.env.BENCHMARK_EXPERIMENT_ID ?? `experiment_${new Date().toISOString().replace(/[:.]/g, "-")}`;

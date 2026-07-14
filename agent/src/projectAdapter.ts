@@ -85,7 +85,7 @@ export function defaultProjectConfig(): ProjectConfig {
     allowedOrigins: ["http://127.0.0.1:6173", "http://localhost:6173"],
     login: { method: "none" },
     env: {
-      VITE_TASK_FILTER_FIXTURE_BUG: "1",
+      VITE_TASK_FILTER_FIXTURE_BUG: "0",
       VITE_APP_API_URL: "http://localhost:6172"
     },
     cleanupCommand: "",

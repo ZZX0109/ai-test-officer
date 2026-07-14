@@ -65,6 +65,13 @@ function html(response) {
     </section>
 
     <section>
+      <h2>Resilience</h2>
+      <button type="button" id="simulateError">模拟错误</button>
+      <button type="button" id="retryError">重试</button>
+      <p data-testid="customer-error-state"></p>
+    </section>
+
+    <section>
       <h2>Roles</h2>
       <label>切换角色
         <select id="role" aria-label="切换角色">
@@ -105,6 +112,13 @@ function html(response) {
         await fetch("/api/schema-check?contract=customer");
         document.querySelector("[data-testid='schema-state']").textContent = "schema ok";
       });
+      document.querySelector("#simulateError").addEventListener("click", async () => {
+        const response = await fetch("/api/customers?status=error");
+        document.querySelector("[data-testid='customer-error-state']").textContent = response.ok ? "unexpected success" : "客户接口失败";
+      });
+      document.querySelector("#retryError").addEventListener("click", () => {
+        document.querySelector("[data-testid='customer-error-state']").textContent = "recovered";
+      });
       document.querySelector("#applyRole").addEventListener("click", () => {
         const role = document.querySelector("#role").value;
         document.querySelector("[data-testid='permission-matrix']").textContent = role === "viewer" ? "viewer: read-only" : "admin: full-access";
@@ -117,6 +131,10 @@ function html(response) {
 const server = http.createServer((request, response) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   if (url.pathname === "/health") return json(response, { ok: true, service: "customer-portal-lite" });
+  if (url.pathname === "/api/customers" && url.searchParams.get("status") === "error") {
+    response.writeHead(503, { "content-type": "application/json; charset=utf-8" });
+    return response.end(JSON.stringify({ ok: false, error: "customer_api_failure" }));
+  }
   if (url.pathname === "/api/customers") return json(response, { ok: true, query: url.searchParams.get("query"), items: ["Acme Renewal"] });
   if (url.pathname === "/api/schema-check") return json(response, { ok: true, contract: url.searchParams.get("contract") });
   return html(response);

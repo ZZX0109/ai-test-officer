@@ -23,11 +23,13 @@ export function testScenarioParser() {
     Array.from(genericCapabilities.keys()).sort(),
     [
       "generic_approval_flow_transition",
+      "generic_api_failure",
       "generic_complex_form_validation",
       "generic_file_upload_validation",
       "generic_openapi_schema_contract",
       "generic_role_permission_matrix",
-      "generic_table_sort_filter_pagination"
+      "generic_table_sort_filter_pagination",
+      "generic_visual_regression_basic"
     ].sort()
   );
   assert.equal(genericCapabilities.get("generic_table_sort_filter_pagination"), "table");
@@ -36,6 +38,8 @@ export function testScenarioParser() {
   assert.equal(genericCapabilities.get("generic_approval_flow_transition"), "approval_flow");
   assert.equal(genericCapabilities.get("generic_openapi_schema_contract"), "openapi_contract");
   assert.equal(genericCapabilities.get("generic_role_permission_matrix"), "role_permission_matrix");
+  assert.equal(genericCapabilities.get("generic_api_failure"), "network_failure");
+  assert.equal(genericCapabilities.get("generic_visual_regression_basic"), "visual_regression");
   assert.throws(() => getScenario("unknown_scenario_id"), /Unknown scenarioId/);
   assert.equal(
     matchScenariosForContext({

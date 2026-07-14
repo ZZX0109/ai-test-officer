@@ -6,11 +6,11 @@
   "scripts": {
     "dev": "npm run dev:api & npm run dev:web",
     "dev:api": "tsx server/mockServer.ts",
-    "dev:web": "VITE_TASK_FILTER_FIXTURE_BUG=1 VITE_APP_API_URL=http://localhost:6172 vite --host 0.0.0.0 --port 6173 --strictPort",
+    "dev:web": "VITE_APP_API_URL=http://localhost:6172 vite --host 0.0.0.0 --port 6173 --strictPort",
     "build": "tsc -p tsconfig.json && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx tests/appContract.test.ts",
-    "preview": "VITE_TASK_FILTER_FIXTURE_BUG=1 VITE_APP_API_URL=http://localhost:6172 vite preview --port 6173 --strictPort"
+    "preview": "VITE_APP_API_URL=http://localhost:6172 vite preview --port 6173 --strictPort"
   },
   "dependencies": {
     "react": "^18.3.1",
