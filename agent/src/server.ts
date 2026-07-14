@@ -87,7 +87,7 @@ import {
   readJudgeSummaryFromAuditStore
 } from "./sqliteAuditStore.js";
 import { listStorageArchives, runStorageRetention, storageStatus } from "./storageGovernance.js";
-import type { ProjectConfig } from "./types.js";
+import type { ProjectConfig, SourceReadEnvelope } from "./types.js";
 import { loadProjectManifest, manifestToProjectConfig } from "./projectManifest.js";
 import { runEventStore } from "./runEventStore.js";
 import type { RunEventType } from "@ai-test-officer/contracts";
@@ -386,10 +386,14 @@ app.post("/v1/runs", async (req, res, next) => {
     });
     let planPayload: Record<string, unknown> = {};
     if (created.state === "planning") {
+      const sourceContexts: SourceReadEnvelope[] = [];
+      if (body.input.requirement) sourceContexts.push({ id: "run_requirement", kind: "manual", title: "Run requirement", status: "connected", summary: body.input.requirement, permissionState: "not_required", isSimulated: false, evidenceUse: "primary_requirement", displayStatus: "ready", readAt: new Date().toISOString(), trustLevel: "medium" });
+      if (body.input.diff) sourceContexts.push({ id: "run_diff", kind: "git_diff", title: "Run diff", status: "connected", summary: body.input.diff, permissionState: "not_required", isSimulated: false, evidenceUse: "change_context", displayStatus: "ready", readAt: new Date().toISOString(), trustLevel: "high" });
+      const intake = analyzeIntake({ requirement: body.input.requirement ?? "", diff: body.input.diff ?? "", sourceContexts });
       if (body.input.plannerMode === "llm") {
         try {
           const generated = await generatePlan({ requirement: body.input.requirement ?? "", diff: body.input.diff ?? "", credentialId: body.input.modelProfileId, requireLlm: true, runId: created.id, experimentId: body.input.experimentId, promptVersion: body.input.promptVersion });
-          planPayload = { plan: generated.plan, compiledPlan: generated.compiledPlan, provenance: generated.provenance, llmCall: generated.llmCall, scenarioId: generated.scenarioId };
+          planPayload = { plan: generated.plan, compiledPlan: generated.compiledPlan, provenance: generated.provenance, llmCall: generated.llmCall, scenarioId: generated.scenarioId, impactAnalysis: intake.impactAnalysis };
         } catch (error) {
           const reason = error instanceof Error ? error.message : "llm_planner_failed";
           const review = reason.startsWith("llm_plan_") || reason.includes("schema") || reason.includes("parse");
@@ -398,8 +402,25 @@ app.post("/v1/runs", async (req, res, next) => {
           return;
         }
       } else {
-        const scenarioId = body.input.scenarioId ?? "task_filter_completed";
-        planPayload = { plan: buildScenarioGrayPlan(getScenario(scenarioId)), provenance: { source: "deterministic", promptVersion: body.input.promptVersion, compilationStatus: "validated" }, scenarioId };
+        const scenarioId = body.input.scenarioId ?? intake.scenarioCandidates.find((candidate) => candidate.executable && candidate.source !== "patrol")?.mappedScenarioId;
+        if (!scenarioId) {
+          const run = await runEventStore.append({
+            runId: created.id,
+            type: "human_review_requested",
+            expectedVersion: created.version,
+            actor: "planner",
+            idempotencyKey: `${body.idempotencyKey}:impact-gap`,
+            payload: {
+              finalStatus: "needs-human-review",
+              error: "impact_analysis_no_executable_scenario",
+              impactAnalysis: intake.impactAnalysis,
+              provenance: { source: "deterministic", promptVersion: body.input.promptVersion, compilationStatus: "rejected", fallbackReason: "impact_analysis_no_executable_scenario" }
+            }
+          });
+          res.status(201).json({ run });
+          return;
+        }
+        planPayload = { plan: buildScenarioGrayPlan(getScenario(scenarioId)), provenance: { source: "deterministic", promptVersion: body.input.promptVersion, compilationStatus: "validated" }, scenarioId, impactAnalysis: intake.impactAnalysis };
       }
     }
     const run = created.state === "planning"
@@ -478,7 +499,7 @@ app.get("/v1/runs/:id/report", async (req, res, next) => {
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
     const result = (await readRunBundle(run?.resultRunId ?? req.params.id)).result;
-    res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision, planProvenance: run?.planProvenance, plannerCall: run?.plannerCall } });
+    res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision, planProvenance: run?.planProvenance, plannerCall: run?.plannerCall, impactAnalysis: run?.impactAnalysis } });
   } catch (error) { next(error); }
 });
 

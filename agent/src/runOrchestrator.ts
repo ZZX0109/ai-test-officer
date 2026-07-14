@@ -72,6 +72,7 @@ export async function executeQueuedRun(runId: string) {
       experimentId: typeof input.experimentId === "string" ? input.experimentId : undefined,
       repetition: typeof input.repetition === "number" ? input.repetition : undefined,
       planProvenance: projection.planProvenance,
+      impactAnalysis: projection.impactAnalysis,
       faultProfile: typeof input.faultProfile === "string" ? input.faultProfile as RunRequest["faultProfile"] : undefined,
       permissionProfile: (input.permissionProfile as { observe: boolean; browserControl: boolean; workspaceControl: boolean; ideTerminalControl: boolean; systemControl: boolean }) ?? {
         observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false

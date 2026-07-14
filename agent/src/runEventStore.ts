@@ -4,7 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Pool } from "pg";
 import { runEventSchema, transitionRunState, type CompiledPlan, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunState } from "@ai-test-officer/contracts";
-import type { GrayPlan } from "./types.js";
+import type { GrayPlan, ImpactAnalysis } from "./types.js";
 
 export interface RunProjection {
   id: string;
@@ -23,6 +23,7 @@ export interface RunProjection {
   planProvenance?: PlanProvenance;
   plannerCall?: LlmCall;
   selectedScenarioId?: string;
+  impactAnalysis?: ImpactAnalysis;
   override?: { originalDecision: string; newLabel: string; reason: string; actor: string; createdAt: string };
 }
 
@@ -54,6 +55,7 @@ function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
     if (event.payload.provenance) projection.planProvenance = event.payload.provenance as PlanProvenance;
     if (event.payload.llmCall) projection.plannerCall = event.payload.llmCall as LlmCall;
     if (event.payload.scenarioId) projection.selectedScenarioId = String(event.payload.scenarioId);
+    if (event.payload.impactAnalysis) projection.impactAnalysis = event.payload.impactAnalysis as ImpactAnalysis;
   }
   if (event.type === "run_completed") projection.gateStatus = (event.payload.finalStatus as GateStatus | undefined) ?? "pass";
   if (event.type === "run_failed") projection.gateStatus = "fail";
