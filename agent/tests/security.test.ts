@@ -8,6 +8,7 @@ import {
   requireInternalWorkerIdentity,
   securitySummary
 } from "../src/security.js";
+import { grantAllows } from "../src/projectAccess.js";
 
 type EnvPatch = Record<string, string | undefined>;
 
@@ -73,6 +74,10 @@ export async function testSecurityBoundaries() {
   assert.equal(isOrganizationAuthorized({ subject: "runner-a", organizationId: "org-a", roles: ["runner"], claims: {} }, "org-a"), true);
   assert.equal(isOrganizationAuthorized({ subject: "runner-a", organizationId: "org-a", roles: ["runner"], claims: {} }, "org-b"), false);
   assert.equal(isOrganizationAuthorized({ subject: "admin-a", organizationId: "org-a", roles: ["admin"], claims: {} }, "org-b"), true);
+  const grant = { id: "grant-1", projectId: "project-a", subject: "runner-a", role: "runner" as const, tokenKind: "dev" as const, scopes: ["run_tests", "read_artifacts"] as const, createdAt: "2026-01-01T00:00:00.000Z", expiresAt: "2026-12-01T00:00:00.000Z" };
+  assert.equal(grantAllows(grant, "runner-a", "run_tests", new Date("2026-06-01")), true);
+  assert.equal(grantAllows(grant, "runner-b", "run_tests", new Date("2026-06-01")), false);
+  assert.equal(grantAllows(grant, "runner-a", "run_tests", new Date("2027-01-01")), false);
   await withEnv({ NODE_ENV: "production", AGENT_API_TOKEN: "dev-local-token" }, () => {
     assert.throws(() => assertSecurityConfig("0.0.0.0"), /must not use dev-local-token/);
   });

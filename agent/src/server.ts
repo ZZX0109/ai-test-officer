@@ -81,7 +81,7 @@ import {
 } from "./projectAdapter.js";
 import { detectProject, diagnoseProject } from "./projectDetection.js";
 import { runDiscoveryScan } from "./discoveryScan.js";
-import { createProjectGrant, deleteProjectGrant, listProjectGrants } from "./projectAccess.js";
+import { createProjectGrant, deleteProjectGrant, hasProjectScope, listProjectGrants } from "./projectAccess.js";
 import {
   auditStoreStatus,
   readEvidenceFromAuditStore,
@@ -107,6 +107,14 @@ const reportsDir = path.join(rootDir, "reports");
 function assertOrganizationAccess(req: express.Request, organizationId: unknown) {
   const context = authContext(req);
   if (!isOrganizationAuthorized(context, organizationId)) throw new Error("organization_forbidden");
+}
+
+async function assertProjectAccess(req: express.Request, projectId: unknown, scope: "run_tests" | "read_artifacts") {
+  if (!projectId) return;
+  const context = authContext(req);
+  if (!context) throw new Error("project_forbidden");
+  if (context.subject === "local-dev" || context.roles.includes("admin")) return;
+  if (!await hasProjectScope({ projectId: String(projectId), subject: context.subject, scope })) throw new Error("project_forbidden");
 }
 
 function artifactUrl(filePath: string) {
@@ -379,6 +387,7 @@ app.post("/v1/runs", async (req, res, next) => {
   try {
     const body = createRunRequestSchema.parse(req.body);
     assertOrganizationAccess(req, body.organizationId);
+    await assertProjectAccess(req, body.projectId, "run_tests");
     const created = await runEventStore.create({
       runId: body.runId,
       actor: body.actor,
@@ -443,12 +452,13 @@ app.get("/v1/runs/:id", async (req, res, next) => {
     const run = await runEventStore.get(req.params.id);
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
     res.json({ run });
   } catch (error) { next(error); }
 });
 
 app.get("/v1/runs/:id/events", async (req, res, next) => {
-  try { const run = await runEventStore.get(req.params.id); if (!run) return void res.status(404).json({ error: "run_not_found" }); assertOrganizationAccess(req, run.input.organizationId); res.json({ events: await runEventStore.events(req.params.id) }); } catch (error) { next(error); }
+  try { const run = await runEventStore.get(req.params.id); if (!run) return void res.status(404).json({ error: "run_not_found" }); assertOrganizationAccess(req, run.input.organizationId); await assertProjectAccess(req, run.input.projectId, "read_artifacts"); res.json({ events: await runEventStore.events(req.params.id) }); } catch (error) { next(error); }
 });
 
 const controlEvents: Record<string, RunEventType> = {
@@ -467,6 +477,7 @@ for (const [action, eventType] of Object.entries(controlEvents)) {
       const existing = await runEventStore.get(req.params.id);
       if (!existing) return void res.status(404).json({ error: "run_not_found" });
       assertOrganizationAccess(req, existing.input.organizationId);
+      await assertProjectAccess(req, existing.input.projectId, "run_tests");
       if (eventType === "decision_overridden") {
         z.object({ status: z.enum(["approved", "blocked", "accepted-risk"]), reason: z.string().min(1), originalDecision: z.string().optional(), newLabel: z.string().optional() }).parse(body.payload);
       }
@@ -489,6 +500,7 @@ app.get("/v1/runs/:id/artifacts", async (req, res, next) => {
     const run = await runEventStore.get(req.params.id);
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
     const bundle = await readRunBundle(run?.resultRunId ?? req.params.id);
     res.json({ artifacts: bundle.artifactsV2 ?? [], legacyEvidence: bundle.evidence.filter((item) => !item.artifactIds?.length) });
   } catch (error) { next(error); }
@@ -499,6 +511,7 @@ app.get("/v1/runs/:id/report", async (req, res, next) => {
     const run = await runEventStore.get(req.params.id);
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
     const result = (await readRunBundle(run?.resultRunId ?? req.params.id)).result;
     res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision, planProvenance: run?.planProvenance, plannerCall: run?.plannerCall, impactAnalysis: run?.impactAnalysis } });
   } catch (error) { next(error); }
@@ -509,6 +522,7 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
     const run = await runEventStore.get(req.params.id);
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
@@ -774,7 +788,7 @@ app.get("/api/projects/:id/grants", async (req, res, next) => {
   }
 });
 
-app.post("/api/projects/:id/grants", async (req, res, next) => {
+app.post("/api/projects/:id/grants", requireRole(["admin"]), async (req, res, next) => {
   try {
     const body = z.object({
       subject: z.string().min(1),
@@ -788,7 +802,7 @@ app.post("/api/projects/:id/grants", async (req, res, next) => {
   }
 });
 
-app.delete("/api/projects/:id/grants/:grantId", async (req, res, next) => {
+app.delete("/api/projects/:id/grants/:grantId", requireRole(["admin"]), async (req, res, next) => {
   try {
     res.json({ deleted: await deleteProjectGrant(req.params.id, req.params.grantId) });
   } catch (error) {
@@ -1416,6 +1430,10 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   }
   if (error instanceof Error && error.message === "organization_forbidden") {
     res.status(403).json({ error: "organization_forbidden" });
+    return;
+  }
+  if (error instanceof Error && error.message === "project_forbidden") {
+    res.status(403).json({ error: "project_forbidden" });
     return;
   }
   const safeError = error instanceof Error

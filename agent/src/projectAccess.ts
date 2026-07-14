@@ -35,6 +35,15 @@ function tokenKindForRole(role: ProjectGrant["role"]): ProjectGrant["tokenKind"]
   return "dev";
 }
 
+export function grantAllows(grant: ProjectGrant, subject: string, scope: ProjectGrant["scopes"][number], now = new Date()) {
+  if (grant.subject !== subject || !grant.scopes.includes(scope)) return false;
+  return !grant.expiresAt || new Date(grant.expiresAt).getTime() > now.getTime();
+}
+
+export async function hasProjectScope(input: { projectId: string; subject: string; scope: ProjectGrant["scopes"][number]; now?: Date }) {
+  return (await listProjectGrants(input.projectId)).some((grant) => grantAllows(grant, input.subject, input.scope, input.now));
+}
+
 export async function listProjectGrants(projectId?: string) {
   const grants = await readGrants();
   return projectId ? grants.filter((grant) => grant.projectId === projectId) : grants;
