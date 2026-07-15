@@ -11,8 +11,8 @@
     ]
   }],
   "users":[
-    {"username":"acceptance-admin","enabled":true,"credentials":[{"type":"password","value":"acceptance-admin-change-me","temporary":false}],"realmRoles":["admin"]},
-    {"username":"acceptance-runner","enabled":true,"credentials":[{"type":"password","value":"acceptance-runner-change-me","temporary":false}],"realmRoles":["runner"]},
-    {"username":"acceptance-reviewer","enabled":true,"credentials":[{"type":"password","value":"acceptance-reviewer-change-me","temporary":false}],"realmRoles":["reviewer"]}
+    {"username":"acceptance-admin","enabled":true,"email":"acceptance-admin@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Admin","requiredActions":[],"credentials":[{"type":"password","value":"acceptance-admin-change-me","temporary":false}],"realmRoles":["admin"]},
+    {"username":"acceptance-runner","enabled":true,"email":"acceptance-runner@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Runner","requiredActions":[],"credentials":[{"type":"password","value":"acceptance-runner-change-me","temporary":false}],"realmRoles":["runner"]},
+    {"username":"acceptance-reviewer","enabled":true,"email":"acceptance-reviewer@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Reviewer","requiredActions":[],"credentials":[{"type":"password","value":"acceptance-reviewer-change-me","temporary":false}],"realmRoles":["reviewer"]}
   ]
 }

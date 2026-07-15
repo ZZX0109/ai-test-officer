@@ -43,7 +43,7 @@ services:
     ports: ["127.0.0.1:18080:8080"]
     networks: [control]
   todo-lite:
-    build: { context: ../.., dockerfile: Dockerfile.production }
+    build: { context: ../.., dockerfile: Dockerfile.production, target: benchmark-target }
     command: ["node", "fixtures/todo-lite/server.mjs"]
     environment: { HOST: 0.0.0.0, PORT: 7101 }
     read_only: true
@@ -51,7 +51,7 @@ services:
     healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:7101/health"], interval: 3s, timeout: 3s, retries: 30 }
     networks: [targets]
   order-portal-lite:
-    build: { context: ../.., dockerfile: Dockerfile.production }
+    build: { context: ../.., dockerfile: Dockerfile.production, target: benchmark-target }
     command: ["node", "fixtures/order-portal-lite/server.mjs"]
     environment: { HOST: 0.0.0.0, PORT: 7102 }
     read_only: true
@@ -59,13 +59,20 @@ services:
     healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:7102/health"], interval: 3s, timeout: 3s, retries: 30 }
     networks: [targets]
   customer-portal-lite:
-    build: { context: ../.., dockerfile: Dockerfile.production }
+    build: { context: ../.., dockerfile: Dockerfile.production, target: benchmark-target }
     command: ["node", "fixtures/customer-portal-lite/server.mjs"]
     environment: { HOST: 0.0.0.0, PORT: 7103 }
     read_only: true
     tmpfs: ["/tmp"]
     healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:7103/health"], interval: 3s, timeout: 3s, retries: 30 }
     networks: [targets]
+  reports-init:
+    build: { context: ../.., dockerfile: Dockerfile.production }
+    user: root
+    command: ["/bin/sh", "-c", "mkdir -p /app/reports && chown -R pwuser:pwuser /app/reports"]
+    read_only: true
+    volumes: ["agent-reports:/app/reports"]
+    networks: [control]
   agent-api: &agent
     build: { context: ../.., dockerfile: Dockerfile.production }
     command: ["/bin/sh", "-c", "npm --workspace @ai-test-officer/agent run migrate && node agent/dist/server.js"]
@@ -95,8 +102,10 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       minio-init: { condition: service_completed_successfully }
+      reports-init: { condition: service_completed_successfully }
       keycloak: { condition: service_started }
     read_only: true
+    restart: unless-stopped
     tmpfs: ["/tmp"]
     volumes: ["agent-reports:/app/reports"]
     healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:4317/api/health"], interval: 5s, timeout: 3s, retries: 30 }

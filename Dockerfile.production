@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright:v1.61.1-noble
+FROM mcr.microsoft.com/playwright:v1.61.1-noble AS build
 ARG VITE_AGENT_URL=http://localhost:14317
 ARG VITE_OIDC_ISSUER=http://localhost:18080/realms/ai-test-officer
 ARG VITE_OIDC_CLIENT_ID=ai-test-officer-local
@@ -12,6 +12,15 @@ COPY --chown=pwuser:pwuser packages packages
 RUN npm ci
 COPY --chown=pwuser:pwuser . .
 RUN npm run build
+
+# Target fixtures intentionally live in a separate image target. The Agent API,
+# worker and Workbench image must not contain target-side variant semantics.
+FROM build AS benchmark-target
+USER pwuser
+ENV NODE_ENV=production HOST=0.0.0.0
+
+FROM build AS production-agent
+RUN rm -rf /app/fixtures /app/evaluation
 USER pwuser
 ENV NODE_ENV=production HOST=0.0.0.0
 CMD ["node", "agent/dist/server.js"]
