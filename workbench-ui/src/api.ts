@@ -25,6 +25,7 @@ import type {
   RunBundle,
   RunBundleDownloadManifest,
   RunHistoryEntry,
+  RunProjection,
   RunResult,
   ScenarioSummary,
   SecuritySummary,
@@ -252,7 +253,79 @@ export function runVisualTest(
   return runThroughV1({ appUrl, scenarioId, permissionProfile, ...(context ?? {}) }, onCreated);
 }
 
-type RunProjection = { id: string; state: string; version: number; gateStatus?: string };
+export function createVisualRun(
+  appUrl: string | undefined,
+  permissionProfile: PermissionProfile,
+  scenarioId: string | undefined,
+  context: RunTargetPayload & { requirement?: string; diff?: string }
+) {
+  const idempotencyKey = crypto.randomUUID();
+  return request<{ run: RunProjection }>("/v1/runs", {
+    method: "POST",
+    body: JSON.stringify({
+      organizationId: "local",
+      projectId: context.projectId,
+      actor: "workbench-user",
+      idempotencyKey,
+      input: {
+        appUrl,
+        scenarioId,
+        requirement: context.requirement,
+        diff: context.diff,
+        permissionProfile,
+        executionMode: "trusted-local",
+        capabilities: ["browser"]
+      }
+    })
+  });
+}
+
+export function approveRunPlan(runId: string, expectedVersion: number) {
+  return request<{ run: RunProjection }>(`/v1/runs/${encodeURIComponent(runId)}/plan-approval`, {
+    method: "POST",
+    body: JSON.stringify({ expectedVersion, actor: "workbench-user", idempotencyKey: `workbench:${runId}:plan:${expectedVersion}` })
+  });
+}
+
+export function grantRunPermissions(runId: string, expectedVersion: number) {
+  return request<{ run: RunProjection }>(`/v1/runs/${encodeURIComponent(runId)}/permissions`, {
+    method: "POST",
+    body: JSON.stringify({ expectedVersion, actor: "workbench-user", idempotencyKey: `workbench:${runId}:permission:${expectedVersion}` })
+  });
+}
+
+export async function waitForRunReport(runId: string) {
+  let run = (await getRunProjection(runId)).run;
+  const terminal = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
+  const deadline = Date.now() + 20 * 60_000;
+  while (!terminal.has(run.state)) {
+    if (Date.now() > deadline) throw new Error("run_wait_timeout");
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    run = (await getRunProjection(runId)).run;
+  }
+  if (run.state === "cancelled") throw new Error("run_cancelled");
+  return (await request<{ report: RunResult }>(`/v1/runs/${encodeURIComponent(runId)}/report`)).report;
+}
+
+export function getRunProjection(runId: string) {
+  return request<{ run: RunProjection }>(`/v1/runs/${encodeURIComponent(runId)}`);
+}
+
+export function controlRun(
+  runId: string,
+  action: "pause" | "resume" | "cancel" | "decision-override",
+  input: { expectedVersion: number; payload?: Record<string, unknown> }
+) {
+  return request<{ run: RunProjection }>(`/v1/runs/${encodeURIComponent(runId)}/${action}`, {
+    method: "POST",
+    body: JSON.stringify({
+      expectedVersion: input.expectedVersion,
+      actor: "workbench-user",
+      idempotencyKey: `workbench:${runId}:${action}:${input.expectedVersion}`,
+      ...(input.payload ? { payload: input.payload } : {})
+    })
+  });
+}
 
 async function runThroughV1(payload: Record<string, unknown>, onCreated?: (runId: string) => void) {
   const idempotencyKey = crypto.randomUUID();
@@ -277,15 +350,7 @@ async function runThroughV1(payload: Record<string, unknown>, onCreated?: (runId
   onCreated?.(run.id);
   run = (await request<{ run: RunProjection }>(`/v1/runs/${run.id}/plan-approval`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "workbench-user", idempotencyKey: `${idempotencyKey}:plan` }) })).run;
   run = (await request<{ run: RunProjection }>(`/v1/runs/${run.id}/permissions`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "workbench-user", idempotencyKey: `${idempotencyKey}:permission` }) })).run;
-  const terminal = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
-  const deadline = Date.now() + 20 * 60_000;
-  while (!terminal.has(run.state)) {
-    if (Date.now() > deadline) throw new Error("run_wait_timeout");
-    await new Promise((resolve) => setTimeout(resolve, 750));
-    run = (await request<{ run: RunProjection }>(`/v1/runs/${run.id}`)).run;
-  }
-  if (run.state === "cancelled") throw new Error("run_cancelled");
-  return (await request<{ report: RunResult }>(`/v1/runs/${run.id}/report`)).report;
+  return waitForRunReport(run.id);
 }
 
 export function subscribeRunEvents(runId: string, onEvent: (event: { type: string; payload: Record<string, unknown> }) => void) {

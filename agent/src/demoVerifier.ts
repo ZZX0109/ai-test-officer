@@ -9,10 +9,15 @@ import { runCommitCheck } from "./commitCheckOrchestrator.js";
 import { runRequirementAcceptance } from "./requirementAcceptanceOrchestrator.js";
 import { runPatrolNow } from "./patrolScheduler.js";
 import { runVisualGrayTest } from "./testRunner.js";
+import { executeQueuedRun } from "./runOrchestrator.js";
+import { runEventStore } from "./runEventStore.js";
+import { buildScenarioGrayPlan } from "./plan.js";
+import { getScenario } from "./scenarios.js";
+import { readRunBundle } from "./evidenceStore.js";
 import { saveProject, startProject, stopProject, testProjectConnection } from "./projectAdapter.js";
 import type { DemoVerificationResult, PermissionProfile } from "./types.js";
 
-const rootDir = path.resolve(process.cwd(), "..");
+const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const verificationDir = path.join(rootDir, "reports", "demo-verification");
 const latestFile = path.join(verificationDir, "latest.json");
 const appUrl = process.env.APP_URL ?? "http://localhost:6173";
@@ -108,8 +113,24 @@ function resultShell(): DemoVerificationResult {
     createdAt: new Date().toISOString(),
     ok: true,
     checks: [],
-    artifacts: {}
+    artifacts: {},
+    stages: []
   };
+}
+
+function addRunStages(result: DemoVerificationResult, run: Awaited<ReturnType<typeof runVisualGrayTest>>) {
+  const artifactIntegrityVerified = Boolean(run.artifactIntegrity?.items.length) && run.artifactIntegrity!.items.every((item) => item.status === "present" || item.status === "self_reference");
+  result.stages.push({
+    runId: run.id,
+    scenarioId: run.attempts?.[0]?.scenarioId,
+    schedulingCompleted: Boolean(run.finishedAt),
+    executionSucceeded: Boolean(run.attempts?.length && run.artifactsV2?.some((item) => item.origin === "runtime-captured")),
+    requirementCovered: Boolean(run.riskCoverageMatrix.length && run.riskCoverageMatrix.every((item) => item.covered)),
+    artifactIntegrityVerified,
+    machineGate: run.machineGate?.status,
+    judgeRecommendation: run.judgeRecommendation?.status,
+    finalStatus: run.finalStatus
+  });
 }
 
 function addCheck(
@@ -343,13 +364,37 @@ export async function runDemoVerification() {
       details: activeMatched ? "远程需求/Bug/diff 命中 task_filter_active。" : "未命中 task_filter_active。"
     });
 
+    const unifiedKey = `demo-unified-${Date.now()}`;
+    let unified = await runEventStore.create({ actor: "demo-verifier", idempotencyKey: unifiedKey, payload: { appUrl, scenarioId: "task_filter_active", requirement: context.requirement, diff: context.diff, plannerMode: "deterministic", judgeMode: "deterministic", permissionProfile: allowBrowser } });
+    unified = await runEventStore.append({ runId: unified.id, type: "plan_generated", expectedVersion: unified.version, actor: "planner", idempotencyKey: `${unifiedKey}:generated`, payload: { plan: buildScenarioGrayPlan(getScenario("task_filter_active")), scenarioId: "task_filter_active", provenance: { source: "deterministic", promptVersion: "demo-freeze-v1", compilationStatus: "validated" }, impactAnalysis: analysis.impactAnalysis } });
+    unified = await runEventStore.append({ runId: unified.id, type: "plan_approved", expectedVersion: unified.version, actor: "demo-verifier", idempotencyKey: `${unifiedKey}:approved`, payload: {} });
+    unified = await runEventStore.append({ runId: unified.id, type: "permission_granted", expectedVersion: unified.version, actor: "demo-verifier", idempotencyKey: `${unifiedKey}:permission`, payload: {} });
+    unified = (await executeQueuedRun(unified.id))!;
+    const unifiedEvents = await runEventStore.events(unified.id);
+    const unifiedBundle = await readRunBundle(unified.resultRunId!);
+    const unifiedResult = { ...unifiedBundle.result, evidence: unifiedBundle.evidence, loopEvents: unifiedBundle.loopEvents, oracles: unifiedBundle.oracles, riskCoverageMatrix: unifiedBundle.riskCoverageMatrix };
+    addRunStages(result, unifiedResult);
+    addCheck(result, {
+      id: "unified_run_state_machine",
+      title: "统一运行入口完成计划审批、权限和执行状态链",
+      status: ["plan_generated", "plan_approved", "permission_granted", "run_started", "evidence_collecting", "run_judging"].every((type) => unifiedEvents.some((event) => event.type === type)) && Boolean(unifiedResult.finalStatus) ? "passed" : "failed",
+      details: `run=${unified.id} state=${unified.state} machine=${unifiedResult.machineGate?.status} judge=${unifiedResult.judgeRecommendation?.status} final=${unifiedResult.finalStatus}`,
+      artifact: unifiedResult.runBundleFile
+    });
+
     const commitCheck = await runCommitCheck({
       appUrl,
       prUrl: "local://demo-verification/commit",
+      // The repository can contain in-progress changes for several fixtures.
+      // A demo backed by the Todo application must keep its explicit executable
+      // scenario bound to that application rather than accidentally selecting an
+      // Order Portal change from the ambient working-tree diff.
+      scenarioId: "task_filter_completed",
       fallbackDiff: "fetchTasks changed completed filter query handling and may drop status=completed",
       notify: ["oncall"],
       permissionProfile: allowBrowser
     });
+    if (commitCheck.run) addRunStages(result, commitCheck.run);
     result.artifacts.commitCheck = commitCheck.commitCheckFile ?? "";
     addCheck(result, {
       id: "commit_check_artifacts",
@@ -372,6 +417,7 @@ export async function runDemoVerification() {
       notify: ["product-owner", "qa-oncall"],
       permissionProfile: allowBrowser
     });
+    if (acceptance.run) addRunStages(result, acceptance.run);
     result.artifacts.requirementAcceptance = acceptance.acceptanceFile ?? "";
     addCheck(result, {
       id: "requirement_acceptance_artifacts",
@@ -396,6 +442,7 @@ export async function runDemoVerification() {
       notify: ["oncall"],
       permissionProfile: allowBrowser
     });
+    addRunStages(result, patrol.run);
     result.artifacts.patrol = patrol.patrol.patrolFile ?? "";
     addCheck(result, {
       id: "patrol_artifacts",
@@ -435,6 +482,7 @@ export async function runDemoVerification() {
         trigger: "manual",
         permissionProfile: allowBrowser
       });
+      addRunStages(result, run);
       addCheck(result, {
         id: `real_project_${scenario.id}`,
         title: scenario.title,

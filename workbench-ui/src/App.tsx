@@ -46,6 +46,7 @@ import {
   AGENT_URL,
   analyzeConnectedContext,
   analyzeIntake,
+  controlRun,
   approveScenarioDraft,
   createCredential,
   createHarnessGapDraft,
@@ -65,6 +66,7 @@ import {
   getSecuritySummary,
   getStorageStatus,
   getRunBundle,
+  getRunProjection,
   listHarnessGaps,
   listBotDeliveries,
   listCredentials,
@@ -85,7 +87,10 @@ import {
   runPatrolPlanNow,
   runRequirementAcceptance,
   runStorageRetention,
-  runVisualTest,
+  createVisualRun,
+  approveRunPlan,
+  grantRunPermissions,
+  waitForRunReport,
   saveProject,
   savePatrolPlan,
   startPatrolJob,
@@ -123,6 +128,7 @@ import type {
   ProjectRuntimeStatus,
   RequirementAcceptanceResult,
   RunBundle,
+  RunProjection,
   RunHistoryEntry,
   RunResult,
   ScenarioSummary,
@@ -218,6 +224,8 @@ export function App() {
   const [requirementAcceptance, setRequirementAcceptance] = useState<RequirementAcceptanceResult | null>(null);
   const [liveRun, setLiveRun] = useState<LiveRunState | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [activeRun, setActiveRun] = useState<RunProjection | null>(null);
+  const [reviewReason, setReviewReason] = useState("");
   const [auditStore, setAuditStore] = useState<AuditStoreStatus | null>(null);
   const [storageStatus, setStorageStatus] = useState<StorageStatus | null>(null);
   const [storageArchives, setStorageArchives] = useState<StorageArchive[]>([]);
@@ -391,7 +399,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!isBusy || !activeRunId) return;
+    if (!activeRunId) return;
     return subscribeRunEvents(activeRunId, ({ type, payload }) => {
       if (type !== "state") return;
       const event = payload as { type?: string };
@@ -403,8 +411,9 @@ export function App() {
         events: current?.events ?? [],
         evidence: current?.evidence ?? []
       }));
+      void getRunProjection(activeRunId).then(({ run }) => setActiveRun(run)).catch(() => undefined);
     });
-  }, [isBusy, activeRunId]);
+  }, [activeRunId]);
 
   async function submitCredential(event: React.FormEvent) {
     event.preventDefault();
@@ -722,22 +731,63 @@ export function App() {
   async function runPlan() {
     if (!requireBrowserAuthorization("接管浏览器执行测试")) return;
     setIsRunning(true);
-    setMessage("AI 测试官开始执行显式灰度验收。");
+    setMessage("正在创建运行，等待你确认测试计划。");
     try {
-      const run = await runVisualTest(appUrl, permissionProfile, scenarioId, {
+      const response = await createVisualRun(appUrl, permissionProfile, scenarioId, {
         requirement: requirementText,
         diff: diffText,
-        plan: plan ?? undefined,
-        trigger: "manual",
-        credentialId: defaultCredential?.id,
         projectId: selectedProjectId || projectDraft?.id
-      }, setActiveRunId);
-      setResult(run);
-      setMessage(run.summary);
+      });
+      setActiveRunId(response.run.id);
+      setActiveRun(response.run);
+      setMessage("运行已创建，请先审批测试计划。");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "执行失败");
-    } finally {
       setIsRunning(false);
+    }
+  }
+
+  async function approveActivePlan() {
+    if (!activeRunId || !activeRun) return;
+    try {
+      const response = await approveRunPlan(activeRunId, activeRun.version);
+      setActiveRun(response.run);
+      setMessage("测试计划已审批，请确认浏览器权限。");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "计划审批失败"); }
+  }
+
+  async function grantActivePermissions() {
+    if (!activeRunId || !activeRun) return;
+    if (!requireBrowserAuthorization("确认浏览器执行权限")) return;
+    try {
+      const response = await grantRunPermissions(activeRunId, activeRun.version);
+      setActiveRun(response.run);
+      setIsRunning(true);
+      setMessage("权限已确认，Agent 正在执行并采集证据。");
+      const report = await waitForRunReport(activeRunId);
+      setResult(report);
+      setMessage(report.summary);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "权限确认或执行失败");
+    } finally { setIsRunning(false); }
+  }
+
+  async function controlActiveRun(action: "pause" | "resume" | "cancel" | "decision-override") {
+    if (!activeRunId) return;
+    try {
+      const current = (await getRunProjection(activeRunId)).run;
+      const payload = action === "decision-override"
+        ? { status: "accepted-risk", reason: reviewReason.trim(), newLabel: "reviewer_accepted_risk" }
+        : undefined;
+      if (action === "decision-override" && !reviewReason.trim()) {
+        setMessage("人工裁决必须填写原因。");
+        return;
+      }
+      const response = await controlRun(activeRunId, action, { expectedVersion: current.version, payload });
+      setActiveRun(response.run);
+      setMessage(`运行控制已写入事件：${action} · state=${response.run.state}`);
+      if (action === "cancel") setIsRunning(false);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `运行控制失败：${action}`);
     }
   }
 
@@ -1198,6 +1248,10 @@ export function App() {
                 <option value="openai-compatible">OpenAI-compatible</option>
                 <option value="custom">Custom</option>
               </select>
+              <div className="button-row" aria-label="本地模型预设">
+                <button type="button" onClick={() => setForm({ ...form, name: "Ollama Local", provider: "openai-compatible", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen3:8b", apiKey: form.apiKey || "ollama", tags: "llm,local,ollama" })}>Ollama 预设</button>
+                <button type="button" onClick={() => setForm({ ...form, name: "vLLM Local", provider: "openai-compatible", baseUrl: "http://127.0.0.1:8000/v1", model: "local-model", apiKey: form.apiKey || "local", tags: "llm,local,vllm" })}>vLLM 预设</button>
+              </div>
               <input
                 aria-label="Base URL"
                 value={form.baseUrl}
@@ -1452,6 +1506,15 @@ export function App() {
                 {isRunning ? <Activity size={16} /> : <Play size={16} />}
                 {isRunning ? "执行中" : "开始测试"}
               </button>
+              {activeRunId && (
+                <>
+                  <button disabled={activeRun?.state !== "awaiting-plan-approval"} onClick={() => void approveActivePlan()} type="button">审批计划</button>
+                  <button disabled={activeRun?.state !== "awaiting-permission" || !permissionProfile.browserControl} onClick={() => void grantActivePermissions()} type="button">确认权限并执行</button>
+                  <button disabled={!activeRun || !["queued", "preparing", "running", "collecting", "judging"].includes(activeRun.state)} onClick={() => void controlActiveRun("pause")} type="button">暂停</button>
+                  <button disabled={!activeRun || activeRun.state !== "paused"} onClick={() => void controlActiveRun("resume")} type="button">恢复</button>
+                  <button disabled={!activeRun || ["completed", "failed", "blocked", "cancelled"].includes(activeRun.state)} onClick={() => void controlActiveRun("cancel")} type="button">取消</button>
+                </>
+              )}
             </div>
           </div>
 
@@ -1505,6 +1568,17 @@ export function App() {
             </div>
             <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
           </section>
+
+          {activeRunId && (
+            <section className="review-control">
+              <h3>人工裁决</h3>
+              <p>runId: <code>{activeRunId}</code> · state: {activeRun?.state ?? "loading"}</p>
+              <label>裁决原因
+                <input aria-label="裁决原因" value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} placeholder="例如：已确认该环境限制可接受" />
+              </label>
+              <button disabled={!reviewReason.trim()} onClick={() => void controlActiveRun("decision-override")} type="button">接受风险并留痕</button>
+            </section>
+          )}
 
           <label className="permission-line">
               <input

@@ -177,19 +177,42 @@ export interface components {
                  * @default deterministic
                  * @enum {string}
                  */
-                plannerMode: "deterministic" | "llm";
+                plannerMode: "deterministic" | "llm" | "adaptive";
                 /**
                  * @default deterministic
                  * @enum {string}
                  */
-                judgeMode: "deterministic" | "llm-assisted";
+                judgeMode: "deterministic" | "llm-assisted" | "adaptive";
                 modelProfileId?: string;
                 experimentId?: string;
                 repetition?: number;
                 /** @default plan-v1 */
                 promptVersion: string;
-                /** @enum {string} */
-                faultProfile?: "wrong-status" | "api-503" | "label-rename" | "permission-bypass" | "drop-trace" | "ambiguous-oracle";
+                targetVersion?: string;
+                /**
+                 * @default auto
+                 * @enum {string}
+                 */
+                cachePolicy: "auto" | "bypass";
+                /** @default {} */
+                llmBudget: {
+                    /** @default 2 */
+                    maxPlannerCalls: number;
+                    /** @default 2 */
+                    maxJudgeCalls: number;
+                    /** @default 12000 */
+                    maxTotalTokens: number;
+                    /** @default 2500 */
+                    plannerMaxOutputTokens: number;
+                    /** @default 2000 */
+                    judgeMaxOutputTokens: number;
+                    /** @default 30000 */
+                    requestTimeoutMs: number;
+                    /** @default 90000 */
+                    totalTimeoutMs: number;
+                    maxEstimatedCostUsd?: number;
+                };
+                fixtureVariantId?: string;
                 /** @default {} */
                 permissionProfile: {
                     /** @default true */

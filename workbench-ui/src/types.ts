@@ -42,6 +42,15 @@ export interface PermissionProfile {
   systemControl: boolean;
 }
 
+export interface RunProjection {
+  id: string;
+  state: string;
+  version: number;
+  gateStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
+  finalStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
+  humanDecision?: { status: string; reason: string; newLabel?: string };
+}
+
 export interface RunResult {
   id: string;
   scenarioFingerprint?: string;
@@ -887,6 +896,7 @@ export interface BenchmarkSummary {
     completedRuns: number;
     plannedRuns: number;
     blockers: string[];
+    displayedSplit?: "development" | "blind";
     acceptance?: { proven: boolean; reasons: string[] };
     lanes: Record<string, Record<string, number | null>>;
   };

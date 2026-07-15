@@ -1,5 +1,9 @@
 import type { BenchmarkSummary } from "../types";
 
+function percent(value: number | null | undefined) {
+  return value == null ? "—" : `${(value * 100).toFixed(1)}%`;
+}
+
 export function BenchmarkPanel({ summary }: { summary: BenchmarkSummary | null }) {
   return (
     <section className="benchmark-box">
@@ -18,10 +22,27 @@ export function BenchmarkPanel({ summary }: { summary: BenchmarkSummary | null }
       </div>
       <p className="empty">{summary?.runtimeMetrics.status === "completed"
         ? summary.runtimeMetrics.conclusion === "llm_gain_proven" ? "盲测已证明 LLM 增益。" : "盲测已完成，但尚未证明 LLM 增益。"
-        : summary?.runtimeMetrics.status === "blocked" ? `实验被阻塞：${summary.runtimeMetrics.blockers.join("、")}` : `真实运行进度 ${summary?.runtimeMetrics.completedRuns ?? 0}/${summary?.runtimeMetrics.plannedRuns ?? 0}`}</p>
+        : summary?.runtimeMetrics.status === "blocked" ? `实验被阻塞：${summary.runtimeMetrics.blockers.join("、")}` : `调度记录完成 ${summary?.runtimeMetrics.completedRuns ?? 0}/${summary?.runtimeMetrics.plannedRuns ?? 0}；这不代表测试成功。`}</p>
       {summary?.runtimeMetrics.acceptance && <p className={summary.runtimeMetrics.acceptance.proven ? "status-ok" : "status-warning"}>{summary.runtimeMetrics.acceptance.proven ? "发布阈值通过" : `未通过：${summary.runtimeMetrics.acceptance.reasons.join("、")}`}</p>}
       <div className="benchmark-projects">
-        {Object.entries(summary?.runtimeMetrics.lanes ?? {}).map(([lane, metrics]) => <span key={lane}>{lane} · F1 {metrics.macroF1 == null ? "—" : metrics.macroF1.toFixed(2)} · 复核 {metrics.humanReviewRate == null ? "—" : `${(metrics.humanReviewRate * 100).toFixed(0)}%`}</span>)}
+        {Object.entries(summary?.runtimeMetrics.lanes ?? {}).map(([lane, metrics]) => (
+          <article key={lane} aria-label={`实验通道 ${lane}`}>
+            <strong>{lane}</strong>
+            <span>调度完成 {percent(metrics.schedulingCompletionRate)}</span>
+            <span>执行成功 {percent(metrics.executionSuccessRate)}</span>
+            <span>需求覆盖 {percent(metrics.requirementCoverageRate)}</span>
+            <span>门禁合格 {percent(metrics.gateEligibleRate)}</span>
+            <span>模型推荐正确 {percent(metrics.recommendationAccuracy)}</span>
+            <span>最终裁决正确 {percent(metrics.finalStatusAccuracy ?? metrics.finalDecisionAccuracy)}</span>
+            <span>任务成功 {percent(metrics.taskSuccessRate)}</span>
+            <span>Macro-F1 {metrics.macroF1 == null ? "—" : metrics.macroF1.toFixed(3)}</span>
+            <span>误放行 {percent(metrics.falseReleaseRate)}</span>
+            <span>误阻塞 {percent(metrics.falseBlockRate)}</span>
+            <span>人工复核 {percent(metrics.humanReviewRate)}</span>
+            <span>证据完整 {percent(metrics.artifactIntegrityRate)}</span>
+            <span>平均 Token {metrics.averageTotalTokensPerRun == null ? "—" : Math.round(metrics.averageTotalTokensPerRun).toLocaleString()}</span>
+          </article>
+        ))}
       </div>
     </section>
   );

@@ -30,4 +30,13 @@ describe("Workbench interactions", () => {
     render(<BenchmarkPanel summary={{ version: "v2", status: "catalog_ready", caseCount: 18, blindCaseCount: 6, projectCount: 2, fixtureProjects: [], byProject: {}, categories: [], runtimeMetrics: { status: "blocked", completedRuns: 0, plannedRuns: 480, blockers: ["openai:credential_env_missing"], lanes: {} } }} />);
     expect(screen.getByText(/实验被阻塞/).textContent).toContain("credential_env_missing");
   });
+
+  it("separates scheduling completion from actual test success", () => {
+    render(<BenchmarkPanel summary={{ version: "v2", status: "catalog_ready", caseCount: 6, blindCaseCount: 0, projectCount: 2, fixtureProjects: [], byProject: {}, categories: [], runtimeMetrics: { status: "awaiting_blind_runs", completedRuns: 30, plannedRuns: 30, blockers: [], lanes: { "full-llm:model": { schedulingCompletionRate: 1, executionSuccessRate: 2 / 3, requirementCoverageRate: 2 / 3, gateEligibleRate: 2 / 3, recommendationAccuracy: 1 / 2, finalStatusAccuracy: 1 / 3, taskSuccessRate: 1 / 3, macroF1: 1 / 3, falseReleaseRate: 0, falseBlockRate: 1, humanReviewRate: 5 / 6, artifactIntegrityRate: 2 / 3, averageTotalTokensPerRun: 8771 } } } }} />);
+    expect(screen.getByText(/调度记录完成 30\/30/).textContent).toContain("不代表测试成功");
+    expect(screen.getByText("执行成功 66.7%")).toBeTruthy();
+    expect(screen.getByText("任务成功 33.3%")).toBeTruthy();
+    expect(screen.getByText("模型推荐正确 50.0%")).toBeTruthy();
+    expect(screen.getByText("平均 Token 8,771")).toBeTruthy();
+  });
 });

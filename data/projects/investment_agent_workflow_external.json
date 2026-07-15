@@ -1,7 +1,7 @@
 {
   "id": "investment_agent_workflow_external",
   "name": "Investment Agent Workflow External Project",
-  "projectPath": "../project-01-investment-agent-workflow",
+  "projectPath": "../investment-research-system",
   "allowExternalProjectPath": true,
   "installCommand": "",
   "startCommand": "",
