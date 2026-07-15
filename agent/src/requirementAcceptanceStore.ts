@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { RequirementAcceptanceResult } from "./types.js";
 
-const rootDir = path.resolve(process.cwd(), "..");
+const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const acceptanceDir = path.join(rootDir, "reports", "requirement-acceptance");
 const latestFile = path.join(acceptanceDir, "latest.json");
 const indexFile = path.join(acceptanceDir, "index.json");

@@ -26,6 +26,7 @@ import { testRunnerExecutablePlanBinding, testRunnerLifecyclePolicy } from "./te
 import { testInvestmentAgentWorkflowExternalSmoke } from "./investmentAgentWorkflowSmoke.test.js";
 import { testBenchmarkContract } from "./benchmarkContract.test.js";
 import { testBenchmarkEvaluation } from "./benchmark.test.js";
+import { testLlmRoutingPolicy } from "./llmRoutingPolicy.test.js";
 import { testIndependentFixtures } from "./independentFixtures.test.js";
 import { testRepairProposals } from "./repairProposal.test.js";
 import { testRunEventStore } from "./runEventStore.test.js";
@@ -38,6 +39,7 @@ import { testLlmPlannerFailClosed } from "./llmPlanner.test.js";
 import { testEvidenceQuality } from "./evidenceQuality.test.js";
 import { testUntrustedInputDefense } from "./untrustedInput.test.js";
 import { testRedactionPreservesUsageTelemetry } from "./redaction.test.js";
+import { testCompiledPlanExecution } from "./compiledPlanExecution.test.js";
 
 async function main() {
   await testConnectorEnvelope();
@@ -58,6 +60,7 @@ async function main() {
   testUntrustedInputDefense();
   testRedactionPreservesUsageTelemetry();
   testBenchmarkEvaluation();
+  testLlmRoutingPolicy();
   await testIndependentFixtures();
   testRepairProposals();
   await testRunEventStore();
@@ -67,6 +70,7 @@ async function main() {
   testMissionPreview();
   testRunnerLifecyclePolicy();
   testRunnerExecutablePlanBinding();
+  await testCompiledPlanExecution();
   await testScenarioDraftLifecycle();
   testScenarioParser();
   testPlanStepSchema();

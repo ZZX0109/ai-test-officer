@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { runEventStore } from "../src/runEventStore.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { runEventStore, SqliteRunEventStore } from "../src/runEventStore.js";
 
 export async function testRunEventStore() {
   const suffix = randomUUID();
@@ -22,4 +26,134 @@ export async function testRunEventStore() {
   run = await runEventStore.append({ runId, type: "run_resumed", expectedVersion: 7, actor: "tester", idempotencyKey: `resume-${suffix}` });
   assert.equal(run.state, "running");
   assert.equal((await runEventStore.events(runId)).length, 8);
+
+  const queuedPauseId = `queued_pause_${suffix}`;
+  let queuedPause = await runEventStore.create({ runId: queuedPauseId, actor: "tester", idempotencyKey: `queued-create-${suffix}` });
+  queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "plan_generated", expectedVersion: queuedPause.version, actor: "planner", idempotencyKey: `queued-plan-${suffix}` });
+  queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "plan_approved", expectedVersion: queuedPause.version, actor: "tester", idempotencyKey: `queued-approve-${suffix}` });
+  queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "permission_granted", expectedVersion: queuedPause.version, actor: "tester", idempotencyKey: `queued-permission-${suffix}` });
+  assert.equal(queuedPause.state, "queued");
+  queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "run_paused", expectedVersion: queuedPause.version, actor: "tester", idempotencyKey: `queued-pause-${suffix}` });
+  assert.equal(queuedPause.state, "paused");
+  queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "run_resumed", expectedVersion: queuedPause.version, actor: "tester", idempotencyKey: `queued-resume-${suffix}` });
+  assert.equal(queuedPause.state, "running");
+
+  for (const [eventType, expectedState, expectedGate] of [
+    ["human_review_requested", "awaiting-human-review", "needs-human-review"],
+    ["run_blocked", "blocked", "blocked"]
+  ] as const) {
+    const rejectedId = `planner_rejected_${eventType}_${suffix}`;
+    const created = await runEventStore.create({ runId: rejectedId, actor: "tester", idempotencyKey: `create-${eventType}-${suffix}` });
+    const llmCall = {
+      id: `llm_${eventType}_${suffix}`,
+      runId: rejectedId,
+      purpose: "planning" as const,
+      provider: "openai-compatible" as const,
+      model: "test-model",
+      startedAt: new Date().toISOString(),
+      durationMs: 12,
+      status: "passed" as const,
+      usage: { totalTokens: 42 }
+    };
+    const rejected = await runEventStore.append({
+      runId: rejectedId,
+      type: eventType,
+      expectedVersion: created.version,
+      actor: "planner",
+      idempotencyKey: `reject-${eventType}-${suffix}`,
+      payload: {
+        provenance: { source: "llm", promptVersion: "plan-test", model: llmCall.model, llmCallId: llmCall.id, compilationStatus: "rejected", fallbackReason: "invalid_dsl" },
+        llmCall,
+        llmCalls: [llmCall],
+        impactAnalysis: { nodes: [], edges: [], changedFiles: [], affectedRoutes: [], affectedPages: [], recommendedScenarioIds: [], explanationChains: [], lowConfidenceEdges: [], harnessGaps: [] }
+      }
+    });
+    assert.equal(rejected.state, expectedState);
+    assert.equal(rejected.gateStatus, expectedGate);
+    assert.equal(rejected.planProvenance?.compilationStatus, "rejected");
+    assert.equal(rejected.planProvenance?.fallbackReason, "invalid_dsl");
+    assert.equal(rejected.plannerCall?.id, llmCall.id);
+    assert.deepEqual(rejected.plannerCalls?.map((call) => call.id), [llmCall.id]);
+    assert.ok(rejected.impactAnalysis);
+  }
+
+  // A restart must rebuild from the append-only events, even when the cached
+  // projection was produced by an older reducer that omitted rejection audit
+  // fields. This is the same replay path used by PostgreSQL get/append.
+  const directory = await mkdtemp(path.join(tmpdir(), "ato-event-replay-"));
+  const databaseFile = path.join(directory, "runs.sqlite");
+  try {
+    const beforeRestart = new SqliteRunEventStore(databaseFile);
+    const replayRunId = `planner_replay_${suffix}`;
+    const created = await beforeRestart.create({
+      runId: replayRunId,
+      actor: "tester",
+      idempotencyKey: `replay-create-${suffix}`,
+      payload: { requirement: "replay a rejected LLM plan" }
+    });
+    const llmCall = {
+      id: `llm_replay_${suffix}`,
+      runId: replayRunId,
+      purpose: "planning" as const,
+      provider: "openai-compatible" as const,
+      model: "test-model",
+      startedAt: new Date().toISOString(),
+      durationMs: 8,
+      status: "failed" as const,
+      error: "invalid action DSL"
+    };
+    await beforeRestart.append({
+      runId: replayRunId,
+      type: "human_review_requested",
+      expectedVersion: created.version,
+      actor: "planner",
+      idempotencyKey: `replay-rejected-${suffix}`,
+      payload: {
+        provenance: {
+          source: "llm",
+          promptVersion: "plan-replay-test",
+          model: llmCall.model,
+          llmCallId: llmCall.id,
+          compilationStatus: "rejected",
+          fallbackReason: "invalid_dsl"
+        },
+        llmCall,
+        llmCalls: [llmCall]
+      }
+    });
+
+    const database = new DatabaseSync(databaseFile);
+    const stale = database.prepare("SELECT projection_json FROM run_projections WHERE run_id = ?").get(replayRunId) as { projection_json: string };
+    const staleProjection = JSON.parse(stale.projection_json) as Record<string, unknown>;
+    delete staleProjection.planProvenance;
+    delete staleProjection.plannerCall;
+    delete staleProjection.plannerCalls;
+    database.prepare("UPDATE run_projections SET projection_json = ? WHERE run_id = ?").run(JSON.stringify(staleProjection), replayRunId);
+    database.close();
+
+    const afterRestart = new SqliteRunEventStore(databaseFile);
+    const recovered = await afterRestart.get(replayRunId);
+    assert.equal(recovered?.input.requirement, "replay a rejected LLM plan");
+    assert.equal(recovered?.state, "awaiting-human-review");
+    assert.equal(recovered?.gateStatus, "needs-human-review");
+    assert.equal(recovered?.planProvenance?.compilationStatus, "rejected");
+    assert.equal(recovered?.planProvenance?.fallbackReason, "invalid_dsl");
+    assert.equal(recovered?.plannerCall?.id, llmCall.id);
+    assert.deepEqual(recovered?.plannerCalls?.map((call) => call.id), [llmCall.id]);
+
+    const continued = await afterRestart.append({
+      runId: replayRunId,
+      type: "decision_overridden",
+      expectedVersion: recovered!.version,
+      actor: "reviewer",
+      idempotencyKey: `replay-review-${suffix}`,
+      payload: { status: "blocked", originalDecision: "needs-human-review", newLabel: "invalid-plan", reason: "planner output did not compile" }
+    });
+    assert.equal(continued.version, 3);
+    assert.equal(continued.planProvenance?.compilationStatus, "rejected");
+    assert.equal(continued.plannerCall?.id, llmCall.id);
+    assert.deepEqual(continued.plannerCalls?.map((call) => call.id), [llmCall.id]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }

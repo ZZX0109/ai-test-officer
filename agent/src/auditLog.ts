@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const rootDir = path.resolve(process.cwd(), "..");
+const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const auditDir = path.join(rootDir, "reports", "runs");
 const auditFile = path.join(auditDir, "audit-log.jsonl");
 
@@ -34,4 +34,3 @@ export async function readAuditLog(limit = 100) {
     return [];
   }
 }
-

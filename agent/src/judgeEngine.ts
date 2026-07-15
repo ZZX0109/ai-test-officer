@@ -58,12 +58,14 @@ function buildPlanJudge(input: JudgeInput): JudgeResult {
   const plan = input.plan ?? fixedGrayPlan;
   const executedStepIds = new Set(input.result.steps.map((step) => step.stepId));
   const coveredPathIds = new Set(input.result.riskCoverageMatrix.flatMap((item) => item.pathIds));
+  const committedPathIds = new Set(plan.risks.filter((risk) => risk.coverageDisposition === "required").flatMap((risk) => risk.pathIds));
   const findings: JudgeFinding[] = [];
 
   for (const level of plan.levels) {
     for (const pathItem of level.paths) {
       const ran = executedStepIds.has(pathItem.id) || coveredPathIds.has(pathItem.id);
-      if (!ran) {
+      const executionCommitted = committedPathIds.has(pathItem.id) || level.id === "smoke" || level.id === "core_path" || level.id === "regression";
+      if (!ran && executionCommitted) {
         findings.push({
           id: `plan_gap_${pathItem.id}`,
           severity: level.id === "core_path" ? "high" : "medium",

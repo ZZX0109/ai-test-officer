@@ -3,7 +3,7 @@ import express from "express";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { commandSpecSchema } from "@ai-test-officer/contracts";
+import { commandSpecSchema, llmCallSchema, planProvenanceSchema } from "@ai-test-officer/contracts";
 import {
   createCredential,
   deleteCredential,
@@ -15,6 +15,8 @@ import {
 import { buildScenarioGrayPlan, fixedGrayPlan } from "./plan.js";
 import { generatePlan } from "./llmPlanner.js";
 import { analyzeIntake } from "./intakeAnalyzer.js";
+import { routePlanner } from "./llmRoutingPolicy.js";
+import { planCacheKey, readCachedPlan, writeCachedPlan } from "./planCache.js";
 import { redactText, redactValue } from "./redaction.js";
 import { readConnectorContext } from "./sourceConnectors.js";
 import { readAuditLog } from "./auditLog.js";
@@ -39,7 +41,7 @@ import {
 } from "./security.js";
 import { testCredentialConnection } from "./testConnection.js";
 import { runVisualGrayTest } from "./testRunner.js";
-import { getScenario, listScenarios } from "./scenarios.js";
+import { getScenario, hasScenario, listExecutableScenarios, listScenarios } from "./scenarios.js";
 import { buildDeliveryFromRun, listBotDeliveries } from "./botNotifier.js";
 import {
   deletePatrolPlan,
@@ -94,7 +96,7 @@ import { loadProjectManifest, manifestToProjectConfig } from "./projectManifest.
 import { runEventStore } from "./runEventStore.js";
 import type { RunEventType } from "@ai-test-officer/contracts";
 import { createRunRequestSchema } from "@ai-test-officer/contracts";
-import { buildCodeImpactGraph } from "./codeImpactGraph.js";
+import { buildCodeImpactGraph, changedFilesFromDiff } from "./codeImpactGraph.js";
 import { createMissionPreview } from "./missionPreview.js";
 import { enqueueRun, executeQueuedRun, interruptRun } from "./runOrchestrator.js";
 
@@ -427,17 +429,88 @@ app.post("/v1/runs", async (req, res, next) => {
       const sourceContexts: SourceReadEnvelope[] = [];
       if (body.input.requirement) sourceContexts.push({ id: "run_requirement", kind: "manual", title: "Run requirement", status: "connected", summary: body.input.requirement, permissionState: "not_required", isSimulated: false, evidenceUse: "primary_requirement", displayStatus: "ready", readAt: new Date().toISOString(), trustLevel: "medium" });
       if (body.input.diff) sourceContexts.push({ id: "run_diff", kind: "git_diff", title: "Run diff", status: "connected", summary: body.input.diff, permissionState: "not_required", isSimulated: false, evidenceUse: "change_context", displayStatus: "ready", readAt: new Date().toISOString(), trustLevel: "high" });
-      const intake = analyzeIntake({ requirement: body.input.requirement ?? "", diff: body.input.diff ?? "", sourceContexts });
-      if (body.input.plannerMode === "llm") {
+      const diff = body.input.diff ?? "";
+      const project = body.projectId ? await getProject(body.projectId) : undefined;
+      const scenarioContracts = listExecutableScenarios().map((scenario) => ({ id: scenario.id, keywords: scenario.matcher?.keywords ?? [scenario.id, scenario.title] }));
+      const repositoryGraph = project && diff
+        ? await buildCodeImpactGraph({
+          repositoryRoot: toTargetProjectConfig(project).rootDir,
+          files: changedFilesFromDiff(diff),
+          diff,
+          cacheFile: path.join(reportsDir, "impact-cache", `${project.id}.json`),
+          scenarios: scenarioContracts
+        })
+        : undefined;
+      const codeGraph = repositoryGraph && project ? { ...repositoryGraph, repositoryRoot: `project://${project.id}` } : repositoryGraph;
+      const intake = analyzeIntake({ requirement: body.input.requirement ?? "", diff, projectId: body.projectId, sourceContexts, codeGraph });
+      const plannerRouting = body.input.plannerMode === "adaptive"
+        ? routePlanner({ requirement: body.input.requirement, explicitScenarioId: body.input.scenarioId, intake, impactAnalysis: intake.impactAnalysis })
+        : { route: body.input.plannerMode, reason: "explicit_mode", signals: [`mode:${body.input.plannerMode}`] };
+      if (plannerRouting.route === "llm") {
         try {
-          const generated = await generatePlan({ requirement: body.input.requirement ?? "", diff: body.input.diff ?? "", credentialId: body.input.modelProfileId, requireLlm: true, runId: created.id, experimentId: body.input.experimentId, promptVersion: body.input.promptVersion });
-          planPayload = { plan: generated.plan, compiledPlan: generated.compiledPlan, provenance: generated.provenance, llmCall: generated.llmCall, scenarioId: generated.scenarioId, impactAnalysis: intake.impactAnalysis };
+          const cacheKey = planCacheKey({ projectId: body.projectId, targetVersion: body.input.targetVersion, requirement: body.input.requirement, diff, promptVersion: body.input.promptVersion, modelProfileId: body.input.modelProfileId });
+          const cached = body.input.plannerMode === "adaptive" && body.input.cachePolicy === "auto" && !body.input.experimentId
+            ? await readCachedPlan(cacheKey)
+            : undefined;
+          if (cached) {
+            const provenance = planProvenanceSchema.parse({ source: "cached-llm", promptVersion: body.input.promptVersion, modelProfileId: body.input.modelProfileId, model: cached.model, compilationStatus: "validated", cacheKey, originLlmCallId: cached.originLlmCallId });
+            planPayload = { plan: cached.plan, compiledPlan: cached.compiledPlan, provenance, scenarioId: cached.scenarioId, impactAnalysis: intake.impactAnalysis, plannerRouting: { ...plannerRouting, signals: [...plannerRouting.signals, "plan_cache_hit"] } };
+          } else {
+            const generated = await generatePlan({ requirement: body.input.requirement ?? "", diff, impactAnalysis: intake.impactAnalysis, credentialId: body.input.modelProfileId, requireLlm: true, runId: created.id, experimentId: body.input.experimentId, promptVersion: body.input.promptVersion, preferredScenarioId: body.input.scenarioId, llmBudget: body.input.llmBudget, browserControlAllowed: body.input.permissionProfile.browserControl });
+            planPayload = { plan: generated.plan, compiledPlan: generated.compiledPlan, provenance: generated.provenance, llmCall: generated.llmCall, llmCalls: generated.llmCalls, scenarioId: generated.scenarioId, impactAnalysis: intake.impactAnalysis, plannerRouting };
+            if (body.input.plannerMode === "adaptive" && body.input.cachePolicy === "auto" && !body.input.experimentId && generated.compiledPlan && generated.scenarioId && generated.llmCall && generated.provenance?.model) {
+              await writeCachedPlan({ key: cacheKey, plan: generated.plan, compiledPlan: generated.compiledPlan, scenarioId: generated.scenarioId, model: generated.provenance.model, originLlmCallId: generated.llmCall.id, createdAt: new Date().toISOString() });
+            }
+          }
         } catch (error) {
           const reason = error instanceof Error ? error.message : "llm_planner_failed";
           const review = reason.startsWith("llm_plan_") || reason.includes("schema") || reason.includes("parse");
-          const run = await runEventStore.append({ runId: created.id, type: review ? "human_review_requested" : "run_blocked", expectedVersion: created.version, actor: "planner", idempotencyKey: `${body.idempotencyKey}:planner-failed`, payload: { finalStatus: review ? "needs-human-review" : "blocked", error: redactText(reason), provenance: { source: "llm", promptVersion: body.input.promptVersion, modelProfileId: body.input.modelProfileId, compilationStatus: "rejected", fallbackReason: redactText(reason) } } });
+          const callResult = llmCallSchema.safeParse(typeof error === "object" && error !== null && "llmCall" in error ? error.llmCall : undefined);
+          const plannerCall = callResult.success ? callResult.data : undefined;
+          const callsResult = llmCallSchema.array().safeParse(typeof error === "object" && error !== null && "llmCalls" in error ? error.llmCalls : undefined);
+          const plannerCalls = callsResult.success ? callsResult.data : plannerCall ? [plannerCall] : [];
+          const failureReason = redactText(reason);
+          const fallbackScenario = body.input.plannerMode === "adaptive"
+            ? intake.impactAnalysis?.recommendedScenarios.find((item) => item.confidence === "high" && hasScenario(item.scenarioId))
+            : undefined;
+          if (fallbackScenario) {
+            planPayload = {
+              plan: buildScenarioGrayPlan(getScenario(fallbackScenario.scenarioId)),
+              provenance: planProvenanceSchema.parse({ source: "adaptive-rule-fallback", promptVersion: body.input.promptVersion, modelProfileId: body.input.modelProfileId, model: plannerCall?.model, llmCallId: plannerCall?.id, compilationStatus: "validated", fallbackReason: failureReason }),
+              scenarioId: fallbackScenario.scenarioId,
+              impactAnalysis: intake.impactAnalysis,
+              plannerRouting: { ...plannerRouting, route: "deterministic", reason: "adaptive_rule_fallback", signals: [...plannerRouting.signals, `llm_failure:${failureReason}`, `fallback_scenario:${fallbackScenario.scenarioId}`] },
+              ...(plannerCall ? { llmCall: plannerCall } : {}),
+              ...(plannerCalls.length ? { llmCalls: plannerCalls } : {})
+            };
+          } else {
+          const provenance = planProvenanceSchema.parse({
+            source: "llm",
+            promptVersion: body.input.promptVersion,
+            modelProfileId: body.input.modelProfileId,
+            model: plannerCall?.model,
+            llmCallId: plannerCall?.id,
+            compilationStatus: "rejected",
+            fallbackReason: failureReason
+          });
+          const run = await runEventStore.append({
+            runId: created.id,
+            type: review ? "human_review_requested" : "run_blocked",
+            expectedVersion: created.version,
+            actor: "planner",
+            idempotencyKey: `${body.idempotencyKey}:planner-failed`,
+            payload: {
+              finalStatus: review ? "needs-human-review" : "blocked",
+              error: failureReason,
+              provenance,
+              ...(plannerCall ? { llmCall: plannerCall } : {}),
+              ...(plannerCalls.length ? { llmCalls: plannerCalls } : {}),
+              impactAnalysis: intake.impactAnalysis
+            }
+          });
           res.status(201).json({ run });
           return;
+          }
         }
       } else {
         const scenarioId = body.input.scenarioId ?? intake.scenarioCandidates.find((candidate) => candidate.executable && candidate.source !== "patrol")?.mappedScenarioId;
@@ -458,7 +531,7 @@ app.post("/v1/runs", async (req, res, next) => {
           res.status(201).json({ run });
           return;
         }
-        planPayload = { plan: buildScenarioGrayPlan(getScenario(scenarioId)), provenance: { source: "deterministic", promptVersion: body.input.promptVersion, compilationStatus: "validated" }, scenarioId, impactAnalysis: intake.impactAnalysis };
+        planPayload = { plan: buildScenarioGrayPlan(getScenario(scenarioId)), provenance: { source: "deterministic", promptVersion: body.input.promptVersion, compilationStatus: "validated" }, scenarioId, impactAnalysis: intake.impactAnalysis, plannerRouting };
       }
     }
     const run = created.state === "planning"
@@ -547,10 +620,10 @@ app.get("/v1/runs/:id/report", async (req, res, next) => {
     await assertProjectAccess(req, run.input.projectId, "read_artifacts");
     try {
       const result = (await readRunBundle(run?.resultRunId ?? req.params.id)).result;
-      res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision, planProvenance: run?.planProvenance, plannerCall: run?.plannerCall, impactAnalysis: run?.impactAnalysis } });
+      res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision, planProvenance: run?.planProvenance, plannerCall: run?.plannerCall, plannerCalls: run?.plannerCalls, impactAnalysis: run?.impactAnalysis } });
     } catch (error) {
       if (!isMissingRunBundle(error)) throw error;
-      res.json({ report: { ...unavailableRunReport(run), humanDecision: run.humanDecision, planProvenance: run.planProvenance, plannerCall: run.plannerCall, impactAnalysis: run.impactAnalysis } });
+      res.json({ report: { ...unavailableRunReport(run), humanDecision: run.humanDecision, planProvenance: run.planProvenance, plannerCall: run.plannerCall, plannerCalls: run.plannerCalls, impactAnalysis: run.impactAnalysis } });
     }
   } catch (error) { next(error); }
 });
@@ -606,6 +679,7 @@ const projectSchema = z.object({
   frontendUrl: z.string().url(),
   backendUrl: z.string().url().optional(),
   testCommand: z.string().optional(),
+  testCommandSpec: commandSpecSchema.optional(),
   allowedOrigins: z.array(z.string().url()).optional(),
   login: z
     .object({
@@ -720,7 +794,8 @@ app.get("/api/benchmark/summary", async (_req, res, next) => {
     const projectIds = Array.from(new Set(cases.map((item) => item.projectId)));
     const byProject = Object.fromEntries(projectIds.map((projectId) => [projectId, cases.filter((item) => item.projectId === projectId).length]));
     const evaluation = await readFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), "utf8").then((value) => JSON.parse(value) as { experimentId?: string; status?: string; conclusion?: string; completedRuns?: number; plannedRuns?: number; blockers?: string[]; evaluations?: Array<{ split: string; completedRuns: number; plannedRuns: number; acceptance: { proven: boolean; reasons: string[] }; lanes: Record<string, Record<string, number | null>> }> }).catch(() => undefined);
-    const blindEvaluation = evaluation?.evaluations?.find((item) => item.split === "blind");
+    const displayedEvaluation = evaluation?.evaluations?.find((item) => item.split === "blind")
+      ?? evaluation?.evaluations?.find((item) => item.split === "development");
     res.json({
       version: "benchmark-v1",
       status: "catalog_ready",
@@ -739,8 +814,9 @@ app.get("/api/benchmark/summary", async (_req, res, next) => {
         completedRuns: evaluation?.completedRuns ?? evaluation?.evaluations?.reduce((sum, item) => sum + item.completedRuns, 0) ?? 0,
         plannedRuns: evaluation?.plannedRuns ?? evaluation?.evaluations?.reduce((sum, item) => sum + item.plannedRuns, 0) ?? 0,
         blockers: evaluation?.blockers ?? [],
-        acceptance: blindEvaluation?.acceptance,
-        lanes: blindEvaluation?.lanes ?? {}
+        acceptance: displayedEvaluation?.acceptance,
+        displayedSplit: displayedEvaluation?.split,
+        lanes: displayedEvaluation?.lanes ?? {}
       }
     });
   } catch (error) {

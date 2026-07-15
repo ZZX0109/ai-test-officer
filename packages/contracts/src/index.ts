@@ -182,7 +182,10 @@ const transitions: Record<RunState, Partial<Record<RunEventType, RunState>>> = {
   planning: { plan_generated: "awaiting-plan-approval", human_review_requested: "awaiting-human-review", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
   "awaiting-plan-approval": { plan_approved: "awaiting-permission", run_cancelled: "cancelled" },
   "awaiting-permission": { permission_granted: "queued", run_cancelled: "cancelled", run_blocked: "blocked" },
-  queued: { run_preparing: "preparing", run_cancelled: "cancelled", run_blocked: "blocked" },
+  // Queueing is a durable checkpoint. Pausing here prevents a worker race and
+  // lets a user approve a resume after a service restart without pretending a
+  // browser attempt is still alive.
+  queued: { run_preparing: "preparing", run_paused: "paused", run_cancelled: "cancelled", run_blocked: "blocked" },
   preparing: { run_started: "running", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
   running: { run_paused: "paused", evidence_collecting: "collecting", run_judging: "judging", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
   paused: { run_resumed: "running", run_cancelled: "cancelled", run_blocked: "blocked" },
@@ -231,10 +234,22 @@ export type MachineGate = z.infer<typeof machineGateSchema>;
 export type JudgeRecommendation = z.infer<typeof judgeRecommendationSchema>;
 export type HumanDecision = z.infer<typeof humanDecisionSchema>;
 
-export const plannerModeSchema = z.enum(["deterministic", "llm"]);
-export const judgeModeSchema = z.enum(["deterministic", "llm-assisted"]);
+export const plannerModeSchema = z.enum(["deterministic", "llm", "adaptive"]);
+export const judgeModeSchema = z.enum(["deterministic", "llm-assisted", "adaptive"]);
 export type PlannerMode = z.infer<typeof plannerModeSchema>;
 export type JudgeMode = z.infer<typeof judgeModeSchema>;
+
+export const llmBudgetSchema = z.object({
+  maxPlannerCalls: z.number().int().min(1).max(2).default(2),
+  maxJudgeCalls: z.number().int().min(1).max(2).default(2),
+  maxTotalTokens: z.number().int().positive().max(100_000).default(12_000),
+  plannerMaxOutputTokens: z.number().int().positive().max(8_000).default(2_500),
+  judgeMaxOutputTokens: z.number().int().positive().max(8_000).default(2_000),
+  requestTimeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
+  totalTimeoutMs: z.number().int().min(1_000).max(300_000).default(90_000),
+  maxEstimatedCostUsd: z.number().positive().optional()
+}).refine((value) => value.requestTimeoutMs <= value.totalTimeoutMs, { message: "requestTimeoutMs must not exceed totalTimeoutMs" });
+export type LlmBudget = z.infer<typeof llmBudgetSchema>;
 
 export const llmCallSchema = z.object({
   id: z.string().min(1),
@@ -258,19 +273,30 @@ export const llmCallSchema = z.object({
 export type LlmCall = z.infer<typeof llmCallSchema>;
 
 export const planProvenanceSchema = z.object({
-  source: z.enum(["deterministic", "llm"]),
+  source: z.enum(["deterministic", "llm", "cached-llm", "adaptive-rule-fallback"]),
   promptVersion: z.string().min(1),
   modelProfileId: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   llmCallId: z.string().min(1).optional(),
   compilationStatus: z.enum(["validated", "rejected"]),
-  fallbackReason: z.string().min(1).optional()
+  fallbackReason: z.string().min(1).optional(),
+  cacheKey: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  originLlmCallId: z.string().min(1).optional()
 }).superRefine((value, context) => {
-  if (value.source === "llm" && (!value.model || !value.llmCallId)) {
+  if (value.source === "llm" && value.compilationStatus === "validated" && (!value.model || !value.llmCallId)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "LLM plan provenance requires model and llmCallId." });
   }
-  if (value.source === "llm" && value.fallbackReason) {
+  if (value.source === "cached-llm" && value.compilationStatus === "validated" && (!value.model || !value.cacheKey || !value.originLlmCallId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Cached LLM provenance requires model, cacheKey, and originLlmCallId." });
+  }
+  if (value.compilationStatus === "validated" && value.fallbackReason && value.source !== "adaptive-rule-fallback") {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["fallbackReason"], message: "LLM plans cannot silently fall back." });
+  }
+  if (value.source === "adaptive-rule-fallback" && (value.compilationStatus !== "validated" || !value.fallbackReason)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Adaptive rule fallback must be validated and retain its LLM failure reason." });
+  }
+  if (value.compilationStatus === "rejected" && !value.fallbackReason) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["fallbackReason"], message: "Rejected plans require a failure reason." });
   }
 });
 export type PlanProvenance = z.infer<typeof planProvenanceSchema>;
@@ -295,6 +321,7 @@ export const actionDslSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("navigate"), path: z.string().startsWith("/") }),
   z.object({ action: z.literal("click"), selectorRef: z.string().min(1) }),
   z.object({ action: z.literal("fill"), selectorRef: z.string().min(1), valueRef: z.string().min(1) }),
+  z.object({ action: z.literal("select"), selectorRef: z.string().min(1), valueRef: z.string().min(1) }),
   z.object({ action: z.literal("upload"), selectorRef: z.string().min(1), fixtureRef: z.string().min(1) }),
   z.object({ action: z.literal("assert"), oracleId: z.string().min(1) }),
   z.object({ action: z.literal("wait"), durationMs: z.number().int().min(0).max(45_000) })
@@ -305,12 +332,18 @@ export const compiledPlanSchema = z.object({
   scenarioId: z.string().min(1),
   steps: z.array(z.object({
     id: z.string().min(1),
+    pathId: z.string().min(1).optional(),
     action: actionDslSchema
   })).min(1).max(50),
   requiredOracleIds: z.array(z.string().min(1)).min(1),
   requiredEvidenceKinds: z.array(artifactKindV2Schema).min(1)
 });
 export type CompiledPlan = z.infer<typeof compiledPlanSchema>;
+
+// An opaque identifier understood only by the benchmark fixture/worker boundary.
+// Its value deliberately carries no failure class, expected verdict, or evidence hint.
+export const fixtureVariantIdSchema = z.string().regex(/^fxv_[a-f0-9]{16}$/);
+export type FixtureVariantId = z.infer<typeof fixtureVariantIdSchema>;
 
 export const createRunRequestSchema = z.object({
   runId: z.string().min(1).optional(),
@@ -329,7 +362,10 @@ export const createRunRequestSchema = z.object({
     experimentId: z.string().min(1).optional(),
     repetition: z.number().int().min(1).max(10).optional(),
     promptVersion: z.string().min(1).default("plan-v1"),
-    faultProfile: z.enum(["wrong-status", "api-503", "label-rename", "permission-bypass", "drop-trace", "ambiguous-oracle"]).optional(),
+    targetVersion: z.string().min(1).optional(),
+    cachePolicy: z.enum(["auto", "bypass"]).default("auto"),
+    llmBudget: llmBudgetSchema.default({}),
+    fixtureVariantId: fixtureVariantIdSchema.optional(),
     permissionProfile: z.object({
       observe: z.boolean().default(true),
       browserControl: z.boolean().default(true),
@@ -342,11 +378,14 @@ export const createRunRequestSchema = z.object({
   })
 }).superRefine((value, context) => {
   if (!value.projectId && !value.input.appUrl) context.addIssue({ code: z.ZodIssueCode.custom, message: "Provide projectId or appUrl" });
-  if ((value.input.plannerMode === "llm" || value.input.judgeMode === "llm-assisted") && !value.input.modelProfileId) {
+  if ((value.input.plannerMode !== "deterministic" || value.input.judgeMode !== "deterministic") && !value.input.modelProfileId) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["input", "modelProfileId"], message: "LLM modes require modelProfileId." });
   }
   if (value.input.experimentId && !value.input.repetition) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["input", "repetition"], message: "Experiment runs require repetition." });
+  }
+  if (value.input.experimentId && value.input.cachePolicy !== "bypass") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["input", "cachePolicy"], message: "Benchmark experiments must bypass plan cache." });
   }
 });
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>;

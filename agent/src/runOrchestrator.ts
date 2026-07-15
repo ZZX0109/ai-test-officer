@@ -1,6 +1,6 @@
 import { Queue, Worker, type Job } from "bullmq";
 import { resolveFinalStatus, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
-import { appendSystemRunEvent, runEventStore } from "./runEventStore.js";
+import { appendSystemRunEvent, runEventStore, type RunProjection } from "./runEventStore.js";
 import { runVisualGrayTest } from "./testRunner.js";
 import type { RunRequest } from "./types.js";
 import { persistExecutionResult } from "./executionPersistence.js";
@@ -47,38 +47,45 @@ function recommendationFromResult(result: Awaited<ReturnType<typeof runVisualGra
   };
 }
 
+export function buildQueuedRunRequest(projection: RunProjection, signal: AbortSignal): RunRequest {
+  const input = projection.input as Record<string, unknown>;
+  return {
+    appUrl: typeof input.appUrl === "string" ? input.appUrl : undefined,
+    projectId: typeof input.projectId === "string" ? input.projectId : undefined,
+    scenarioId: projection.selectedScenarioId ?? (typeof input.scenarioId === "string" ? input.scenarioId : undefined),
+    requirement: typeof input.requirement === "string" ? input.requirement : undefined,
+    diff: typeof input.diff === "string" ? input.diff : undefined,
+    plan: projection.plan,
+    compiledPlan: projection.compiledPlan,
+    credentialId: typeof input.modelProfileId === "string" ? input.modelProfileId : undefined,
+    judgeMode: input.judgeMode === "llm-assisted" || input.judgeMode === "adaptive" ? input.judgeMode : "deterministic",
+    llmBudget: input.llmBudget as RunRequest["llmBudget"],
+    priorLlmTokens: projection.plannerCalls?.reduce((sum, call) => sum + (call.usage.totalTokens ?? 0), 0) ?? projection.plannerCall?.usage.totalTokens ?? 0,
+    experimentId: typeof input.experimentId === "string" ? input.experimentId : undefined,
+    repetition: typeof input.repetition === "number" ? input.repetition : undefined,
+    planProvenance: projection.planProvenance,
+    impactAnalysis: projection.impactAnalysis,
+    fixtureVariantId: typeof input.fixtureVariantId === "string" ? input.fixtureVariantId : undefined,
+    permissionProfile: (input.permissionProfile as RunRequest["permissionProfile"] | undefined) ?? {
+      observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false
+    },
+    signal
+  };
+}
+
 export async function executeQueuedRun(runId: string) {
   const lease = await acquireExecutionLease(runId);
   if (!lease) return runEventStore.get(runId);
   const heartbeat = setInterval(() => void lease.heartbeat().then((active) => { if (!active) activeControllers.get(runId)?.abort(); }).catch(() => activeControllers.get(runId)?.abort()), Math.max(1_000, Number(process.env.EXECUTION_LEASE_TTL_MS ?? 30_000) / 3));
   const projection = await runEventStore.get(runId);
-  if (!projection || ["cancelled", "completed", "failed", "blocked"].includes(projection.state)) { clearInterval(heartbeat); await lease.release(); return projection; }
+  if (!projection || ["cancelled", "completed", "failed", "blocked", "paused"].includes(projection.state)) { clearInterval(heartbeat); await lease.release(); return projection; }
   if (projection.state === "queued") await appendSystemRunEvent(runId, "run_preparing");
   const beforeStart = await runEventStore.get(runId);
   if (beforeStart?.state === "preparing") await appendSystemRunEvent(runId, "run_started");
   const controller = new AbortController();
   activeControllers.set(runId, controller);
   try {
-    const input = projection.input as Record<string, unknown>;
-    const result = await runVisualGrayTest({
-      appUrl: typeof input.appUrl === "string" ? input.appUrl : undefined,
-      projectId: typeof input.projectId === "string" ? input.projectId : undefined,
-      scenarioId: projection.selectedScenarioId ?? (typeof input.scenarioId === "string" ? input.scenarioId : undefined),
-      requirement: typeof input.requirement === "string" ? input.requirement : undefined,
-      diff: typeof input.diff === "string" ? input.diff : undefined,
-      plan: projection.plan,
-      credentialId: typeof input.modelProfileId === "string" ? input.modelProfileId : undefined,
-      judgeMode: input.judgeMode === "llm-assisted" ? "llm-assisted" : "deterministic",
-      experimentId: typeof input.experimentId === "string" ? input.experimentId : undefined,
-      repetition: typeof input.repetition === "number" ? input.repetition : undefined,
-      planProvenance: projection.planProvenance,
-      impactAnalysis: projection.impactAnalysis,
-      faultProfile: typeof input.faultProfile === "string" ? input.faultProfile as RunRequest["faultProfile"] : undefined,
-      permissionProfile: (input.permissionProfile as { observe: boolean; browserControl: boolean; workspaceControl: boolean; ideTerminalControl: boolean; systemControl: boolean }) ?? {
-        observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false
-      },
-      signal: controller.signal
-    });
+    const result = await runVisualGrayTest(buildQueuedRunRequest(projection, controller.signal));
     await persistExecutionResult(runId, result);
     await appendSystemRunEvent(runId, "evidence_collecting", { resultRunId: result.id });
     const machineGate = machineGateFromResult(result);
@@ -120,7 +127,11 @@ export async function enqueueRun(runId: string, version: number) {
   const connection = redisConnection();
   if (connection) {
     queue ??= new Queue(queueName, { connection });
-    await queue.add("execute", { runId, version }, { jobId: runId, removeOnComplete: 500, removeOnFail: 500 });
+    // One version maps to one idempotent delivery. A resume intentionally has a
+    // newer projection version and therefore needs a fresh job, while duplicate
+    // control requests at the same version still collapse to one BullMQ job.
+    // BullMQ rejects ':' in custom ids, so keep the version delimiter portable.
+    await queue.add("execute", { runId, version }, { jobId: `${runId}-v${version}`, removeOnComplete: 500, removeOnFail: 500 });
     if (process.env.RUN_WORKER_IN_PROCESS !== "0") await startRunWorker();
     return;
   }

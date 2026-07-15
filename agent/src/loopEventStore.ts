@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { LoopEvent } from "./types.js";
 
-const rootDir = path.resolve(process.cwd(), "..");
+const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
 const writeQueues = new Map<string, Promise<unknown>>();
 

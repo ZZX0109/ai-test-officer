@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { PatrolRunResult } from "./types.js";
 
-const rootDir = path.resolve(process.cwd(), "..");
+const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const patrolDir = path.join(rootDir, "reports", "patrol-runs");
 const latestFile = path.join(patrolDir, "latest.json");
 const indexFile = path.join(patrolDir, "index.json");

@@ -22,8 +22,10 @@ export interface RunProjection {
   compiledPlan?: CompiledPlan;
   planProvenance?: PlanProvenance;
   plannerCall?: LlmCall;
+  plannerCalls?: LlmCall[];
   selectedScenarioId?: string;
   impactAnalysis?: ImpactAnalysis;
+  plannerRouting?: { route: "deterministic" | "llm"; reason: string; signals: string[] };
   override?: { originalDecision: string; newLabel: string; reason: string; actor: string; createdAt: string };
 }
 
@@ -49,13 +51,17 @@ function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
   if (event.payload.machineGate) projection.machineGate = event.payload.machineGate as MachineGate;
   if (event.payload.judgeRecommendation) projection.judgeRecommendation = event.payload.judgeRecommendation as JudgeRecommendation;
   if (event.payload.resultRunId) projection.resultRunId = String(event.payload.resultRunId);
+  // Planning can terminate before plan_generated. Preserve rejection provenance
+  // and its provider call on review/terminal events for audit and benchmarks.
+  if (event.payload.provenance) projection.planProvenance = event.payload.provenance as PlanProvenance;
+  if (event.payload.llmCall) projection.plannerCall = event.payload.llmCall as LlmCall;
+  if (event.payload.llmCalls) projection.plannerCalls = event.payload.llmCalls as LlmCall[];
+  if (event.payload.impactAnalysis) projection.impactAnalysis = event.payload.impactAnalysis as ImpactAnalysis;
+  if (event.payload.plannerRouting) projection.plannerRouting = event.payload.plannerRouting as RunProjection["plannerRouting"];
   if (event.type === "plan_generated") {
     if (event.payload.plan) projection.plan = event.payload.plan as GrayPlan;
     if (event.payload.compiledPlan) projection.compiledPlan = event.payload.compiledPlan as CompiledPlan;
-    if (event.payload.provenance) projection.planProvenance = event.payload.provenance as PlanProvenance;
-    if (event.payload.llmCall) projection.plannerCall = event.payload.llmCall as LlmCall;
     if (event.payload.scenarioId) projection.selectedScenarioId = String(event.payload.scenarioId);
-    if (event.payload.impactAnalysis) projection.impactAnalysis = event.payload.impactAnalysis as ImpactAnalysis;
   }
   if (event.type === "run_completed") projection.gateStatus = (event.payload.finalStatus as GateStatus | undefined) ?? "pass";
   if (event.type === "run_failed") projection.gateStatus = "fail";
@@ -82,6 +88,36 @@ function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
   return projection;
 }
 
+/**
+ * Rebuild a run's materialized view exclusively from its append-only log.
+ * `projection_json` is deliberately not an input: it is a disposable cache and
+ * may have been written by an older reducer which did not know newer fields.
+ */
+export function replayRunEvents(events: readonly RunEvent[]): RunProjection | undefined {
+  if (events.length === 0) return undefined;
+  const [first] = events;
+  if (first.type !== "run_created" || first.version !== 1) {
+    throw new Error(`run_event_log_invalid:${first.runId}:missing_run_created`);
+  }
+
+  let projection: RunProjection = {
+    id: first.runId,
+    state: "draft",
+    version: 0,
+    createdAt: first.createdAt,
+    updatedAt: first.createdAt,
+    input: { ...first.payload }
+  };
+  for (const event of events) {
+    if (event.runId !== first.runId) throw new Error(`run_event_log_invalid:${first.runId}:mixed_run_ids`);
+    if (event.version !== projection.version + 1) {
+      throw new Error(`run_event_log_invalid:${first.runId}:expected_version_${projection.version + 1}`);
+    }
+    projection = applyEvent(projection, event);
+  }
+  return projection;
+}
+
 function makeEvent(input: { runId: string; type: RunEventType; version: number; actor: string; idempotencyKey: string; payload?: Record<string, unknown> }) {
   return runEventSchema.parse({
     schemaVersion: "1.0",
@@ -96,7 +132,7 @@ function makeEvent(input: { runId: string; type: RunEventType; version: number; 
   });
 }
 
-class SqliteRunEventStore implements RunEventStore {
+export class SqliteRunEventStore implements RunEventStore {
   private readonly database: DatabaseSync;
   constructor(file: string) {
     mkdirSync(path.dirname(file), { recursive: true });
@@ -118,8 +154,8 @@ class SqliteRunEventStore implements RunEventStore {
   }
 
   async create(input: { runId?: string; actor: string; idempotencyKey: string; payload?: Record<string, unknown> }) {
-    const existing = this.database.prepare("SELECT projection_json FROM run_projections WHERE run_id = ?").get(input.runId ?? "") as { projection_json?: string } | undefined;
-    if (existing?.projection_json) return JSON.parse(existing.projection_json) as RunProjection;
+    const existing = input.runId ? await this.get(input.runId) : undefined;
+    if (existing) return existing;
     const duplicate = this.database.prepare("SELECT run_id FROM run_control_events WHERE idempotency_key = ?").get(input.idempotencyKey) as { run_id?: string } | undefined;
     if (duplicate?.run_id) return (await this.get(duplicate.run_id))!;
     const runId = input.runId ?? `run_${randomUUID()}`;
@@ -170,8 +206,7 @@ class SqliteRunEventStore implements RunEventStore {
   }
 
   async get(runId: string) {
-    const row = this.database.prepare("SELECT projection_json FROM run_projections WHERE run_id = ?").get(runId) as { projection_json?: string } | undefined;
-    return row?.projection_json ? JSON.parse(row.projection_json) as RunProjection : undefined;
+    return replayRunEvents(await this.events(runId));
   }
 
   async events(runId: string) {
@@ -180,7 +215,7 @@ class SqliteRunEventStore implements RunEventStore {
   }
 }
 
-class PostgresRunEventStore implements RunEventStore {
+export class PostgresRunEventStore implements RunEventStore {
   private readonly pool: Pool;
   private initialized?: Promise<void>;
   constructor(connectionString: string) { this.pool = new Pool({ connectionString, max: 10 }); }
@@ -200,6 +235,8 @@ class PostgresRunEventStore implements RunEventStore {
   }
   async create(input: { runId?: string; actor: string; idempotencyKey: string; payload?: Record<string, unknown> }) {
     await this.init();
+    const existing = input.runId ? await this.get(input.runId) : undefined;
+    if (existing) return existing;
     const duplicate = await this.pool.query("SELECT run_id FROM run_control_events WHERE idempotency_key=$1", [input.idempotencyKey]);
     if (duplicate.rowCount) return (await this.get(String(duplicate.rows[0].run_id)))!;
     const runId = input.runId ?? `run_${randomUUID()}`;
@@ -224,9 +261,11 @@ class PostgresRunEventStore implements RunEventStore {
       await client.query("BEGIN");
       const duplicate = await client.query("SELECT run_id FROM run_control_events WHERE idempotency_key=$1", [input.idempotencyKey]);
       if (duplicate.rowCount) { await client.query("ROLLBACK"); return (await this.get(String(duplicate.rows[0].run_id)))!; }
-      const row = await client.query("SELECT projection_json FROM run_projections WHERE run_id=$1 FOR UPDATE", [input.runId]);
+      const row = await client.query("SELECT run_id FROM run_projections WHERE run_id=$1 FOR UPDATE", [input.runId]);
       if (!row.rowCount) throw new Error("run_not_found");
-      const current = row.rows[0].projection_json as RunProjection;
+      const eventRows = await client.query("SELECT event_json FROM run_control_events WHERE run_id=$1 ORDER BY version", [input.runId]);
+      const current = replayRunEvents(eventRows.rows.map((eventRow) => runEventSchema.parse(eventRow.event_json)));
+      if (!current) throw new Error("run_not_found");
       if (current.version !== input.expectedVersion) throw new Error(`run_version_conflict:${current.version}`);
       const event = makeEvent({ ...input, version: current.version + 1 });
       const projection = applyEvent(current, event);
@@ -238,7 +277,7 @@ class PostgresRunEventStore implements RunEventStore {
       return projection;
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   }
-  async get(runId: string) { await this.init(); const result = await this.pool.query("SELECT projection_json FROM run_projections WHERE run_id=$1", [runId]); return result.rowCount ? result.rows[0].projection_json as RunProjection : undefined; }
+  async get(runId: string) { await this.init(); return replayRunEvents(await this.events(runId)); }
   async events(runId: string) { await this.init(); const result = await this.pool.query("SELECT event_json FROM run_control_events WHERE run_id=$1 ORDER BY version", [runId]); return result.rows.map((row) => runEventSchema.parse(row.event_json)); }
 }
 

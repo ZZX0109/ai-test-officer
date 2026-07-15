@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CommitCheckResult } from "./types.js";
 
-const rootDir = path.resolve(process.cwd(), "..");
+const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const checksDir = path.join(rootDir, "reports", "commit-checks");
 const latestFile = path.join(checksDir, "latest.json");
 const indexFile = path.join(checksDir, "index.json");

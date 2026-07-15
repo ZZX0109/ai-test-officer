@@ -19,24 +19,29 @@ export async function mirrorArtifactsToConfiguredStore(artifacts: ArtifactV2[], 
     if (!resolved.ok) throw new Error(`artifact_object_store_source_invalid:${artifact.id}:${resolved.reason}`);
     const key = [prefix, artifact.runId, artifact.scenarioId, artifact.attemptId, path.basename(resolved.filePath)].filter(Boolean).join("/");
     const temporaryKey = `${prefix}/.partial/${artifact.id}-${Date.now()}`;
-    await client.send(new PutObjectCommand({
-      Bucket: bucket,
-      Key: temporaryKey,
-      Body: createReadStream(resolved.filePath),
-      ContentType: artifact.integrity.mediaType,
-      Metadata: { sha256: artifact.integrity.sha256, artifactid: artifact.id, origin: artifact.origin }
-    }));
-    const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: temporaryKey }));
-    if (head.ContentLength !== artifact.integrity.sizeBytes || head.Metadata?.sha256 !== artifact.integrity.sha256) {
-      throw new Error(`artifact_object_store_integrity_mismatch:${artifact.id}`);
+    let temporaryUploaded = false;
+    try {
+      await client.send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: temporaryKey,
+        Body: createReadStream(resolved.filePath),
+        ContentType: artifact.integrity.mediaType,
+        Metadata: { sha256: artifact.integrity.sha256, artifactid: artifact.id, origin: artifact.origin }
+      }));
+      temporaryUploaded = true;
+      const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: temporaryKey }));
+      if (head.ContentLength !== artifact.integrity.sizeBytes || head.Metadata?.sha256 !== artifact.integrity.sha256) {
+        throw new Error(`artifact_object_store_integrity_mismatch:${artifact.id}`);
+      }
+      await client.send(new CopyObjectCommand({ Bucket: bucket, Key: key, CopySource: `${bucket}/${temporaryKey}`, MetadataDirective: "COPY" }));
+      const committed = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      if (committed.ContentLength !== artifact.integrity.sizeBytes || committed.Metadata?.sha256 !== artifact.integrity.sha256) {
+        throw new Error(`artifact_object_store_commit_mismatch:${artifact.id}`);
+      }
+      mirrored.push({ ...artifact, replicaUris: Array.from(new Set([...(artifact.replicaUris ?? []), `s3://${bucket}/${key}`])) });
+    } finally {
+      if (temporaryUploaded) await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: temporaryKey })).catch(() => undefined);
     }
-    await client.send(new CopyObjectCommand({ Bucket: bucket, Key: key, CopySource: `${bucket}/${temporaryKey}`, MetadataDirective: "COPY" }));
-    const committed = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
-    if (committed.ContentLength !== artifact.integrity.sizeBytes || committed.Metadata?.sha256 !== artifact.integrity.sha256) {
-      throw new Error(`artifact_object_store_commit_mismatch:${artifact.id}`);
-    }
-    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: temporaryKey }));
-    mirrored.push({ ...artifact, replicaUris: Array.from(new Set([...(artifact.replicaUris ?? []), `s3://${bucket}/${key}`])) });
   }
   return mirrored;
 }
