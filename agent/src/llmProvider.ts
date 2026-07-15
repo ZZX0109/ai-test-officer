@@ -13,6 +13,35 @@ export interface LlmCallContext {
   experimentId?: string;
 }
 
+/**
+ * Provider APIs report exact usage only after a response. Use a deliberately
+ * conservative UTF-8 estimate before dispatch so a run cannot knowingly start
+ * a call whose prompt plus maximum completion exceeds its token budget.
+ */
+export function reserveLlmOutputTokens(input: {
+  prompt: string;
+  system: string;
+  usedTokens: number;
+  maxTotalTokens: number;
+  requestedOutputTokens: number;
+  minimumOutputTokens?: number;
+}) {
+  const promptBytes = Buffer.byteLength(`${input.system}\n${input.prompt}`, "utf8");
+  // UTF-8 bytes / 3 is intentionally stricter than the common ASCII heuristic
+  // of characters / 4, while still leaving room for a compact second-stage
+  // Judge after one successful Planner call.
+  const estimatedPromptTokens = Math.ceil(promptBytes / 3);
+  const availableOutputTokens = input.maxTotalTokens - input.usedTokens - estimatedPromptTokens;
+  const minimumOutputTokens = input.minimumOutputTokens ?? 256;
+  if (availableOutputTokens < minimumOutputTokens) {
+    throw new Error("llm_budget_exceeded:preflight_total_tokens");
+  }
+  return {
+    estimatedPromptTokens,
+    maxOutputTokens: Math.min(input.requestedOutputTokens, availableOutputTokens)
+  };
+}
+
 function usageCost(model: string, promptTokens?: number, completionTokens?: number) {
   const rates = model.startsWith("claude-sonnet-4-6")
     ? { input: 3, output: 15 }
@@ -46,6 +75,7 @@ export async function executeLlmCall(input: {
   prompt: string;
   system: string;
   maxTokens: number;
+  timeoutMs?: number;
   temperature?: number;
   context: LlmCallContext;
 }) {
@@ -59,6 +89,7 @@ export async function executeLlmCall(input: {
       headers: anthropic
         ? { "content-type": "application/json", "x-api-key": input.apiKey, "anthropic-version": "2023-06-01" }
         : { "content-type": "application/json", authorization: `Bearer ${input.apiKey}` },
+      signal: AbortSignal.timeout(input.timeoutMs ?? Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 30_000)),
       body: JSON.stringify(anthropic ? {
         model: input.credential.model,
         max_tokens: input.maxTokens,

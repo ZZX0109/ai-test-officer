@@ -195,7 +195,7 @@ npm run reports:retention:archive
 
 ## 真实 AI 实验
 
-`data/benchmark/cases.json` 是18条开发输入，`blind-cases.json` 是6条冻结盲测输入；两者均不包含答案。标签只存在于 `evaluation/benchmark-labels/`，该目录被 `.dockerignore` 排除，Agent/worker 镜像无法读取。正式实验包含 test-command、规则、LLM Planner、LLM Judge 和完整 LLM 五条通道，两个固定模型各重复3次。
+`data/benchmark/cases.json` 是18条开发输入，`blind-cases.json` 是6条冻结盲测输入。盲测清单只使用编号案例 ID 和无语义的 `fixtureVariantId`，不包含 verdict、故障类别、fault 名称或期望证据；opaque token 仅由目标 fixture/采集夹具解释，也不会展开进 Planner 或 Judge Prompt。标签只存在于 `evaluation/benchmark-labels/`，该目录被 `.dockerignore` 排除，Agent/worker 镜像无法读取。正式实验包含 test-command、规则、LLM Planner、LLM Judge 和完整 LLM 五条通道，两个固定模型各重复3次。
 
 可通过 `BENCHMARK_EXTENDED=1` 加入 Customer Portal 的6条扩展案例；核心命题、门禁规则与可证伪的验收标准见 [Evidence-Grounded Testing 方法说明](docs/evidence-grounded-method.md)。
 
