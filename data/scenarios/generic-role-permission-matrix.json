@@ -9,7 +9,8 @@
     "keywords": ["多角色", "权限矩阵", "role matrix", "RBAC", "permission matrix", "admin", "viewer"],
     "riskLevel": "high",
     "sourceHints": ["requirement", "diff", "llm_inferred"],
-    "capabilities": ["role_permission_matrix", "rbac", "permission_boundary"]
+    "capabilities": ["role_permission_matrix", "rbac", "permission_boundary"],
+    "projectIds": ["customer_portal_lite"]
   },
   "smoke": {
     "pathId": "open_customer_portal",

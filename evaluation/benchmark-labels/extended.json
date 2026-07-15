@@ -1,8 +1,8 @@
 [
-  {"benchmarkId":"customer-table-filter","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","network","trace"]},
-  {"benchmarkId":"customer-form-required","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","trace"]},
-  {"benchmarkId":"customer-file-upload","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","trace"]},
-  {"benchmarkId":"customer-approval","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","trace"]},
-  {"benchmarkId":"customer-role-matrix","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","trace"]},
-  {"benchmarkId":"customer-openapi-contract","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","network","trace"]}
+  {"benchmarkId":"customer-table-filter","expectedScenarioId":"generic_table_sort_filter_pagination","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","network","trace"]},
+  {"benchmarkId":"customer-form-required","expectedScenarioId":"generic_complex_form_validation","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","trace"]},
+  {"benchmarkId":"customer-file-upload","expectedScenarioId":"generic_file_upload_validation","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","trace"]},
+  {"benchmarkId":"customer-approval","expectedScenarioId":"generic_approval_flow_transition","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","trace"]},
+  {"benchmarkId":"customer-role-matrix","expectedScenarioId":"generic_role_permission_matrix","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","trace"]},
+  {"benchmarkId":"customer-openapi-contract","expectedScenarioId":"generic_openapi_schema_contract","verdict":"pass","requiredEvidenceTypes":["screenshot","dom","network","trace"]}
 ]

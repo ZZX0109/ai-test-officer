@@ -9,7 +9,8 @@
     "keywords": ["table", "表格", "排序", "筛选", "分页", "pagination", "sort", "filter"],
     "riskLevel": "medium",
     "sourceHints": ["requirement", "diff", "llm_inferred"],
-    "capabilities": ["table", "data_grid", "playwright_mcp", "network_evidence"]
+    "capabilities": ["table", "data_grid", "playwright_mcp", "network_evidence"],
+    "projectIds": ["customer_portal_lite"]
   },
   "smoke": {
     "pathId": "open_customer_portal",

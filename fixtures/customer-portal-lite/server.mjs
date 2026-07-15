@@ -7,7 +7,7 @@ function json(response, value) {
   response.end(JSON.stringify(value));
 }
 
-function html(response) {
+function html(response, variant = "") {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   response.end(`<!doctype html>
 <html lang="en">
@@ -84,6 +84,7 @@ function html(response) {
     </section>
 
     <script>
+      const variant = ${JSON.stringify(variant)};
       const customers = document.querySelector("#customers");
       document.querySelector("#sort").addEventListener("click", () => {
         customers.innerHTML = "<tr><td>Acme Renewal</td><td>9800</td></tr><tr><td>Globex Expansion</td><td>1200</td></tr>";
@@ -106,7 +107,7 @@ function html(response) {
         document.querySelector("[data-testid='upload-state']").textContent = file ? file.name : "no file";
       });
       document.querySelector("#approve").addEventListener("click", () => {
-        document.querySelector("[data-testid='approval-status']").textContent = "approved";
+        document.querySelector("[data-testid='approval-status']").textContent = variant === "fxv_d20b8f2d5c3a9074" ? "pending" : "approved";
       });
       document.querySelector("#schema").addEventListener("click", async () => {
         await fetch("/api/schema-check?contract=customer");
@@ -121,7 +122,7 @@ function html(response) {
       });
       document.querySelector("#applyRole").addEventListener("click", () => {
         const role = document.querySelector("#role").value;
-        document.querySelector("[data-testid='permission-matrix']").textContent = role === "viewer" ? "viewer: read-only" : "admin: full-access";
+        document.querySelector("[data-testid='permission-matrix']").textContent = role === "viewer" && variant !== "fxv_d30c9a3e6d4b0185" ? "viewer: read-only" : "admin: full-access";
       });
     </script>
   </body>
@@ -137,7 +138,7 @@ const server = http.createServer((request, response) => {
   }
   if (url.pathname === "/api/customers") return json(response, { ok: true, query: url.searchParams.get("query"), items: ["Acme Renewal"] });
   if (url.pathname === "/api/schema-check") return json(response, { ok: true, contract: url.searchParams.get("contract") });
-  return html(response);
+  return html(response, url.searchParams.get("fixtureVariantId") ?? "");
 });
 
 server.listen(port, process.env.HOST ?? "127.0.0.1");

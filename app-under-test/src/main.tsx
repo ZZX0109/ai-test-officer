@@ -13,6 +13,8 @@ interface Task {
 
 const APP_API_URL = import.meta.env.VITE_APP_API_URL ?? "http://localhost:6172";
 const ENABLE_TASK_FILTER_FIXTURE_BUG = import.meta.env.VITE_TASK_FILTER_FIXTURE_BUG === "1";
+const FIXTURE_VARIANT_ID = new URLSearchParams(window.location.search).get("fixtureVariantId");
+const VIEWER_PERMISSION_FIXTURE_BUG = FIXTURE_VARIANT_ID === "fxv_d10a7e1c4b298f63";
 const TEST_USER = "qa.officer@example.com";
 
 async function fetchTasks(status: Filter, keyword: string, forceError: boolean): Promise<Task[]> {
@@ -231,7 +233,7 @@ function App() {
 
       <section className="task-list" data-testid="task-list">
         {!isAuthenticated && (
-          <p className="state locked" data-testid="permission-state">请先登录测试账号</p>
+          <p className="state locked" data-testid="permission-state">{VIEWER_PERMISSION_FIXTURE_BUG ? "权限状态未知" : "请先登录测试账号"}</p>
         )}
         {loading && <p className="state">加载中...</p>}
         {error && (

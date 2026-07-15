@@ -24,7 +24,7 @@ export type ScenarioAction =
   | "approval_flow_transition"
   | "openapi_schema_contract"
   | "role_permission_matrix"
-  | "investment_agent_workflow_auth_portfolio_research";
+  | "authenticated_onboarding_workflow";
 
 export type ScenarioOracleType =
   | "network_query"
@@ -43,6 +43,9 @@ export interface ScenarioMatcher {
   riskLevel: ScenarioRiskLevel;
   sourceHints: string[];
   capabilities: string[];
+  /** Optional project allow-list. A scenario must never be selected only because
+   * its wording matches when its controls and oracles belong to another target. */
+  projectIds?: string[];
 }
 
 export interface ScenarioSmoke {
@@ -95,6 +98,16 @@ export interface ScenarioCorePath {
   expectedEmptyText?: string;
   errorLocator?: string;
   expectedErrorText?: string;
+  usernameEnv?: string;
+  passwordEnv?: string;
+  registerButtonName?: string;
+  usernameLabel?: string;
+  passwordLabel?: string;
+  createAccountButtonName?: string;
+  loginButtonName?: string;
+  loginSubmitButtonName?: string;
+  setupHeadingName?: string;
+  setupSubmitButtonPattern?: string;
   oracles: ScenarioOracle[];
 }
 
@@ -341,6 +354,7 @@ export function matchScenariosForContext(input: {
   requirement: string;
   diff: string;
   bugTicket?: string;
+  projectId?: string;
 }) {
   return scenarioList
     .map((scenario) => {
@@ -350,6 +364,12 @@ export function matchScenariosForContext(input: {
         sourceHints: ["requirement"],
         capabilities: ["playwright_mcp", "evidence_store"]
       };
+      // Legacy callers without a project context keep the broad discovery
+      // behaviour. Once a project is known, project-scoped scenarios are a
+      // hard boundary and cannot leak into a different fixture.
+      if (input.projectId && matcher.projectIds?.length && !matcher.projectIds.includes(input.projectId)) {
+        return undefined;
+      }
       const requirementHits = keywordHits(input.requirement, matcher.keywords);
       const diffHits = keywordHits(input.diff, matcher.keywords);
       const bugHits = keywordHits(input.bugTicket ?? "", matcher.keywords);
@@ -371,6 +391,7 @@ export function matchScenariosForContext(input: {
         requiredCapabilities: matcher.capabilities
       };
     })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score);
 }

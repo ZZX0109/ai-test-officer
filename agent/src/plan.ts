@@ -8,19 +8,22 @@ export const fixedGrayPlan: GrayPlan = {
       id: "risk_status_query",
       level: "high",
       title: "状态筛选请求参数可能漏传",
-      evidence: "diff 显示 fetchTasks 中查询参数被清空，已完成筛选可能无法传递 status=completed。"
+      evidence: "diff 显示 fetchTasks 中查询参数被清空，已完成筛选可能无法传递 status=completed。",
+      pathIds: ["completed_filter_path"], coverageDisposition: "required"
     },
     {
       id: "risk_list_rendering",
       level: "medium",
       title: "列表渲染可能展示错误任务集合",
-      evidence: "任务列表依赖接口返回值，如果接口未过滤，页面会显示全部任务。"
+      evidence: "任务列表依赖接口返回值，如果接口未过滤，页面会显示全部任务。",
+      pathIds: ["completed_filter_path"], coverageDisposition: "required"
     },
     {
       id: "risk_empty_state",
       level: "low",
       title: "空状态和异常状态需要补测",
-      evidence: "状态筛选变更可能影响无结果和接口错误场景。"
+      evidence: "状态筛选变更可能影响无结果和接口错误场景。",
+      pathIds: [], coverageDisposition: "harness_gap"
     }
   ],
   levels: [
@@ -104,19 +107,22 @@ export function buildScenarioGrayPlan(scenario: ExecutableScenario): GrayPlan {
         title: "核心请求或操作可能不符合需求",
         evidence: queryOracle
           ? `变更或需求涉及 ${queryOracle.expectedQueryFragment}，必须验证请求是否携带该查询参数。`
-          : `变更或需求命中 ${scenario.corePath.action}，必须验证核心操作有可观察结果。`
+          : `变更或需求命中 ${scenario.corePath.action}，必须验证核心操作有可观察结果。`,
+        pathIds: [scenario.corePath.pathId], coverageDisposition: "required"
       },
       {
         id: "risk_visible_oracle",
         level: "medium",
         title: "页面可见结果可能与需求不一致",
-        evidence: domOracle?.expected ?? "页面 DOM、截图或错误态需要和需求 oracle 对齐。"
+        evidence: domOracle?.expected ?? "页面 DOM、截图或错误态需要和需求 oracle 对齐。",
+        pathIds: [scenario.corePath.pathId], coverageDisposition: "required"
       },
       {
         id: "risk_empty_state",
         level: "low",
         title: "空状态和异常状态需要补测",
-        evidence: "状态筛选变更可能影响无结果和接口错误场景。"
+        evidence: "状态筛选变更可能影响无结果和接口错误场景。",
+        pathIds: [], coverageDisposition: "harness_gap"
       }
     ],
     levels: [

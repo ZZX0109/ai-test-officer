@@ -1,0 +1,24 @@
+{
+  "id": "order_filter_pending",
+  "title": "订单待处理筛选验收",
+  "capabilityKind": "table_filter",
+  "genericTemplate": false,
+  "planObservation": "smoke -> core_path(select pending and load orders) -> regression",
+  "summary": "验证订单门户仅展示 pending 订单，并采集 status=pending 请求和订单表格证据。",
+  "matcher": {
+    "keywords": ["order", "orders", "订单", "pending", "待处理", "status=pending", "筛选"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["table_interaction", "network_evidence"],
+    "projectIds": ["order_portal_lite"]
+  },
+  "smoke": {"pathId":"open_order_portal","stepId":"open_order_portal","title":"打开订单门户","headingName":"Order Portal Lite","assertionName":"订单门户标题可见","expected":"Order Portal Lite 标题出现"},
+  "corePath": {
+    "pathId":"order_pending_filter_path","stepId":"filter_pending_orders","title":"筛选待处理订单","action":"table_sort_filter_paginate","selectLabel":"Status","selectValue":"pending","submitButtonName":"Load orders","targetLocator":"[data-testid='order-table']","networkUrlIncludes":"/api/orders","expectedQueryFragment":"status=pending","expectedTextIncludes":"ORD-1001","queryAssertionName":"订单筛选请求携带 status=pending","domAssertionName":"订单表只展示待处理订单","riskReason":"订单状态筛选直接影响待审批工作队列，必须验证网络请求和可见行。",
+    "oracles":[
+      {"id":"order_pending_query","name":"订单筛选请求携带 status=pending","type":"network_query","networkUrlIncludes":"/api/orders","expectedQueryFragment":"status=pending","expected":"GET /api/orders?status=pending"},
+      {"id":"order_pending_dom","name":"订单表只展示待处理订单","type":"dom_text","locator":"[data-testid='order-table']","expectedTextIncludes":"ORD-1001","expected":"订单表展示 ORD-1001"}
+    ]
+  },
+  "regressionPath":{"stepId":"order_filter_regression","title":"保留订单筛选回归截图","action":"visual_check","triggerButtonName":"Load orders"}
+}

@@ -1,5 +1,7 @@
 import type { ConnectorContext, ImpactAnalysis, ImpactAnalysisItem, SourceReadEnvelope } from "./types.js";
-import { matchScenariosForContext } from "./scenarios.js";
+import type { CodeImpactGraph } from "./codeImpactGraph.js";
+import { buildDiffImpactGraph } from "./codeImpactGraph.js";
+import { listExecutableScenarios, matchScenariosForContext } from "./scenarios.js";
 
 function sourceIds(context: ConnectorContext, pattern: RegExp) {
   return context.sourceContexts
@@ -129,7 +131,9 @@ function priorityFor(score: number): "critical" | "high" | "medium" | "low" {
   return "low";
 }
 
-export function buildImpactAnalysis(context: ConnectorContext): ImpactAnalysis {
+export function buildImpactAnalysis(context: ConnectorContext, suppliedGraph?: CodeImpactGraph): ImpactAnalysis {
+  const scenarioContracts = listExecutableScenarios().map((scenario) => ({ id: scenario.id, keywords: scenario.matcher?.keywords ?? [scenario.id, scenario.title] }));
+  const codeGraph = suppliedGraph ?? buildDiffImpactGraph({ diff: context.diff, scenarios: scenarioContracts });
   const scenarioMatches = matchScenariosForContext({
     requirement: context.requirement,
     diff: context.diff,
@@ -145,14 +149,17 @@ export function buildImpactAnalysis(context: ConnectorContext): ImpactAnalysis {
       (signal.id === "api" && /api|network|contract/.test(scenarioText)) ||
       (signal.id === "async" && /error|retry|patrol/.test(scenarioText)) ||
       signal.id === "change_breadth" || signal.id === "historical_bug");
-    const score = Math.min(100, match.score + relevantSignals.reduce((sum, signal) => sum + signal.weight, 0) + (match.riskLevel === "high" ? 8 : 0));
+    const graphNode = codeGraph.nodes.find((node) => node.kind === "scenario" && node.label === match.scenario.id);
+    const graphReasons = graphNode ? codeGraph.edges.filter((edge) => edge.to === graphNode.id && edge.kind === "covered-by").map((edge) => edge.reason) : [];
+    const graphScore = Math.min(24, graphReasons.length * 8);
+    const score = Math.min(100, match.score + relevantSignals.reduce((sum, signal) => sum + signal.weight, 0) + (match.riskLevel === "high" ? 8 : 0) + graphScore);
     return {
       scenarioId: match.scenario.id,
-      reason: `${match.scenario.summary ?? match.scenario.title} matched keywords: ${match.matchedKeywords.join(", ") || "registry fallback"}; risk drivers: ${relevantSignals.map((signal) => signal.label).join("、") || "keyword match"}.`,
+      reason: `${match.scenario.summary ?? match.scenario.title} matched keywords: ${match.matchedKeywords.join(", ") || "registry fallback"}; risk drivers: ${relevantSignals.map((signal) => signal.label).join("、") || "keyword match"}; code graph: ${graphReasons.join(" | ") || "no direct graph edge"}.`,
       confidence: score >= 45 ? "high" as const : score >= 18 ? "medium" as const : "low" as const,
       priority: priorityFor(score),
       score,
-      riskDrivers: relevantSignals.map((signal) => signal.id),
+      riskDrivers: [...relevantSignals.map((signal) => signal.id), ...(graphReasons.length ? ["code_graph"] : [])],
       sourceContextIds: sourceIds(context, /diff|requirement|bug|issue|jira|openapi|pull request|pr/i)
     };
   }).sort((left, right) => (right.score ?? 0) - (left.score ?? 0)).slice(0, 8);
@@ -175,6 +182,7 @@ export function buildImpactAnalysis(context: ConnectorContext): ImpactAnalysis {
     affectedApis,
     affectedComponents,
     recommendedScenarios,
-    uncoveredRisks
+    uncoveredRisks,
+    codeGraph
   };
 }

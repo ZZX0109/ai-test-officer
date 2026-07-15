@@ -1,0 +1,12 @@
+{
+  "id": "order_visual_regression",
+  "title": "订单表格视觉回归验收",
+  "capabilityKind": "visual_regression",
+  "genericTemplate": false,
+  "planObservation": "smoke -> core_path(load order table) -> screenshot regression",
+  "summary": "验证订单表格可见，并采集可复核截图。",
+  "matcher": {"keywords":["order","订单","visual","视觉","css","table","表格"],"riskLevel":"low","sourceHints":["requirement","diff","llm_inferred"],"capabilities":["screenshot","visual_evidence"],"projectIds":["order_portal_lite"]},
+  "smoke": {"pathId":"open_order_portal","stepId":"open_order_portal","title":"打开订单门户","headingName":"Order Portal Lite","assertionName":"订单门户标题可见","expected":"Order Portal Lite 标题出现"},
+  "corePath": {"pathId":"order_visual_path","stepId":"load_order_table","title":"加载订单表格","action":"visual_check","triggerButtonName":"Load orders","targetLocator":"[data-testid='order-table']","expectedTextIncludes":"ORD-1001","domAssertionName":"订单表格保持可读","riskReason":"订单状态筛选相关样式改动不能破坏核心表格可读性。","oracles":[{"id":"order_visual_dom","name":"订单表格保持可读","type":"dom_text","locator":"[data-testid='order-table']","expectedTextIncludes":"ORD-1001","expected":"订单表可见 ORD-1001"}]},
+  "regressionPath":{"stepId":"order_visual_snapshot","title":"保留订单视觉回归截图","action":"visual_check"}
+}

@@ -1,0 +1,21 @@
+{
+  "id": "order_openapi_contract",
+  "title": "订单 OpenAPI 审批契约验收",
+  "capabilityKind": "api_contract",
+  "genericTemplate": false,
+  "planObservation": "smoke -> core_path(validate order schema) -> regression",
+  "summary": "验证订单审批端点出现在目标项目公开 OpenAPI 描述中。",
+  "matcher": {
+    "keywords": ["order", "订单", "openapi", "schema", "contract", "approve"],
+    "riskLevel": "medium",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["api_schema", "network_evidence"],
+    "projectIds": ["order_portal_lite"]
+  },
+  "smoke": {"pathId":"open_order_portal","stepId":"open_order_portal","title":"打开订单门户","headingName":"Order Portal Lite","assertionName":"订单门户标题可见","expected":"Order Portal Lite 标题出现"},
+  "corePath": {
+    "pathId":"order_openapi_contract_path","stepId":"validate_order_schema","title":"校验订单审批 OpenAPI","action":"openapi_schema_contract","triggerButtonName":"Validate order API schema","targetLocator":"[data-testid='schema-state']","expectedTextIncludes":"schema ok","domAssertionName":"订单 OpenAPI 审批契约可用","riskReason":"审批接口变更必须有可审计的 API 契约证据。",
+    "oracles":[{"id":"order_schema_dom","name":"订单 OpenAPI 审批契约可用","type":"api_schema","locator":"[data-testid='schema-state']","expectedTextIncludes":"schema ok","expected":"订单 schema-state 展示 schema ok"}]
+  },
+  "regressionPath":{"stepId":"order_schema_regression","title":"保留订单契约回归截图","action":"visual_check"}
+}

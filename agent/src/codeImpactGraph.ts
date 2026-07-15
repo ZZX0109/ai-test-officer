@@ -21,6 +21,64 @@ function normalizedApiPath(value: string) {
   return value.replace(/^https?:\/\/[^/]+/i, "").replace(/[?#].*$/, "").replace(/\/:?[A-Za-z0-9_{}-]+/g, "/:param").replace(/\/+/g, "/").replace(/\/$/, "") || "/";
 }
 
+export function changedFilesFromDiff(diff: string) {
+  return Array.from(diff.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm), (match) => match[2]);
+}
+
+/** Index submitted patch text even when the changed revision is not checked out locally. */
+export function buildDiffImpactGraph(input: { diff: string; scenarios?: Array<{ id: string; keywords: string[] }> }): CodeImpactGraph {
+  const nodes: CodeGraphNode[] = [];
+  const edges: CodeGraphEdge[] = [];
+  const blocks = input.diff.split(/(?=^diff --git )/m).filter((block) => block.startsWith("diff --git "));
+  for (const block of blocks) {
+    const header = block.match(/^diff --git a\/(.+?) b\/(.+)$/m);
+    if (!header) continue;
+    const relative = header[2];
+    const fileId = id("file", relative);
+    nodes.push({ id: fileId, kind: "file", label: relative, file: relative, confidence: "high" });
+    const added = block.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).map((line) => line.slice(1)).join("\n");
+    for (const match of added.matchAll(/\b(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|const)\s+([A-Za-z_$][\w$]*)/g)) {
+      const symbolId = id("symbol", `${relative}:${match[1]}`);
+      nodes.push({ id: symbolId, kind: "symbol", label: match[1], file: relative, confidence: "medium" });
+      edges.push({ from: fileId, to: symbolId, kind: "exports", reason: `Patch for ${relative} declares or changes ${match[1]}.` });
+    }
+    const apiTargets = new Set(Array.from(added.matchAll(/['"`]((?:https?:\/\/[^/'"`]+)?\/api\/[A-Za-z0-9_?&=/${}.:-]+)/g), (match) => match[1].replace(/\$\{[^}]+\}/g, ":param")));
+    for (const target of apiTargets) {
+      const callId = id("call", `${relative}:${target}`);
+      nodes.push({ id: callId, kind: "frontend-call", label: target, file: relative, confidence: "medium" });
+      edges.push({ from: fileId, to: callId, kind: "calls", reason: `Patch for ${relative} references API ${target}.` });
+    }
+    if (/(^|\/)(pages|routes|app|components)\/|\.(?:tsx|jsx)$/.test(relative)) {
+      const pageId = id("page", relative);
+      nodes.push({ id: pageId, kind: "page", label: relative.replace(/\.(tsx?|jsx?)$/, ""), file: relative, confidence: "medium" });
+      edges.push({ from: fileId, to: pageId, kind: "renders", reason: `${relative} is a page or UI component changed by the patch.` });
+    }
+    const search = `${relative}\n${added}`.toLowerCase();
+    for (const scenario of input.scenarios ?? []) {
+      const matched = scenario.keywords.filter((keyword) => search.includes(keyword.toLowerCase()));
+      if (!matched.length) continue;
+      const scenarioId = id("scenario", scenario.id);
+      if (!nodes.some((node) => node.id === scenarioId)) nodes.push({ id: scenarioId, kind: "scenario", label: scenario.id, confidence: "medium" });
+      edges.push({ from: fileId, to: scenarioId, kind: "covered-by", reason: `${relative} matched ${scenario.id} through patch signals: ${matched.join(", ")}.` });
+    }
+  }
+  return { version: "1.0", createdAt: new Date().toISOString(), repositoryRoot: "diff://submitted-change", nodes, edges, explanations: edges.map((edge) => edge.reason), cacheHits: 0 };
+}
+
+export function mergeImpactGraphs(primary: CodeImpactGraph, secondary: CodeImpactGraph): CodeImpactGraph {
+  const nodeMap = new Map([...primary.nodes, ...secondary.nodes].map((node) => [node.id, node]));
+  const edgeMap = new Map([...primary.edges, ...secondary.edges].map((edge) => [`${edge.from}:${edge.to}:${edge.kind}:${edge.reason}`, edge]));
+  return {
+    version: "1.0",
+    createdAt: new Date().toISOString(),
+    repositoryRoot: primary.repositoryRoot,
+    nodes: [...nodeMap.values()],
+    edges: [...edgeMap.values()],
+    explanations: [...new Set([...primary.explanations, ...secondary.explanations])],
+    cacheHits: primary.cacheHits + secondary.cacheHits
+  };
+}
+
 async function discoverSourceFiles(root: string, directory = root, found: string[] = []): Promise<string[]> {
   if (found.length >= 1_000) return found;
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -92,7 +150,7 @@ async function indexPython(script: string, root: string, files: string[]) {
   });
 }
 
-export async function buildCodeImpactGraph(input: { repositoryRoot: string; files: string[]; cacheFile?: string; includeRepositorySources?: boolean; scenarios?: Array<{ id: string; keywords: string[] }>; historicalBugs?: Array<{ id: string; title: string; files: string[] }> }): Promise<CodeImpactGraph> {
+export async function buildCodeImpactGraph(input: { repositoryRoot: string; files: string[]; diff?: string; cacheFile?: string; includeRepositorySources?: boolean; scenarios?: Array<{ id: string; keywords: string[] }>; historicalBugs?: Array<{ id: string; title: string; files: string[] }> }): Promise<CodeImpactGraph> {
   const root = path.resolve(input.repositoryRoot);
   const cacheFile = input.cacheFile ?? path.join(root, ".ai-test-officer", "impact-cache.json");
   const cache: GraphCache = await readFile(cacheFile, "utf8").then((raw) => JSON.parse(raw) as GraphCache).catch(() => ({ files: {} }));
@@ -144,5 +202,6 @@ export async function buildCodeImpactGraph(input: { repositoryRoot: string; file
     fileNodes.filter((node) => node.file && bug.files.includes(node.file)).forEach((node) => edges.push({ from: node.id, to: bugId, kind: "regressed-by", reason: `Historical bug ${bug.id} touched ${node.file}.` }));
   }
   const explanations = edges.filter((edge) => ["serves", "calls", "covered-by", "regressed-by"].includes(edge.kind)).map((edge) => edge.reason);
-  return { version: "1.0", createdAt: new Date().toISOString(), repositoryRoot: root, nodes, edges, explanations, cacheHits };
+  const repositoryGraph: CodeImpactGraph = { version: "1.0", createdAt: new Date().toISOString(), repositoryRoot: root, nodes, edges, explanations, cacheHits };
+  return input.diff ? mergeImpactGraphs(repositoryGraph, buildDiffImpactGraph({ diff: input.diff, scenarios: input.scenarios })) : repositoryGraph;
 }

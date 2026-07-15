@@ -9,7 +9,8 @@
     "keywords": ["审批", "approval", "workflow", "状态流", "批准", "review"],
     "riskLevel": "high",
     "sourceHints": ["requirement", "diff", "llm_inferred"],
-    "capabilities": ["approval_flow", "state_transition", "playwright_mcp"]
+    "capabilities": ["approval_flow", "state_transition", "playwright_mcp"],
+    "projectIds": ["customer_portal_lite"]
   },
   "smoke": {
     "pathId": "open_customer_portal",

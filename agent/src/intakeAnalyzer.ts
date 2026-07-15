@@ -2,14 +2,17 @@ import type { GrayPlan, IntakeAnalysis, IntakeSource, ScenarioCandidate, SourceR
 import { buildScenarioGrayPlan, fixedGrayPlan } from "./plan.js";
 import { getDefaultScenarioId, matchScenariosForContext } from "./scenarios.js";
 import { buildImpactAnalysis } from "./impactAnalysis.js";
+import type { CodeImpactGraph } from "./codeImpactGraph.js";
 
 export interface AnalyzeIntakeInput {
   requirement: string;
   diff: string;
   bugTicket?: string;
+  projectId?: string;
   prUrl?: string;
   sources?: IntakeSource[];
   sourceContexts?: SourceReadEnvelope[];
+  codeGraph?: CodeImpactGraph;
 }
 
 function has(text: string, pattern: RegExp) {
@@ -146,7 +149,7 @@ export function analyzeIntake(input: AnalyzeIntakeInput): IntakeAnalysis {
       prUrl: input.prUrl,
       sourceContexts,
       sources: input.sources ?? buildSources(input)
-    })
+    }, input.codeGraph)
     : undefined;
   return {
     id: `intake_${Date.now()}`,

@@ -43,15 +43,25 @@ export async function testIndependentFixtures() {
     assert.ok(payload.tasks.every((task) => task.status === "completed"));
     const openApi = await (await fetch(`${baseUrl}/openapi.json`)).json() as { paths: Record<string, unknown> };
     assert.ok(openApi.paths["/api/tasks"]);
+    const isolatedFailure = await fetch(`${baseUrl}/api/tasks?fixtureVariantId=fxv_2b8e6d41a9c753f0`);
+    assert.equal(isolatedFailure.status, 503);
+    const renamedPage = await (await fetch(`${baseUrl}/?fixtureVariantId=fxv_9c4d0a73e1b625f8`)).text();
+    assert.match(renamedPage, /aria-label="Find work items"/);
   });
   await runFixture("order-portal-lite", 6283, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/orders?status=pending`);
     const payload = await response.json() as { orders: Array<{ status: string }> };
     assert.ok(payload.orders.length > 0);
     assert.ok(payload.orders.every((order) => order.status === "pending"));
+    const isolatedApproval = await fetch(`${baseUrl}/api/orders/ORD-1001/approve?fixtureVariantId=fxv_7f3a1c92d6e8405b`, { method: "POST" });
+    assert.equal(isolatedApproval.status, 200);
+    const isolatedPayload = await isolatedApproval.json() as { order: { status: string } };
+    assert.equal(isolatedPayload.order.status, "pending");
     const approval = await fetch(`${baseUrl}/api/orders/ORD-1001/approve`, { method: "POST" });
     assert.equal(approval.status, 200);
     const repeated = await fetch(`${baseUrl}/api/orders/ORD-1001/approve`, { method: "POST" });
-    assert.equal(repeated.status, 409);
+    // Fixture responses are isolated per attempt. A prior benchmark repetition
+    // must not mutate the next run's order state on this shared test server.
+    assert.equal(repeated.status, 200);
   });
 }

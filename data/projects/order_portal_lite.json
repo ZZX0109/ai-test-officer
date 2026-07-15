@@ -12,6 +12,7 @@
   "backendUrl": "http://127.0.0.1:6183",
   "allowedOrigins": ["http://127.0.0.1:6183"],
   "testCommand": "npm test",
+  "testCommandSpec": { "executable": "npm", "args": ["test"] },
   "login": { "method": "none" },
   "env": { "PORT": "6183" },
   "timeoutMs": 30000,

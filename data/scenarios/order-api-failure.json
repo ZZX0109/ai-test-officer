@@ -1,0 +1,24 @@
+{
+  "id": "order_api_failure",
+  "title": "订单接口失败与恢复验收",
+  "capabilityKind": "network_failure",
+  "genericTemplate": false,
+  "planObservation": "smoke -> core_path(simulate order API failure) -> retry evidence",
+  "summary": "验证订单接口 503 与恢复动作被采集为环境证据，不能伪装为通过。",
+  "matcher": {
+    "keywords": ["order", "订单", "api failure", "接口失败", "503", "not found", "environment", "error"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["network_evidence", "failure_attribution"],
+    "projectIds": ["order_portal_lite"]
+  },
+  "smoke": {"pathId":"open_order_portal","stepId":"open_order_portal","title":"打开订单门户","headingName":"Order Portal Lite","assertionName":"订单门户标题可见","expected":"Order Portal Lite 标题出现"},
+  "corePath": {
+    "pathId":"order_api_failure_path","stepId":"simulate_order_api_failure","retryStepId":"retry_order_api_failure","title":"模拟订单接口失败并验证错误态","action":"simulate_error_and_retry","triggerButtonName":"Simulate order API failure","retryButtonName":"Retry order load","networkUrlIncludes":"/api/orders","expectedQueryFragment":"status=error","errorLocator":"[data-testid='order-error-state']","expectedErrorText":"order API failure","queryAssertionName":"订单错误请求携带 status=error","domAssertionName":"订单接口失败后展示错误态","riskReason":"订单 API 失败必须以网络和 DOM 证据进入环境问题或人工复核，不能被放行。",
+    "oracles":[
+      {"id":"order_api_failure_query","name":"订单错误请求携带 status=error","type":"network_query","networkUrlIncludes":"/api/orders","expectedQueryFragment":"status=error","expected":"GET /api/orders?status=error"},
+      {"id":"order_api_failure_dom","name":"订单接口失败后展示错误态","type":"error_text","locator":"[data-testid='order-error-state']","expectedTextIncludes":"order API failure","expected":"页面展示 order API failure"}
+    ]
+  },
+  "regressionPath":{"stepId":"order_api_failure_regression","title":"采集订单错误恢复截图","action":"visual_check"}
+}

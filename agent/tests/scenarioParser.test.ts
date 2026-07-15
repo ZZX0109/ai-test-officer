@@ -49,4 +49,20 @@ export function testScenarioParser() {
     })[0]?.scenario.id,
     "task_api_failure"
   );
+  assert.equal(
+    matchScenariosForContext({
+      projectId: "order_portal_lite",
+      requirement: "Pending filter only shows pending orders",
+      diff: "return api.get('/api/orders?status=pending');"
+    })[0]?.scenario.id,
+    "order_filter_pending"
+  );
+  assert.equal(
+    matchScenariosForContext({
+      projectId: "todo_lite",
+      requirement: "Unauthenticated visitors must see login required",
+      diff: "if (!session.user) return permissionState('login_required');"
+    })[0]?.scenario.id,
+    "todo_visitor_permission"
+  );
 }

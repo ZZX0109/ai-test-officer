@@ -1,0 +1,21 @@
+{
+  "id": "todo_visitor_permission",
+  "title": "Todo 访客访问权限验收",
+  "capabilityKind": "permission_boundary",
+  "genericTemplate": false,
+  "planObservation": "smoke -> core_path(sign out and verify login required) -> regression",
+  "summary": "验证未登录访客不能读取任务列表，并出现明确登录提示。",
+  "matcher": {
+    "keywords": ["task", "任务", "visitor", "访客", "unauthenticated", "未登录", "login required", "permission"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["auth_boundary", "permission_boundary"],
+    "projectIds": ["todo_lite"]
+  },
+  "smoke": {"pathId":"open_todo_lite","stepId":"open_todo_lite","title":"打开 Todo Lite","headingName":"Todo Lite","assertionName":"Todo Lite 标题可见","expected":"Todo Lite 标题出现"},
+  "corePath": {
+    "pathId":"todo_visitor_permission_path","stepId":"signout_expect_login_required","title":"退出登录并验证访客拦截","action":"require_permission","triggerButtonName":"Sign out","targetLocator":"[data-testid='permission-state']","expectedTextIncludes":"login required","domAssertionName":"访客态显示 login required","riskReason":"任务列表是受保护数据；未登录状态不得继续展示业务数据。",
+    "oracles":[{"id":"todo_login_required_dom","name":"访客态显示 login required","type":"dom_text","locator":"[data-testid='permission-state']","expectedTextIncludes":"login required","expected":"退出后 permission-state 显示 login required"}]
+  },
+  "regressionPath":{"stepId":"todo_relogin_regression","title":"重新登录后恢复任务页","action":"login_as_test_user","triggerButtonName":"Sign in test user"}
+}

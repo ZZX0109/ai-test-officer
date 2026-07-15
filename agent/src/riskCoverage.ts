@@ -42,6 +42,12 @@ export function buildRiskCoverageMatrix(
   });
 
   const pageAssertion = result.assertions.find((item) => item.name === scenario.smoke.assertionName);
+  const regressionAssertion = scenario.regressionPath
+    ? result.assertions.find((item) => item.name.startsWith(scenario.regressionPath!.title))
+    : undefined;
+  const regressionEvidence = scenario.regressionPath
+    ? evidence.filter((item) => item.pathId === scenario.regressionPath!.stepId && item.type === "assertion").map((item) => item.id)
+    : [];
   return [
     {
       riskId: "risk_smoke",
@@ -52,6 +58,15 @@ export function buildRiskCoverageMatrix(
       evidenceRefs: evidenceFor(evidence, scenario.smoke.assertionName),
       notes: pageAssertion?.passed ? "Smoke 路径通过。" : "Smoke 路径未通过或缺少证据。"
     },
-    ...items
+    ...items,
+    ...(scenario.regressionPath && regressionAssertion ? [{
+      riskId: "risk_regression",
+      riskTitle: "回归路径稳定性风险",
+      covered: Boolean(regressionAssertion),
+      passed: Boolean(regressionAssertion?.passed),
+      pathIds: [scenario.regressionPath.stepId],
+      evidenceRefs: regressionEvidence,
+      notes: regressionAssertion?.passed ? "回归路径执行后页面与运行信号保持稳定。" : "回归路径未通过或缺少结构化断言。"
+    }] : [])
   ];
 }

@@ -7,5 +7,55 @@
     "risk": "high",
     "source": "project-01-investment-research-system",
     "evaluationScope": "challenge_only"
+  },
+  {
+    "id": "challenge-investment-refresh-failure",
+    "projectId": "investment_agent_workflow_external",
+    "category": "data_refresh_failure",
+    "requirement": "验证每日数据刷新失败时明确展示失败和降级来源，不得继续把旧数据标记为实时数据。",
+    "risk": "high",
+    "source": "investment-research-system",
+    "evaluationScope": "challenge_only",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "challenge-investment-model-approval-gate",
+    "projectId": "investment_agent_workflow_external",
+    "category": "model_governance",
+    "requirement": "验证模型未审批或数据质量预检不通过时隐藏正式预测并阻止生产推断。",
+    "risk": "critical",
+    "source": "investment-research-system",
+    "evaluationScope": "challenge_only",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "challenge-investment-analysis-state",
+    "projectId": "investment_agent_workflow_external",
+    "category": "long_running_workflow",
+    "requirement": "验证分析任务从 queued 到 running 再到 completed 或 failed 的状态流转及恢复证据。",
+    "risk": "high",
+    "source": "investment-research-system",
+    "evaluationScope": "challenge_only",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "challenge-investment-report-generation",
+    "projectId": "investment_agent_workflow_external",
+    "category": "report_generation",
+    "requirement": "验证指定研究 run 生成的 Markdown 报告包含证据链、Judge 结论、风险边界和正确 runId。",
+    "risk": "high",
+    "source": "investment-research-system",
+    "evaluationScope": "challenge_only",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "challenge-investment-permission-isolation",
+    "projectId": "investment_agent_workflow_external",
+    "category": "permission_isolation",
+    "requirement": "验证不同用户无法读取彼此的组合、研究运行和报告，401/403 不得回退到样例数据。",
+    "risk": "critical",
+    "source": "investment-research-system",
+    "evaluationScope": "challenge_only",
+    "harnessStatus": "required"
   }
 ]

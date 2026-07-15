@@ -7,7 +7,8 @@
     "keywords": ["login", "登录", "权限", "账号", "auth", "permission", "未登录"],
     "riskLevel": "high",
     "sourceHints": ["requirement", "diff", "tapd_bug"],
-    "capabilities": ["playwright_mcp", "permission_boundary", "evidence_store"]
+    "capabilities": ["playwright_mcp", "permission_boundary", "evidence_store"],
+    "projectIds": ["local_demo_app"]
   },
   "smoke": {
     "pathId": "open_task_page",

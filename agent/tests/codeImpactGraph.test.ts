@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { buildCodeImpactGraph } from "../src/codeImpactGraph.js";
+import { buildCodeImpactGraph, buildDiffImpactGraph, changedFilesFromDiff } from "../src/codeImpactGraph.js";
 
 export async function testCodeImpactGraph() {
   const root = await mkdtemp(path.join(os.tmpdir(), "ato-impact-"));
@@ -18,5 +18,13 @@ export async function testCodeImpactGraph() {
     assert.ok(graph.edges.some((edge) => edge.kind === "renders" && edge.reason.includes("contains frontend call")));
     const cached = await buildCodeImpactGraph({ repositoryRoot: root, files: ["src/pages/orders.ts", "service.py"] });
     assert.equal(cached.cacheHits, 2);
+    const diff = "diff --git a/src/pages/orders.ts b/src/pages/orders.ts\n+export async function approveOrder() { return fetch('/api/orders/123/approve'); }\n";
+    assert.deepEqual(changedFilesFromDiff(diff), ["src/pages/orders.ts"]);
+    const patchGraph = buildDiffImpactGraph({ diff, scenarios: [{ id: "approval", keywords: ["approve", "orders"] }] });
+    assert.ok(patchGraph.nodes.some((node) => node.kind === "symbol" && node.label === "approveOrder"));
+    assert.ok(patchGraph.nodes.some((node) => node.kind === "frontend-call" && node.label.includes("/api/orders")));
+    assert.ok(patchGraph.nodes.some((node) => node.kind === "scenario" && node.label === "approval"));
+    const merged = await buildCodeImpactGraph({ repositoryRoot: root, files: ["src/pages/orders.ts"], diff, scenarios: [{ id: "approval", keywords: ["approve"] }] });
+    assert.ok(merged.explanations.some((reason) => reason.includes("patch signals")));
   } finally { await rm(root, { recursive: true, force: true }); }
 }

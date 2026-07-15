@@ -5,7 +5,7 @@
   "genericTemplate": true,
   "planObservation": "smoke -> core_path(customer API error) -> retry evidence",
   "summary": "验证客户接口 503 产生 network 和 DOM 错误态证据，不能被误判为通过。",
-  "matcher": {"keywords":["api failure","接口失败","503","network error"],"riskLevel":"high","sourceHints":["requirement","diff","llm_inferred"],"capabilities":["network_evidence","failure_attribution"]},
+  "matcher": {"keywords":["api failure","接口失败","503","network error"],"riskLevel":"high","sourceHints":["requirement","diff","llm_inferred"],"capabilities":["network_evidence","failure_attribution"],"projectIds":["customer_portal_lite"]},
   "smoke": {"pathId":"open_customer_portal","stepId":"open_customer_portal","title":"打开客户门户","headingName":"Customer Portal Lite","assertionName":"客户门户标题可见","expected":"Customer Portal Lite 标题出现"},
   "corePath": {
     "pathId":"customer_api_failure_path","stepId":"simulate_customer_api_failure","retryStepId":"retry_customer_api_failure","title":"模拟客户接口失败并验证错误态","action":"simulate_error_and_retry","triggerButtonName":"模拟错误","retryButtonName":"重试","networkUrlIncludes":"/api/customers","expectedQueryFragment":"status=error","errorLocator":"[data-testid='customer-error-state']","expectedErrorText":"客户接口失败","queryAssertionName":"客户接口失败请求携带 status=error","domAssertionName":"客户接口失败后展示错误态","riskReason":"接口失败必须被证据链识别为环境或人工复核，而非通过。",

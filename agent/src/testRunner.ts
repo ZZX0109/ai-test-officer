@@ -1,9 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
 import type { EvidenceItem, RunBundle, RunRequest, RunStepEvidence, VisualRunResult } from "./types.js";
-import { resolveFinalStatus, type ArtifactV2, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
+import { compiledPlanSchema, resolveFinalStatus, type ActionDsl, type ArtifactV2, type CompiledPlan, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
 import {
   AttemptClock,
   PlaywrightAttemptTrace,
@@ -22,6 +22,7 @@ import { appendRunHistory } from "./runHistory.js";
 import { buildConflictPacket } from "./conflictReplay.js";
 import { getScenario, type ScenarioAction, type ScenarioOracle } from "./scenarios.js";
 import { buildLayeredJudgeReport } from "./judgeEngine.js";
+import { routeJudge } from "./llmRoutingPolicy.js";
 import { buildLlmJudgeReport } from "./llmJudge.js";
 import { writeReadableReports } from "./reportRenderer.js";
 import { getProject, getProjectRuntimeStatus, resolveProjectTarget, startProject, stopProject, testProjectConnection } from "./projectAdapter.js";
@@ -81,6 +82,130 @@ export function assertRunRequestExecutablePlan(input: Pick<RunRequest, "scenario
   }
 }
 
+function scenarioSelectorRefs(scenario: ReturnType<typeof getScenario>) {
+  return new Set([
+    ...Object.keys(scenario.corePath).filter((key) => /ButtonName|Label/.test(key)),
+    ...(scenario.regressionPath?.triggerButtonName ? ["regressionTriggerButtonName"] : [])
+  ]);
+}
+
+function scenarioValueRefs(scenario: ReturnType<typeof getScenario>) {
+  return new Set(Object.keys(scenario.corePath).filter((key) =>
+    /^(input|selectValue)$/.test(key) && typeof scenario.corePath[key as keyof typeof scenario.corePath] === "string"
+  ));
+}
+
+/** Runtime validation is intentional: persisted plans and internal callers must not bypass the compiler boundary. */
+export function assertCompiledPlanBinding(compiledPlan: CompiledPlan, scenario: ReturnType<typeof getScenario>) {
+  const parsed = compiledPlanSchema.parse(compiledPlan);
+  if (parsed.scenarioId !== scenario.id) throw new Error(`compiled_plan_scenario_mismatch:${parsed.scenarioId}:${scenario.id}`);
+  const selectors = scenarioSelectorRefs(scenario);
+  const values = scenarioValueRefs(scenario);
+  const oracleIds = new Set(scenario.corePath.oracles.map((oracle) => oracle.id));
+  const allowedPathIds = new Set([scenario.smoke.pathId, scenario.corePath.pathId, ...(scenario.regressionPath ? [scenario.regressionPath.stepId] : [])]);
+  const fixtureRefs = new Set(scenario.corePath.action === "file_upload_validate" ? ["scenarioFixture"] : []);
+  const capturableKinds = new Set(["screenshot", "dom", "network", "console", "trace", "video"]);
+  for (const kind of parsed.requiredEvidenceKinds) {
+    if (!capturableKinds.has(kind)) throw new Error(`compiled_plan_unsupported_evidence_kind:${kind}`);
+  }
+  if (parsed.steps[0]?.action.action !== "navigate") throw new Error("compiled_plan_must_start_with_navigate");
+  const asserted = new Set<string>();
+  for (const step of parsed.steps) {
+    if (step.pathId && !allowedPathIds.has(step.pathId)) throw new Error(`compiled_plan_unknown_path:${step.pathId}`);
+    const action = step.action;
+    if ("selectorRef" in action && !selectors.has(action.selectorRef)) throw new Error(`compiled_plan_unknown_selector:${action.selectorRef}`);
+    if (action.action === "click" && !(action.selectorRef.endsWith("ButtonName") || action.selectorRef === "regressionTriggerButtonName")) throw new Error(`compiled_plan_click_selector_not_actionable:${action.selectorRef}`);
+    if (action.action === "fill" && action.selectorRef !== "inputLabel") throw new Error(`compiled_plan_fill_selector_not_actionable:${action.selectorRef}`);
+    if (action.action === "select" && action.selectorRef !== "selectLabel") throw new Error(`compiled_plan_select_selector_not_actionable:${action.selectorRef}`);
+    if (action.action === "upload" && !action.selectorRef.endsWith("Label")) throw new Error(`compiled_plan_upload_selector_not_actionable:${action.selectorRef}`);
+    if (action.action === "fill" && !values.has(action.valueRef)) throw new Error(`compiled_plan_unknown_value:${action.valueRef}`);
+    if (action.action === "select" && (action.valueRef !== "selectValue" || !values.has(action.valueRef))) throw new Error(`compiled_plan_unknown_select_value:${action.valueRef}`);
+    if (action.action === "upload" && !fixtureRefs.has(action.fixtureRef)) throw new Error(`compiled_plan_unknown_fixture:${action.fixtureRef}`);
+    if (action.action === "assert") {
+      if (!oracleIds.has(action.oracleId)) throw new Error(`compiled_plan_unknown_oracle:${action.oracleId}`);
+      if (step.pathId && step.pathId !== scenario.corePath.pathId) throw new Error(`compiled_plan_assert_outside_core_path:${step.pathId}`);
+      asserted.add(action.oracleId);
+    }
+    if (action.action === "click" && action.selectorRef === "regressionTriggerButtonName" && step.pathId !== scenario.regressionPath?.stepId) throw new Error(`compiled_plan_regression_selector_wrong_path:${step.pathId ?? "missing"}`);
+  }
+  const clickKeys = parsed.steps.filter((step) => step.action.action === "click").map((step) => `${step.pathId ?? scenario.corePath.pathId}:${step.action.action === "click" ? step.action.selectorRef : ""}`);
+  if (new Set(clickKeys).size !== clickKeys.length) throw new Error("compiled_plan_duplicate_click");
+  for (const required of parsed.requiredOracleIds) {
+    if (!oracleIds.has(required)) throw new Error(`compiled_plan_unknown_required_oracle:${required}`);
+    if (!asserted.has(required)) throw new Error(`compiled_plan_oracle_not_executed:${required}`);
+  }
+  return parsed;
+}
+
+function resolveApprovedLocator(page: Page, scenario: ReturnType<typeof getScenario>, selectorRef: string): Locator {
+  if (!scenarioSelectorRefs(scenario).has(selectorRef)) throw new Error(`compiled_plan_unknown_selector:${selectorRef}`);
+  const selector = selectorRef === "regressionTriggerButtonName"
+    ? scenario.regressionPath?.triggerButtonName
+    : scenario.corePath[selectorRef as keyof typeof scenario.corePath];
+  if (typeof selector !== "string" || !selector) throw new Error(`compiled_plan_empty_selector:${selectorRef}`);
+  if (selectorRef.endsWith("ButtonName")) return page.getByRole("button", { name: selector, exact: true });
+  if (selectorRef.endsWith("Label")) return page.getByLabel(selector);
+  if (selectorRef.endsWith("Locator")) return page.locator(selector);
+  throw new Error(`compiled_plan_unsupported_selector:${selectorRef}`);
+}
+
+export interface CompiledActionExecutionContext {
+  page: Page;
+  scenario: ReturnType<typeof getScenario>;
+  targetFrontendUrl: string;
+  evaluateOracle: (oracle: ScenarioOracle, stepId: string) => Promise<unknown>;
+  resolveFixture: (fixtureRef: string) => Promise<string>;
+}
+
+/** Execute one already-bound DSL action without accepting raw selectors, URLs, values, or commands. */
+export async function executeCompiledAction(action: ActionDsl, stepId: string, context: CompiledActionExecutionContext) {
+  const { page, scenario } = context;
+  if (action.action === "navigate") {
+    const base = new URL(context.targetFrontendUrl);
+    const destination = new URL(action.path, base);
+    if (destination.origin !== base.origin) throw new Error("compiled_plan_cross_origin_navigation");
+    if (!destination.search && base.search) destination.search = base.search;
+    await page.goto(destination.toString(), { waitUntil: "networkidle", timeout: 15_000 });
+    return;
+  }
+  if (action.action === "click") {
+    await resolveApprovedLocator(page, scenario, action.selectorRef).click();
+    return;
+  }
+  if (action.action === "fill") {
+    if (!scenarioValueRefs(scenario).has(action.valueRef)) throw new Error(`compiled_plan_unknown_value:${action.valueRef}`);
+    const value = scenario.corePath[action.valueRef as keyof typeof scenario.corePath];
+    if (typeof value !== "string") throw new Error(`compiled_plan_empty_value:${action.valueRef}`);
+    await resolveApprovedLocator(page, scenario, action.selectorRef).fill(value);
+    return;
+  }
+  if (action.action === "select") {
+    if (action.selectorRef !== "selectLabel" || action.valueRef !== "selectValue") throw new Error("compiled_plan_select_binding_invalid");
+    const value = scenario.corePath[action.valueRef as keyof typeof scenario.corePath];
+    if (typeof value !== "string") throw new Error(`compiled_plan_empty_value:${action.valueRef}`);
+    await resolveApprovedLocator(page, scenario, action.selectorRef).selectOption(value);
+    return;
+  }
+  if (action.action === "upload") {
+    await resolveApprovedLocator(page, scenario, action.selectorRef).setInputFiles(await context.resolveFixture(action.fixtureRef));
+    return;
+  }
+  if (action.action === "assert") {
+    const oracle = scenario.corePath.oracles.find((item) => item.id === action.oracleId);
+    if (!oracle) throw new Error(`compiled_plan_unknown_oracle:${action.oracleId}`);
+    await context.evaluateOracle(oracle, stepId);
+    return;
+  }
+  await page.waitForTimeout(action.durationMs);
+}
+
+/** Bind an opaque benchmark fixture to either a managed local target or a container target. */
+export function targetFrontendUrl(frontendUrl: string, fixtureVariantId?: string) {
+  const url = new URL(frontendUrl);
+  if (fixtureVariantId) url.searchParams.set("fixtureVariantId", fixtureVariantId);
+  return url.toString();
+}
+
 export async function runVisualGrayTest(input: RunRequest): Promise<VisualRunResult> {
   const lockProjectId = input.projectId ?? input.target?.projectId;
   if (!lockProjectId) return runVisualGrayTestUnlocked(input);
@@ -91,7 +216,9 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   await requireBrowserControl(input);
   assertRunRequestExecutablePlan(input);
   const scenario = getScenario(input.scenarioId);
+  const compiledPlan = input.compiledPlan ? assertCompiledPlanBinding(input.compiledPlan, scenario) : undefined;
   const targetRuntime = await resolveProjectTarget(input);
+  const frontendUrl = targetFrontendUrl(targetRuntime.frontendUrl, input.fixtureVariantId);
   const id = `run_${Date.now()}`;
   const startedAt = new Date().toISOString();
   const attemptClock = new AttemptClock();
@@ -127,8 +254,11 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const runDir = path.join(reportsDir, "runs", id);
   const evidenceWrites: Promise<unknown>[] = [];
   const headless = envFlag("HEADLESS");
-  const recordVideo = envFlag("RECORD_VIDEO");
-  const recordTrace = envFlag("TRACE") && input.faultProfile !== "drop-trace";
+  const recordVideo = envFlag("RECORD_VIDEO") || compiledPlan?.requiredEvidenceKinds.includes("video") === true;
+  // Evidence degradation is selected by an opaque evaluator-owned variant. The
+  // semantic failure class is intentionally absent from the Agent-visible input.
+  const recordTrace = (envFlag("TRACE") || compiledPlan?.requiredEvidenceKinds.includes("trace") === true)
+    && input.fixtureVariantId !== "fxv_a6d2c904f7b138e5";
   const configuredProject = input.projectId ? await getProject(input.projectId) : undefined;
   const budgetTracker = new BudgetTracker(configuredProject?.budget);
   const runDeadline = Date.now() + (configuredProject?.budget?.runTimeoutMs ?? budgetTracker.budget.runTimeoutMs);
@@ -235,6 +365,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
         finalPath,
         id: `${id}_trace_attempt_${activeAttempt}`,
         identity: attemptIdentity(),
+        stepId: `attempt-${activeAttempt}-finalize`,
         kind: "trace",
         mediaType: "application/zip",
         storageUri: artifactUrl(finalPath),
@@ -332,12 +463,13 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     return url;
   }
 
-  async function recordAssertion(assertion: VisualRunResult["assertions"][number], pathId: string) {
+  async function recordAssertion(assertion: VisualRunResult["assertions"][number], pathId: string, stepId?: string) {
     assertWithinRunBudget();
     const evidence = await appendEvidence(id, {
       type: "assertion",
       title: assertion.name,
       pathId,
+      stepId,
       payload: { assertion }
     });
     if (assertion.fact) {
@@ -359,8 +491,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     return { texts, evidence };
   }
 
-  async function evaluateOracle(oracle: ScenarioOracle, stepId: string) {
-    const pathId = scenario.corePath.pathId;
+  async function evaluateOracle(oracle: ScenarioOracle, stepId: string, pathId = scenario.corePath.pathId) {
     if (oracle.type === "network_query") {
       const passed = network.some(
         (entry) =>
@@ -384,7 +515,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
           evidenceRefs: [],
           failureClass: passed ? undefined : "product_bug"
         }
-      }, pathId);
+      }, pathId, stepId);
     }
     if (oracle.type === "console_no_error") {
       const consoleErrors = consoleEvents.filter((entry) => /error|exception|failed/i.test(`${entry.type} ${entry.text}`));
@@ -403,7 +534,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
           evidenceRefs: [],
           failureClass: consoleErrors.length ? "product_bug" : undefined
         }
-      }, pathId);
+      }, pathId, stepId);
     }
 
     const locator =
@@ -436,11 +567,54 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
         evidenceRefs: [evidence.id],
         failureClass: passed ? undefined : texts.length === 0 ? "test_script_issue" : "product_bug"
       }
-    }, pathId);
+    }, pathId, stepId);
     return {
       ...assertionEvidence,
       evidenceRefs: [evidence.id, assertionEvidence.id]
     };
+  }
+
+  async function evaluateCompiledSmokePath(stepId: string) {
+    const visible = await page.getByRole("heading", { name: scenario.smoke.headingName, exact: true }).isVisible().catch(() => false);
+    return recordAssertion({
+      name: scenario.smoke.assertionName,
+      passed: visible,
+      expected: scenario.smoke.expected,
+      actual: visible ? "visible" : "hidden",
+      fact: {
+        kind: "element.visible",
+        target: `heading:${scenario.smoke.headingName}`,
+        operator: "exists",
+        expected: scenario.smoke.headingName,
+        actual: visible ? "visible" : "hidden",
+        severity: "high",
+        evidenceRefs: [],
+        failureClass: visible ? undefined : "environment_issue"
+      }
+    }, scenario.smoke.pathId, stepId);
+  }
+
+  async function evaluateCompiledRegressionPath(stepId: string, pathId: string, telemetryStart: { network: number; console: number }) {
+    const headingVisible = await page.getByRole("heading", { name: scenario.smoke.headingName, exact: true }).isVisible().catch(() => false);
+    const consoleErrors = consoleEvents.slice(telemetryStart.console).filter((entry) => /error|exception|failed/i.test(`${entry.type} ${entry.text}`));
+    const networkErrors = network.slice(telemetryStart.network).filter((entry) => typeof entry.status === "number" && entry.status >= 500);
+    const passed = headingVisible && consoleErrors.length === 0 && networkErrors.length === 0;
+    return recordAssertion({
+      name: `${scenario.regressionPath?.title ?? "回归路径"}执行后页面保持可用`,
+      passed,
+      expected: "页面标题仍可见，且没有 console error 或 5xx 网络响应",
+      actual: `heading=${headingVisible ? "visible" : "hidden"}; consoleErrors=${consoleErrors.length}; network5xx=${networkErrors.length}`,
+      fact: {
+        kind: "element.visible",
+        target: `heading:${scenario.smoke.headingName}`,
+        operator: "exists",
+        expected: `${scenario.smoke.headingName}; no console error; no network 5xx`,
+        actual: `heading=${headingVisible}; consoleErrors=${consoleErrors.length}; network5xx=${networkErrors.length}`,
+        severity: "medium",
+        evidenceRefs: [],
+        failureClass: passed ? undefined : networkErrors.length || !headingVisible ? "environment_issue" : "product_bug"
+      }
+    }, pathId, stepId);
   }
 
   async function clickButton(name: string | undefined) {
@@ -519,6 +693,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     }
     if (action === "table_sort_filter_paginate") {
       if (core.triggerButtonName) await clickButton(core.triggerButtonName);
+      if (core.selectLabel && core.selectValue) await page.getByLabel(core.selectLabel).selectOption(core.selectValue);
       if (core.inputLabel) await page.getByLabel(core.inputLabel).fill(core.input ?? "");
       if (core.submitButtonName) await clickButton(core.submitButtonName);
       if (core.retryButtonName) await clickButton(core.retryButtonName);
@@ -537,6 +712,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       return;
     }
     if (action === "approval_flow_transition") {
+      if (core.inputLabel) await page.getByLabel(core.inputLabel).fill(core.input ?? "");
       await clickButton(core.triggerButtonName ?? core.submitButtonName);
       return;
     }
@@ -549,31 +725,31 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       if (core.submitButtonName) await clickButton(core.submitButtonName);
       return;
     }
-    if (action === "investment_agent_workflow_auth_portfolio_research") {
-      const email = process.env.INVESTMENT_AGENT_WORKFLOW_SMOKE_EMAIL?.trim()
+    if (action === "authenticated_onboarding_workflow") {
+      const email = process.env[core.usernameEnv ?? "TEST_WORKFLOW_USERNAME"]?.trim()
         || `ai-test-officer-${Date.now()}@example.com`;
-      const password = process.env.INVESTMENT_AGENT_WORKFLOW_SMOKE_PASSWORD?.trim()
+      const password = process.env[core.passwordEnv ?? "TEST_WORKFLOW_PASSWORD"]?.trim()
         || "InvestmentAgent123!";
-      await page.getByRole("button", { name: "注册", exact: true }).click();
-      await page.getByLabel("邮箱").fill(email);
-      await page.getByLabel("密码").fill(password);
-      await page.getByRole("button", { name: "创建账户", exact: true }).click();
+      await page.getByRole("button", { name: core.registerButtonName ?? "注册", exact: true }).click();
+      await page.getByLabel(core.usernameLabel ?? "邮箱").fill(email);
+      await page.getByLabel(core.passwordLabel ?? "密码").fill(password);
+      await page.getByRole("button", { name: core.createAccountButtonName ?? "创建账户", exact: true }).click();
 
-      const setupHeading = page.getByRole("heading", { name: "完成前测和持仓录入", exact: true });
+      const setupHeading = page.getByRole("heading", { name: core.setupHeadingName ?? "完成前测和持仓录入", exact: true });
       const duplicateAccount = page.getByText(/Email already registered|already registered|已注册/i);
       await Promise.race([
         setupHeading.waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined),
         duplicateAccount.waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined)
       ]);
       if (await duplicateAccount.isVisible().catch(() => false)) {
-        await page.getByRole("button", { name: "登录", exact: true }).click();
-        await page.getByLabel("邮箱").fill(email);
-        await page.getByLabel("密码").fill(password);
-        await page.getByRole("button", { name: "进入系统", exact: true }).click();
+        await page.getByRole("button", { name: core.loginButtonName ?? "登录", exact: true }).click();
+        await page.getByLabel(core.usernameLabel ?? "邮箱").fill(email);
+        await page.getByLabel(core.passwordLabel ?? "密码").fill(password);
+        await page.getByRole("button", { name: core.loginSubmitButtonName ?? "进入系统", exact: true }).click();
       }
 
-      await page.getByRole("heading", { name: "完成前测和持仓录入", exact: true }).waitFor({ state: "visible", timeout: 15_000 });
-      await page.getByRole("button", { name: /保存并生成投研面板/ }).click();
+      await page.getByRole("heading", { name: core.setupHeadingName ?? "完成前测和持仓录入", exact: true }).waitFor({ state: "visible", timeout: 15_000 });
+      await page.getByRole("button", { name: new RegExp(core.setupSubmitButtonPattern ?? "保存并生成投研面板") }).click();
       await page.getByRole("heading", { name: "组合风险与 Agent 投研闭环", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
       const auditTab = page.getByRole("button", { name: /审稿复盘/ });
       if (await auditTab.isVisible().catch(() => false)) {
@@ -781,7 +957,88 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     });
   }
 
+  async function executeCompiledPlan() {
+    if (!compiledPlan) throw new Error("compiled_plan_missing");
+    await appendLoopEvent(id, {
+      loopType: "gray_execution_loop",
+      iteration: 1,
+      status: "running",
+      title: "LLM Action DSL 开始执行",
+      action: "execute_compiled_plan",
+      decisionReason: "计划已经通过 contracts 与场景 capability 绑定校验",
+      evidenceRefs: []
+    });
+    let regressionTelemetryStart: { network: number; console: number } | undefined;
+    for (const [stepIndex, step] of compiledPlan.steps.entries()) {
+      assertWithinRunBudget();
+      budgetTracker.consume({ steps: 1 });
+      const assertionStart = assertions.length;
+      const fixturePath = path.join(runDir, `${step.id}-fixture.txt`);
+      if (scenario.regressionPath && step.pathId === scenario.regressionPath.stepId && !regressionTelemetryStart) {
+        regressionTelemetryStart = { network: network.length, console: consoleEvents.length };
+      }
+      await executeCompiledAction(step.action, step.id, {
+        page,
+        scenario,
+        targetFrontendUrl: frontendUrl,
+        evaluateOracle: (oracle, stepId) => evaluateOracle(oracle, stepId, step.pathId ?? scenario.corePath.pathId),
+        resolveFixture: async (fixtureRef) => {
+          if (fixtureRef !== "scenarioFixture" || scenario.corePath.action !== "file_upload_validate") {
+            throw new Error(`compiled_plan_unknown_fixture:${fixtureRef}`);
+          }
+          await writeFile(fixturePath, "AI Test Officer scenario fixture.\n");
+          return fixturePath;
+        }
+      });
+      if (step.pathId === scenario.smoke.pathId && step.action.action === "navigate") {
+        await evaluateCompiledSmokePath(step.id);
+      }
+      if (scenario.regressionPath && step.pathId === scenario.regressionPath.stepId
+        && !compiledPlan.steps.slice(stepIndex + 1).some((candidate) => candidate.pathId === step.pathId)) {
+        await evaluateCompiledRegressionPath(step.id, step.pathId, regressionTelemetryStart ?? { network: network.length, console: consoleEvents.length });
+      }
+      const operationEvidence = await appendEvidence(id, {
+        type: "operation",
+        title: `Compiled action ${step.action.action}`,
+        pathId: step.pathId ?? scenario.corePath.pathId,
+        stepId: step.id,
+        payload: {
+          action: step.action.action,
+          ...(step.action.action === "click" || step.action.action === "fill" || step.action.action === "select" || step.action.action === "upload"
+            ? { selectorRef: step.action.selectorRef }
+            : {}),
+          ...(step.action.action === "assert" ? { oracleId: step.action.oracleId } : {})
+        }
+      });
+      const stepScreenshot = await screenshot(step.id);
+      const newAssertions = assertions.slice(assertionStart);
+      const passed = newAssertions.every((assertion) => assertion.passed);
+      steps.push({
+        stepId: step.id,
+        title: `LLM plan: ${step.action.action}`,
+        status: passed ? "passed" : "failed",
+        action: step.action.action,
+        screenshot: stepScreenshot,
+        details: passed ? "受控 Action DSL 步骤执行完成。" : "步骤绑定的确定性 oracle 未通过。"
+      });
+      await appendLoopEvent(id, {
+        loopType: "gray_execution_loop",
+        iteration: steps.length,
+        status: passed ? "passed" : "failed",
+        title: `Compiled step ${step.id}`,
+        action: step.action.action,
+        observation: passed ? "动作完成且绑定断言通过" : "绑定断言失败",
+        decision: "继续执行下一条已编译动作",
+        decisionReason: "fail_fast=false，保留完整计划证据",
+        evidenceRefs: [operationEvidence.id]
+      });
+    }
+  }
+
   try {
+    if (compiledPlan) {
+      await executeCompiledPlan();
+    } else {
     await appendLoopEvent(id, {
       loopType: "gray_execution_loop",
       iteration: 1,
@@ -791,19 +1048,19 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       decisionReason: "先确认页面基础可用",
       evidenceRefs: []
     });
-    await page.goto(targetRuntime.frontendUrl, { waitUntil: "networkidle", timeout: 15000 });
+    await page.goto(frontendUrl, { waitUntil: "networkidle", timeout: 15000 });
     await appendAudit({
       type: "agent_action",
       action: "browser_open",
       result: "recorded",
-      details: { runId: id, appUrl: targetRuntime.frontendUrl }
+      details: { runId: id, appUrl: frontendUrl }
     });
     const openScreenshot = await screenshot(scenario.smoke.stepId);
     const operationEvidence = await appendEvidence(id, {
       type: "operation",
       title: scenario.smoke.title,
       stepId: scenario.smoke.stepId,
-      payload: { action: "browser_open", appUrl: targetRuntime.frontendUrl }
+      payload: { action: "browser_open", appUrl: frontendUrl }
     });
     steps.push({
       stepId: scenario.smoke.stepId,
@@ -811,7 +1068,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       status: "passed",
       action: "browser_open",
       screenshot: openScreenshot,
-      details: `已打开 ${targetRuntime.frontendUrl}`
+      details: `已打开 ${frontendUrl}`
     });
 
     const titleVisible = await page.getByRole("heading", { name: scenario.smoke.headingName }).isVisible();
@@ -849,6 +1106,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       await runFailureRetry();
     }
     await runRegressionPath();
+    }
   } finally {
     try {
       try {
@@ -861,6 +1119,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
           finalPath,
           id: `${id}_dom_attempt_${activeAttempt}`,
           identity: attemptIdentity(),
+          stepId: `attempt-${activeAttempt}-finalize`,
           kind: "dom",
           mediaType: "text/html",
           storageUri: artifactUrl(finalPath),
@@ -892,6 +1151,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
             finalPath,
             id: `${id}_video_attempt_${activeAttempt}`,
             identity: attemptIdentity(),
+            stepId: `attempt-${activeAttempt}-finalize`,
             kind: "video",
             mediaType: "video/webm",
             storageUri: artifactUrl(finalPath),
@@ -961,6 +1221,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       finalPath,
       id: `${id}_${kind}_attempt_${activeAttempt}`,
       identity: attemptIdentity(),
+      stepId: `attempt-${activeAttempt}-finalize`,
       kind,
       mediaType,
       storageUri: artifactUrl(finalPath),
@@ -984,7 +1245,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     finishedAt
   };
   const latestEvidence: EvidenceItem[] = await readEvidence(id);
-  const requiredKinds = (input.executablePlan?.steps.find((step) => step.scenarioId === scenario.id)?.evidenceRequirements
+  const requiredKinds = (compiledPlan?.requiredEvidenceKinds
+    ?? input.executablePlan?.steps.find((step) => step.scenarioId === scenario.id)?.evidenceRequirements
     ?? ["screenshot", "dom", "network", "console"])
     .filter((kind) => ["screenshot", "dom", "network", "console", "trace", "video"].includes(kind)) as ArtifactV2["kind"][];
   const mirroredArtifacts = await mirrorArtifactsToConfiguredStore(artifactsV2, reportsDir);
@@ -1006,7 +1268,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   });
   const historicalVerdict = await appendRunHistory({
     runId: id,
-    appUrl: targetRuntime.frontendUrl,
+    appUrl: frontendUrl,
     projectId: targetRuntime.projectId ?? configuredProject?.id,
     scenarioId: scenario.id,
     scenarioFingerprint: runScenarioFingerprint,
@@ -1032,7 +1294,15 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     },
     evidence: latestEvidence
   });
-  const assistedJudgeReport = input.judgeMode === "llm-assisted"
+  const judgeRouting = input.judgeMode === "adaptive"
+    ? routeJudge({
+      baseline: baselineJudgeReport,
+      conflictStatus: conflictPacket.status,
+      failedAssertionCount: assertions.filter((item) => !item.passed).length,
+      insufficientEvidenceCount: evidenceQuality.assertions.filter((item) => item.status === "insufficient").length
+    })
+    : { route: input.judgeMode === "llm-assisted" ? "llm" as const : "deterministic" as const, reason: "explicit_mode", signals: [`mode:${input.judgeMode ?? "deterministic"}`] };
+  const assistedJudgeReport = judgeRouting.route === "llm"
     ? await buildLlmJudgeReport({
       credentialId: input.credentialId,
       baseline: baselineJudgeReport,
@@ -1052,17 +1322,25 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       evidence: latestEvidence,
       runId: id,
       experimentId: input.experimentId,
-      requireLlm: true
+      requireLlm: true,
+      llmBudget: input.llmBudget,
+      priorLlmTokens: input.priorLlmTokens
     })
     : baselineJudgeReport;
   const qualityReasons = evidenceQuality.assertions
     .filter((item) => item.passed && item.status !== "grounded")
     .flatMap((item) => [`assertion_evidence_incomplete:${item.assertionName}`, ...item.reasons.map((reason) => `${item.assertionName}:${reason}`)]);
+  // A non-empty coverage matrix is not enough: every required oracle must
+  // have been executed. Otherwise a scheduling-complete run could be shown as
+  // a pass even though the requirement was never exercised.
+  const uncoveredRequirementRisks = riskCoverageMatrix
+    .filter((item) => !item.covered)
+    .map((item) => `requirement_not_covered:${item.riskId}`);
   const machineGateStatus = artifactGate.status !== "pass"
     ? artifactGate.status
     : failed
       ? "fail" as const
-      : qualityReasons.length
+      : qualityReasons.length || uncoveredRequirementRisks.length
         ? "needs-human-review" as const
       : attempts.length > 1
         ? "needs-human-review" as const
@@ -1081,9 +1359,9 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   });
   const machineGate: MachineGate = {
     status: machineGateStatus,
-    reasons: [...artifactGate.reasons, ...qualityReasons],
+    reasons: [...artifactGate.reasons, ...qualityReasons, ...uncoveredRequirementRisks],
     assertionFailures: assertions.filter((item) => !item.passed).map((item) => item.name),
-    evidenceComplete: artifactGate.status === "pass" && qualityReasons.length === 0
+    evidenceComplete: artifactGate.status === "pass" && qualityReasons.length === 0 && uncoveredRequirementRisks.length === 0
   };
   const judgeRecommendation: JudgeRecommendation = {
     status: judgeReport.releaseJudge.verdict === "needs_review" ? "needs-human-review" : judgeReport.releaseJudge.verdict,
@@ -1168,6 +1446,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     runtimeStatus,
     evidenceQuality,
     judgeReport,
+    judgeRouting,
     reportFile: artifactUrl(path.join(runDir, "report.json")),
     runBundleFile: artifactUrl(path.join(runDir, "run_bundle.json"))
   };

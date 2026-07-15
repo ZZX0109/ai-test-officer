@@ -17,6 +17,7 @@ export interface BenchmarkCase {
 export interface HumanBenchmarkLabel {
   benchmarkId: string;
   verdict: BenchmarkVerdict;
+  expectedScenarioId?: string;
   failureClass?: "product_bug" | "test_script_issue" | "environment_issue" | "insufficient_evidence" | "unknown";
   requiredEvidenceTypes: string[];
   expectedEvidenceRefs?: string[];
@@ -39,18 +40,64 @@ export interface BenchmarkRunRecord {
   repetition?: number;
   planExecutable?: boolean;
   planSource?: "deterministic" | "llm";
+  selectedScenarioId?: string;
+  finalStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
+  planProvenance?: {
+    source: "deterministic" | "llm" | "scenario_fallback" | "adaptive-rule-fallback" | "cached-llm";
+    promptVersion?: string;
+    modelProfileId?: string;
+    model?: string;
+    llmCallId?: string;
+    compilationStatus?: "validated" | "rejected" | "not-required";
+    fallbackReason?: string;
+  };
+  attempts?: Array<{
+    id: string;
+    runId: string;
+    scenarioId: string;
+    attempt: number;
+    status: string;
+  }>;
+  llmCalls?: Array<{
+    id: string;
+    runId?: string;
+    experimentId?: string;
+    purpose: "planning" | "judging";
+    provider: string;
+    model: string;
+    requestId?: string;
+    status: string;
+    durationMs?: number;
+    usage?: JudgeLaneRecord["usage"];
+  }>;
   baselineDerivedFromRunId?: string;
   initialVerdict?: BenchmarkVerdict;
   deterministic: JudgeLaneRecord;
   llm?: JudgeLaneRecord;
   evidence: Array<{ id: string; type: string }>;
   attribution?: { failureClass?: string; suspectFiles?: string[]; evidenceRefs: string[] };
-  executionOrigin?: "agent-run" | "seeded-fixture" | "static-report";
+  executionOrigin?: "agent-run" | "command-baseline" | "seeded-fixture" | "static-report";
   gateEligible?: boolean;
+  artifactIntegrityVerified?: boolean;
   agentVersion?: string;
   configHash?: string;
   targetVersion?: string;
-  artifactsV2?: Array<{ id: string; type: string; origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "legacy-unverified"; sha256: string; integrityStatus: "verified" | "missing" | "mismatch" }>;
+  artifactsV2?: Array<{
+    id: string;
+    type: string;
+    origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "legacy-unverified";
+    sha256: string;
+    integrityStatus: "verified" | "missing" | "mismatch";
+    runId?: string;
+    scenarioId?: string;
+    stepId?: string;
+    attemptId?: string;
+    attempt?: number;
+    capturedAt?: string;
+    sizeBytes?: number;
+    mediaType?: string;
+    storageUri?: string;
+  }>;
   evidenceQuality?: { groundedPassedRate: number; runtimeArtifactRate: number; crossAttemptViolations: number };
   baselines?: {
     rules?: JudgeLaneRecord;
@@ -65,7 +112,113 @@ export interface ExperimentEvaluation {
   plannedRuns: number;
   completedRuns: number;
   lanes: Record<string, Record<string, number | null>>;
-  acceptance: { proven: boolean; reasons: string[] };
+  diagnostics: BenchmarkRunDiagnostic[];
+  acceptance: { proven: boolean; readyForBlind: boolean; reasons: string[] };
+}
+
+export type BenchmarkFailureCategory =
+  | "scenario_selection_error"
+  | "planner_provider_failure"
+  | "plan_compilation_error"
+  | "browser_execution_error"
+  | "requirement_not_covered"
+  | "artifact_integrity_failure"
+  | "judge_recommendation_error"
+  | "model_call_failure";
+
+export interface BenchmarkRunDiagnostic {
+  benchmarkId: string;
+  runId: string;
+  lane: string;
+  repetition: number;
+  expectedScenarioId?: string;
+  selectedScenarioId?: string;
+  primaryCause?: BenchmarkFailureCategory;
+  effects: BenchmarkFailureCategory[];
+  browserStarted: boolean;
+  executionSucceeded: boolean;
+  requirementCovered: boolean;
+  artifactIntegrityVerified: boolean;
+  gateEligible: boolean;
+  recommendation?: BenchmarkVerdict;
+  recommendationValid: boolean;
+  finalStatus?: BenchmarkRunRecord["finalStatus"];
+  llmCalls: BenchmarkRunRecord["llmCalls"];
+}
+
+function finalVerdict(status: BenchmarkRunRecord["finalStatus"]): BenchmarkVerdict | undefined {
+  if (status === "pass" || status === "fail") return status;
+  if (status === "blocked" || status === "needs-human-review") return "needs_review";
+  return undefined;
+}
+
+export function diagnoseBenchmarkRun(record: BenchmarkRunRecord, label?: HumanBenchmarkLabel): BenchmarkRunDiagnostic {
+  const effects: BenchmarkFailureCategory[] = [];
+  const plannerFailed = record.planProvenance?.compilationStatus === "rejected" || record.planExecutable === false;
+  const providerFailure = plannerFailed && /fetch_failed|provider_http|timeout|llm_not_configured/i.test(record.planProvenance?.fallbackReason ?? "");
+  const browserStarted = Boolean(record.attempts?.length || record.artifactsV2?.some((artifact) => artifact.origin === "runtime-captured"));
+  const recommendation = record.llm?.verdict;
+  const recommendationValid = Boolean(record.llm && record.llm.status === "passed" && !record.llm.fallback);
+  if (label?.expectedScenarioId && record.selectedScenarioId !== label.expectedScenarioId) effects.push("scenario_selection_error");
+  if (providerFailure) effects.push("planner_provider_failure");
+  else if (plannerFailed) effects.push("plan_compilation_error");
+  if (browserStarted && !record.executionSucceeded) effects.push("browser_execution_error");
+  if (!record.requirementCovered) effects.push("requirement_not_covered");
+  if (!record.artifactIntegrityVerified || record.gateEligible !== true) effects.push("artifact_integrity_failure");
+  if (record.llm && (record.llm.status === "failed" || record.llm.fallback || record.llmCalls?.some((call) => call.status !== "passed"))) effects.push("model_call_failure");
+  if (record.llm && ((!recommendationValid && record.llmCalls?.some((call) => call.purpose === "judging")) || (recommendationValid && label && recommendation !== label.verdict))) effects.push("judge_recommendation_error");
+  const priority: BenchmarkFailureCategory[] = ["planner_provider_failure", "plan_compilation_error", "browser_execution_error", "scenario_selection_error", "requirement_not_covered", "artifact_integrity_failure", "model_call_failure", "judge_recommendation_error"];
+  return {
+    benchmarkId: record.benchmarkId,
+    runId: record.runId,
+    lane: record.lane ?? "unknown",
+    repetition: record.repetition ?? 1,
+    expectedScenarioId: label?.expectedScenarioId,
+    selectedScenarioId: record.selectedScenarioId,
+    primaryCause: priority.find((category) => effects.includes(category)),
+    effects,
+    browserStarted,
+    executionSucceeded: record.executionSucceeded,
+    requirementCovered: record.requirementCovered,
+    artifactIntegrityVerified: record.artifactIntegrityVerified === true,
+    gateEligible: record.gateEligible === true,
+    recommendation,
+    recommendationValid,
+    finalStatus: record.finalStatus,
+    llmCalls: record.llmCalls ?? []
+  };
+}
+
+export function validateExperimentRunMatrix(input: {
+  records: BenchmarkRunRecord[];
+  caseIds: string[];
+  modelIds: string[];
+  repetitions: number;
+}) {
+  const expected = new Set<string>();
+  for (const caseId of input.caseIds) {
+    for (let repetition = 1; repetition <= input.repetitions; repetition += 1) {
+      expected.add(`${caseId}:rules-deterministic:none:${repetition}`);
+      expected.add(`${caseId}:test-command:none:${repetition}`);
+      for (const modelId of input.modelIds) {
+        for (const lane of ["llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"]) {
+          expected.add(`${caseId}:${lane}:${modelId}:${repetition}`);
+        }
+      }
+    }
+  }
+  const actual = input.records.map((record) => `${record.benchmarkId}:${record.lane ?? "missing"}:${record.modelProfileId ?? "none"}:${record.repetition ?? 1}`);
+  const seen = new Set<string>();
+  const duplicates = actual.filter((key) => seen.has(key) || !seen.add(key));
+  const actualSet = new Set(actual);
+  return {
+    expectedRuns: expected.size,
+    actualRuns: actual.length,
+    missing: [...expected].filter((key) => !actualSet.has(key)),
+    unexpected: [...actualSet].filter((key) => !expected.has(key)),
+    duplicates: [...new Set(duplicates)],
+    complete: actual.length === expected.size && duplicates.length === 0 && [...expected].every((key) => actualSet.has(key)) && [...actualSet].every((key) => expected.has(key))
+  };
 }
 
 export interface JudgeLaneRecord {
@@ -151,6 +304,26 @@ function laneMetrics(records: BenchmarkRunRecord[], labels: Map<string, HumanBen
   };
 }
 
+export function hasCompleteBenchmarkTrace(record: BenchmarkRunRecord) {
+  if (!record.runId || !record.attempts?.length || !record.artifactsV2?.length) return false;
+  const attemptIds = new Set(record.attempts.map((attempt) => attempt.id));
+  const attemptsValid = record.attempts.every((attempt) => attempt.id && attempt.runId && attempt.scenarioId && attempt.attempt > 0);
+  const artifactsValid = record.artifactsV2.every((artifact) =>
+    artifact.runId
+    && artifact.scenarioId
+    && artifact.stepId
+    && artifact.attemptId
+    && attemptIds.has(artifact.attemptId)
+    && typeof artifact.attempt === "number"
+    && artifact.capturedAt
+    && typeof artifact.sizeBytes === "number"
+    && artifact.mediaType
+  );
+  const llmRequired = record.lane?.includes("llm") ?? false;
+  const llmValid = !llmRequired || Boolean(record.llmCalls?.length && record.llmCalls.every((call) => call.id && call.runId && call.provider && call.model && call.status));
+  return attemptsValid && artifactsValid && llmValid;
+}
+
 function isIndependentCompletedRun(record: BenchmarkRunRecord) {
   return record.status === "completed"
     && record.executionOrigin === "agent-run"
@@ -217,7 +390,7 @@ export function evaluateExperiment(input: {
   labels: HumanBenchmarkLabel[];
   records: BenchmarkRunRecord[];
   plannedRuns: number;
-  thresholds: { blindFalseReleaseMax: number; artifactIntegrityMin: number; evidenceReferenceMin: number; evidenceGroundedMin: number; macroF1GainMin: number; taskSuccessGainMin: number; humanReviewRelativeReductionMin: number; consistencyMin: number; modelFailureMax: number };
+  thresholds: { blindFalseReleaseMax: number; artifactIntegrityMin: number; evidenceReferenceMin: number; evidenceGroundedMin: number; macroF1GainMin: number; taskSuccessGainMin: number; humanReviewRelativeReductionMin: number; consistencyMin: number; modelFailureMax: number; developmentMacroF1GainMin?: number; developmentTaskSuccessGainMin?: number; developmentHumanReviewMax?: number };
   roi?: { manualMinutesPerCase: number; reviewMinutesPerCase: number };
 }): ExperimentEvaluation {
   const labels = new Map(input.labels.map((label) => [label.benchmarkId, label]));
@@ -227,10 +400,19 @@ export function evaluateExperiment(input: {
   for (const key of laneKeys) {
     const selected = records.filter((record) => `${record.lane}:${record.modelProfileId ?? "none"}` === key);
     const compared = selected.map((record) => ({ record, label: labels.get(record.benchmarkId), result: record.llm && record.lane?.includes("llm") ? record.llm : record.deterministic })).filter((item): item is typeof item & { label: HumanBenchmarkLabel; result: JudgeLaneRecord } => Boolean(item.label && item.result));
-    const expectedFail = compared.filter((item) => item.label.verdict !== "pass");
-    const expectedPass = compared.filter((item) => item.label.verdict === "pass");
+    const validRecommendations = compared.filter((item) => item.result.status === "passed" && !item.result.fallback);
+    const finalCompared = compared.map((item) => ({ ...item, finalVerdict: finalVerdict(item.record.finalStatus) })).filter((item): item is typeof item & { finalVerdict: BenchmarkVerdict } => Boolean(item.finalVerdict));
+    const expectedFail = finalCompared.filter((item) => item.label.verdict !== "pass");
+    const expectedPass = finalCompared.filter((item) => item.label.verdict === "pass");
     const durations = compared.map((item) => item.result.durationMs ?? 0);
     const usage = compared.map((item) => item.result.usage).filter(Boolean);
+    const calls = selected.flatMap((item) => item.llmCalls ?? []);
+    const planningCalls = calls.filter((call) => call.purpose === "planning");
+    const judgingCalls = calls.filter((call) => call.purpose === "judging");
+    const plannerRuns = selected.filter((record) => (record.llmCalls ?? []).some((call) => call.purpose === "planning"));
+    const repairedPlannerRuns = plannerRuns.filter((record) => (record.llmCalls ?? []).filter((call) => call.purpose === "planning").length > 1);
+    const judgeRuns = selected.filter((record) => (record.llmCalls ?? []).some((call) => call.purpose === "judging"));
+    const repairedJudgeRuns = judgeRuns.filter((record) => (record.llmCalls ?? []).filter((call) => call.purpose === "judging").length > 1);
     const automatedMinutes = durations.reduce((sum, value) => sum + value, 0) / 60_000;
     const reviewMinutes = compared.filter((item) => item.result.verdict === "needs_review").length * (input.roi?.reviewMinutesPerCase ?? 0);
     const baselineMinutes = compared.length * (input.roi?.manualMinutesPerCase ?? 0);
@@ -239,24 +421,50 @@ export function evaluateExperiment(input: {
     const consistencies = [...grouped.values()].map((values) => Math.max(...[...new Set(values)].map((value) => values.filter((item) => item === value).length)) / values.length);
     const validEvidenceReferences = compared.map((item) => {
       const ids = new Set(item.record.evidence.map((evidence) => evidence.id));
-      return item.result.evidenceRefs.every((id) => ids.has(id));
+      return item.result.evidenceRefs.length > 0 && item.result.evidenceRefs.every((id) => ids.has(id));
     });
+    const scenarioSelections = compared.filter((item) => Boolean(item.label.expectedScenarioId));
     lanes[key] = {
-      macroF1: macroF1(compared.map((item) => ({ actual: item.result.verdict, expected: item.label.verdict }))),
-      taskSuccessRate: ratio(compared.filter((item) => item.record.executionSucceeded).length, compared.length),
-      falseReleaseRate: ratio(expectedFail.filter((item) => item.result.verdict === "pass").length, expectedFail.length),
-      falseBlockRate: ratio(expectedPass.filter((item) => item.result.verdict !== "pass").length, expectedPass.length),
-      humanReviewRate: ratio(compared.filter((item) => item.result.verdict === "needs_review").length, compared.length),
+      schedulingCompletionRate: ratio(selected.filter((item) => item.status === "completed").length, selected.length),
+      executionSuccessRate: ratio(compared.filter((item) => item.record.executionSucceeded).length, compared.length),
+      gateEligibleRate: ratio(compared.filter((item) => item.record.gateEligible === true && item.record.artifactIntegrityVerified === true).length, compared.length),
+      finalDecisionAvailabilityRate: ratio(compared.filter((item) => Boolean(item.record.finalStatus)).length, compared.length),
+      recommendationAccuracy: ratio(validRecommendations.filter((item) => item.result.verdict === item.label.verdict).length, validRecommendations.length),
+      recommendationMacroF1: macroF1(validRecommendations.map((item) => ({ actual: item.result.verdict, expected: item.label.verdict }))),
+      finalStatusAccuracy: ratio(finalCompared.filter((item) => item.finalVerdict === item.label.verdict).length, finalCompared.length),
+      finalDecisionAccuracy: ratio(finalCompared.filter((item) => item.finalVerdict === item.label.verdict).length, finalCompared.length),
+      macroF1: macroF1(finalCompared.map((item) => ({ actual: item.finalVerdict, expected: item.label.verdict }))),
+      taskSuccessRate: ratio(compared.filter((item) => item.record.executionSucceeded && item.record.planExecutable !== false && item.record.gateEligible === true && item.record.artifactIntegrityVerified === true && item.result.status === "passed" && (!item.label.expectedScenarioId || item.record.selectedScenarioId === item.label.expectedScenarioId)).length, compared.length),
+      scenarioSelectionAccuracy: ratio(scenarioSelections.filter((item) => item.record.selectedScenarioId === item.label.expectedScenarioId).length, scenarioSelections.length),
+      requirementCoverageRate: ratio(compared.filter((item) => item.record.requirementCovered).length, compared.length),
+      falseReleaseRate: ratio(expectedFail.filter((item) => item.finalVerdict === "pass").length, expectedFail.length),
+      falseBlockRate: ratio(expectedPass.filter((item) => item.finalVerdict !== "pass").length, expectedPass.length),
+      humanReviewRate: ratio(finalCompared.filter((item) => item.finalVerdict === "needs_review").length, finalCompared.length),
       planExecutableRate: ratio(compared.filter((item) => item.record.planExecutable !== false).length, compared.length),
-      artifactIntegrityRate: ratio(compared.filter((item) => item.record.gateEligible).length, compared.length),
+      firstPassPlanRate: ratio(plannerRuns.filter((record) => record.planExecutable !== false && (record.llmCalls ?? []).filter((call) => call.purpose === "planning").length === 1).length, plannerRuns.length),
+      plannerRepairRate: ratio(repairedPlannerRuns.length, plannerRuns.length),
+      averagePlannerCallsPerRun: plannerRuns.length ? planningCalls.length / plannerRuns.length : null,
+      firstPassJudgeRate: ratio(judgeRuns.filter((record) => record.llm?.status === "passed" && (record.llmCalls ?? []).filter((call) => call.purpose === "judging").length === 1).length, judgeRuns.length),
+      judgeRepairRate: ratio(repairedJudgeRuns.length, judgeRuns.length),
+      averageJudgeCallsPerRun: judgeRuns.length ? judgingCalls.length / judgeRuns.length : null,
+      artifactIntegrityRate: ratio(compared.filter((item) => item.record.gateEligible && item.record.artifactIntegrityVerified === true && item.record.artifactsV2?.length && item.record.artifactsV2.every((artifact) => artifact.integrityStatus === "verified" && /^[a-f0-9]{64}$/.test(artifact.sha256) && (artifact.origin === "runtime-captured" || artifact.origin === "fixture"))).length, compared.length),
       groundedEvidenceRate: compared.length ? compared.reduce((sum, item) => sum + (item.record.evidenceQuality?.groundedPassedRate ?? 0), 0) / compared.length : null,
       evidenceReferenceAccuracy: ratio(validEvidenceReferences.filter(Boolean).length, validEvidenceReferences.length),
+      runTraceabilityRate: ratio(compared.filter((item) => hasCompleteBenchmarkTrace(item.record)).length, compared.length),
       meanConsistency: consistencies.length ? consistencies.reduce((sum, value) => sum + value, 0) / consistencies.length : null,
-      modelFailureRate: ratio(selected.filter((item) => item.llm?.status === "failed" || item.llm?.status === "not_configured").length, selected.length),
+      modelFailureRate: ratio(selected.filter((item) => item.llm?.status === "failed" || item.llm?.status === "not_configured" || item.llm?.fallback).length, selected.length),
       averageDurationMs: durations.length ? durations.reduce((sum, value) => sum + value, 0) / durations.length : null,
       p95DurationMs: percentile(durations, 0.95),
+      averageLlmCallDurationMs: calls.length ? calls.reduce((sum, call) => sum + (call.durationMs ?? 0), 0) / calls.length : null,
+      p95LlmCallDurationMs: percentile(calls.map((call) => call.durationMs ?? 0), 0.95),
+      averagePlannerCallDurationMs: planningCalls.length ? planningCalls.reduce((sum, call) => sum + (call.durationMs ?? 0), 0) / planningCalls.length : null,
+      averageJudgeCallDurationMs: judgingCalls.length ? judgingCalls.reduce((sum, call) => sum + (call.durationMs ?? 0), 0) / judgingCalls.length : null,
+      blockedRate: ratio(compared.filter((item) => item.record.finalStatus === "blocked").length, compared.length),
       promptTokens: usage.length ? usage.reduce((sum, item) => sum + (item?.promptTokens ?? 0), 0) : null,
       completionTokens: usage.length ? usage.reduce((sum, item) => sum + (item?.completionTokens ?? 0), 0) : null,
+      averagePromptTokensPerRun: usage.length ? usage.reduce((sum, item) => sum + (item?.promptTokens ?? 0), 0) / compared.length : null,
+      averageCompletionTokensPerRun: usage.length ? usage.reduce((sum, item) => sum + (item?.completionTokens ?? 0), 0) / compared.length : null,
+      averageTotalTokensPerRun: usage.length ? usage.reduce((sum, item) => sum + (item?.totalTokens ?? 0), 0) / compared.length : null,
       estimatedCostUsd: totalKnownCost(usage)
       ,estimatedManualMinutesAvoided: input.roi ? Math.max(0, baselineMinutes - automatedMinutes - reviewMinutes) : null
       ,estimatedHumanReviewMinutes: input.roi ? reviewMinutes : null
@@ -271,8 +479,8 @@ export function evaluateExperiment(input: {
     const fullRecords = records.filter((record) => `${record.lane}:${record.modelProfileId ?? "none"}` === key);
     const pairs = input.cases.map((item) => {
       const expected = labels.get(item.id)?.verdict;
-      const rule = rulesRecords.find((record) => record.benchmarkId === item.id)?.deterministic.verdict;
-      const full = majority(fullRecords.filter((record) => record.benchmarkId === item.id).map((record) => record.llm?.verdict ?? record.deterministic.verdict));
+      const rule = majority(rulesRecords.filter((record) => record.benchmarkId === item.id).map((record) => finalVerdict(record.finalStatus) ?? record.deterministic.verdict));
+      const full = majority(fullRecords.filter((record) => record.benchmarkId === item.id).map((record) => finalVerdict(record.finalStatus) ?? "needs_review"));
       return expected && rule ? { expected, rule, full } : undefined;
     }).filter((item): item is { expected: BenchmarkVerdict; rule: BenchmarkVerdict; full: BenchmarkVerdict } => Boolean(item));
     let seed = 0x5f3759df;
@@ -282,7 +490,14 @@ export function evaluateExperiment(input: {
       gains.push((macroF1(sample.map((item) => ({ actual: item.full, expected: item.expected }))) ?? 0) - (macroF1(sample.map((item) => ({ actual: item.rule, expected: item.expected }))) ?? 0));
     }
     gains.sort((a, b) => a - b);
-    metrics.macroF1Gain = (metrics.macroF1 ?? 0) - (rules?.macroF1 ?? 0);
+    // The paired interval samples benchmark cases and uses each lane's majority
+    // verdict. Keep the point estimate on that same case-level estimand; the raw
+    // per-repetition difference is useful, but must not be paired with this CI.
+    metrics.runLevelMacroF1Gain = (metrics.macroF1 ?? 0) - (rules?.macroF1 ?? 0);
+    metrics.macroF1Gain = pairs.length
+      ? (macroF1(pairs.map((item) => ({ actual: item.full, expected: item.expected }))) ?? 0)
+        - (macroF1(pairs.map((item) => ({ actual: item.rule, expected: item.expected }))) ?? 0)
+      : null;
     metrics.macroF1GainCiLow = percentile(gains, 0.025);
     metrics.macroF1GainCiHigh = percentile(gains, 0.975);
   }
@@ -293,12 +508,21 @@ export function evaluateExperiment(input: {
     if (full.some((lane) => (lane.groundedEvidenceRate ?? 0) < input.thresholds.evidenceGroundedMin)) reasons.push("evidence_quality");
     if (full.some((lane) => (lane.meanConsistency ?? 0) < input.thresholds.consistencyMin)) reasons.push("consistency");
     if (full.some((lane) => (lane.modelFailureRate ?? 1) > input.thresholds.modelFailureMax)) reasons.push("model_failure");
-    const gain = full.some((lane) => (lane.macroF1 ?? 0) - (rules?.macroF1 ?? 0) >= input.thresholds.macroF1GainMin || (lane.taskSuccessRate ?? 0) - (rules?.taskSuccessRate ?? 0) >= input.thresholds.taskSuccessGainMin);
+    const gain = full.length > 0 && full.every((lane) => (lane.macroF1 ?? 0) - (rules?.macroF1 ?? 0) >= input.thresholds.macroF1GainMin || (lane.taskSuccessRate ?? 0) - (rules?.taskSuccessRate ?? 0) >= input.thresholds.taskSuccessGainMin);
     if (!gain) reasons.push("no_measured_llm_gain");
-    const reviewReduced = full.some((lane) => (rules?.humanReviewRate ?? 0) > 0 && ((rules!.humanReviewRate! - (lane.humanReviewRate ?? 1)) / rules!.humanReviewRate!) >= input.thresholds.humanReviewRelativeReductionMin);
+    const reviewReduced = full.length > 0 && full.every((lane) => (rules?.humanReviewRate ?? 0) > 0 && ((rules!.humanReviewRate! - (lane.humanReviewRate ?? 1)) / rules!.humanReviewRate!) >= input.thresholds.humanReviewRelativeReductionMin);
     if (!reviewReduced) reasons.push("human_review_not_reduced");
   }
-  return { experimentId: input.experimentId, status: records.length < input.plannedRuns ? "awaiting_agent_runs" : "completed", split: input.split, plannedRuns: input.plannedRuns, completedRuns: records.length, lanes, acceptance: { proven: input.split === "blind" && records.length === input.plannedRuns && reasons.length === 0, reasons } };
+  if (input.split === "development") {
+    if (full.some((lane) => (lane.falseReleaseRate ?? 1) > 0)) reasons.push("development_false_release");
+    if (full.some((lane) => (lane.artifactIntegrityRate ?? 0) < 1 || (lane.groundedEvidenceRate ?? 0) < 1)) reasons.push("development_evidence_incomplete");
+    if (full.some((lane) => (lane.modelFailureRate ?? 1) >= input.thresholds.modelFailureMax)) reasons.push("development_model_failure");
+    if (full.some((lane) => (lane.humanReviewRate ?? 1) > (input.thresholds.developmentHumanReviewMax ?? 0.30))) reasons.push("development_human_review_high");
+    if (full.some((lane) => (lane.taskSuccessRate ?? 0) - (rules?.taskSuccessRate ?? 0) < (input.thresholds.developmentTaskSuccessGainMin ?? -0.10))) reasons.push("development_task_success_regression");
+    if (full.some((lane) => (lane.macroF1 ?? 0) - (rules?.macroF1 ?? 0) < (input.thresholds.developmentMacroF1GainMin ?? -0.05))) reasons.push("development_macro_f1_regression");
+  }
+  const complete = records.length === input.plannedRuns;
+  return { experimentId: input.experimentId, status: complete ? "completed" : "awaiting_agent_runs", split: input.split, plannedRuns: input.plannedRuns, completedRuns: records.length, lanes, diagnostics: records.map((record) => diagnoseBenchmarkRun(record, labels.get(record.benchmarkId))), acceptance: { proven: input.split === "blind" && complete && reasons.length === 0, readyForBlind: input.split === "development" && complete && reasons.length === 0, reasons } };
 }
 
 async function readJson<T>(file: string): Promise<T> {

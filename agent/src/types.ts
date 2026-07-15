@@ -1,4 +1,4 @@
-import type { ArtifactV2, CommandSpec, GateStatus, HumanDecision, JudgeRecommendation, LlmCall, MachineGate, PlanProvenance, ProjectManifest, ResourceBudget } from "@ai-test-officer/contracts";
+import type { ArtifactV2, CommandSpec, CompiledPlan, GateStatus, HumanDecision, JudgeRecommendation, LlmBudget, LlmCall, MachineGate, PlanProvenance, ProjectManifest, ResourceBudget } from "@ai-test-officer/contracts";
 
 export type ProviderKind = "openai-compatible" | "openai" | "anthropic" | "openrouter" | "custom";
 
@@ -80,6 +80,8 @@ export interface GrayPlan {
     level: "high" | "medium" | "low";
     title: string;
     evidence: string;
+    pathIds?: string[];
+    coverageDisposition?: "required" | "harness_gap";
   }>;
   levels: GrayLevel[];
 }
@@ -134,6 +136,7 @@ export interface ProjectConfig {
   frontendUrl: string;
   backendUrl?: string;
   testCommand?: string;
+  testCommandSpec?: CommandSpec;
   allowedOrigins?: string[];
   login?: ProjectLoginConfig;
   env?: Record<string, string>;
@@ -149,7 +152,7 @@ export interface ProjectConfig {
 
 export type TargetProjectConfig = Pick<
   ProjectConfig,
-  "id" | "projectPath" | "frontendUrl" | "backendUrl" | "startCommand" | "cleanupCommand" | "healthCheckUrl" | "testCommand" | "allowedOrigins"
+  "id" | "projectPath" | "frontendUrl" | "backendUrl" | "startCommand" | "cleanupCommand" | "healthCheckUrl" | "testCommand" | "testCommandSpec" | "allowedOrigins"
 > & {
   projectId: string;
   rootDir: string;
@@ -367,6 +370,7 @@ export interface ImpactAnalysis {
     requiredCapabilities: string[];
     sourceContextIds: string[];
   }>;
+  codeGraph?: import("./codeImpactGraph.js").CodeImpactGraph;
 }
 
 export interface PlanStep {
@@ -444,11 +448,14 @@ export interface RunRequest {
   keepProjectRunning?: boolean;
   scenarioId?: string;
   credentialId?: string;
-  judgeMode?: "deterministic" | "llm-assisted";
+  judgeMode?: "deterministic" | "llm-assisted" | "adaptive";
+  llmBudget?: LlmBudget;
+  priorLlmTokens?: number;
   experimentId?: string;
   repetition?: number;
   planProvenance?: PlanProvenance;
-  faultProfile?: "wrong-status" | "api-503" | "label-rename" | "permission-bypass" | "drop-trace" | "ambiguous-oracle";
+  /** Opaque benchmark fixture selector; never include its target-side meaning in prompts. */
+  fixtureVariantId?: string;
   trigger?: "manual" | "commit" | "requirement" | "patrol";
   requirement?: string;
   diff?: string;
@@ -457,6 +464,8 @@ export interface RunRequest {
   sourceContexts?: SourceReadEnvelope[];
   impactAnalysis?: ImpactAnalysis;
   executablePlan?: ExecutableTestPlan;
+  /** Validated, capability-bounded Action DSL produced by the LLM planner. */
+  compiledPlan?: CompiledPlan;
   maxAutoRepairs?: number;
   permissionProfile: PermissionProfile;
   signal?: AbortSignal;
@@ -599,6 +608,7 @@ export interface VisualRunResult {
   repairAttempts?: RepairAttempt[];
   runtimeStatus?: ProjectRuntimeStatus;
   judgeReport: LayeredJudgeReport;
+  judgeRouting?: { route: "deterministic" | "llm"; reason: string; signals: string[] };
   reportFile: string;
   markdownReportFile?: string;
   htmlReportFile?: string;
@@ -958,11 +968,18 @@ export interface LayeredJudgeReport {
   llmStatus: "not_configured" | "passed" | "failed";
   llmError?: string;
   llmCall?: LlmCall;
+  llmCalls?: LlmCall[];
   policyVersion: string;
   createdAt: string;
   planJudge: JudgeResult;
   evidenceJudge: JudgeResult;
   releaseJudge: JudgeResult;
+  modelRecommendation?: {
+    verdict: "pass" | "needs_review" | "fail";
+    summary: string;
+    evidenceRefs: string[];
+    failureClass?: FailureClass;
+  };
 }
 
 export interface PlatformCapability {
@@ -1111,5 +1128,16 @@ export interface DemoVerificationResult {
     artifact?: string;
   }>;
   artifacts: Record<string, string>;
+  stages: Array<{
+    runId: string;
+    scenarioId?: string;
+    schedulingCompleted: boolean;
+    executionSucceeded: boolean;
+    requirementCovered: boolean;
+    artifactIntegrityVerified: boolean;
+    machineGate?: GateStatus;
+    judgeRecommendation?: GateStatus;
+    finalStatus?: GateStatus;
+  }>;
   demoVerificationFile?: string;
 }

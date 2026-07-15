@@ -1,0 +1,21 @@
+{
+  "id": "order_viewer_permission",
+  "title": "订单 Viewer 权限边界验收",
+  "capabilityKind": "role_permission_matrix",
+  "genericTemplate": false,
+  "planObservation": "smoke -> core_path(switch viewer) -> regression",
+  "summary": "验证 viewer 不能批准订单，且权限状态有 DOM 证据。",
+  "matcher": {
+    "keywords": ["order", "订单", "viewer", "权限", "permission", "role", "approve"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["rbac", "permission_boundary"],
+    "projectIds": ["order_portal_lite"]
+  },
+  "smoke": {"pathId":"open_order_portal","stepId":"open_order_portal","title":"打开订单门户","headingName":"Order Portal Lite","assertionName":"订单门户标题可见","expected":"Order Portal Lite 标题出现"},
+  "corePath": {
+    "pathId":"order_viewer_permission_path","stepId":"switch_order_viewer","title":"切换 Viewer 并验证只读权限","action":"role_permission_matrix","selectLabel":"Role","selectValue":"viewer","submitButtonName":"Apply role","targetLocator":"[data-testid='permission-status']","expectedTextIncludes":"viewer: read-only","domAssertionName":"Viewer 显示订单只读权限","riskReason":"订单审批是高风险写操作，Viewer 必须明确处于只读状态。",
+    "oracles":[{"id":"order_viewer_dom","name":"Viewer 显示订单只读权限","type":"role_permission_state","locator":"[data-testid='permission-status']","expectedTextIncludes":"viewer: read-only","expected":"切换 viewer 后展示 viewer: read-only"}]
+  },
+  "regressionPath":{"stepId":"order_viewer_regression","title":"保留权限回归截图","action":"visual_check"}
+}

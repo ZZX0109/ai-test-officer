@@ -103,6 +103,7 @@ export function toTargetProjectConfig(project: ProjectConfig): TargetProjectConf
     appUrl: project.frontendUrl,
     apiUrl: project.backendUrl,
     testCommand: project.testCommand,
+    testCommandSpec: project.testCommandSpec,
     allowedOrigins: project.allowedOrigins ?? []
   };
 }

@@ -1,0 +1,21 @@
+{
+  "id": "order_approval_transition",
+  "title": "订单审批状态流转验收",
+  "capabilityKind": "approval_flow",
+  "genericTemplate": false,
+  "planObservation": "smoke -> core_path(approve pending order) -> regression",
+  "summary": "验证待处理订单审批后显示 approved，并保留该动作的证据。",
+  "matcher": {
+    "keywords": ["order", "订单", "approve", "approval", "审批", "批准", "pending", "状态流"],
+    "riskLevel": "high",
+    "sourceHints": ["requirement", "diff", "llm_inferred"],
+    "capabilities": ["approval_flow", "state_transition"],
+    "projectIds": ["order_portal_lite"]
+  },
+  "smoke": {"pathId":"open_order_portal","stepId":"open_order_portal","title":"打开订单门户","headingName":"Order Portal Lite","assertionName":"订单门户标题可见","expected":"Order Portal Lite 标题出现"},
+  "corePath": {
+    "pathId":"order_approval_path","stepId":"approve_pending_order","title":"批准待处理订单","action":"approval_flow_transition","inputLabel":"Order ID","input":"ORD-1001","triggerButtonName":"Approve order","targetLocator":"[data-testid='approval-status']","expectedTextIncludes":"approved","domAssertionName":"订单审批状态变为 approved","riskReason":"待处理订单的批准操作必须真实改变可见业务状态。",
+    "oracles":[{"id":"order_approved_dom","name":"订单审批状态变为 approved","type":"dom_text","locator":"[data-testid='approval-status']","expectedTextIncludes":"approved","expected":"批准 ORD-1001 后状态展示 approved"}]
+  },
+  "regressionPath":{"stepId":"order_approval_regression","title":"保留订单审批回归截图","action":"visual_check"}
+}
