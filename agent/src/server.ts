@@ -6,6 +6,7 @@ import { z } from "zod";
 import { commandSpecSchema, llmCallSchema, planProvenanceSchema } from "@ai-test-officer/contracts";
 import {
   createCredential,
+  decrypt,
   deleteCredential,
   getCredential,
   listCredentials,
@@ -40,6 +41,7 @@ import {
   securitySummary
 } from "./security.js";
 import { testCredentialConnection } from "./testConnection.js";
+import { executeLlmCall } from "./llmProvider.js";
 import { runVisualGrayTest } from "./testRunner.js";
 import { getScenario, hasScenario, listExecutableScenarios, listScenarios } from "./scenarios.js";
 import { buildDeliveryFromRun, listBotDeliveries } from "./botNotifier.js";
@@ -99,6 +101,7 @@ import { createRunRequestSchema } from "@ai-test-officer/contracts";
 import { buildCodeImpactGraph, changedFilesFromDiff } from "./codeImpactGraph.js";
 import { createMissionPreview } from "./missionPreview.js";
 import { enqueueRun, executeQueuedRun, interruptRun } from "./runOrchestrator.js";
+import { buildBenchmarkCatalog, trustedBenchmarkRuntimeMetrics } from "./benchmarkSummary.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4317);
@@ -253,7 +256,28 @@ app.post("/api/credentials/:id/test", async (req, res, next) => {
       res.status(404).json({ error: "Credential not found" });
       return;
     }
-    res.json(await testCredentialConnection(credential));
+    const connection = await testCredentialConnection(credential);
+    if (req.body?.mode !== "structured" || !connection.ok) {
+      res.json(connection);
+      return;
+    }
+    try {
+      const result = await executeLlmCall({
+        credential,
+        apiKey: await decrypt(credential.apiKeyEncrypted),
+        system: "Return only a JSON object with key ok and boolean value.",
+        prompt: "Preflight structured output check.",
+        maxTokens: 64,
+        timeoutMs: 30_000,
+        context: { purpose: "planning", experimentId: "credential-preflight" }
+      });
+      let parsed: unknown;
+      try { parsed = JSON.parse(result.text); } catch { parsed = undefined; }
+      res.json({ ...connection, structuredOutput: parsed && typeof parsed === "object" && (parsed as { ok?: unknown }).ok === true, call: result.call });
+    } catch (error) {
+      const call = (error as { llmCall?: unknown }).llmCall;
+      res.json({ ...connection, ok: false, structuredOutput: false, message: "结构化输出预检失败", call });
+    }
   } catch (error) {
     next(error);
   }
@@ -787,37 +811,20 @@ app.post("/v1/impact/code-graph", async (req, res, next) => {
 
 app.get("/api/benchmark/summary", async (_req, res, next) => {
   try {
-    const cases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Array<{ projectId: string; category: string }>;
-    const blindCases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8")) as Array<{ projectId: string; category: string }>;
-    const executionMap = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "execution-map.json"), "utf8")) as { mappings: Array<{ logicalProjectId: string; executionProjectId: string }> };
+    const cases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Array<{ id: string; projectId: string; category: string }>;
+    const blindCases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8")) as Array<{ id: string; projectId: string; category: string }>;
+    const extendedCases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "extended-cases.json"), "utf8")) as Array<{ id: string; projectId: string; category: string }>;
+    const executionMap = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "execution-map.json"), "utf8")) as { mappings: Array<{ logicalProjectId: string; executionProjectId: string; targetUrl?: string; targetKind?: string }> };
     const challengeCases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "challenge-cases.json"), "utf8")) as Array<{ projectId: string }>;
-    const projectIds = Array.from(new Set(cases.map((item) => item.projectId)));
-    const byProject = Object.fromEntries(projectIds.map((projectId) => [projectId, cases.filter((item) => item.projectId === projectId).length]));
-    const evaluation = await readFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), "utf8").then((value) => JSON.parse(value) as { experimentId?: string; status?: string; conclusion?: string; completedRuns?: number; plannedRuns?: number; blockers?: string[]; evaluations?: Array<{ split: string; completedRuns: number; plannedRuns: number; acceptance: { proven: boolean; reasons: string[] }; lanes: Record<string, Record<string, number | null>> }> }).catch(() => undefined);
-    const displayedEvaluation = evaluation?.evaluations?.find((item) => item.split === "blind")
-      ?? evaluation?.evaluations?.find((item) => item.split === "development");
+    const catalog = buildBenchmarkCatalog({ development: cases, blind: blindCases, extended: extendedCases, mappings: executionMap.mappings, challengeProjectIds: challengeCases.map((item) => item.projectId) });
+    const snapshot = await readFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), "utf8").then((value) => JSON.parse(value) as unknown).catch(() => undefined);
+    const runtimeMetrics = trustedBenchmarkRuntimeMetrics(snapshot);
     res.json({
       version: "benchmark-v1",
       status: "catalog_ready",
-      caseCount: cases.length,
-      blindCaseCount: blindCases.length,
-      projectCount: new Set(["local_demo_app", ...executionMap.mappings.map((item) => item.executionProjectId), ...challengeCases.map((item) => item.projectId)]).size,
-      fixtureProjects: ["local_demo_app", "customer_portal_lite"],
-      executionMap,
+      ...catalog,
       challengeCases: { count: challengeCases.length, projectIds: challengeCases.map((item) => item.projectId) },
-      byProject,
-      categories: Array.from(new Set(cases.map((item) => item.category))).sort(),
-      runtimeMetrics: {
-        status: evaluation?.status ?? "awaiting_agent_runs",
-        experimentId: evaluation?.experimentId,
-        conclusion: evaluation?.conclusion,
-        completedRuns: evaluation?.completedRuns ?? evaluation?.evaluations?.reduce((sum, item) => sum + item.completedRuns, 0) ?? 0,
-        plannedRuns: evaluation?.plannedRuns ?? evaluation?.evaluations?.reduce((sum, item) => sum + item.plannedRuns, 0) ?? 0,
-        blockers: evaluation?.blockers ?? [],
-        acceptance: displayedEvaluation?.acceptance,
-        displayedSplit: displayedEvaluation?.split,
-        lanes: displayedEvaluation?.lanes ?? {}
-      }
+      runtimeMetrics
     });
   } catch (error) {
     next(error);

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -9,6 +9,26 @@ const reportFile = path.join(root, "reports", "production-acceptance", "latest.j
 const startedAt = new Date().toISOString();
 const composeProject = `ato-acceptance-${randomUUID().slice(0, 8)}`;
 await mkdir(path.dirname(reportFile), { recursive: true });
+
+// This script provisions an isolated, disposable Compose project. Generate
+// secrets only for that local acceptance process so a clean checkout can run
+// it without a developer-owned .env; production deployments still require
+// externally injected secrets.
+function ensureAcceptanceSecrets() {
+  const generated = [];
+  for (const name of ["POSTGRES_PASSWORD", "REDIS_PASSWORD", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "KEYCLOAK_ADMIN_PASSWORD", "INTERNAL_WORKER_TOKEN"]) {
+    if (!process.env[name]) {
+      process.env[name] = randomBytes(24).toString("base64url");
+      generated.push(name);
+    }
+  }
+  if (!process.env.KEYCLOAK_ADMIN) {
+    process.env.KEYCLOAK_ADMIN = "acceptance-admin";
+    generated.push("KEYCLOAK_ADMIN");
+  }
+  return generated;
+}
+const generatedAcceptanceSecrets = ensureAcceptanceSecrets();
 
 function redact(value) {
   let result = String(value ?? "");
@@ -41,11 +61,7 @@ function diagnostics() {
     logs: Object.fromEntries(services.map((service) => [service, dockerCapture(["logs", "--no-color", "--tail", "120", service])]))
   };
 }
-async function save(status, checks, blockers = []) { await writeFile(reportFile, JSON.stringify({ startedAt, finishedAt: new Date().toISOString(), status, checks, blockers, diagnostics: diagnostics() }, null, 2)); }
-
-const required = ["POSTGRES_PASSWORD", "REDIS_PASSWORD", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "KEYCLOAK_ADMIN", "KEYCLOAK_ADMIN_PASSWORD", "INTERNAL_WORKER_TOKEN"];
-const missing = required.filter((name) => !process.env[name]);
-if (missing.length) { await save("blocked", [], missing.map((name) => `${name}_missing`)); console.error(`production_acceptance_blocked:${missing.join(",")}`); process.exit(2); }
+async function save(status, checks, blockers = []) { await writeFile(reportFile, JSON.stringify({ startedAt, finishedAt: new Date().toISOString(), status, checks, blockers, generatedAcceptanceSecrets, diagnostics: diagnostics() }, null, 2)); }
 try { execFileSync("docker", ["info"], { stdio: "ignore" }); } catch { await save("blocked", [], ["docker_daemon_unavailable"]); console.error("production_acceptance_blocked:docker_daemon_unavailable"); process.exit(2); }
 
 const checks = [];

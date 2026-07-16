@@ -33,7 +33,7 @@ export async function testProductionAcceptanceContract() {
     "postgres_api_worker_restart_recovery",
     "generic_table_sort_filter_pagination"
   ]) assert.match(script, new RegExp(marker));
-  for (const marker of ["randomUUID", "composeProject", "diagnostics", "agent-api", "worker", "keycloak", "postgres", "redis", "minio", "REDACTED"]) assert.match(script, new RegExp(marker));
+  for (const marker of ["randomUUID", "randomBytes", "ensureAcceptanceSecrets", "generatedAcceptanceSecrets", "composeProject", "diagnostics", "agent-api", "worker", "keycloak", "postgres", "redis", "minio", "REDACTED"]) assert.match(script, new RegExp(marker));
   for (const file of ["loopEventStore.ts", "auditLog.ts", "requirementAcceptanceStore.ts", "commitCheckStore.ts", "patrolRunStore.ts", "demoVerificationStore.ts"]) {
     const source = await readFile(path.join(rootDir, "agent", "src", file), "utf8");
     assert.doesNotMatch(source, /const rootDir = path\.resolve\(process\.cwd\(\), "\.\."\);/, `${file} must not escape /app when a production container starts at the workspace root`);

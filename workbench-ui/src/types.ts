@@ -886,7 +886,7 @@ export interface BenchmarkSummary {
   caseCount: number;
   blindCaseCount: number;
   projectCount: number;
-  fixtureProjects: string[];
+  fixtureProjects: Array<{ logicalProjectId: string; executionProjectId: string; targetUrl?: string; targetKind?: string; splits: string[] }>;
   byProject: Record<string, number>;
   categories: string[];
   runtimeMetrics: {
@@ -894,10 +894,12 @@ export interface BenchmarkSummary {
     experimentId?: string;
     conclusion?: string;
     completedRuns: number;
+    formalEligibleRuns?: number;
     plannedRuns: number;
     blockers: string[];
     displayedSplit?: "development" | "blind";
     acceptance?: { proven: boolean; reasons: string[] };
+    provenance?: { kind?: string; rawRecordCount?: number; formalEligibleRecordCount?: number; excludedRecords?: unknown[]; blindDataIncluded?: boolean };
     lanes: Record<string, Record<string, number | null>>;
   };
 }

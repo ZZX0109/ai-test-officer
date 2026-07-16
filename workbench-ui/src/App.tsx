@@ -248,12 +248,12 @@ export function App() {
     systemControl: false
   });
   const [form, setForm] = useState({
-    name: "OpenAI Main",
-    provider: "openai",
-    baseUrl: "https://api.openai.com/v1",
+    name: "SophNet gpt-5.1-codex",
+    provider: "openai-compatible",
+    baseUrl: "https://api.sophnet.com/v1",
     apiKey: "",
-    model: "gpt-4.1",
-    tags: "llm,default",
+    model: "gpt-5.1-codex",
+    tags: "llm,sophnet,benchmark",
     owner: "local-dev",
     scopes: "judge,planning",
     isDefault: true

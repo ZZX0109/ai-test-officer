@@ -5,6 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { ConnectorPanel } from "../src/components/ConnectorPanel";
 import { PatrolPanel } from "../src/components/PatrolPanel";
 import { BenchmarkPanel } from "../src/components/BenchmarkPanel";
+import { OidcSessionPanel } from "../src/components/OidcSessionPanel";
+import { RunTimeline } from "../src/components/RunTimeline";
 
 describe("Workbench interactions", () => {
   it("propagates connector input and strict mode decisions", async () => {
@@ -38,5 +40,25 @@ describe("Workbench interactions", () => {
     expect(screen.getByText("任务成功 33.3%")).toBeTruthy();
     expect(screen.getByText("模型推荐正确 50.0%")).toBeTruthy();
     expect(screen.getByText("平均 Token 8,771")).toBeTruthy();
+  });
+
+  it("shows the safe development session state when OIDC is unavailable", () => {
+    render(<OidcSessionPanel configured={false} authenticated={false} />);
+    expect(screen.getByText("开发会话")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /OIDC/ })).toBeNull();
+  });
+
+  it("renders run-scoped live events for the SSE timeline", () => {
+    render(<RunTimeline displayedLoopEvents={[{
+      id: "event-1",
+      runId: "run-1",
+      loopType: "assertion",
+      title: "Artifact integrity verified",
+      status: "passed",
+      observedAt: new Date().toISOString(),
+      observation: "artifact-1 linked to attempt-1"
+    } as never]} />);
+    expect(screen.getByText("Artifact integrity verified")).toBeTruthy();
+    expect(screen.getByText("artifact-1 linked to attempt-1")).toBeTruthy();
   });
 });
