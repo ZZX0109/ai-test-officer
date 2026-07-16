@@ -290,7 +290,10 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const startedAt = new Date().toISOString();
   const key = `benchmark:${input.experimentId}:${input.item.id}:${input.lane}:${input.model?.id ?? "none"}:${input.repetition}`;
   const plannerMode = input.lane === "llm-plan-deterministic-judge" || input.lane === "full-llm" ? "llm" : "deterministic";
-  const judgeMode = input.lane === "rules-plan-llm-judge" || input.lane === "full-llm" ? "llm-assisted" : "deterministic";
+  // Judge lanes remain LLM-assisted, but the runtime only invokes the model when
+  // deterministic evidence actually conflicts. Normal, fully-grounded passes do
+  // not spend model budget or become provider-failure samples.
+  const judgeMode = input.lane === "rules-plan-llm-judge" || input.lane === "full-llm" ? "adaptive" : "deterministic";
   let run = (await request<{ run: { id: string; state: string; version: number; gateStatus?: string } }>("/v1/runs", {
     method: "POST",
     body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: benchmarkScenario(input.item), requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 2, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 2000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
@@ -329,13 +332,14 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const final = verdict(run.gateStatus);
   const deterministicVerdict = verdict(report.judgeReport?.releaseJudge?.verdict ?? report.machineGate?.status ?? run.gateStatus);
   const modelRecommendation = report.judgeReport?.modelRecommendation;
-  const llmVerdict = judgeMode === "llm-assisted" ? verdict(modelRecommendation?.verdict) : deterministicVerdict;
+  const judgeRoutedToLlm = report.judgeRouting?.route === "llm";
+  const llmVerdict = judgeRoutedToLlm ? verdict(modelRecommendation?.verdict) : deterministicVerdict;
   const deterministicEvidenceRefs = report.judgeReport?.releaseJudge?.findings?.flatMap((finding: any) => finding.evidenceRefs ?? [])
     ?? report.evidence?.filter((item: any) => item.type === "assertion").map((item: any) => item.id)
     ?? [];
   const durationMs = Date.now() - new Date(startedAt).getTime();
   const plannerOutcome = assessPlannerOutcome(plannerMode, report.planProvenance);
-  const llmFailed = plannerOutcome.plannerFailed || (plannerMode === "llm" && !plannerCall) || (judgeMode === "llm-assisted" && (!judgeCall || report.judgeReport?.llmStatus !== "passed" || report.judgeReport?.executionMode === "fallback_baseline"));
+  const llmFailed = plannerOutcome.plannerFailed || (plannerMode === "llm" && !plannerCall) || (judgeRoutedToLlm && (!judgeCall || report.judgeReport?.llmStatus !== "passed" || report.judgeReport?.executionMode === "fallback_baseline"));
   const execution = deriveBenchmarkExecutionSignals(report, artifacts);
   return {
     benchmarkId: input.item.id, runId: run.id, experimentId: input.experimentId, split: input.item.split, lane: input.lane, modelProfileId: input.model?.id, repetition: input.repetition,
@@ -344,7 +348,7 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
     attempts: (report.attempts ?? []).map((attempt: any) => ({ id: attempt.id, runId: attempt.runId, scenarioId: attempt.scenarioId, attempt: attempt.attempt, status: attempt.status })),
     llmCalls: [...plannerCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "planning" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, durationMs: call.durationMs, usage: call.usage })), ...judgeCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "judging" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, durationMs: call.durationMs, usage: call.usage }))],
     deterministic: { verdict: deterministicVerdict, evidenceRefs: deterministicEvidenceRefs, status: "passed", durationMs },
-    llm: plannerMode === "llm" || judgeMode === "llm-assisted" ? { verdict: llmVerdict, evidenceRefs: judgeMode === "llm-assisted" ? modelRecommendation?.evidenceRefs ?? [] : deterministicEvidenceRefs, failureClass: judgeMode === "llm-assisted" ? modelRecommendation?.failureClass : report.failureAttributions?.[0]?.failureClass, status: llmFailed ? "failed" : "passed", fallback: report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
+    llm: plannerMode === "llm" || judgeMode === "adaptive" ? { verdict: llmVerdict, evidenceRefs: judgeRoutedToLlm ? modelRecommendation?.evidenceRefs ?? [] : deterministicEvidenceRefs, failureClass: judgeRoutedToLlm ? modelRecommendation?.failureClass : report.failureAttributions?.[0]?.failureClass, status: llmFailed ? "failed" : "passed", fallback: judgeRoutedToLlm && report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
     evidence: (report.evidence ?? []).map((item: any) => ({ id: item.id, type: item.type })), attribution: { failureClass: report.failureAttributions?.[0]?.failureClass, suspectFiles: report.failureAttributions?.flatMap((entry: any) => entry.topSuspects?.map((suspect: any) => suspect.filePath) ?? []) ?? [], evidenceRefs: report.failureAttributions?.flatMap((entry: any) => entry.evidenceRefs ?? []) ?? [] },
     executionOrigin: "agent-run", gateEligible: execution.gateEligible, artifactIntegrityVerified: execution.artifactIntegrityVerified, evidenceQuality: report.evidenceQuality ? { groundedPassedRate: report.evidenceQuality.summary.groundedPassedRate, runtimeArtifactRate: report.evidenceQuality.summary.runtimeArtifactRate, crossAttemptViolations: report.evidenceQuality.summary.crossAttemptViolations } : undefined, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified", runId: artifact.runId, scenarioId: artifact.scenarioId, stepId: artifact.stepId, attemptId: artifact.attemptId, attempt: artifact.attempt, capturedAt: artifact.integrity.capturedAt, sizeBytes: artifact.integrity.sizeBytes, mediaType: artifact.integrity.mediaType, storageUri: artifact.storageUri }))
   };
