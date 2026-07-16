@@ -400,17 +400,31 @@ export function App() {
 
   useEffect(() => {
     if (!activeRunId) return;
-    return subscribeRunEvents(activeRunId, ({ type, payload }) => {
+    return subscribeRunEvents(activeRunId, ({ id, type, payload }) => {
       if (type !== "state") return;
-      const event = payload as { type?: string };
+      const event = payload as { id?: string; type?: string; createdAt?: string; payload?: Record<string, unknown> };
       const finished = ["run_completed", "run_failed", "run_blocked", "run_cancelled", "human_review_requested"].includes(event.type ?? "");
-      setLiveRun((current) => ({
-        runId: activeRunId,
-        status: finished ? "finished" : "running",
-        evidenceCount: current?.evidenceCount ?? 0,
-        events: current?.events ?? [],
-        evidence: current?.evidence ?? []
-      }));
+      setLiveRun((current) => {
+        const eventId = event.id ?? id ?? `${activeRunId}:${event.type ?? "state"}`;
+        const events = current?.events ?? [];
+        const nextEvent = {
+          id: `sse:${eventId}`,
+          loopType: "run_state",
+          iteration: Number(id ?? 0),
+          title: event.type ?? "run_state",
+          status: finished ? "completed" : "running",
+          timestamp: event.createdAt ?? new Date().toISOString(),
+          observation: JSON.stringify(event.payload ?? {}),
+          evidenceRefs: []
+        } satisfies RunResult["loopEvents"][number];
+        return {
+          runId: activeRunId,
+          status: finished ? "finished" : "running",
+          evidenceCount: current?.evidenceCount ?? 0,
+          events: events.some((item) => item.id === nextEvent.id) ? events : [...events, nextEvent].slice(-100),
+          evidence: current?.evidence ?? []
+        };
+      });
       void getRunProjection(activeRunId).then(({ run }) => setActiveRun(run)).catch(() => undefined);
     });
   }, [activeRunId]);

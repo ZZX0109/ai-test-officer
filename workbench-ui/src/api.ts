@@ -353,31 +353,48 @@ async function runThroughV1(payload: Record<string, unknown>, onCreated?: (runId
   return waitForRunReport(run.id);
 }
 
-export function subscribeRunEvents(runId: string, onEvent: (event: { type: string; payload: Record<string, unknown> }) => void) {
+export function subscribeRunEvents(runId: string, onEvent: (event: { id?: string; type: string; payload: Record<string, unknown> }) => void) {
   const controller = new AbortController();
-  void fetch(`${AGENT_URL}/v1/runs/${encodeURIComponent(runId)}/stream`, {
-    credentials: "include",
-    headers: AGENT_TOKEN ? { "x-agent-token": AGENT_TOKEN } : {},
-    signal: controller.signal
-  }).then(async (response) => {
-    if (!response.ok || !response.body) throw new Error(`stream_http_${response.status}`);
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop() ?? "";
-      for (const frame of frames) {
-        const eventType = frame.match(/^event: (.+)$/m)?.[1] ?? "message";
-        const data = frame.match(/^data: (.+)$/m)?.[1];
-        if (data) onEvent({ type: eventType, payload: JSON.parse(data) as Record<string, unknown> });
+  let lastEventId: string | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconnectAttempt = 0;
+  const connect = async () => {
+    try {
+      const headers = new Headers(AGENT_TOKEN ? { "x-agent-token": AGENT_TOKEN } : {});
+      if (lastEventId) headers.set("last-event-id", lastEventId);
+      const response = await fetch(`${AGENT_URL}/v1/runs/${encodeURIComponent(runId)}/stream`, {
+        credentials: "include", headers, signal: controller.signal
+      });
+      if (!response.ok || !response.body) throw new Error(`stream_http_${response.status}`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!controller.signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          const eventType = frame.match(/^event: (.+)$/m)?.[1] ?? "message";
+          const eventId = frame.match(/^id: (.+)$/m)?.[1];
+          const data = frame.match(/^data: (.+)$/m)?.[1];
+          if (!data) continue;
+          if (eventId) lastEventId = eventId;
+          onEvent({ id: eventId, type: eventType, payload: JSON.parse(data) as Record<string, unknown> });
+          reconnectAttempt = 0;
+        }
       }
+    } catch (error) {
+      if (!controller.signal.aborted) console.warn("run stream closed", error);
     }
-  }).catch((error) => { if (!controller.signal.aborted) console.warn("run stream closed", error); });
-  return () => controller.abort();
+    if (!controller.signal.aborted) {
+      const delay = Math.min(5_000, 250 * 2 ** reconnectAttempt++);
+      retryTimer = setTimeout(() => void connect(), delay);
+    }
+  };
+  void connect();
+  return () => { if (retryTimer) clearTimeout(retryTimer); controller.abort(); };
 }
 
 export function runPatrol(payload: RunTargetPayload & {

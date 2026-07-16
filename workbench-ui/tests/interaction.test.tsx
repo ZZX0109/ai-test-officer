@@ -7,6 +7,7 @@ import { PatrolPanel } from "../src/components/PatrolPanel";
 import { BenchmarkPanel } from "../src/components/BenchmarkPanel";
 import { OidcSessionPanel } from "../src/components/OidcSessionPanel";
 import { RunTimeline } from "../src/components/RunTimeline";
+import { subscribeRunEvents } from "../src/api";
 
 describe("Workbench interactions", () => {
   it("propagates connector input and strict mode decisions", async () => {
@@ -60,5 +61,22 @@ describe("Workbench interactions", () => {
     } as never]} />);
     expect(screen.getByText("Artifact integrity verified")).toBeTruthy();
     expect(screen.getByText("artifact-1 linked to attempt-1")).toBeTruthy();
+  });
+
+  it("reconnects a run-scoped SSE stream from the last event ID", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("id: 4\nevent: state\ndata: {\"id\":\"event-4\",\"type\":\"run_started\"}\n\n"))
+      .mockResolvedValueOnce(new Response("id: 5\nevent: state\ndata: {\"id\":\"event-5\",\"type\":\"evidence_collecting\"}\n\n"));
+    vi.stubGlobal("fetch", fetchMock);
+    const received: Array<{ id?: string; type: string }> = [];
+    const unsubscribe = subscribeRunEvents("run-1", (event) => received.push({ id: event.id, type: event.type }));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(received).toEqual([{ id: "4", type: "state" }, { id: "5", type: "state" }]);
+    expect(fetchMock.mock.calls[1]?.[1]?.headers.get("last-event-id")).toBe("4");
+    unsubscribe();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 });
