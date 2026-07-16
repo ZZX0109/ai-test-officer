@@ -4,7 +4,7 @@ import { z } from "zod";
 import { executeLlmCall, reserveLlmOutputTokens } from "./llmProvider.js";
 import { buildScenarioGrayPlan, fixedGrayPlan } from "./plan.js";
 import { getScenario, hasScenario, listExecutableScenarios, matchScenariosForContext } from "./scenarios.js";
-import type { CredentialRecord, GrayPlan, ImpactAnalysis } from "./types.js";
+import type { CredentialRecord, ImpactAnalysis } from "./types.js";
 
 interface GeneratePlanInput {
   requirement: string;
@@ -20,32 +20,10 @@ interface GeneratePlanInput {
   browserControlAllowed?: boolean;
 }
 
-const grayPlanSchema = z.object({
-  sessionName: z.string().min(1),
-  risks: z.array(z.object({
-    id: z.string().min(1), level: z.enum(["high", "medium", "low"]), title: z.string().min(1), evidence: z.string().min(1),
-    pathIds: z.array(z.string().min(1)), coverageDisposition: z.enum(["required", "harness_gap"])
-  }).superRefine((risk, context) => {
-    if (risk.coverageDisposition === "required" && risk.pathIds.length === 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ["pathIds"], message: "required risk needs a path" });
-    if (risk.coverageDisposition === "harness_gap" && risk.pathIds.length > 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ["pathIds"], message: "harness gap cannot claim a path" });
-  })),
-  levels: z.array(z.object({
-    id: z.enum(["smoke", "core_path", "edge_case", "regression"]),
-    title: z.string().min(1),
-    description: z.string().min(1),
-    paths: z.array(z.object({ id: z.string().min(1), title: z.string().min(1), riskReason: z.string().min(1), expectedFrom: z.enum(["requirement", "diff", "existing_test", "llm_inferred"]), steps: z.array(z.string()), retry: z.number().int().min(0).max(1) }))
-  // A scenario may expose only smoke/core/regression paths.  Requiring an
-  // invented edge path makes the plan look comprehensive while guaranteeing an
-  // unverifiable coverage gap.  Three executable levels are the minimum; an
-  // edge level is allowed only when the selected scenario actually exposes one.
-  })).min(3).max(4)
-});
-
 const llmPlanResponseSchema = z.object({
   scenarioId: z.string().min(1),
-  plan: grayPlanSchema,
-  actions: z.array(z.object({ pathId: z.string().min(1), action: actionDslSchema })).min(1).max(50)
-});
+  actions: z.array(z.object({ pathId: z.string().min(1), action: actionDslSchema }).strict()).min(1).max(50)
+}).strict();
 
 function extractJson(text: string) {
   const trimmed = text.trim();
@@ -53,13 +31,6 @@ function extractJson(text: string) {
   const match = trimmed.match(/```json\s*([\s\S]*?)```/);
   if (match) return JSON.parse(match[1]) as unknown;
   throw new Error("LLM response did not contain JSON");
-}
-
-function coercePlan(candidate: GrayPlan): GrayPlan {
-  if (!candidate.sessionName || !Array.isArray(candidate.risks) || !Array.isArray(candidate.levels)) {
-    throw new Error("LLM plan schema is incomplete");
-  }
-  return candidate;
 }
 
 async function resolveCredential(id?: string) {
@@ -95,14 +66,11 @@ function buildPrompt(input: GeneratePlanInput) {
     ]
   }));
   if (!executableScenarios.length) throw new Error(`llm_plan_unknown_preferred_scenario:${input.preferredScenarioId}`);
-  return `你是 AI 测试官。请根据需求和 Git diff 生成显式灰度测试 plan。必须只输出一个可被 JSON.parse 解析的 JSON 对象，不要输出 Markdown、解释、注释或额外字段。
+  return `你是 AI 测试官的受限动作规划器。必须只输出一个可被 JSON.parse 解析的 JSON 对象，不要输出 Markdown、解释、注释或额外字段。
 
 JSON schema:
 {
   "scenarioId": "one allowed scenario id",
-  "plan": {"sessionName": "string", "risks": [{"id":"string","level":"high|medium|low","title":"string","evidence":"string","pathIds":["exact plan path id"],"coverageDisposition":"required|harness_gap"}], "levels": [
-    {"id":"smoke|core_path|edge_case|regression","title":"string","description":"string","paths":[{"id":"string","title":"string","riskReason":"string","expectedFrom":"requirement|diff|existing_test|llm_inferred","retry":1,"steps":["string"]}]}
-  ]},
   "actions": [
     {"pathId":"an exact allowed planPath id","action":{"action":"navigate","path":"/"}},
     {"pathId":"an exact allowed planPath id","action":{"action":"click","selectorRef":"an allowed selectorRef"}},
@@ -114,13 +82,11 @@ JSON schema:
   ]
 }
 
-每个 plan 的 levels 必须只使用所选 scenario 的 planPaths 中列出的 levelId/pathId 配对，且每一条列出的 path 必须恰好出现一次。绝不能编造 path id，也不得添加 edge_case，除非该 scenario 的 planPaths 明确列出了它。断言预期来源不清楚时 expectedFrom 必须用 llm_inferred。
-每个 required 风险必须用 pathIds 显式绑定至少一个已声明 planPath；没有可执行路径的额外风险必须标为 harness_gap 且 pathIds 为空，不能声称已覆盖。
-actions 中每一项的 pathId 必须逐字来自所选 scenario 的 planPaths；每个 planPath 至少绑定一个实际动作。action.action 只能精确为 navigate、click、fill、select、upload、assert、wait 七者之一。不得使用 screenshot、scroll、hover、press、type、evaluate、command 或任何其他值。每个 action 只可含上面该动作所需字段；navigate 的 path 必须以 / 开头；wait 的 durationMs 为 0 到 45000 的整数。不得生成命令、CSS、XPath、任意 URL、文件路径或额外 capability。assert 只允许绑定 core_path，且全部必需 oracle 必须在 core_path 中各出现一次。click 只能使用 ButtonName 或 regressionTriggerButtonName；fill 只能使用 inputLabel；select 只能使用 selectLabel 和 selectValue；upload 只能使用文件输入 Label；不得点击 Locator。相同 pathId 下同一 click selectorRef 最多出现一次。
+只输出 scenarioId 和 actions；灰度风险、级别、审批与证据策略由可信运行时从 scenario contract 生成。actions 中每一项的 pathId 必须逐字来自所选 scenario 的 planPaths；每个 planPath 至少绑定一个实际动作。action.action 只能精确为 navigate、click、fill、select、upload、assert、wait 七者之一。不得使用 screenshot、scroll、hover、press、type、evaluate、command 或任何其他值。每个 action 只可含上面该动作所需字段；navigate 的 path 必须以 / 开头；wait 的 durationMs 为 0 到 45000 的整数。不得生成命令、CSS、XPath、任意 URL、文件路径或额外 capability。assert 只允许绑定 core_path，且全部必需 oracle 必须在 core_path 中各出现一次。click 只能使用 ButtonName 或 regressionTriggerButtonName；fill 只能使用 inputLabel；select 只能使用 selectLabel 和 selectValue；upload 只能使用文件输入 Label；不得点击 Locator。相同 pathId 下同一 click selectorRef 最多出现一次。
 只能选择以下已注册场景、selectorRef 和 oracleId：
 ${JSON.stringify(executableScenarios)}
 
-确定性代码影响图（它是辅助证据，不是答案；如果与需求语义冲突，必须在风险说明中解释）：
+确定性代码影响图（它是辅助证据，不是答案；不得改变允许的动作或场景合同）：
 ${JSON.stringify({
   affectedPages: input.impactAnalysis?.affectedPages ?? [],
   affectedApis: input.impactAnalysis?.affectedApis ?? [],
@@ -178,7 +144,7 @@ ${JSON.stringify(selectedContract)}
 ${previousOutput.slice(0, 12_000)}
 </untrusted_previous_output>
 
-重新输出一个完整 JSON 对象。必须包含所选 scenario 的全部 oracleId 对应 assert action，且每个 planPath 恰好出现一次。`;
+重新输出一个完整 JSON 对象。必须包含所选 scenario 的全部 oracleId 对应 assert action，且每个 planPath 至少有一个 action。`;
 }
 
 function compile(candidate: z.infer<typeof llmPlanResponseSchema>, preferredScenarioId?: string, browserControlAllowed = true) {
@@ -198,19 +164,6 @@ function compile(candidate: z.infer<typeof llmPlanResponseSchema>, preferredScen
     ["core_path", scenario.corePath.pathId],
     ...(scenario.regressionPath ? [["regression", scenario.regressionPath.stepId] as const] : [])
   ]);
-  const suppliedPlanPaths = candidate.plan.levels.flatMap((level) => level.paths.map((path) => ({ levelId: level.id, pathId: path.id })));
-  if (candidate.plan.levels.length !== expectedPlanPaths.size || suppliedPlanPaths.length !== expectedPlanPaths.size) {
-    throw new Error("llm_plan_path_coverage_invalid");
-  }
-  for (const [levelId, pathId] of expectedPlanPaths) {
-    if (!suppliedPlanPaths.some((item) => item.levelId === levelId && item.pathId === pathId)) {
-      throw new Error(`llm_plan_path_not_bound:${levelId}:${pathId}`);
-    }
-  }
-  const declaredPathIds = new Set(suppliedPlanPaths.map((item) => item.pathId));
-  for (const risk of candidate.plan.risks) {
-    if (risk.coverageDisposition === "required" && risk.pathIds.some((pathId) => !declaredPathIds.has(pathId))) throw new Error(`llm_plan_risk_unknown_path:${risk.id}`);
-  }
   const allowedPathIds = new Set(expectedPlanPaths.values());
   for (const step of candidate.actions) {
     if (!allowedPathIds.has(step.pathId)) throw new Error(`llm_plan_action_unknown_path:${step.pathId}`);
@@ -304,7 +257,7 @@ export async function generatePlan(input: GeneratePlanInput) {
     return {
       source: "llm",
       message: repaired ? "LLM 初始计划经一次受约束修复后通过编译。" : "已通过 LLM 生成显式灰度 plan。",
-      plan: coercePlan(candidate.plan),
+      plan: buildScenarioGrayPlan(getScenario(candidate.scenarioId)),
       scenarioId: candidate.scenarioId,
       compiledPlan,
       llmCall: accepted.call,
