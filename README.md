@@ -184,6 +184,7 @@ npm run worker                # 启动 BullMQ execution worker
 npm run contracts:generate    # 生成 OpenAPI 和 Workbench TypeScript 类型
 npm run benchmark:run         # 通过 /v1/runs 执行真实 Benchmark
 npm run benchmark:evaluate    # 在隔离 evaluator 中挂载人工标签并计算增益
+npm run benchmark:recompute-history # 以当前 Gate 重算历史报告，不改写原始记录
 npm run test:unified-run      # /v1/runs -> Playwright -> Artifact v2 闭环
 npm run acceptance:production # PostgreSQL/Redis/MinIO/OIDC/worker 生产栈验收
 
@@ -199,7 +200,7 @@ npm run reports:retention:archive
 
 可通过 `BENCHMARK_EXTENDED=1` 加入 Customer Portal 的6条扩展案例；核心命题、门禁规则与可证伪的验收标准见 [Evidence-Grounded Testing 方法说明](docs/evidence-grounded-method.md)。
 
-运行前先在凭据管理中创建对应模型，并注入 `BENCHMARK_OPENAI_CREDENTIAL_ID` 与 `BENCHMARK_ANTHROPIC_CREDENTIAL_ID`。Runner 不得获得 `BENCHMARK_LABELS_ROOT`；运行结束后只在 evaluator 进程挂载标签：
+运行前先在凭据管理中创建 SophNet `gpt-5.1-codex` 凭据，并注入 `BENCHMARK_SOPHNET_CREDENTIAL_ID`。Poe 目录仅作为历史审计，不再进入活动矩阵。Runner 不得获得 `BENCHMARK_LABELS_ROOT`；运行结束后只在 evaluator 进程挂载标签：
 
 ```bash
 BENCHMARK_EXPERIMENT_ID=competition-v1 npm run benchmark:run
@@ -209,6 +210,8 @@ npm run benchmark:evaluate
 ```
 
 缺少模型、凭据、Docker daemon 或生产服务时命令以 `blocked` 结束；Workbench 保留 `awaiting_agent_runs`/blocker，不用 fallback 或空指标冒充 AI 结果。
+
+历史实验可在 evaluator 中通过 `BENCHMARK_HISTORICAL_EXPERIMENT_ID` 重算。重算快照会标注 `historical-recompute`，把 test-command、缺少 Artifact v2、覆盖不足或场景不匹配的记录排除在正式指标之外；它只能作为开发审计，不能证明 LLM 增益或替代盲测。
 
 生产验收栈位于 `deploy/production-acceptance/`。复制其中 `.env.example`、替换所有值后运行 `npm run acceptance:production`。它会验证 OIDC runner、BullMQ worker、PostgreSQL 重启恢复、MinIO Artifact v2 提交和 Redis 可用性，并在默认情况下自动清理容器与卷。
 

@@ -42,10 +42,13 @@ export function reserveLlmOutputTokens(input: {
   };
 }
 
-function usageCost(model: string, promptTokens?: number, completionTokens?: number) {
-  const rates = model.startsWith("claude-sonnet-4-6")
+function usageCost(provider: CredentialRecord["provider"], model: string, promptTokens?: number, completionTokens?: number) {
+  // Provider pricing is intentionally explicit. An OpenAI-compatible endpoint
+  // is not necessarily billed at OpenAI rates (for example SophNet), so an
+  // unknown provider must report token usage without inventing a dollar cost.
+  const rates = provider === "anthropic" && model.startsWith("claude-sonnet-4-6")
     ? { input: 3, output: 15 }
-    : model.startsWith("gpt-5.1")
+    : provider === "openai" && model.startsWith("gpt-5.1")
       ? { input: 1.25, output: 10 }
       : undefined;
   return rates && (promptTokens !== undefined || completionTokens !== undefined)
@@ -69,6 +72,34 @@ async function persist(call: LlmCall) {
   }
 }
 
+async function parseResponsesStream(response: Response) {
+  let completed: Record<string, any> | undefined;
+  let text = "";
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("provider_responses_body_missing");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const consume = (line: string) => {
+    if (!line.startsWith("data: ")) return;
+    try {
+      const event = JSON.parse(line.slice(6)) as Record<string, any>;
+      if (event.type === "response.output_text.delta") text += typeof event.delta === "string" ? event.delta : "";
+      if (event.type === "response.completed") completed = event.response;
+    } catch { /* ignore keep-alive and malformed provider lines */ }
+  };
+  while (!completed) {
+    const next = await reader.read();
+    buffer += decoder.decode(next.value ?? new Uint8Array(), { stream: !next.done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) consume(line);
+    if (next.done) break;
+  }
+  if (!completed && buffer) consume(buffer);
+  if (!completed) throw new Error("provider_responses_incomplete");
+  return { ...completed, output_text: text };
+}
+
 export async function executeLlmCall(input: {
   credential: CredentialRecord;
   apiKey: string;
@@ -84,7 +115,11 @@ export async function executeLlmCall(input: {
   const started = Date.now();
   try {
     const anthropic = input.credential.provider === "anthropic";
-    const response = await fetch(`${input.credential.baseUrl}${anthropic ? "/messages" : "/chat/completions"}`, {
+    // Codex profiles exposed by some OpenAI-compatible gateways only support
+    // the Responses API. Keep the adapter narrow so ordinary compatible
+    // models continue using chat completions.
+    const responsesApi = !anthropic && input.credential.provider === "openai-compatible" && /codex/i.test(input.credential.model);
+    const response = await fetch(`${input.credential.baseUrl}${anthropic ? "/messages" : responsesApi ? "/responses" : "/chat/completions"}`, {
       method: "POST",
       headers: anthropic
         ? { "content-type": "application/json", "x-api-key": input.apiKey, "anthropic-version": "2023-06-01" }
@@ -96,6 +131,13 @@ export async function executeLlmCall(input: {
         temperature: input.temperature ?? 0,
         system: input.system,
         messages: [{ role: "user", content: input.prompt }]
+      } : responsesApi ? {
+        model: input.credential.model,
+        instructions: input.system,
+        input: `${input.prompt}\nReturn a JSON object.`,
+        max_output_tokens: input.maxTokens,
+        stream: true,
+        text: { format: { type: "json_object" } }
       } : {
         model: input.credential.model,
         temperature: input.temperature ?? 0,
@@ -105,9 +147,11 @@ export async function executeLlmCall(input: {
       })
     });
     if (!response.ok) throw new Error(`provider_http_${response.status}`);
-    const data = await response.json() as {
+    const data = (responsesApi ? await parseResponsesStream(response) : await response.json()) as {
       id?: string;
       model?: string;
+      output_text?: string;
+      output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
       choices?: Array<{ message?: { content?: string } }>;
       content?: Array<{ type: string; text?: string }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; input_tokens?: number; output_tokens?: number };
@@ -127,12 +171,16 @@ export async function executeLlmCall(input: {
         promptTokens,
         completionTokens,
         totalTokens: data.usage?.total_tokens ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined),
-        estimatedCostUsd: usageCost(data.model ?? input.credential.model, promptTokens, completionTokens)
+        estimatedCostUsd: usageCost(input.credential.provider, data.model ?? input.credential.model, promptTokens, completionTokens)
       }
     });
     await persist(call);
     return {
-      text: anthropic ? data.content?.find((item) => item.type === "text")?.text ?? "" : data.choices?.[0]?.message?.content ?? "",
+      text: anthropic
+        ? data.content?.find((item) => item.type === "text")?.text ?? ""
+        : responsesApi
+          ? data.output_text ?? data.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text" || item.type === "text")?.text ?? ""
+          : data.choices?.[0]?.message?.content ?? "",
       call
     };
   } catch (error) {

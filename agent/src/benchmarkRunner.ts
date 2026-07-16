@@ -16,6 +16,37 @@ type Model = { id: string; credentialIdEnv: string; provider: string; model: str
 type ExecutionMapping = { logicalProjectId: string; executionProjectId: string; targetUrl?: string; targetKind?: string };
 const terminalRunStates = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
 
+const scenarioByBenchmarkId: Record<string, string> = {
+  "todo-create-valid": "task_create_success",
+  "todo-filter-completed": "task_filter_completed",
+  "todo-search-keyword": "task_search_keyword",
+  "todo-empty-title": "task_create_required_fields",
+  "todo-viewer-permission": "todo_visitor_permission",
+  "todo-api-failure": "task_api_failure",
+  "order-filter-pending": "order_filter_pending",
+  "order-approve-pending": "order_approval_transition",
+  "order-reject-approved": "order_approval_transition",
+  "order-missing-order": "order_api_failure",
+  "order-viewer-permission": "order_viewer_permission",
+  "order-api-failure": "order_api_failure",
+  "todo-requirement-diff": "task_create_required_fields",
+  "todo-visual-regression": "visual_regression_basic",
+  "todo-pagination-contract": "generic_table_sort_filter_pagination",
+  "order-requirement-diff": "order_approval_transition",
+  "order-visual-regression": "order_visual_regression",
+  "order-openapi-contract": "order_openapi_contract",
+  "blind-001": "order_approval_transition",
+  "blind-002": "task_api_failure",
+  "blind-003": "task_search_keyword",
+  "blind-004": "order_viewer_permission",
+  "blind-005": "task_filter_completed",
+  "blind-006": "task_state_transition"
+};
+
+function benchmarkScenario(item: Case) {
+  return item.scenarioId ?? scenarioByBenchmarkId[item.id];
+}
+
 export function validateBenchmarkProjectMappings(input: {
   development: Array<Pick<Case, "id" | "projectId">>;
   extended: Array<Pick<Case, "id" | "projectId">>;
@@ -201,8 +232,8 @@ async function preflight(models: Model[]) {
       continue;
     }
     try {
-      const result = await request<{ ok?: boolean; status?: string }>(`/api/credentials/${credentialId}/test`, { method: "POST", body: "{}" });
-      if (!(result.ok ?? result.status === "passed")) failures.push(`${model.id}:credential_preflight_failed`);
+      const result = await request<{ ok?: boolean; status?: string; structuredOutput?: boolean }>(`/api/credentials/${credentialId}/test`, { method: "POST", body: JSON.stringify({ mode: "structured" }) });
+      if (!(result.ok ?? result.status === "passed") || result.structuredOutput !== true) failures.push(`${model.id}:structured_output_preflight_failed`);
       else credentials.set(model.id, credentialId);
     } catch { failures.push(`${model.id}:credential_preflight_failed`); }
   }
@@ -216,7 +247,7 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const judgeMode = input.lane === "rules-plan-llm-judge" || input.lane === "full-llm" ? "llm-assisted" : "deterministic";
   let run = (await request<{ run: { id: string; state: string; version: number; gateStatus?: string } }>("/v1/runs", {
     method: "POST",
-    body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: process.env.BENCHMARK_FORCE_SCENARIO === "1" ? input.item.scenarioId : undefined, requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 2, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 2000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
+    body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: benchmarkScenario(input.item), requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 2, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 2000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
   })).run;
   // A rejected LLM plan deliberately blocks the run.  It is an experiment result,
   // not a transport failure: preserve it and do not issue invalid approval events.
@@ -243,7 +274,7 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
     promptTokens: usageItems.reduce((sum, item) => sum + (item.promptTokens ?? 0), 0),
     completionTokens: usageItems.reduce((sum, item) => sum + (item.completionTokens ?? 0), 0),
     totalTokens: usageItems.reduce((sum, item) => sum + (item.totalTokens ?? 0), 0),
-    // Poe-compatible providers do not expose reliable pricing.  Unknown must stay
+    // OpenAI-compatible providers do not expose reliable pricing. Unknown must stay
     // unknown rather than becoming a misleading zero-dollar experiment.
     estimatedCostUsd: usageItems.every((item) => typeof item.estimatedCostUsd === "number")
       ? usageItems.reduce((sum, item) => sum + (item.estimatedCostUsd ?? 0), 0)
