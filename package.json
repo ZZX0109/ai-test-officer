@@ -35,6 +35,7 @@
     "judge:eval": "npm --workspace @ai-test-officer/agent run judge:eval",
     "benchmark:run": "npm --workspace @ai-test-officer/agent run benchmark:run",
     "benchmark:evaluate": "npm --workspace @ai-test-officer/agent run benchmark:evaluate",
+    "benchmark:recompute-history": "npm --workspace @ai-test-officer/agent run benchmark:recompute-history",
     "acceptance:production": "node scripts/production-acceptance.mjs",
     "hooks:install": "sh scripts/install-ai-test-officer-hook.sh",
     "reports:retention": "node scripts/reports-retention.mjs",

@@ -63,7 +63,10 @@ function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
     if (event.payload.compiledPlan) projection.compiledPlan = event.payload.compiledPlan as CompiledPlan;
     if (event.payload.scenarioId) projection.selectedScenarioId = String(event.payload.scenarioId);
   }
-  if (event.type === "run_completed") projection.gateStatus = (event.payload.finalStatus as GateStatus | undefined) ?? "pass";
+  // Older event streams used `run_completed` without an explicit Gate result.
+  // Never infer a pass during replay: a legacy completion proves only that the
+  // scheduler finished, not coverage, evidence integrity, or a final decision.
+  if (event.type === "run_completed") projection.gateStatus = (event.payload.finalStatus as GateStatus | undefined) ?? "needs-human-review";
   if (event.type === "run_failed") projection.gateStatus = "fail";
   if (event.type === "run_blocked") projection.gateStatus = "blocked";
   if (event.type === "human_review_requested") projection.gateStatus = "needs-human-review";

@@ -27,6 +27,18 @@ export async function testRunEventStore() {
   assert.equal(run.state, "running");
   assert.equal((await runEventStore.events(runId)).length, 8);
 
+  const legacyCompletedId = `legacy_completed_${suffix}`;
+  let legacyCompleted = await runEventStore.create({ runId: legacyCompletedId, actor: "tester", idempotencyKey: `legacy-create-${suffix}` });
+  legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "plan_generated", expectedVersion: legacyCompleted.version, actor: "planner", idempotencyKey: `legacy-plan-${suffix}` });
+  legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "plan_approved", expectedVersion: legacyCompleted.version, actor: "tester", idempotencyKey: `legacy-approve-${suffix}` });
+  legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "permission_granted", expectedVersion: legacyCompleted.version, actor: "tester", idempotencyKey: `legacy-permission-${suffix}` });
+  legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "run_preparing", expectedVersion: legacyCompleted.version, actor: "worker", idempotencyKey: `legacy-prepare-${suffix}` });
+  legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "run_started", expectedVersion: legacyCompleted.version, actor: "worker", idempotencyKey: `legacy-start-${suffix}` });
+  legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "evidence_collecting", expectedVersion: legacyCompleted.version, actor: "worker", idempotencyKey: `legacy-evidence-${suffix}` });
+  legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "run_judging", expectedVersion: legacyCompleted.version, actor: "worker", idempotencyKey: `legacy-judge-${suffix}` });
+  legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "run_completed", expectedVersion: legacyCompleted.version, actor: "worker", idempotencyKey: `legacy-complete-${suffix}`, payload: {} });
+  assert.equal(legacyCompleted.gateStatus, "needs-human-review", "legacy completion without an explicit final status must not replay as pass");
+
   const queuedPauseId = `queued_pause_${suffix}`;
   let queuedPause = await runEventStore.create({ runId: queuedPauseId, actor: "tester", idempotencyKey: `queued-create-${suffix}` });
   queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "plan_generated", expectedVersion: queuedPause.version, actor: "planner", idempotencyKey: `queued-plan-${suffix}` });

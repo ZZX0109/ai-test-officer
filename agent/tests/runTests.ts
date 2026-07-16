@@ -40,6 +40,7 @@ import { testEvidenceQuality } from "./evidenceQuality.test.js";
 import { testUntrustedInputDefense } from "./untrustedInput.test.js";
 import { testRedactionPreservesUsageTelemetry } from "./redaction.test.js";
 import { testCompiledPlanExecution } from "./compiledPlanExecution.test.js";
+import { testBenchmarkSummary } from "./benchmarkSummary.test.js";
 
 async function main() {
   await testConnectorEnvelope();
@@ -60,6 +61,7 @@ async function main() {
   testUntrustedInputDefense();
   testRedactionPreservesUsageTelemetry();
   testBenchmarkEvaluation();
+  testBenchmarkSummary();
   testLlmRoutingPolicy();
   await testIndependentFixtures();
   testRepairProposals();

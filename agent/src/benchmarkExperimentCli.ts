@@ -68,7 +68,14 @@ async function main() {
     evaluations.push(evaluateExperiment({ experimentId, split: "blind", cases: blindCases, labels: selectedBlindLabels, records, plannedRuns: blindMatrix.expectedRuns, thresholds: config.acceptance, roi: config.roi }));
   }
   const blind = evaluations.find((item) => item.split === "blind");
-  const output = { experimentId, createdAt: new Date().toISOString(), status: blind ? evaluations.every((item) => item.status === "completed") ? "completed" : "awaiting_agent_runs" : "awaiting_blind_runs", conclusion: blind ? blind.acceptance.proven ? "llm_gain_proven" : "llm_gain_not_proven" : "development_only", evaluations };
+  const output = {
+    experimentId,
+    createdAt: new Date().toISOString(),
+    status: blind ? evaluations.every((item) => item.status === "completed") ? "completed" : "awaiting_agent_runs" : "awaiting_blind_runs",
+    conclusion: blind ? blind.acceptance.proven ? "llm_gain_proven" : "llm_gain_not_proven" : "development_only",
+    provenance: { kind: "live-evaluation", rawRecordsModified: false, blindDataIncluded: Boolean(blind) },
+    evaluations
+  };
   await writeFile(path.join(directory, "evaluation.json"), JSON.stringify(output, null, 2));
   await writeFile(path.join(directory, "evaluation-summary.md"), evaluationMarkdown(output));
   await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify(output, null, 2));

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { diagnoseBenchmarkRun, evaluateBenchmark, evaluateExperiment, hasCompleteBenchmarkTrace, validateExperimentRunMatrix, type BenchmarkCase, type BenchmarkRunRecord, type HumanBenchmarkLabel } from "../src/benchmark.js";
+import { diagnoseBenchmarkRun, evaluateBenchmark, evaluateExperiment, hasCompleteBenchmarkTrace, normalizeHistoricalBenchmarkRecord, recomputeHistoricalBenchmarkRecords, validateExperimentRunMatrix, type BenchmarkCase, type BenchmarkRunRecord, type HumanBenchmarkLabel } from "../src/benchmark.js";
 
 function fixtures() {
   const cases: BenchmarkCase[] = Array.from({ length: 18 }, (_, index) => ({
@@ -78,6 +78,20 @@ export function testBenchmarkEvaluation() {
     deterministic: { verdict: "needs_review" as const, evidenceRefs: ["ev-1"], status: "passed" as const }
   };
   assert.equal(evaluateBenchmark(cases, labels, [commandOnly]).completedRuns, 0, "command-only baselines must not enter the formal completed denominator");
+  const migratedCommand = normalizeHistoricalBenchmarkRecord({ ...commandOnly, finalStatus: "pass" as const, status: "completed" });
+  assert.equal(migratedCommand.record.status, "invalid");
+  assert.equal(migratedCommand.record.finalStatus, "needs-human-review");
+  assert.ok(migratedCommand.exclusion?.reasons.includes("command_baseline_not_formal_evidence"));
+  const missingTrace = normalizeHistoricalBenchmarkRecord({ ...record, artifactsV2: undefined, finalStatus: undefined });
+  assert.equal(missingTrace.record.status, "invalid");
+  assert.ok(missingTrace.exclusion?.reasons.includes("final_status_missing"));
+  assert.ok(missingTrace.exclusion?.reasons.includes("artifact_v2_trace_incomplete"));
+  const wrongScenario = normalizeHistoricalBenchmarkRecord(record, { ...labels[0], expectedScenarioId: "other-scenario" });
+  assert.equal(wrongScenario.record.status, "invalid");
+  assert.ok(wrongScenario.exclusion?.reasons.includes("scenario_selection_mismatch"));
+  const migrated = recomputeHistoricalBenchmarkRecords([record, { ...commandOnly, finalStatus: "pass" as const }]);
+  assert.equal(migrated.records.filter((item) => item.status === "completed").length, 1);
+  assert.equal(migrated.exclusions.length, 1);
 
   const experimentRecords: BenchmarkRunRecord[] = [
     { ...record, experimentId: "exp-1", split: "blind", lane: "rules-deterministic", benchmarkId: "bm-1", repetition: 1 },

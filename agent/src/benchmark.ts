@@ -105,6 +105,17 @@ export interface BenchmarkRunRecord {
   };
 }
 
+export interface HistoricalBenchmarkExclusion {
+  runId: string;
+  benchmarkId: string;
+  reasons: string[];
+}
+
+export interface HistoricalBenchmarkRecompute {
+  records: BenchmarkRunRecord[];
+  exclusions: HistoricalBenchmarkExclusion[];
+}
+
 export interface ExperimentEvaluation {
   experimentId: string;
   status: "awaiting_agent_runs" | "completed" | "blocked";
@@ -322,6 +333,51 @@ export function hasCompleteBenchmarkTrace(record: BenchmarkRunRecord) {
   const llmRequired = record.lane?.includes("llm") ?? false;
   const llmValid = !llmRequired || Boolean(record.llmCalls?.length && record.llmCalls.every((call) => call.id && call.runId && call.provider && call.model && call.status));
   return attemptsValid && artifactsValid && llmValid;
+}
+
+/**
+ * Converts an old, permissive benchmark record into the current formal-gate
+ * representation without changing the source file. Invalid records become
+ * `invalid`, so evaluators retain them for audit but exclude them from formal
+ * metrics and release claims.
+ */
+export function normalizeHistoricalBenchmarkRecord(record: BenchmarkRunRecord, label?: HumanBenchmarkLabel): { record: BenchmarkRunRecord; exclusion?: HistoricalBenchmarkExclusion } {
+  const reasons: string[] = [];
+  const commandBaseline = record.lane === "test-command" || record.executionOrigin === "command-baseline";
+  if (commandBaseline) reasons.push("command_baseline_not_formal_evidence");
+  if (!record.finalStatus) reasons.push("final_status_missing");
+  if (!record.requirementCovered) reasons.push("requirement_not_covered");
+  if (record.gateEligible !== true) reasons.push("gate_not_eligible");
+  if (record.artifactIntegrityVerified !== true) reasons.push("artifact_integrity_not_verified");
+  if (!hasCompleteBenchmarkTrace(record)) reasons.push("artifact_v2_trace_incomplete");
+  if (record.artifactsV2?.some((artifact) => artifact.integrityStatus !== "verified" || !/^[a-f0-9]{64}$/.test(artifact.sha256) || (artifact.origin !== "runtime-captured" && artifact.origin !== "fixture"))) reasons.push("artifact_v2_integrity_invalid");
+  if (label?.expectedScenarioId && record.selectedScenarioId !== label.expectedScenarioId) reasons.push("scenario_selection_mismatch");
+  if (!reasons.length) return { record };
+
+  const safeStatus = record.finalStatus === "fail" || record.finalStatus === "blocked"
+    ? record.finalStatus
+    : "needs-human-review";
+  return {
+    record: {
+      ...record,
+      status: "invalid",
+      requirementCovered: false,
+      gateEligible: false,
+      artifactIntegrityVerified: false,
+      finalStatus: safeStatus,
+      executionOrigin: commandBaseline ? "command-baseline" : record.executionOrigin ?? "static-report"
+    },
+    exclusion: { runId: record.runId, benchmarkId: record.benchmarkId, reasons }
+  };
+}
+
+export function recomputeHistoricalBenchmarkRecords(records: BenchmarkRunRecord[], labels: HumanBenchmarkLabel[] = []): HistoricalBenchmarkRecompute {
+  const labelByBenchmarkId = new Map(labels.map((label) => [label.benchmarkId, label]));
+  const normalized = records.map((record) => normalizeHistoricalBenchmarkRecord(record, labelByBenchmarkId.get(record.benchmarkId)));
+  return {
+    records: normalized.map((item) => item.record),
+    exclusions: normalized.flatMap((item) => item.exclusion ? [item.exclusion] : [])
+  };
 }
 
 function isIndependentCompletedRun(record: BenchmarkRunRecord) {
