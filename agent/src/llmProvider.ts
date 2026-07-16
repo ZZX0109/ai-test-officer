@@ -100,7 +100,7 @@ async function parseResponsesStream(response: Response) {
   return { ...completed, output_text: text };
 }
 
-export async function executeLlmCall(input: {
+async function executeLlmCallAttempt(input: {
   credential: CredentialRecord;
   apiKey: string;
   prompt: string;
@@ -109,7 +109,10 @@ export async function executeLlmCall(input: {
   timeoutMs?: number;
   temperature?: number;
   context: LlmCallContext;
-}) {
+}, transportRetriesRemaining: number): Promise<{
+  text: string;
+  call: LlmCall;
+}> {
   const id = `llm_${randomUUID()}`;
   const startedAt = new Date().toISOString();
   const started = Date.now();
@@ -185,8 +188,30 @@ export async function executeLlmCall(input: {
     };
   } catch (error) {
     const errorCode = error instanceof Error ? error.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
+    // Some OpenAI-compatible gateways intermittently terminate an otherwise
+    // valid Responses stream before the terminal event. Retry the *transport*
+    // once before recording a logical model-call failure. This does not retry
+    // an LLM decision or relax the requirement for `response.completed`.
+    const responsesApi = input.credential.provider === "openai-compatible" && /codex/i.test(input.credential.model);
+    if (responsesApi && errorCode === "provider_responses_incomplete" && transportRetriesRemaining > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return executeLlmCallAttempt(input, transportRetriesRemaining - 1);
+    }
     const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: input.credential.model, startedAt, durationMs: Date.now() - started, status: "failed", usage: {}, errorCode });
     await persist(call);
     throw Object.assign(new Error(errorCode), { llmCall: call });
   }
+}
+
+export async function executeLlmCall(input: {
+  credential: CredentialRecord;
+  apiKey: string;
+  prompt: string;
+  system: string;
+  maxTokens: number;
+  timeoutMs?: number;
+  temperature?: number;
+  context: LlmCallContext;
+}) {
+  return executeLlmCallAttempt(input, 1);
 }

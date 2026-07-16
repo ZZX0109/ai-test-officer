@@ -262,28 +262,15 @@ app.post("/api/credentials/:id/test", async (req, res, next) => {
       return;
     }
     try {
-      const callInput = {
+      const result = await executeLlmCall({
         credential,
         apiKey: await decrypt(credential.apiKeyEncrypted),
         system: "Return only a JSON object with key ok and boolean value.",
         prompt: "Preflight structured output check.",
         maxTokens: 64,
         timeoutMs: 30_000,
-        context: { purpose: "planning" as const, experimentId: "credential-preflight" }
-      };
-      // A gateway may close an SSE connection before sending its terminal event.
-      // Keep the strict Responses contract (no terminal event is still a failure),
-      // but allow one fresh connection for this health check so a transient
-      // transport truncation cannot incorrectly block an entire experiment.
-      let result;
-      try {
-        result = await executeLlmCall(callInput);
-      } catch (firstError) {
-        const code = firstError instanceof Error ? firstError.message : "";
-        if (code !== "provider_responses_incomplete") throw firstError;
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        result = await executeLlmCall(callInput);
-      }
+        context: { purpose: "planning", experimentId: "credential-preflight" }
+      });
       let parsed: unknown;
       try { parsed = JSON.parse(result.text); } catch { parsed = undefined; }
       res.json({ ...connection, structuredOutput: parsed && typeof parsed === "object" && (parsed as { ok?: unknown }).ok === true, call: result.call });
