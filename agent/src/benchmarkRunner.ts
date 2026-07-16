@@ -14,6 +14,7 @@ type Lane = "test-command" | "rules-deterministic" | "llm-plan-deterministic-jud
 type Case = { id: string; split: "development" | "blind"; projectId: string; scenarioId?: string; requirement: string; diff: string; risk: string; fixtureVariantId?: string };
 type Model = { id: string; credentialIdEnv: string; provider: string; model: string };
 type ExecutionMapping = { logicalProjectId: string; executionProjectId: string; targetUrl?: string; targetKind?: string };
+type FixtureVariantBinding = { fixtureVariantId: string; logicalProjectId: string; executionProjectId: string };
 const terminalRunStates = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
 
 const scenarioByBenchmarkId: Record<string, string> = {
@@ -81,6 +82,28 @@ export function validateBenchmarkProjectMappings(input: {
   return byLogicalProject;
 }
 
+/** Opaque fixture IDs are public execution inputs, but their failure semantics stay evaluator-owned. */
+export function validateBenchmarkFixtureBindings(input: {
+  cases: Array<Pick<Case, "id" | "projectId" | "fixtureVariantId">>;
+  mappings: Map<string, ExecutionMapping>;
+  variants: FixtureVariantBinding[];
+}) {
+  const variants = new Map<string, FixtureVariantBinding>();
+  for (const variant of input.variants) {
+    if (variants.has(variant.fixtureVariantId)) throw new Error(`benchmark_fixture_variant_duplicate:${variant.fixtureVariantId}`);
+    variants.set(variant.fixtureVariantId, variant);
+  }
+  for (const item of input.cases) {
+    if (!item.fixtureVariantId) continue;
+    const binding = variants.get(item.fixtureVariantId);
+    if (!binding) throw new Error(`benchmark_fixture_variant_missing:${item.id}:${item.fixtureVariantId}`);
+    const mapping = input.mappings.get(item.projectId);
+    if (!mapping || binding.logicalProjectId !== item.projectId || binding.executionProjectId !== mapping.executionProjectId) {
+      throw new Error(`benchmark_fixture_variant_project_mismatch:${item.id}:${item.fixtureVariantId}`);
+    }
+  }
+}
+
 function selectedModels(models: Model[]) {
   const requested = (process.env.BENCHMARK_MODEL_IDS ?? "")
     .split(",")
@@ -126,6 +149,29 @@ export function assessPlannerOutcome(plannerMode: "deterministic" | "llm", prove
       && Boolean(provenance.llmCallId)
     : provenance?.compilationStatus !== "rejected";
   return { planExecutable, plannerFailed: plannerMode === "llm" && !planExecutable };
+}
+
+/** Keep scheduling, execution, coverage and formal-gate facts separate in every lane. */
+export function deriveBenchmarkExecutionSignals(report: Record<string, any>, artifacts: Array<Record<string, any>>) {
+  const riskCoverage = Array.isArray(report.riskCoverageMatrix) ? report.riskCoverageMatrix : [];
+  const requirementCovered = riskCoverage.length > 0 && riskCoverage.every((risk: any) => risk?.covered === true && risk?.passed === true);
+  const hasRuntimeArtifacts = artifacts.some((artifact) => artifact.origin === "runtime-captured");
+  const hasExecutedAssertion = Array.isArray(report.assertions) && report.assertions.length > 0;
+  const artifactIntegrityVerified = Boolean(report.artifactIntegrity?.items?.length)
+    && report.artifactIntegrity.items.every((item: any) => item.status === "present" || item.status === "self_reference");
+  const artifactsAreFormal = artifacts.length > 0
+    && artifacts.every((artifact) => (artifact.origin === "runtime-captured" || artifact.origin === "fixture")
+      && artifact.integrity?.sha256
+      && artifact.integrity?.sizeBytes !== undefined);
+  const evidenceGrounded = report.evidenceQuality?.summary?.groundedPassedRate === 1
+    && report.evidenceQuality?.summary?.crossAttemptViolations === 0;
+  const executionSucceeded = hasRuntimeArtifacts && hasExecutedAssertion;
+  return {
+    requirementCovered,
+    executionSucceeded,
+    artifactIntegrityVerified,
+    gateEligible: executionSucceeded && requirementCovered && artifactIntegrityVerified && artifactsAreFormal && evidenceGrounded
+  };
 }
 
 async function executeTestCommandCase(input: { item: Case; projectId: string; experimentId: string; artifactRoot: string; promptVersion: string; repetition: number }): Promise<BenchmarkRunRecord> {
@@ -290,18 +336,17 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const durationMs = Date.now() - new Date(startedAt).getTime();
   const plannerOutcome = assessPlannerOutcome(plannerMode, report.planProvenance);
   const llmFailed = plannerOutcome.plannerFailed || (plannerMode === "llm" && !plannerCall) || (judgeMode === "llm-assisted" && (!judgeCall || report.judgeReport?.llmStatus !== "passed" || report.judgeReport?.executionMode === "fallback_baseline"));
-  const hasRuntimeArtifacts = artifacts.some((artifact) => artifact.origin === "runtime-captured");
-  const artifactIntegrityVerified = Boolean(report.artifactIntegrity?.items?.length) && report.artifactIntegrity.items.every((item: any) => item.status === "present" || item.status === "self_reference");
+  const execution = deriveBenchmarkExecutionSignals(report, artifacts);
   return {
     benchmarkId: input.item.id, runId: run.id, experimentId: input.experimentId, split: input.item.split, lane: input.lane, modelProfileId: input.model?.id, repetition: input.repetition,
-    status: "completed", startedAt, finishedAt: new Date().toISOString(), requirementCovered: Boolean(report.riskCoverageMatrix?.length), executionSucceeded: hasRuntimeArtifacts, retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: plannerOutcome.planExecutable, planSource: plannerMode, selectedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId, finalStatus: finalStatus(run.gateStatus),
+    status: "completed", startedAt, finishedAt: new Date().toISOString(), requirementCovered: execution.requirementCovered, executionSucceeded: execution.executionSucceeded, retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: plannerOutcome.planExecutable, planSource: plannerMode, selectedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId, finalStatus: finalStatus(run.gateStatus),
     planProvenance: report.planProvenance,
     attempts: (report.attempts ?? []).map((attempt: any) => ({ id: attempt.id, runId: attempt.runId, scenarioId: attempt.scenarioId, attempt: attempt.attempt, status: attempt.status })),
     llmCalls: [...plannerCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "planning" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, durationMs: call.durationMs, usage: call.usage })), ...judgeCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "judging" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, durationMs: call.durationMs, usage: call.usage }))],
     deterministic: { verdict: deterministicVerdict, evidenceRefs: deterministicEvidenceRefs, status: "passed", durationMs },
     llm: plannerMode === "llm" || judgeMode === "llm-assisted" ? { verdict: llmVerdict, evidenceRefs: judgeMode === "llm-assisted" ? modelRecommendation?.evidenceRefs ?? [] : deterministicEvidenceRefs, failureClass: judgeMode === "llm-assisted" ? modelRecommendation?.failureClass : report.failureAttributions?.[0]?.failureClass, status: llmFailed ? "failed" : "passed", fallback: report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
     evidence: (report.evidence ?? []).map((item: any) => ({ id: item.id, type: item.type })), attribution: { failureClass: report.failureAttributions?.[0]?.failureClass, suspectFiles: report.failureAttributions?.flatMap((entry: any) => entry.topSuspects?.map((suspect: any) => suspect.filePath) ?? []) ?? [], evidenceRefs: report.failureAttributions?.flatMap((entry: any) => entry.evidenceRefs ?? []) ?? [] },
-    executionOrigin: "agent-run", gateEligible: artifacts.length > 0 && artifacts.every((artifact) => artifact.origin === "runtime-captured" || artifact.origin === "fixture") && artifacts.some((artifact) => artifact.origin === "runtime-captured"), artifactIntegrityVerified, evidenceQuality: report.evidenceQuality ? { groundedPassedRate: report.evidenceQuality.summary.groundedPassedRate, runtimeArtifactRate: report.evidenceQuality.summary.runtimeArtifactRate, crossAttemptViolations: report.evidenceQuality.summary.crossAttemptViolations } : undefined, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified", runId: artifact.runId, scenarioId: artifact.scenarioId, stepId: artifact.stepId, attemptId: artifact.attemptId, attempt: artifact.attempt, capturedAt: artifact.integrity.capturedAt, sizeBytes: artifact.integrity.sizeBytes, mediaType: artifact.integrity.mediaType, storageUri: artifact.storageUri }))
+    executionOrigin: "agent-run", gateEligible: execution.gateEligible, artifactIntegrityVerified: execution.artifactIntegrityVerified, evidenceQuality: report.evidenceQuality ? { groundedPassedRate: report.evidenceQuality.summary.groundedPassedRate, runtimeArtifactRate: report.evidenceQuality.summary.runtimeArtifactRate, crossAttemptViolations: report.evidenceQuality.summary.crossAttemptViolations } : undefined, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified", runId: artifact.runId, scenarioId: artifact.scenarioId, stepId: artifact.stepId, attemptId: artifact.attemptId, attempt: artifact.attempt, capturedAt: artifact.integrity.capturedAt, sizeBytes: artifact.integrity.sizeBytes, mediaType: artifact.integrity.mediaType, storageUri: artifact.storageUri }))
   };
 }
 
@@ -345,6 +390,8 @@ export async function runBenchmarkExperiment() {
   if (missingChangeContext.length) throw new Error(`benchmark_case_diff_missing:${missingChangeContext.join(",")}`);
   const mapping = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "execution-map.json"), "utf8")) as { mappings: ExecutionMapping[] };
   const projectMap = validateBenchmarkProjectMappings({ development, extended, blind, mappings: mapping.mappings });
+  const fixtureManifest = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "fixture-variants.json"), "utf8")) as { variants: FixtureVariantBinding[] };
+  validateBenchmarkFixtureBindings({ cases: [...development, ...extended, ...blind], mappings: projectMap, variants: fixtureManifest.variants });
   const experimentId = process.env.BENCHMARK_EXPERIMENT_ID ?? `experiment_${new Date().toISOString().replace(/[:.]/g, "-")}`;
   const directory = path.join(rootDir, "reports", "benchmarks", "experiments", experimentId);
   const runsDir = path.join(directory, "runs");

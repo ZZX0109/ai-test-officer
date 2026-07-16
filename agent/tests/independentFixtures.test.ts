@@ -47,6 +47,8 @@ export async function testIndependentFixtures() {
     assert.equal(isolatedFailure.status, 503);
     const renamedPage = await (await fetch(`${baseUrl}/?fixtureVariantId=fxv_9c4d0a73e1b625f8`)).text();
     assert.match(renamedPage, /aria-label="Find work items"/);
+    const permissionBypassPage = await (await fetch(`${baseUrl}/?fixtureVariantId=fxv_d10a7e1c4b298f63`)).text();
+    assert.match(permissionBypassPage, /permissionBypass=true/);
   });
   await runFixture("order-portal-lite", 6283, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/orders?status=pending`);
@@ -63,5 +65,9 @@ export async function testIndependentFixtures() {
     // Fixture responses are isolated per attempt. A prior benchmark repetition
     // must not mutate the next run's order state on this shared test server.
     assert.equal(repeated.status, 200);
+    const rejectedApprovalPage = await (await fetch(`${baseUrl}/?fixtureVariantId=fxv_d20b8f2d5c3a9074`)).text();
+    assert.match(rejectedApprovalPage, /value="ORD-1002"/);
+    const permissionBypassPage = await (await fetch(`${baseUrl}/?fixtureVariantId=fxv_d30c9a3e6d4b0185`)).text();
+    assert.match(permissionBypassPage, /permissionBypass=true/);
   });
 }

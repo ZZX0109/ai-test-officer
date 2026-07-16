@@ -1,8 +1,8 @@
 [
-  {"benchmarkId":"blind-001","expectedScenarioId":"generic_approval_flow_transition","verdict":"fail","failureClass":"product_bug"},
+  {"benchmarkId":"blind-001","expectedScenarioId":"order_approval_transition","verdict":"fail","failureClass":"product_bug"},
   {"benchmarkId":"blind-002","expectedScenarioId":"task_api_failure","verdict":"needs_review","failureClass":"environment_issue"},
   {"benchmarkId":"blind-003","expectedScenarioId":"task_search_keyword","verdict":"needs_review","failureClass":"test_script_issue"},
-  {"benchmarkId":"blind-004","expectedScenarioId":"generic_role_permission_matrix","verdict":"fail","failureClass":"product_bug"},
+  {"benchmarkId":"blind-004","expectedScenarioId":"order_viewer_permission","verdict":"fail","failureClass":"product_bug"},
   {"benchmarkId":"blind-005","expectedScenarioId":"task_filter_completed","verdict":"needs_review","failureClass":"insufficient_evidence"},
   {"benchmarkId":"blind-006","expectedScenarioId":"task_state_transition","verdict":"needs_review","failureClass":"insufficient_evidence"}
 ]

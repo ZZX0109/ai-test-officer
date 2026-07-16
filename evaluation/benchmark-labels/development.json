@@ -13,8 +13,8 @@
   {"benchmarkId":"order-api-failure","expectedScenarioId":"order_api_failure","verdict":"needs_review","failureClass":"environment_issue"},
   {"benchmarkId":"todo-requirement-diff","expectedScenarioId":"task_create_required_fields","verdict":"pass"},
   {"benchmarkId":"todo-visual-regression","expectedScenarioId":"visual_regression_basic","verdict":"pass"},
-  {"benchmarkId":"todo-pagination-contract","expectedScenarioId":"task_filter_completed","verdict":"pass"},
-  {"benchmarkId":"order-requirement-diff","expectedScenarioId":"generic_approval_flow_transition","verdict":"pass"},
+  {"benchmarkId":"todo-pagination-contract","expectedScenarioId":"generic_table_sort_filter_pagination","verdict":"pass"},
+  {"benchmarkId":"order-requirement-diff","expectedScenarioId":"order_approval_transition","verdict":"pass"},
   {"benchmarkId":"order-visual-regression","expectedScenarioId":"order_visual_regression","verdict":"pass"},
   {"benchmarkId":"order-openapi-contract","expectedScenarioId":"order_openapi_contract","verdict":"pass"}
 ]

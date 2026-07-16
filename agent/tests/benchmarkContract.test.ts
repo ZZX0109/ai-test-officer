@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { assessPlannerOutcome, validateBenchmarkProjectMappings } from "../src/benchmarkRunner.js";
+import { assessPlannerOutcome, deriveBenchmarkExecutionSignals, validateBenchmarkFixtureBindings, validateBenchmarkProjectMappings } from "../src/benchmarkRunner.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
@@ -10,6 +10,21 @@ export async function testBenchmarkContract() {
   assert.deepEqual(assessPlannerOutcome("llm", { source: "llm", compilationStatus: "rejected", model: "model", llmCallId: "call" }), { planExecutable: false, plannerFailed: true });
   assert.deepEqual(assessPlannerOutcome("llm", { source: "llm", compilationStatus: "validated", model: "model", llmCallId: "call" }), { planExecutable: true, plannerFailed: false });
   assert.deepEqual(assessPlannerOutcome("llm", { source: "deterministic", compilationStatus: "validated" }), { planExecutable: false, plannerFailed: true });
+  const completeSignals = deriveBenchmarkExecutionSignals({
+    riskCoverageMatrix: [{ covered: true, passed: true }],
+    assertions: [{ passed: true }],
+    artifactIntegrity: { items: [{ status: "present" }] },
+    evidenceQuality: { summary: { groundedPassedRate: 1, crossAttemptViolations: 0 } }
+  }, [{ origin: "runtime-captured", integrity: { sha256: "a".repeat(64), sizeBytes: 1 } }]);
+  assert.deepEqual(completeSignals, { requirementCovered: true, executionSucceeded: true, artifactIntegrityVerified: true, gateEligible: true });
+  const incompleteSignals = deriveBenchmarkExecutionSignals({
+    riskCoverageMatrix: [{ covered: true, passed: false }],
+    assertions: [{ passed: true }],
+    artifactIntegrity: { items: [{ status: "present" }] },
+    evidenceQuality: { summary: { groundedPassedRate: 1, crossAttemptViolations: 0 } }
+  }, [{ origin: "runtime-captured", integrity: { sha256: "a".repeat(64), sizeBytes: 1 } }]);
+  assert.equal(incompleteSignals.requirementCovered, false);
+  assert.equal(incompleteSignals.gateEligible, false);
   const cases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Array<{ id: string; projectId: string; category: string; scenarioId?: string; expectedVerdict?: string }>;
   assert.equal(cases.length, 18);
   assert.deepEqual(new Set(cases.map((item) => item.projectId)), new Set(["todo_lite", "order_portal_lite"]));
@@ -53,6 +68,14 @@ export async function testBenchmarkContract() {
     { logicalProjectId: "customer_portal_lite", executionProjectId: "customer_portal_lite", targetKind: "independent-fixture" }
   ]);
   assert.doesNotThrow(() => validateBenchmarkProjectMappings({ development: cases, extended: extendedCases, blind: blindCases, mappings: executionMap.mappings }));
+  const fixtureVariants = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "fixture-variants.json"), "utf8")) as { variants: Array<{ fixtureVariantId: string; logicalProjectId: string; executionProjectId: string }> };
+  const mappings = validateBenchmarkProjectMappings({ development: cases, extended: extendedCases, blind: blindCases, mappings: executionMap.mappings });
+  assert.doesNotThrow(() => validateBenchmarkFixtureBindings({ cases: [...cases, ...extendedCases, ...blindCases], mappings, variants: fixtureVariants.variants }));
+  assert.throws(() => validateBenchmarkFixtureBindings({
+    cases: [...cases, ...extendedCases, ...blindCases],
+    mappings,
+    variants: fixtureVariants.variants.map((item) => item.fixtureVariantId === "fxv_d30c9a3e6d4b0185" ? { ...item, executionProjectId: "customer_portal_lite" } : item)
+  }), /benchmark_fixture_variant_project_mismatch:order-viewer-permission/);
   assert.throws(() => validateBenchmarkProjectMappings({
     development: cases,
     extended: extendedCases,

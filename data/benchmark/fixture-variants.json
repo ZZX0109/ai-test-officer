@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "ai-test-officer.fixture-variants.v1",
+  "variants": [
+    { "fixtureVariantId": "fxv_d10a7e1c4b298f63", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_2b8e6d41a9c753f0", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_9c4d0a73e1b625f8", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_a6d2c904f7b138e5", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_c8b3e157d0a624f9", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_d20b8f2d5c3a9074", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
+    { "fixtureVariantId": "fxv_d30c9a3e6d4b0185", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
+    { "fixtureVariantId": "fxv_7f3a1c92d6e8405b", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
+    { "fixtureVariantId": "fxv_5e1f8b26c4a907d3", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" }
+  ]
+}
