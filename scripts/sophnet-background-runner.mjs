@@ -71,9 +71,13 @@ for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => void clea
 try {
   await mkdir(backgroundDir, { recursive: true });
   await status("starting");
-  const agent = start("agent", ["--workspace", "@ai-test-officer/agent", "run", "dev"]);
-  const api = start("todo-api", ["--workspace", "app-under-test", "run", "dev:api"]);
-  const web = start("todo-web", ["--workspace", "app-under-test", "run", "dev:web"]);
+  // Do not use development watchers for a long-running benchmark. Watch mode
+  // can restart or be reaped mid-experiment and turns an infrastructure blip
+  // into an incomplete data set. The runner uses the already-built server and
+  // fixture processes instead.
+  const agent = start("agent", ["--workspace", "@ai-test-officer/agent", "run", "start"], { NODE_ENV: "development", HOST: "127.0.0.1" });
+  const api = start("todo-api", ["exec", "tsx", "app-under-test/server/mockServer.ts"]);
+  const web = start("todo-web", ["exec", "vite", "preview", "--host", "127.0.0.1", "--port", "6173", "--strictPort"], { npm_config_workspace: "app-under-test" });
   await waitFor("http://127.0.0.1:4317/api/health");
   await waitFor("http://127.0.0.1:6173/");
   await status("running", { agentPid: agent.pid, todoApiPid: api.pid, todoWebPid: web.pid });
