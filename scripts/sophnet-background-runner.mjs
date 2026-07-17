@@ -77,7 +77,7 @@ try {
   // fixture processes instead.
   const agent = start("agent", ["--workspace", "@ai-test-officer/agent", "run", "start"], { NODE_ENV: "development", HOST: "127.0.0.1" });
   const api = start("todo-api", ["exec", "tsx", "app-under-test/server/mockServer.ts"]);
-  const web = start("todo-web", ["exec", "vite", "preview", "--host", "127.0.0.1", "--port", "6173", "--strictPort"], { npm_config_workspace: "app-under-test" });
+  const web = start("todo-web", ["--workspace", "app-under-test", "exec", "--", "vite", "preview", "--host", "127.0.0.1", "--port", "6173", "--strictPort"]);
   await waitFor("http://127.0.0.1:4317/api/health");
   await waitFor("http://127.0.0.1:6173/");
   await status("running", { agentPid: agent.pid, todoApiPid: api.pid, todoWebPid: web.pid });
