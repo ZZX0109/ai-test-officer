@@ -32,3 +32,5 @@ temp/
 *.wal
 *.shm
 *.partial
+# Fixture targets may be bootstrapped with npm during isolated benchmark runs.
+fixtures/*/package-lock.json
