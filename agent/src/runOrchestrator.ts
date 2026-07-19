@@ -85,7 +85,20 @@ export async function executeQueuedRun(runId: string) {
   const controller = new AbortController();
   activeControllers.set(runId, controller);
   try {
-    const result = await runVisualGrayTest(buildQueuedRunRequest(projection, controller.signal));
+    const queuedRequest = buildQueuedRunRequest(projection, controller.signal);
+    const requestedScenarioId = typeof projection.input.scenarioId === "string" ? projection.input.scenarioId : undefined;
+    if (requestedScenarioId && queuedRequest.scenarioId !== requestedScenarioId) {
+      return appendSystemRunEvent(runId, "run_blocked", {
+        finalStatus: "blocked",
+        error: "scenario_handoff_missing",
+        requestedScenarioId,
+        projectedScenarioId: projection.selectedScenarioId
+      });
+    }
+    if (!queuedRequest.scenarioId) {
+      return appendSystemRunEvent(runId, "run_blocked", { finalStatus: "blocked", error: "scenario_handoff_missing" });
+    }
+    const result = await runVisualGrayTest(queuedRequest);
     await persistExecutionResult(runId, result);
     await appendSystemRunEvent(runId, "evidence_collecting", { resultRunId: result.id });
     const machineGate = machineGateFromResult(result);

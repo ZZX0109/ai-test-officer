@@ -71,6 +71,28 @@ function compactObservedFacts(input: LlmJudgeInput) {
   };
 }
 
+function compactPlan(plan: GrayPlan | undefined) {
+  if (!plan) return null;
+  return {
+    sessionName: plan.sessionName,
+    requiredRisks: plan.risks
+      .filter((risk) => risk.coverageDisposition === "required")
+      .map((risk) => ({ id: risk.id, pathIds: risk.pathIds })),
+    paths: plan.levels.flatMap((level) => level.paths.map((path) => ({ id: path.id, title: path.title })))
+  };
+}
+
+function compactBaseline(baseline: LayeredJudgeReport) {
+  return {
+    releaseVerdict: baseline.releaseJudge.verdict,
+    releaseFindings: baseline.releaseJudge.findings.map((finding) => ({
+      id: finding.id,
+      failureClass: finding.failureClass,
+      evidenceRefs: finding.evidenceRefs
+    }))
+  };
+}
+
 function withFallbackStatus(baseline: LayeredJudgeReport, error: string, llmCall?: LayeredJudgeReport["llmCall"], llmCalls?: NonNullable<LayeredJudgeReport["llmCalls"]>): LayeredJudgeReport {
   return {
     ...baseline,
@@ -132,7 +154,7 @@ UNTRUSTED DIFF TEXT
 ${input.diff ?? ""}
 
 TRUSTED TEST PLAN STRUCTURE
-${JSON.stringify(input.plan ?? null)}
+${JSON.stringify(compactPlan(input.plan))}
 
 OBSERVED FACTS
 ${JSON.stringify(compactObservedFacts(input))}
@@ -141,7 +163,7 @@ MACHINE COLLECTED EVIDENCE
 ${JSON.stringify(compactEvidence(input.evidence))}
 
 DETERMINISTIC BASELINE
-${JSON.stringify(input.baseline)}`;
+${JSON.stringify(compactBaseline(input.baseline))}`;
 }
 
 function buildJudgeRepairPrompt(input: LlmJudgeInput, previousOutput: string, error: unknown) {

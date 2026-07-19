@@ -40,6 +40,9 @@ export interface BenchmarkRunRecord {
   repetition?: number;
   planExecutable?: boolean;
   planSource?: "deterministic" | "llm";
+  requestedScenarioId?: string;
+  projectedScenarioId?: string;
+  executedScenarioId?: string;
   selectedScenarioId?: string;
   finalStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
   planProvenance?: {
@@ -67,6 +70,7 @@ export interface BenchmarkRunRecord {
     model: string;
     requestId?: string;
     status: string;
+    errorCode?: string;
     durationMs?: number;
     usage?: JudgeLaneRecord["usage"];
   }>;
@@ -170,7 +174,8 @@ export function diagnoseBenchmarkRun(record: BenchmarkRunRecord, label?: HumanBe
   const browserStarted = Boolean(record.attempts?.length || record.artifactsV2?.some((artifact) => artifact.origin === "runtime-captured"));
   const recommendation = record.llm?.verdict;
   const recommendationValid = Boolean(record.llm && record.llm.status === "passed" && !record.llm.fallback);
-  if (label?.expectedScenarioId && record.selectedScenarioId !== label.expectedScenarioId) effects.push("scenario_selection_error");
+  const scenarioSelection = record.executedScenarioId ?? record.selectedScenarioId;
+  if (label?.expectedScenarioId && scenarioSelection && scenarioSelection !== label.expectedScenarioId) effects.push("scenario_selection_error");
   if (providerFailure) effects.push("planner_provider_failure");
   else if (plannerFailed) effects.push("plan_compilation_error");
   if (browserStarted && !record.executionSucceeded) effects.push("browser_execution_error");
@@ -185,7 +190,7 @@ export function diagnoseBenchmarkRun(record: BenchmarkRunRecord, label?: HumanBe
     lane: record.lane ?? "unknown",
     repetition: record.repetition ?? 1,
     expectedScenarioId: label?.expectedScenarioId,
-    selectedScenarioId: record.selectedScenarioId,
+    selectedScenarioId: scenarioSelection,
     primaryCause: priority.find((category) => effects.includes(category)),
     effects,
     browserStarted,

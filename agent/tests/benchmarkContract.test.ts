@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { diagnoseBenchmarkRun } from "../src/benchmark.js";
 import { assessPlannerOutcome, deriveBenchmarkExecutionSignals, validateBenchmarkFixtureBindings, validateBenchmarkProjectMappings } from "../src/benchmarkRunner.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
@@ -25,7 +26,13 @@ export async function testBenchmarkContract() {
   }, [{ origin: "runtime-captured", integrity: { sha256: "a".repeat(64), sizeBytes: 1 } }]);
   assert.equal(incompleteSignals.requirementCovered, false);
   assert.equal(incompleteSignals.gateEligible, false);
-  const cases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Array<{ id: string; projectId: string; category: string; scenarioId?: string; expectedVerdict?: string }>;
+  const handoffDiagnostic = diagnoseBenchmarkRun({
+    benchmarkId: "todo-viewer-permission", runId: "run-handoff", status: "completed", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    requestedScenarioId: "todo_visitor_permission", projectedScenarioId: "todo_visitor_permission", requirementCovered: false, executionSucceeded: false, retryCount: 0,
+    deterministic: { verdict: "fail", evidenceRefs: [], status: "passed" }, evidence: [], artifactIntegrityVerified: false, gateEligible: false
+  }, { benchmarkId: "todo-viewer-permission", verdict: "fail", expectedScenarioId: "todo_visitor_permission", requiredEvidenceTypes: [] });
+  assert.ok(!handoffDiagnostic.effects.includes("scenario_selection_error"), "missing attempt is a handoff failure, not a Planner selection error");
+  const cases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Array<{ id: string; projectId: string; category: string; scenarioId?: string; fixtureVariantId?: string; expectedVerdict?: string }>;
   assert.equal(cases.length, 18);
   assert.deepEqual(new Set(cases.map((item) => item.projectId)), new Set(["todo_lite", "order_portal_lite"]));
   assert.equal(cases.filter((item) => item.projectId === "todo_lite").length, 9);
@@ -33,6 +40,7 @@ export async function testBenchmarkContract() {
   assert.ok(new Set(cases.map((item) => item.category)).size >= 6);
   assert.ok(cases.every((item) => item.scenarioId === undefined), "Agent-readable development manifest must not reveal the evaluator scenario label");
   assert.ok(cases.every((item) => item.expectedVerdict === undefined));
+  assert.equal(cases.find((item) => item.id === "order-api-failure")?.fixtureVariantId, "fxv_7f3a1c92d6e8405b");
   const blindManifestText = await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8");
   const blindCases = JSON.parse(blindManifestText) as Array<{ id: string; fixtureVariantId: string } & Record<string, unknown>>;
   assert.equal(blindCases.length, 6);

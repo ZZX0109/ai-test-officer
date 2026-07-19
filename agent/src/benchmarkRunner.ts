@@ -294,7 +294,7 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   // deterministic evidence actually conflicts. Normal, fully-grounded passes do
   // not spend model budget or become provider-failure samples.
   const judgeMode = input.lane === "rules-plan-llm-judge" || input.lane === "full-llm" ? "adaptive" : "deterministic";
-  let run = (await request<{ run: { id: string; state: string; version: number; gateStatus?: string } }>("/v1/runs", {
+  let run = (await request<{ run: { id: string; state: string; version: number; gateStatus?: string; selectedScenarioId?: string } }>("/v1/runs", {
     method: "POST",
     body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: benchmarkScenario(input.item), requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 2, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 2000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
   })).run;
@@ -312,6 +312,8 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}`)).run;
   }
+  const projection = run;
+  const requestedScenarioId = benchmarkScenario(input.item);
   const report = (await request<{ report: Record<string, any> }>(`/v1/runs/${run.id}/report`)).report;
   const artifacts = (await request<{ artifacts: Array<Record<string, any>> }>(`/v1/runs/${run.id}/artifacts`)).artifacts;
   const judgeCall = report.judgeReport?.llmCall;
@@ -343,10 +345,13 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const execution = deriveBenchmarkExecutionSignals(report, artifacts);
   return {
     benchmarkId: input.item.id, runId: run.id, experimentId: input.experimentId, split: input.item.split, lane: input.lane, modelProfileId: input.model?.id, repetition: input.repetition,
-    status: "completed", startedAt, finishedAt: new Date().toISOString(), requirementCovered: execution.requirementCovered, executionSucceeded: execution.executionSucceeded, retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: plannerOutcome.planExecutable, planSource: plannerMode, selectedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId, finalStatus: finalStatus(run.gateStatus),
+    status: "completed", startedAt, finishedAt: new Date().toISOString(), requirementCovered: execution.requirementCovered, executionSucceeded: execution.executionSucceeded, retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: plannerOutcome.planExecutable, planSource: plannerMode,
+    requestedScenarioId, projectedScenarioId: projection.selectedScenarioId,
+    executedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId,
+    selectedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId, finalStatus: finalStatus(run.gateStatus),
     planProvenance: report.planProvenance,
     attempts: (report.attempts ?? []).map((attempt: any) => ({ id: attempt.id, runId: attempt.runId, scenarioId: attempt.scenarioId, attempt: attempt.attempt, status: attempt.status })),
-    llmCalls: [...plannerCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "planning" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, durationMs: call.durationMs, usage: call.usage })), ...judgeCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "judging" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, durationMs: call.durationMs, usage: call.usage }))],
+    llmCalls: [...plannerCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "planning" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage })), ...judgeCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "judging" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage }))],
     deterministic: { verdict: deterministicVerdict, evidenceRefs: deterministicEvidenceRefs, status: "passed", durationMs },
     llm: plannerMode === "llm" || judgeMode === "adaptive" ? { verdict: llmVerdict, evidenceRefs: judgeRoutedToLlm ? modelRecommendation?.evidenceRefs ?? [] : deterministicEvidenceRefs, failureClass: judgeRoutedToLlm ? modelRecommendation?.failureClass : report.failureAttributions?.[0]?.failureClass, status: llmFailed ? "failed" : "passed", fallback: judgeRoutedToLlm && report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
     evidence: (report.evidence ?? []).map((item: any) => ({ id: item.id, type: item.type })), attribution: { failureClass: report.failureAttributions?.[0]?.failureClass, suspectFiles: report.failureAttributions?.flatMap((entry: any) => entry.topSuspects?.map((suspect: any) => suspect.filePath) ?? []) ?? [], evidenceRefs: report.failureAttributions?.flatMap((entry: any) => entry.evidenceRefs ?? []) ?? [] },
