@@ -9,10 +9,11 @@ function filterPlan(): CompiledPlan {
   return {
     scenarioId: "task_filter_completed",
     steps: [
-      { id: "open", action: { action: "navigate", path: "/" } },
-      { id: "click", action: { action: "click", selectorRef: "triggerButtonName" } },
-      { id: "query", action: { action: "assert", oracleId: "completed_filter_query" } },
-      { id: "dom", action: { action: "assert", oracleId: "completed_filter_dom" } }
+      { id: "open", pathId: "open_task_page", action: { action: "navigate", path: "/" } },
+      { id: "click", pathId: "completed_filter_path", action: { action: "click", selectorRef: "triggerButtonName" } },
+      { id: "query", pathId: "completed_filter_path", action: { action: "assert", oracleId: "completed_filter_query" } },
+      { id: "dom", pathId: "completed_filter_path", action: { action: "assert", oracleId: "completed_filter_dom" } },
+      { id: "regression", pathId: "all_filter_regression", action: { action: "click", selectorRef: "regressionTriggerButtonName" } }
     ],
     requiredOracleIds: ["completed_filter_query", "completed_filter_dom"],
     requiredEvidenceKinds: ["screenshot", "dom", "network", "console", "trace"]
@@ -22,7 +23,7 @@ function filterPlan(): CompiledPlan {
 export async function testCompiledPlanExecution() {
   const scenario = getScenario("task_filter_completed");
   const compiledPlan = filterPlan();
-  assert.equal(assertCompiledPlanBinding(compiledPlan, scenario).steps.length, 4);
+  assert.equal(assertCompiledPlanBinding(compiledPlan, scenario).steps.length, 5);
   assert.throws(
     () => assertCompiledPlanBinding({
       ...compiledPlan,
@@ -56,7 +57,7 @@ export async function testCompiledPlanExecution() {
     resolveFixture: async () => "/tmp/fixture"
   };
   for (const step of compiledPlan.steps) await executeCompiledAction(step.action, step.id, context);
-  assert.deepEqual(events, ["goto:http://127.0.0.1:4173/", "click"]);
+  assert.deepEqual(events, ["goto:http://127.0.0.1:4173/", "click", "click"]);
   assert.deepEqual(evaluated, ["completed_filter_query", "completed_filter_dom"]);
 
   const createScenario = getScenario("task_create_success");

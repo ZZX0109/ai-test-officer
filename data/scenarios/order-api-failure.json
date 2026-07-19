@@ -20,5 +20,17 @@
       {"id":"order_api_failure_dom","name":"订单接口失败后展示错误态","type":"error_text","locator":"[data-testid='order-error-state']","expectedTextIncludes":"order API failure","expected":"页面展示 order API failure"}
     ]
   },
-  "regressionPath":{"stepId":"order_api_failure_regression","title":"采集订单错误恢复截图","action":"visual_check"}
+  "regressionPath":{"stepId":"order_api_failure_regression","title":"采集订单错误恢复截图","action":"visual_check"},
+  "compiledPlanContract": {
+    "routePath": "/",
+    "requiredSteps": [
+      {"pathId":"open_order_portal","action":{"action":"navigate","path":"/"}},
+      {"pathId":"order_api_failure_path","action":{"action":"click","selectorRef":"triggerButtonName"}},
+      {"pathId":"order_api_failure_path","action":{"action":"assert","oracleId":"order_api_failure_query"}},
+      {"pathId":"order_api_failure_path","action":{"action":"assert","oracleId":"order_api_failure_dom"}},
+      {"pathId":"order_api_failure_regression","action":{"action":"click","selectorRef":"retryButtonName"}}
+    ],
+    "requiredEvidenceKinds": ["screenshot","dom","network","console","trace"],
+    "allowOptionalWait": true
+  }
 }

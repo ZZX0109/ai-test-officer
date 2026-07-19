@@ -55,5 +55,17 @@
     "title": "继续执行全部筛选回归路径",
     "action": "click_filter",
     "triggerButtonName": "全部"
+  },
+  "compiledPlanContract": {
+    "routePath": "/",
+    "requiredSteps": [
+      {"pathId":"open_task_page","action":{"action":"navigate","path":"/"}},
+      {"pathId":"completed_filter_path","action":{"action":"click","selectorRef":"triggerButtonName"}},
+      {"pathId":"completed_filter_path","action":{"action":"assert","oracleId":"completed_filter_query"}},
+      {"pathId":"completed_filter_path","action":{"action":"assert","oracleId":"completed_filter_dom"}},
+      {"pathId":"all_filter_regression","action":{"action":"click","selectorRef":"regressionTriggerButtonName"}}
+    ],
+    "requiredEvidenceKinds": ["screenshot","dom","network","console","trace"],
+    "allowOptionalWait": true
   }
 }

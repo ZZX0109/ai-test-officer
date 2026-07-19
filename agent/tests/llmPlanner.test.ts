@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildRepairPrompt, generatePlan } from "../src/llmPlanner.js";
+import { buildRepairPrompt, compileLlmPlanCandidate, generatePlan } from "../src/llmPlanner.js";
 import { reserveLlmOutputTokens } from "../src/llmProvider.js";
 
 export async function testLlmPlannerFailClosed() {
@@ -29,4 +29,24 @@ export async function testLlmPlannerFailClosed() {
     maxTotalTokens: 12_000,
     requestedOutputTokens: 2_000
   }), /llm_budget_exceeded:preflight_total_tokens/);
+
+  const todoActions = [
+    { pathId: "open_todo_lite", action: { action: "navigate" as const, path: "/" } },
+    { pathId: "todo_visitor_permission_path", action: { action: "click" as const, selectorRef: "triggerButtonName" } },
+    { pathId: "todo_visitor_permission_path", action: { action: "assert" as const, oracleId: "todo_login_required_dom" } },
+    { pathId: "todo_relogin_regression", action: { action: "click" as const, selectorRef: "regressionTriggerButtonName" } }
+  ];
+  assert.equal(compileLlmPlanCandidate({ scenarioId: "todo_visitor_permission", actions: todoActions }, "todo_visitor_permission").steps.length, 4);
+  assert.throws(() => compileLlmPlanCandidate({ scenarioId: "todo_visitor_permission", actions: todoActions.filter((_, index) => index !== 1) }, "todo_visitor_permission"), /compiled_plan_semantic_sequence_mismatch/);
+  assert.throws(() => compileLlmPlanCandidate({ scenarioId: "todo_visitor_permission", actions: todoActions.map((item, index) => index === 0 ? { ...item, action: { action: "navigate" as const, path: "/tasks" } } : item) }, "todo_visitor_permission"), /compiled_plan_route_mismatch/);
+
+  const orderActions = [
+    { pathId: "open_order_portal", action: { action: "navigate" as const, path: "/" } },
+    { pathId: "order_api_failure_path", action: { action: "click" as const, selectorRef: "triggerButtonName" } },
+    { pathId: "order_api_failure_path", action: { action: "assert" as const, oracleId: "order_api_failure_query" } },
+    { pathId: "order_api_failure_path", action: { action: "assert" as const, oracleId: "order_api_failure_dom" } },
+    { pathId: "order_api_failure_regression", action: { action: "click" as const, selectorRef: "retryButtonName" } }
+  ];
+  assert.equal(compileLlmPlanCandidate({ scenarioId: "order_api_failure", actions: orderActions }, "order_api_failure").steps.length, 5);
+  assert.throws(() => compileLlmPlanCandidate({ scenarioId: "order_api_failure", actions: orderActions.filter((_, index) => index !== 1) }, "order_api_failure"), /compiled_plan_semantic_sequence_mismatch/);
 }

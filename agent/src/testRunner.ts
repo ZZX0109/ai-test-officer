@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
 import type { EvidenceItem, RunBundle, RunRequest, RunStepEvidence, VisualRunResult } from "./types.js";
-import { compiledPlanSchema, resolveFinalStatus, type ActionDsl, type ArtifactV2, type CompiledPlan, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
+import { compiledPlanSchema, resolveFinalStatus, runOutcomeSummaryV2Schema, type ActionDsl, type ArtifactV2, type CompiledPlan, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
 import {
   AttemptClock,
   PlaywrightAttemptTrace,
@@ -23,6 +23,7 @@ import { buildConflictPacket } from "./conflictReplay.js";
 import { getScenario, type ScenarioAction, type ScenarioOracle } from "./scenarios.js";
 import { buildLayeredJudgeReport } from "./judgeEngine.js";
 import { routeJudge } from "./llmRoutingPolicy.js";
+import { assertCompiledPlanSemanticContract } from "./compiledPlanContract.js";
 import { buildLlmJudgeReport } from "./llmJudge.js";
 import { writeReadableReports } from "./reportRenderer.js";
 import { getProject, getProjectRuntimeStatus, resolveProjectTarget, startProject, stopProject, testProjectConnection } from "./projectAdapter.js";
@@ -40,6 +41,21 @@ const reportsDir = path.join(rootDir, "reports");
 
 function scenarioFingerprint(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+}
+
+function classifyExecutionError(error: unknown, stepId?: string): NonNullable<VisualRunResult["executionError"]> {
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = raw.replace(/[\r\n]+/g, " ").slice(0, 1_000);
+  if (/locator\.|waiting for|getByRole|getByLabel|selector/i.test(raw)) {
+    return { code: "action_binding_failure", stepId, message, failureClass: "test_script_issue" };
+  }
+  if (/target page.*closed|browser.*closed|context.*closed|crash/i.test(raw)) {
+    return { code: "browser_runtime_failure", stepId, message, failureClass: "environment_issue" };
+  }
+  if (/net::|ECONN|ERR_CONNECTION|health|timeout.*navigation/i.test(raw)) {
+    return { code: "environment_failure", stepId, message, failureClass: "environment_issue" };
+  }
+  return { code: "execution_failure", stepId, message, failureClass: "unknown" };
 }
 
 function envFlag(name: string) {
@@ -134,7 +150,7 @@ export function assertCompiledPlanBinding(compiledPlan: CompiledPlan, scenario: 
     if (!oracleIds.has(required)) throw new Error(`compiled_plan_unknown_required_oracle:${required}`);
     if (!asserted.has(required)) throw new Error(`compiled_plan_oracle_not_executed:${required}`);
   }
-  return parsed;
+  return assertCompiledPlanSemanticContract(parsed, scenario);
 }
 
 function resolveApprovedLocator(page: Page, scenario: ReturnType<typeof getScenario>, selectorRef: string): Locator {
@@ -388,6 +404,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   };
   await startAttemptTrace();
   const page = await context.newPage();
+  page.setDefaultTimeout(Number(process.env.PLAYWRIGHT_ACTION_TIMEOUT_MS ?? 30_000));
   const pageVideo = page.video();
   const unbindTelemetry = bindAttemptTelemetry({
     context,
@@ -970,6 +987,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     });
     let regressionTelemetryStart: { network: number; console: number } | undefined;
     for (const [stepIndex, step] of compiledPlan.steps.entries()) {
+      activeCompiledStepId = step.id;
       assertWithinRunBudget();
       budgetTracker.consume({ steps: 1 });
       const assertionStart = assertions.length;
@@ -1032,9 +1050,12 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
         decisionReason: "fail_fast=false，保留完整计划证据",
         evidenceRefs: [operationEvidence.id]
       });
+      activeCompiledStepId = undefined;
     }
   }
 
+  let activeCompiledStepId: string | undefined;
+  let executionError: NonNullable<VisualRunResult["executionError"]> | undefined;
   try {
     if (compiledPlan) {
       await executeCompiledPlan();
@@ -1107,6 +1128,34 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     }
     await runRegressionPath();
     }
+  } catch (error) {
+    executionError = classifyExecutionError(error, activeCompiledStepId);
+    const failedStepId = executionError.stepId ?? `execution-error-${activeAttempt}`;
+    const errorEvidence = await appendEvidence(id, {
+      type: "operation",
+      title: "Compiled action execution failed",
+      stepId: failedStepId,
+      payload: { code: executionError.code, failureClass: executionError.failureClass, message: executionError.message }
+    });
+    steps.push({
+      stepId: failedStepId,
+      title: "Compiled action execution failed",
+      status: "failed",
+      action: "execution_error",
+      screenshot: await screenshot(failedStepId).catch(() => undefined),
+      details: `${executionError.code}: ${executionError.message}`
+    });
+    await appendLoopEvent(id, {
+      loopType: "failure_recovery_loop",
+      iteration: steps.length,
+      status: "stopped",
+      title: "执行动作失败，停止依赖步骤",
+      action: "persist_partial_execution",
+      observation: executionError.code,
+      decision: "先持久化证据，再进入机器门禁",
+      decisionReason: executionError.failureClass,
+      evidenceRefs: [errorEvidence.id]
+    });
   } finally {
     try {
       try {
@@ -1207,6 +1256,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   }
 
   const failed = assertions.some((assertion) => !assertion.passed);
+  const runFailed = failed || Boolean(executionError);
   const finishedAt = new Date().toISOString();
   await Promise.allSettled(evidenceWrites);
   for (const [kind, value, mediaType] of [
@@ -1241,7 +1291,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   }
   attempts[activeAttempt - 1] = {
     ...attempts[activeAttempt - 1],
-    status: attempts.length > 1 ? attempts[activeAttempt - 1].status : failed ? "failed" : "passed",
+    status: attempts.length > 1 ? attempts[activeAttempt - 1].status : failed || executionError ? "failed" : "passed",
     finishedAt
   };
   const latestEvidence: EvidenceItem[] = await readEvidence(id);
@@ -1256,7 +1306,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const partialResult = {
     assertions,
     steps,
-    verdict: failed ? "hold_for_review" : "continue"
+    verdict: runFailed ? "hold_for_review" : "continue"
   } as Pick<VisualRunResult, "assertions" | "steps" | "verdict">;
   const oracles = buildScenarioOracles(scenario, latestEvidence);
   const riskCoverageMatrix = buildRiskCoverageMatrix({ assertions }, latestEvidence, scenario);
@@ -1290,7 +1340,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       riskCoverageMatrix,
       aggregatedVerdict,
       conflictPacket,
-      verdict: failed ? "hold_for_review" : "continue"
+      verdict: runFailed ? "hold_for_review" : "continue"
     },
     evidence: latestEvidence
   });
@@ -1317,7 +1367,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
         riskCoverageMatrix,
         aggregatedVerdict,
         conflictPacket,
-        verdict: failed ? "hold_for_review" : "continue"
+        verdict: runFailed ? "hold_for_review" : "continue"
       },
       evidence: latestEvidence,
       runId: id,
@@ -1338,6 +1388,10 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     .map((item) => `requirement_not_covered:${item.riskId}`);
   const machineGateStatus = artifactGate.status !== "pass"
     ? artifactGate.status
+    : executionError?.failureClass === "environment_issue"
+      ? "blocked" as const
+      : executionError
+        ? "needs-human-review" as const
     : failed
       ? "fail" as const
       : qualityReasons.length || uncoveredRequirementRisks.length
@@ -1359,9 +1413,9 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   });
   const machineGate: MachineGate = {
     status: machineGateStatus,
-    reasons: [...artifactGate.reasons, ...qualityReasons, ...uncoveredRequirementRisks],
+    reasons: [...artifactGate.reasons, ...(executionError ? [`execution_error:${executionError.code}:${executionError.stepId ?? "unknown"}`] : []), ...qualityReasons, ...uncoveredRequirementRisks],
     assertionFailures: assertions.filter((item) => !item.passed).map((item) => item.name),
-    evidenceComplete: artifactGate.status === "pass" && qualityReasons.length === 0 && uncoveredRequirementRisks.length === 0
+    evidenceComplete: artifactGate.status === "pass" && !executionError && qualityReasons.length === 0 && uncoveredRequirementRisks.length === 0
   };
   const judgeRecommendation: JudgeRecommendation = {
     status: judgeReport.releaseJudge.verdict === "needs_review" ? "needs-human-review" : judgeReport.releaseJudge.verdict,
@@ -1369,6 +1423,28 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     evidenceRefs: Array.from(new Set(judgeReport.releaseJudge.findings.flatMap((finding) => finding.evidenceRefs)))
   };
   const finalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
+  const requirementCovered = riskCoverageMatrix.length > 0 && riskCoverageMatrix.every((item) => item.covered);
+  const requirementPassed = requirementCovered && riskCoverageMatrix.every((item) => item.passed);
+  const evidenceGrounded = evidenceQuality.assertions.length > 0
+    && evidenceQuality.assertions.every((item) => item.status === "grounded")
+    && evidenceQuality.summary.crossAttemptViolations === 0;
+  const executionSucceeded = !executionError && attempts.length > 0;
+  const artifactIntegrityVerified = artifactGate.status === "pass";
+  const gateEligible = executionSucceeded && requirementCovered && artifactIntegrityVerified && evidenceGrounded;
+  const outcomeSummary = runOutcomeSummaryV2Schema.parse({
+    schemaVersion: "2.0",
+    schedulingCompleted: true,
+    executionStarted: attempts.length > 0,
+    executionSucceeded,
+    requirementCovered,
+    requirementPassed,
+    artifactIntegrityVerified,
+    evidenceGrounded,
+    gateEligible,
+    machineGate,
+    judgeRecommendation,
+    finalStatus
+  });
   const failureAttributions = buildFailureAttributions({
     assertions,
     steps,
@@ -1380,8 +1456,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     diff: input.diff
   });
   const failedNames = assertions.filter((assertion) => !assertion.passed).map((assertion) => assertion.name);
-  const reflectionNote = failed
-    ? `本次失败集中在 ${scenario.corePath.title}：${failedNames.join("、")}。下一轮应优先检查对应 evidence ID 的 network、DOM 和截图是否一致。`
+  const reflectionNote = runFailed
+    ? `本次失败集中在 ${scenario.corePath.title}：${failedNames.join("、") || executionError?.code}。下一轮应优先检查对应 evidence ID 的 network、DOM 和截图是否一致。`
     : `本次 ${scenario.title} 显式灰度路径通过，证据包包含 ${latestEvidence.length} 条 evidence。`;
   await appendLoopEvent(id, {
     loopType: conflictPacket.status === "not_triggered" ? "report_loop" : "evidence_conflict_loop",
@@ -1400,9 +1476,9 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     status: "waiting_for_user",
     title: "报告已生成，等待用户裁决",
     action: "generate_report",
-    observation: failed ? "核心路径存在失败断言" : "未发现阻塞断言",
-    decision: failed ? "建议 hold_for_review" : "建议 continue",
-    decisionReason: failed ? `${scenario.corePath.title} 存在 oracle 失败` : "所有断言通过",
+    observation: runFailed ? "核心路径存在失败断言或执行错误" : "未发现阻塞断言",
+    decision: runFailed ? "建议 hold_for_review" : "建议 continue",
+    decisionReason: executionError ? executionError.code : failed ? `${scenario.corePath.title} 存在 oracle 失败` : "所有断言通过",
     evidenceRefs: latestEvidence.map((item) => item.id).slice(-8)
   });
   const loopEvents = await readLoopEvents(id);
@@ -1411,8 +1487,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     startedAt,
     finishedAt,
     scenarioFingerprint: runScenarioFingerprint,
-    verdict: failed ? "hold_for_review" : "continue",
-    summary: failed
+    verdict: runFailed ? "hold_for_review" : "continue",
+    summary: runFailed
       ? "核心路径存在失败证据，建议用户复核并阻塞合并。"
       : "显式灰度路径未发现阻塞问题。",
     steps,
@@ -1433,6 +1509,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     machineGate,
     judgeRecommendation,
     finalStatus,
+    outcomeSummary,
+    executionError,
     repairAttempts: loopEvents
       .filter((event) => event.loopType === "failure_recovery_loop" && event.status === "retrying")
       .slice(0, Math.max(0, Math.min(input.maxAutoRepairs ?? 2, 2)))

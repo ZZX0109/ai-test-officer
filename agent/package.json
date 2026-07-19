@@ -12,6 +12,7 @@
     "start": "node dist/server.js",
     "test:visual": "tsx src/manualRun.ts",
     "test:compiled-plan": "HEADLESS=1 tsx tests/compiledPlanBrowserSmoke.ts",
+    "test:credibility-browser": "HEADLESS=1 PLAYWRIGHT_ACTION_TIMEOUT_MS=1000 tsx tests/credibilityBrowserSmoke.ts",
     "commit-check": "tsx src/commitCheckCli.ts",
     "commit-check:strict": "STRICT_RELEASE_GATE=1 tsx src/commitCheckCli.ts",
     "requirement-acceptance": "tsx src/requirementAcceptanceCli.ts",

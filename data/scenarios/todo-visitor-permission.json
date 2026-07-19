@@ -17,5 +17,16 @@
     "pathId":"todo_visitor_permission_path","stepId":"signout_expect_login_required","title":"退出登录并验证访客拦截","action":"require_permission","triggerButtonName":"退出登录","targetLocator":"[data-testid='permission-state']","expectedTextIncludes":"登录","domAssertionName":"访客态显示登录提示","riskReason":"任务列表是受保护数据；未登录状态不得继续展示业务数据。",
     "oracles":[{"id":"todo_login_required_dom","name":"访客态显示登录提示","type":"dom_text","locator":"[data-testid='permission-state']","expectedTextIncludes":"登录","expected":"退出后 permission-state 显示登录提示"}]
   },
-  "regressionPath":{"stepId":"todo_relogin_regression","title":"重新登录后恢复任务页","action":"login_as_test_user","triggerButtonName":"登录测试账号"}
+  "regressionPath":{"stepId":"todo_relogin_regression","title":"重新登录后恢复任务页","action":"login_as_test_user","triggerButtonName":"登录测试账号"},
+  "compiledPlanContract": {
+    "routePath": "/",
+    "requiredSteps": [
+      {"pathId":"open_todo_lite","action":{"action":"navigate","path":"/"}},
+      {"pathId":"todo_visitor_permission_path","action":{"action":"click","selectorRef":"triggerButtonName"}},
+      {"pathId":"todo_visitor_permission_path","action":{"action":"assert","oracleId":"todo_login_required_dom"}},
+      {"pathId":"todo_relogin_regression","action":{"action":"click","selectorRef":"regressionTriggerButtonName"}}
+    ],
+    "requiredEvidenceKinds": ["screenshot","dom","network","console","trace"],
+    "allowOptionalWait": true
+  }
 }

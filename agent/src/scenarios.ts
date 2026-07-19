@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { ScenarioCapabilityKind } from "./types.js";
+import type { ScenarioCompiledPlanContract } from "./compiledPlanContract.js";
 
 export type ScenarioRiskLevel = "high" | "medium" | "low";
 export type ScenarioMatchSource = "diff" | "requirement" | "tapd_bug" | "patrol" | "llm_inferred";
@@ -130,6 +131,7 @@ export interface ExecutableScenario {
   smoke: ScenarioSmoke;
   corePath: ScenarioCorePath;
   regressionPath?: ScenarioRegressionPath;
+  compiledPlanContract?: ScenarioCompiledPlanContract;
 }
 
 type LegacyScenario = Omit<ExecutableScenario, "corePath"> & {

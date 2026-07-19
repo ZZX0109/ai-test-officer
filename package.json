@@ -25,6 +25,7 @@
     "typecheck": "npm run build:packages && npm --workspaces --if-present run typecheck",
     "test": "npm run build:packages && npm --workspaces --if-present run test",
     "test:visual": "npm --workspace @ai-test-officer/agent run test:visual",
+    "test:credibility-browser": "npm --workspace @ai-test-officer/agent run test:credibility-browser",
     "commit-check": "npm --workspace @ai-test-officer/agent run commit-check",
     "commit-check:strict": "npm --workspace @ai-test-officer/agent run commit-check:strict",
     "requirement-acceptance": "npm --workspace @ai-test-officer/agent run requirement-acceptance",
