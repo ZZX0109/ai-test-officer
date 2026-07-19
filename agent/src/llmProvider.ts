@@ -64,31 +64,41 @@ async function persist(call: LlmCall) {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
   try {
     await pool.query(
-      "INSERT INTO llm_calls_v1 (id, run_id, experiment_id, purpose, provider, model, request_id, status, duration_ms, usage, error_code, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (id) DO NOTHING",
-      [call.id, call.runId ?? null, call.experimentId ?? null, call.purpose, call.provider, call.model, call.requestId ?? null, call.status, call.durationMs, call.usage, call.errorCode ?? null, call.startedAt]
+      "INSERT INTO llm_calls_v1 (id, run_id, experiment_id, purpose, provider, model, request_id, status, duration_ms, usage, error_code, created_at, transport_attempts) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (id) DO NOTHING",
+      [call.id, call.runId ?? null, call.experimentId ?? null, call.purpose, call.provider, call.model, call.requestId ?? null, call.status, call.durationMs, call.usage, call.errorCode ?? null, call.startedAt, JSON.stringify(call.transportAttempts ?? [])]
     );
   } finally {
     await pool.end();
   }
 }
 
-async function parseResponsesStream(response: Response) {
+export async function parseResponsesStream(response: Response) {
   let completed: Record<string, any> | undefined;
   let text = "";
   const reader = response.body?.getReader();
   if (!reader) throw new Error("provider_responses_body_missing");
   const decoder = new TextDecoder();
   let buffer = "";
+  let bytesReceived = 0;
+  let invalidEvents = 0;
+  const eventTypes = new Set<string>();
   const consume = (line: string) => {
     if (!line.startsWith("data: ")) return;
     try {
       const event = JSON.parse(line.slice(6)) as Record<string, any>;
+      if (typeof event.type === "string") eventTypes.add(event.type);
       if (event.type === "response.output_text.delta") text += typeof event.delta === "string" ? event.delta : "";
       if (event.type === "response.completed") completed = event.response;
-    } catch { /* ignore keep-alive and malformed provider lines */ }
+      if (event.type === "response.failed") throw new Error("provider_responses_failed");
+      if (event.type === "response.incomplete") throw new Error("provider_responses_incomplete");
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("provider_responses_")) throw error;
+      invalidEvents += 1;
+    }
   };
   while (!completed) {
     const next = await reader.read();
+    bytesReceived += next.value?.byteLength ?? 0;
     buffer += decoder.decode(next.value ?? new Uint8Array(), { stream: !next.done });
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() ?? "";
@@ -96,11 +106,15 @@ async function parseResponsesStream(response: Response) {
     if (next.done) break;
   }
   if (!completed && buffer) consume(buffer);
-  if (!completed) throw new Error("provider_responses_incomplete");
-  return { ...completed, output_text: text };
+  if (!completed) {
+    const error = new Error(bytesReceived === 0 ? "provider_responses_empty" : invalidEvents > 0 ? "provider_responses_invalid_event" : "provider_responses_incomplete");
+    throw Object.assign(error, { streamTelemetry: { bytesReceived, eventTypes: [...eventTypes] } });
+  }
+  await reader.cancel().catch(() => undefined);
+  return { data: { ...completed, output_text: text }, telemetry: { bytesReceived, eventTypes: [...eventTypes] } };
 }
 
-async function executeLlmCallAttempt(input: {
+type ExecuteLlmCallInput = {
   credential: CredentialRecord;
   apiKey: string;
   prompt: string;
@@ -109,48 +123,77 @@ async function executeLlmCallAttempt(input: {
   timeoutMs?: number;
   temperature?: number;
   context: LlmCallContext;
-}, transportRetriesRemaining: number): Promise<{
-  text: string;
-  call: LlmCall;
-}> {
-  const id = `llm_${randomUUID()}`;
-  const startedAt = new Date().toISOString();
-  const started = Date.now();
+  totalTimeoutMs?: number;
+};
+
+async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: number) {
+  const attemptStartedAt = new Date().toISOString();
+  const attemptStarted = Date.now();
+  let requestId: string | undefined;
+  let bytesReceived = 0;
+  let eventTypes: string[] = [];
   try {
     const anthropic = input.credential.provider === "anthropic";
-    // Codex profiles exposed by some OpenAI-compatible gateways only support
-    // the Responses API. Keep the adapter narrow so ordinary compatible
-    // models continue using chat completions.
     const responsesApi = !anthropic && input.credential.provider === "openai-compatible" && /codex/i.test(input.credential.model);
     const response = await fetch(`${input.credential.baseUrl}${anthropic ? "/messages" : responsesApi ? "/responses" : "/chat/completions"}`, {
       method: "POST",
       headers: anthropic
         ? { "content-type": "application/json", "x-api-key": input.apiKey, "anthropic-version": "2023-06-01" }
         : { "content-type": "application/json", authorization: `Bearer ${input.apiKey}` },
-      signal: AbortSignal.timeout(input.timeoutMs ?? Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 30_000)),
+      signal: AbortSignal.timeout(timeoutMs),
       body: JSON.stringify(anthropic ? {
-        model: input.credential.model,
-        max_tokens: input.maxTokens,
-        temperature: input.temperature ?? 0,
-        system: input.system,
-        messages: [{ role: "user", content: input.prompt }]
+        model: input.credential.model, max_tokens: input.maxTokens, temperature: input.temperature ?? 0,
+        system: input.system, messages: [{ role: "user", content: input.prompt }]
       } : responsesApi ? {
-        model: input.credential.model,
-        instructions: input.system,
-        input: `${input.prompt}\nReturn a JSON object.`,
-        max_output_tokens: input.maxTokens,
-        stream: true,
-        text: { format: { type: "json_object" } }
+        model: input.credential.model, instructions: input.system, input: `${input.prompt}\nReturn a JSON object.`,
+        max_output_tokens: input.maxTokens, stream: true, text: { format: { type: "json_object" } }
       } : {
-        model: input.credential.model,
-        temperature: input.temperature ?? 0,
-        response_format: { type: "json_object" },
-        max_tokens: input.maxTokens,
-        messages: [{ role: "system", content: input.system }, { role: "user", content: input.prompt }]
+        model: input.credential.model, temperature: input.temperature ?? 0, response_format: { type: "json_object" },
+        max_tokens: input.maxTokens, messages: [{ role: "system", content: input.system }, { role: "user", content: input.prompt }]
       })
     });
+    requestId = response.headers.get("x-request-id") ?? undefined;
     if (!response.ok) throw new Error(`provider_http_${response.status}`);
-    const data = (responsesApi ? await parseResponsesStream(response) : await response.json()) as {
+    const parsed = responsesApi ? await parseResponsesStream(response) : { data: await response.json(), telemetry: { bytesReceived: 0, eventTypes: ["json_response"] } };
+    bytesReceived = parsed.telemetry.bytesReceived;
+    eventTypes = parsed.telemetry.eventTypes;
+    const data = parsed.data as Record<string, any>;
+    requestId ??= data.id;
+    return {
+      data,
+      telemetry: { attemptStartedAt, durationMs: Date.now() - attemptStarted, requestId, bytesReceived, eventTypes }
+    };
+  } catch (error) {
+    const streamTelemetry = error && typeof error === "object" && "streamTelemetry" in error
+      ? (error as { streamTelemetry?: { bytesReceived?: number; eventTypes?: string[] } }).streamTelemetry
+      : undefined;
+    throw Object.assign(error instanceof Error ? error : new Error("provider_error"), {
+      transportTelemetry: {
+        attemptStartedAt,
+        durationMs: Date.now() - attemptStarted,
+        requestId,
+        bytesReceived: streamTelemetry?.bytesReceived ?? bytesReceived,
+        eventTypes: streamTelemetry?.eventTypes ?? eventTypes
+      }
+    });
+  }
+}
+
+async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text: string; call: LlmCall }> {
+  const id = `llm_${randomUUID()}`;
+  const startedAt = new Date().toISOString();
+  const started = Date.now();
+  const attempts: NonNullable<LlmCall["transportAttempts"]> = [];
+  const responsesApi = input.credential.provider === "openai-compatible" && /codex/i.test(input.credential.model);
+  const maxAttempts = responsesApi ? 3 : 1;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const remainingMs = (input.totalTimeoutMs ?? (input.timeoutMs ?? 30_000) * maxAttempts + 2_000) - (Date.now() - started);
+    if (remainingMs <= 0) { lastError = new Error("provider_total_timeout"); break; }
+    try {
+      const result = await executeTransportAttempt(input, Math.min(input.timeoutMs ?? Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 30_000), remainingMs));
+      attempts.push({ attempt, status: "passed", startedAt: result.telemetry.attemptStartedAt, durationMs: result.telemetry.durationMs, requestId: result.telemetry.requestId, bytesReceived: result.telemetry.bytesReceived, eventTypes: result.telemetry.eventTypes });
+      const data = result.data as {
       id?: string;
       model?: string;
       output_text?: string;
@@ -158,60 +201,32 @@ async function executeLlmCallAttempt(input: {
       choices?: Array<{ message?: { content?: string } }>;
       content?: Array<{ type: string; text?: string }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; input_tokens?: number; output_tokens?: number };
-    };
-    const promptTokens = data.usage?.prompt_tokens ?? data.usage?.input_tokens;
-    const completionTokens = data.usage?.completion_tokens ?? data.usage?.output_tokens;
-    const call = llmCallSchema.parse({
-      id,
-      ...input.context,
-      provider: input.credential.provider,
-      model: data.model ?? input.credential.model,
-      requestId: response.headers.get("x-request-id") ?? data.id,
-      startedAt,
-      durationMs: Date.now() - started,
-      status: "passed",
-      usage: {
-        promptTokens,
-        completionTokens,
-        totalTokens: data.usage?.total_tokens ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined),
-        estimatedCostUsd: usageCost(input.credential.provider, data.model ?? input.credential.model, promptTokens, completionTokens)
-      }
-    });
-    await persist(call);
-    return {
-      text: anthropic
+      };
+      const promptTokens = data.usage?.prompt_tokens ?? data.usage?.input_tokens;
+      const completionTokens = data.usage?.completion_tokens ?? data.usage?.output_tokens;
+      const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: data.model ?? input.credential.model, requestId: result.telemetry.requestId ?? data.id, startedAt, durationMs: Date.now() - started, status: "passed", transportAttempts: attempts, usage: { promptTokens, completionTokens, totalTokens: data.usage?.total_tokens ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined), estimatedCostUsd: usageCost(input.credential.provider, data.model ?? input.credential.model, promptTokens, completionTokens) } });
+      await persist(call);
+      return { text: input.credential.provider === "anthropic"
         ? data.content?.find((item) => item.type === "text")?.text ?? ""
         : responsesApi
           ? data.output_text ?? data.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text" || item.type === "text")?.text ?? ""
-          : data.choices?.[0]?.message?.content ?? "",
-      call
-    };
-  } catch (error) {
-    const errorCode = error instanceof Error ? error.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
-    // Some OpenAI-compatible gateways intermittently terminate an otherwise
-    // valid Responses stream before the terminal event. Retry the *transport*
-    // once before recording a logical model-call failure. This does not retry
-    // an LLM decision or relax the requirement for `response.completed`.
-    const responsesApi = input.credential.provider === "openai-compatible" && /codex/i.test(input.credential.model);
-    if (responsesApi && errorCode === "provider_responses_incomplete" && transportRetriesRemaining > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      return executeLlmCallAttempt(input, transportRetriesRemaining - 1);
+          : data.choices?.[0]?.message?.content ?? "", call };
+    } catch (error) {
+      lastError = error;
+      const errorCode = error instanceof Error ? error.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
+      const telemetry = error && typeof error === "object" && "transportTelemetry" in error ? (error as any).transportTelemetry : {};
+      attempts.push({ attempt, status: "failed", startedAt: telemetry.attemptStartedAt ?? new Date().toISOString(), durationMs: telemetry.durationMs ?? 0, requestId: telemetry.requestId, errorCode, bytesReceived: telemetry.bytesReceived ?? 0, eventTypes: telemetry.eventTypes ?? [] });
+      const retriable = responsesApi && /provider_responses_(incomplete|empty|invalid_event|body_missing)|TimeoutError|fetch_failed/.test(errorCode);
+      if (!retriable || attempt === maxAttempts) break;
+      await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 250 : 1_000));
     }
-    const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: input.credential.model, startedAt, durationMs: Date.now() - started, status: "failed", usage: {}, errorCode });
-    await persist(call);
-    throw Object.assign(new Error(errorCode), { llmCall: call });
   }
+  const errorCode = lastError instanceof Error ? lastError.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
+  const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: input.credential.model, startedAt, durationMs: Date.now() - started, status: "failed", usage: {}, errorCode, transportAttempts: attempts });
+  await persist(call);
+  throw Object.assign(new Error(errorCode), { llmCall: call });
 }
 
-export async function executeLlmCall(input: {
-  credential: CredentialRecord;
-  apiKey: string;
-  prompt: string;
-  system: string;
-  maxTokens: number;
-  timeoutMs?: number;
-  temperature?: number;
-  context: LlmCallContext;
-}) {
-  return executeLlmCallAttempt(input, 1);
+export async function executeLlmCall(input: ExecuteLlmCallInput) {
+  return executeLlmCallAttempt(input);
 }

@@ -41,6 +41,7 @@ import { testUntrustedInputDefense } from "./untrustedInput.test.js";
 import { testRedactionPreservesUsageTelemetry } from "./redaction.test.js";
 import { testCompiledPlanExecution } from "./compiledPlanExecution.test.js";
 import { testBenchmarkSummary } from "./benchmarkSummary.test.js";
+import { testLlmProviderResponsesTransport } from "./llmProvider.test.js";
 
 async function main() {
   await testConnectorEnvelope();
@@ -57,6 +58,7 @@ async function main() {
   await testBenchmarkContract();
   await testProductionAcceptanceContract();
   await testLlmPlannerFailClosed();
+  await testLlmProviderResponsesTransport();
   testEvidenceQuality();
   testUntrustedInputDefense();
   testRedactionPreservesUsageTelemetry();
