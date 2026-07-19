@@ -41,6 +41,9 @@ export async function testBenchmarkContract() {
   assert.ok(cases.every((item) => item.scenarioId === undefined), "Agent-readable development manifest must not reveal the evaluator scenario label");
   assert.ok(cases.every((item) => item.expectedVerdict === undefined));
   assert.equal(cases.find((item) => item.id === "order-api-failure")?.fixtureVariantId, "fxv_7f3a1c92d6e8405b");
+  const todoPermissionScenario = await readFile(path.join(rootDir, "data", "scenarios", "todo-visitor-permission.json"), "utf8");
+  assert.match(todoPermissionScenario, /"triggerButtonName":"退出登录"/);
+  assert.match(todoPermissionScenario, /"triggerButtonName":"登录测试账号"/);
   const blindManifestText = await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8");
   const blindCases = JSON.parse(blindManifestText) as Array<{ id: string; fixtureVariantId: string } & Record<string, unknown>>;
   assert.equal(blindCases.length, 6);

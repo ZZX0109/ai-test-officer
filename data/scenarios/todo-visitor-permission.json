@@ -14,8 +14,8 @@
   },
   "smoke": {"pathId":"open_todo_lite","stepId":"open_todo_lite","title":"打开 Todo Lite","headingName":"Todo Lite","assertionName":"Todo Lite 标题可见","expected":"Todo Lite 标题出现"},
   "corePath": {
-    "pathId":"todo_visitor_permission_path","stepId":"signout_expect_login_required","title":"退出登录并验证访客拦截","action":"require_permission","triggerButtonName":"Sign out","targetLocator":"[data-testid='permission-state']","expectedTextIncludes":"登录","domAssertionName":"访客态显示登录提示","riskReason":"任务列表是受保护数据；未登录状态不得继续展示业务数据。",
+    "pathId":"todo_visitor_permission_path","stepId":"signout_expect_login_required","title":"退出登录并验证访客拦截","action":"require_permission","triggerButtonName":"退出登录","targetLocator":"[data-testid='permission-state']","expectedTextIncludes":"登录","domAssertionName":"访客态显示登录提示","riskReason":"任务列表是受保护数据；未登录状态不得继续展示业务数据。",
     "oracles":[{"id":"todo_login_required_dom","name":"访客态显示登录提示","type":"dom_text","locator":"[data-testid='permission-state']","expectedTextIncludes":"登录","expected":"退出后 permission-state 显示登录提示"}]
   },
-  "regressionPath":{"stepId":"todo_relogin_regression","title":"重新登录后恢复任务页","action":"login_as_test_user","triggerButtonName":"Sign in test user"}
+  "regressionPath":{"stepId":"todo_relogin_regression","title":"重新登录后恢复任务页","action":"login_as_test_user","triggerButtonName":"登录测试账号"}
 }
