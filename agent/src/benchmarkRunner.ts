@@ -154,23 +154,31 @@ export function assessPlannerOutcome(plannerMode: "deterministic" | "llm", prove
 /** Keep scheduling, execution, coverage and formal-gate facts separate in every lane. */
 export function deriveBenchmarkExecutionSignals(report: Record<string, any>, artifacts: Array<Record<string, any>>) {
   const riskCoverage = Array.isArray(report.riskCoverageMatrix) ? report.riskCoverageMatrix : [];
-  const requirementCovered = riskCoverage.length > 0 && riskCoverage.every((risk: any) => risk?.covered === true && risk?.passed === true);
+  const requirementCovered = riskCoverage.length > 0 && riskCoverage.every((risk: any) => risk?.covered === true);
+  const requirementPassed = requirementCovered && riskCoverage.every((risk: any) => risk?.passed === true);
   const hasRuntimeArtifacts = artifacts.some((artifact) => artifact.origin === "runtime-captured");
   const hasExecutedAssertion = Array.isArray(report.assertions) && report.assertions.length > 0;
-  const artifactIntegrityVerified = Boolean(report.artifactIntegrity?.items?.length)
+  const metadataIntegrityVerified = Boolean(report.artifactIntegrity?.items?.length)
     && report.artifactIntegrity.items.every((item: any) => item.status === "present" || item.status === "self_reference");
   const artifactsAreFormal = artifacts.length > 0
     && artifacts.every((artifact) => (artifact.origin === "runtime-captured" || artifact.origin === "fixture")
       && artifact.integrity?.sha256
       && artifact.integrity?.sizeBytes !== undefined);
-  const evidenceGrounded = report.evidenceQuality?.summary?.groundedPassedRate === 1
+  const evidenceGrounded = Array.isArray(report.evidenceQuality?.assertions)
+    && report.evidenceQuality.assertions.length > 0
+    && report.evidenceQuality.assertions.every((item: any) => item.status === "grounded")
     && report.evidenceQuality?.summary?.crossAttemptViolations === 0;
-  const executionSucceeded = hasRuntimeArtifacts && hasExecutedAssertion;
+  const artifactIntegrityVerified = metadataIntegrityVerified && artifactsAreFormal;
+  const executionStarted = Boolean(report.attempts?.length || hasRuntimeArtifacts);
+  const executionSucceeded = executionStarted && hasRuntimeArtifacts && hasExecutedAssertion && !report.executionError;
   return {
+    executionStarted,
     requirementCovered,
+    requirementPassed,
     executionSucceeded,
     artifactIntegrityVerified,
-    gateEligible: executionSucceeded && requirementCovered && artifactIntegrityVerified && artifactsAreFormal && evidenceGrounded
+    evidenceGrounded,
+    gateEligible: executionSucceeded && requirementCovered && artifactIntegrityVerified && evidenceGrounded
   };
 }
 
@@ -241,7 +249,10 @@ async function executeTestCommandCase(input: { item: Case; projectId: string; ex
     status: "completed",
     startedAt,
     finishedAt,
+    outcomeSchemaVersion: "2.0",
+    executionStarted: true,
     requirementCovered: false,
+    requirementPassed: false,
     executionSucceeded: !output.launchError && !output.timedOut,
     retryCount: 0,
     planExecutable: true,
@@ -345,17 +356,17 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const execution = deriveBenchmarkExecutionSignals(report, artifacts);
   return {
     benchmarkId: input.item.id, runId: run.id, experimentId: input.experimentId, split: input.item.split, lane: input.lane, modelProfileId: input.model?.id, repetition: input.repetition,
-    status: "completed", startedAt, finishedAt: new Date().toISOString(), requirementCovered: execution.requirementCovered, executionSucceeded: execution.executionSucceeded, retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: plannerOutcome.planExecutable, planSource: plannerMode,
+    status: "completed", startedAt, finishedAt: new Date().toISOString(), outcomeSchemaVersion: "2.0", executionStarted: execution.executionStarted, requirementCovered: execution.requirementCovered, requirementPassed: execution.requirementPassed, executionSucceeded: execution.executionSucceeded, retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: plannerOutcome.planExecutable, planSource: plannerMode,
     requestedScenarioId, projectedScenarioId: projection.selectedScenarioId,
     executedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId,
-    selectedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId, finalStatus: finalStatus(run.gateStatus),
+    selectedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId, failedStepId: report.executionError?.stepId, executionErrorCode: report.executionError?.code, finalStatus: finalStatus(run.gateStatus),
     planProvenance: report.planProvenance,
     attempts: (report.attempts ?? []).map((attempt: any) => ({ id: attempt.id, runId: attempt.runId, scenarioId: attempt.scenarioId, attempt: attempt.attempt, status: attempt.status })),
-    llmCalls: [...plannerCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "planning" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage })), ...judgeCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "judging" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage }))],
+    llmCalls: [...plannerCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "planning" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage, transportAttempts: call.transportAttempts })), ...judgeCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "judging" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage, transportAttempts: call.transportAttempts }))],
     deterministic: { verdict: deterministicVerdict, evidenceRefs: deterministicEvidenceRefs, status: "passed", durationMs },
     llm: plannerMode === "llm" || judgeMode === "adaptive" ? { verdict: llmVerdict, evidenceRefs: judgeRoutedToLlm ? modelRecommendation?.evidenceRefs ?? [] : deterministicEvidenceRefs, failureClass: judgeRoutedToLlm ? modelRecommendation?.failureClass : report.failureAttributions?.[0]?.failureClass, status: llmFailed ? "failed" : "passed", fallback: judgeRoutedToLlm && report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
     evidence: (report.evidence ?? []).map((item: any) => ({ id: item.id, type: item.type })), attribution: { failureClass: report.failureAttributions?.[0]?.failureClass, suspectFiles: report.failureAttributions?.flatMap((entry: any) => entry.topSuspects?.map((suspect: any) => suspect.filePath) ?? []) ?? [], evidenceRefs: report.failureAttributions?.flatMap((entry: any) => entry.evidenceRefs ?? []) ?? [] },
-    executionOrigin: "agent-run", gateEligible: execution.gateEligible, artifactIntegrityVerified: execution.artifactIntegrityVerified, evidenceQuality: report.evidenceQuality ? { groundedPassedRate: report.evidenceQuality.summary.groundedPassedRate, runtimeArtifactRate: report.evidenceQuality.summary.runtimeArtifactRate, crossAttemptViolations: report.evidenceQuality.summary.crossAttemptViolations } : undefined, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified", runId: artifact.runId, scenarioId: artifact.scenarioId, stepId: artifact.stepId, attemptId: artifact.attemptId, attempt: artifact.attempt, capturedAt: artifact.integrity.capturedAt, sizeBytes: artifact.integrity.sizeBytes, mediaType: artifact.integrity.mediaType, storageUri: artifact.storageUri }))
+    executionOrigin: "agent-run", gateEligible: execution.gateEligible, artifactIntegrityVerified: execution.artifactIntegrityVerified, evidenceGrounded: execution.evidenceGrounded, evidenceQuality: report.evidenceQuality ? { groundedPassedRate: report.evidenceQuality.summary.groundedPassedRate, runtimeArtifactRate: report.evidenceQuality.summary.runtimeArtifactRate, crossAttemptViolations: report.evidenceQuality.summary.crossAttemptViolations } : undefined, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified", runId: artifact.runId, scenarioId: artifact.scenarioId, stepId: artifact.stepId, attemptId: artifact.attemptId, attempt: artifact.attempt, capturedAt: artifact.integrity.capturedAt, sizeBytes: artifact.integrity.sizeBytes, mediaType: artifact.integrity.mediaType, storageUri: artifact.storageUri }))
   };
 }
 

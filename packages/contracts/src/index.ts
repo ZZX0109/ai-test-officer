@@ -234,6 +234,36 @@ export type MachineGate = z.infer<typeof machineGateSchema>;
 export type JudgeRecommendation = z.infer<typeof judgeRecommendationSchema>;
 export type HumanDecision = z.infer<typeof humanDecisionSchema>;
 
+/** UI/API-safe outcome facts. Completion, coverage, correctness and release are
+ * deliberately independent so a fully executed product failure remains
+ * auditable without being presented as a successful release. */
+export const runOutcomeSummaryV2Schema = z.object({
+  schemaVersion: z.literal("2.0"),
+  schedulingCompleted: z.boolean(),
+  executionStarted: z.boolean(),
+  executionSucceeded: z.boolean(),
+  requirementCovered: z.boolean(),
+  requirementPassed: z.boolean(),
+  artifactIntegrityVerified: z.boolean(),
+  evidenceGrounded: z.boolean(),
+  gateEligible: z.boolean(),
+  machineGate: machineGateSchema.optional(),
+  judgeRecommendation: judgeRecommendationSchema.optional(),
+  humanDecision: humanDecisionSchema.optional(),
+  finalStatus: gateStatusSchema.optional()
+}).superRefine((value, context) => {
+  if (value.requirementPassed && !value.requirementCovered) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["requirementPassed"], message: "A requirement cannot pass before it is covered." });
+  }
+  if (value.gateEligible && (!value.executionSucceeded || !value.requirementCovered || !value.artifactIntegrityVerified || !value.evidenceGrounded)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["gateEligible"], message: "Gate eligibility requires completed execution, coverage and grounded artifacts." });
+  }
+  if (value.finalStatus === "pass" && (!value.gateEligible || !value.requirementPassed || value.machineGate?.status !== "pass")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["finalStatus"], message: "Pass requires an eligible passing machine result." });
+  }
+});
+export type RunOutcomeSummaryV2 = z.infer<typeof runOutcomeSummaryV2Schema>;
+
 export const plannerModeSchema = z.enum(["deterministic", "llm", "adaptive"]);
 export const judgeModeSchema = z.enum(["deterministic", "llm-assisted", "adaptive"]);
 export type PlannerMode = z.infer<typeof plannerModeSchema>;
@@ -250,6 +280,18 @@ export const llmBudgetSchema = z.object({
   maxEstimatedCostUsd: z.number().positive().optional()
 }).refine((value) => value.requestTimeoutMs <= value.totalTimeoutMs, { message: "requestTimeoutMs must not exceed totalTimeoutMs" });
 export type LlmBudget = z.infer<typeof llmBudgetSchema>;
+
+export const llmTransportAttemptSchema = z.object({
+  attempt: z.number().int().min(1).max(3),
+  status: z.enum(["passed", "failed"]),
+  startedAt: z.string().datetime(),
+  durationMs: z.number().int().nonnegative(),
+  requestId: z.string().min(1).optional(),
+  errorCode: z.string().min(1).optional(),
+  bytesReceived: z.number().int().nonnegative().default(0),
+  eventTypes: z.array(z.string().min(1)).max(64).default([])
+});
+export type LlmTransportAttempt = z.infer<typeof llmTransportAttemptSchema>;
 
 export const llmCallSchema = z.object({
   id: z.string().min(1),
@@ -268,7 +310,8 @@ export const llmCallSchema = z.object({
     totalTokens: z.number().int().nonnegative().optional(),
     estimatedCostUsd: z.number().nonnegative().optional()
   }).default({}),
-  errorCode: z.string().min(1).optional()
+  errorCode: z.string().min(1).optional(),
+  transportAttempts: z.array(llmTransportAttemptSchema).min(1).max(3).optional()
 });
 export type LlmCall = z.infer<typeof llmCallSchema>;
 

@@ -15,17 +15,18 @@ export async function testBenchmarkContract() {
     riskCoverageMatrix: [{ covered: true, passed: true }],
     assertions: [{ passed: true }],
     artifactIntegrity: { items: [{ status: "present" }] },
-    evidenceQuality: { summary: { groundedPassedRate: 1, crossAttemptViolations: 0 } }
+    evidenceQuality: { assertions: [{ status: "grounded" }], summary: { groundedPassedRate: 1, crossAttemptViolations: 0 } }
   }, [{ origin: "runtime-captured", integrity: { sha256: "a".repeat(64), sizeBytes: 1 } }]);
-  assert.deepEqual(completeSignals, { requirementCovered: true, executionSucceeded: true, artifactIntegrityVerified: true, gateEligible: true });
+  assert.deepEqual(completeSignals, { executionStarted: true, requirementCovered: true, requirementPassed: true, executionSucceeded: true, artifactIntegrityVerified: true, evidenceGrounded: true, gateEligible: true });
   const incompleteSignals = deriveBenchmarkExecutionSignals({
     riskCoverageMatrix: [{ covered: true, passed: false }],
     assertions: [{ passed: true }],
     artifactIntegrity: { items: [{ status: "present" }] },
-    evidenceQuality: { summary: { groundedPassedRate: 1, crossAttemptViolations: 0 } }
+    evidenceQuality: { assertions: [{ status: "grounded" }], summary: { groundedPassedRate: 1, crossAttemptViolations: 0 } }
   }, [{ origin: "runtime-captured", integrity: { sha256: "a".repeat(64), sizeBytes: 1 } }]);
-  assert.equal(incompleteSignals.requirementCovered, false);
-  assert.equal(incompleteSignals.gateEligible, false);
+  assert.equal(incompleteSignals.requirementCovered, true);
+  assert.equal(incompleteSignals.requirementPassed, false);
+  assert.equal(incompleteSignals.gateEligible, true, "a fully evidenced product failure remains decision eligible");
   const handoffDiagnostic = diagnoseBenchmarkRun({
     benchmarkId: "todo-viewer-permission", runId: "run-handoff", status: "completed", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
     requestedScenarioId: "todo_visitor_permission", projectedScenarioId: "todo_visitor_permission", requirementCovered: false, executionSucceeded: false, retryCount: 0,

@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Pool } from "pg";
-import { runEventSchema, transitionRunState, type CompiledPlan, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunState } from "@ai-test-officer/contracts";
+import { runEventSchema, transitionRunState, type CompiledPlan, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunOutcomeSummaryV2, type RunState } from "@ai-test-officer/contracts";
 import type { GrayPlan, ImpactAnalysis } from "./types.js";
 
 export interface RunProjection {
@@ -17,6 +17,7 @@ export interface RunProjection {
   machineGate?: MachineGate;
   judgeRecommendation?: JudgeRecommendation;
   humanDecision?: HumanDecision;
+  outcomeSummary?: RunOutcomeSummaryV2;
   resultRunId?: string;
   plan?: GrayPlan;
   compiledPlan?: CompiledPlan;
@@ -50,6 +51,7 @@ function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
   const projection: RunProjection = { ...current, state, version: event.version, updatedAt: event.createdAt };
   if (event.payload.machineGate) projection.machineGate = event.payload.machineGate as MachineGate;
   if (event.payload.judgeRecommendation) projection.judgeRecommendation = event.payload.judgeRecommendation as JudgeRecommendation;
+  if (event.payload.outcomeSummary) projection.outcomeSummary = event.payload.outcomeSummary as RunOutcomeSummaryV2;
   if (event.payload.resultRunId) projection.resultRunId = String(event.payload.resultRunId);
   // Planning can terminate before plan_generated. Preserve rejection provenance
   // and its provider call on review/terminal events for audit and benchmarks.

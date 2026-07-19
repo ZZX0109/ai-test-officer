@@ -105,7 +105,7 @@ export async function executeQueuedRun(runId: string) {
     const judgeRecommendation = recommendationFromResult(result);
     await appendSystemRunEvent(runId, "run_judging", { resultRunId: result.id, machineGate, judgeRecommendation });
     const finalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
-    const payload = { resultRunId: result.id, machineGate, judgeRecommendation, finalStatus };
+    const payload = { resultRunId: result.id, machineGate, judgeRecommendation, finalStatus, outcomeSummary: result.outcomeSummary };
     if (finalStatus === "pass") return appendSystemRunEvent(runId, "run_completed", payload);
     if (finalStatus === "fail") return appendSystemRunEvent(runId, "run_failed", payload);
     if (finalStatus === "blocked") return appendSystemRunEvent(runId, "run_blocked", payload);

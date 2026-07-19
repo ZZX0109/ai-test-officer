@@ -1,4 +1,4 @@
-import type { ArtifactV2, CommandSpec, CompiledPlan, GateStatus, HumanDecision, JudgeRecommendation, LlmBudget, LlmCall, MachineGate, PlanProvenance, ProjectManifest, ResourceBudget } from "@ai-test-officer/contracts";
+import type { ArtifactV2, CommandSpec, CompiledPlan, GateStatus, HumanDecision, JudgeRecommendation, LlmBudget, LlmCall, MachineGate, PlanProvenance, ProjectManifest, ResourceBudget, RunOutcomeSummaryV2 } from "@ai-test-officer/contracts";
 
 export type ProviderKind = "openai-compatible" | "openai" | "anthropic" | "openrouter" | "custom";
 
@@ -605,6 +605,13 @@ export interface VisualRunResult {
   judgeRecommendation?: JudgeRecommendation;
   humanDecision?: HumanDecision;
   finalStatus?: GateStatus;
+  outcomeSummary?: RunOutcomeSummaryV2;
+  executionError?: {
+    code: "action_binding_failure" | "browser_runtime_failure" | "environment_failure" | "execution_failure";
+    stepId?: string;
+    message: string;
+    failureClass: "test_script_issue" | "environment_issue" | "unknown";
+  };
   repairAttempts?: RepairAttempt[];
   runtimeStatus?: ProjectRuntimeStatus;
   judgeReport: LayeredJudgeReport;
@@ -1131,10 +1138,15 @@ export interface DemoVerificationResult {
   stages: Array<{
     runId: string;
     scenarioId?: string;
+    schemaVersion: "2.0";
     schedulingCompleted: boolean;
+    executionStarted: boolean;
     executionSucceeded: boolean;
     requirementCovered: boolean;
+    requirementPassed: boolean;
     artifactIntegrityVerified: boolean;
+    evidenceGrounded: boolean;
+    gateEligible: boolean;
     machineGate?: GateStatus;
     judgeRecommendation?: GateStatus;
     finalStatus?: GateStatus;

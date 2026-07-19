@@ -137,6 +137,21 @@ function unavailableRunReport(run: NonNullable<Awaited<ReturnType<typeof runEven
     state: run.state,
     finalStatus,
     gateStatus: finalStatus,
+    outcomeSummary: {
+      schemaVersion: "2.0",
+      schedulingCompleted: ["completed", "failed", "blocked", "cancelled"].includes(run.state),
+      executionStarted: ["running", "collecting", "judging", "awaiting-human-review", "completed", "failed", "blocked"].includes(run.state),
+      executionSucceeded: false,
+      requirementCovered: false,
+      requirementPassed: false,
+      artifactIntegrityVerified: false,
+      evidenceGrounded: false,
+      gateEligible: false,
+      machineGate: run.machineGate,
+      judgeRecommendation: run.judgeRecommendation,
+      humanDecision: run.humanDecision,
+      finalStatus
+    },
     machineGate: run.machineGate ?? {
       status: finalStatus,
       reasons: ["run_bundle_unavailable"],

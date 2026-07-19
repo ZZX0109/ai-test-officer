@@ -95,6 +95,7 @@ async function ensureAppServer() {
   if (await isHttpReady(appUrl)) return undefined;
   const child = spawn("npm", ["--workspace", "app-under-test", "run", "dev"], {
     cwd: rootDir,
+    detached: process.platform !== "win32",
     stdio: "ignore",
     env: { ...process.env }
   });
@@ -105,6 +106,22 @@ async function ensureAppServer() {
   }
   child.kill();
   throw new Error(`APP_URL 未就绪，且自动启动 app-under-test 超时：${appUrl}`);
+}
+
+async function stopAppServer(child: ChildProcess) {
+  if (!child.pid) return;
+  try {
+    if (process.platform === "win32") child.kill("SIGTERM");
+    else process.kill(-child.pid, "SIGTERM");
+  } catch { return; }
+  const deadline = Date.now() + 5_000;
+  while (child.exitCode === null && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+  if (child.exitCode === null) {
+    try {
+      if (process.platform === "win32") child.kill("SIGKILL");
+      else process.kill(-child.pid, "SIGKILL");
+    } catch { /* already stopped */ }
+  }
 }
 
 function resultShell(): DemoVerificationResult {
@@ -119,14 +136,19 @@ function resultShell(): DemoVerificationResult {
 }
 
 function addRunStages(result: DemoVerificationResult, run: Awaited<ReturnType<typeof runVisualGrayTest>>) {
-  const artifactIntegrityVerified = Boolean(run.artifactIntegrity?.items.length) && run.artifactIntegrity!.items.every((item) => item.status === "present" || item.status === "self_reference");
+  const summary = run.outcomeSummary;
   result.stages.push({
     runId: run.id,
     scenarioId: run.attempts?.[0]?.scenarioId,
-    schedulingCompleted: Boolean(run.finishedAt),
-    executionSucceeded: Boolean(run.attempts?.length && run.artifactsV2?.some((item) => item.origin === "runtime-captured")),
-    requirementCovered: Boolean(run.riskCoverageMatrix.length && run.riskCoverageMatrix.every((item) => item.covered)),
-    artifactIntegrityVerified,
+    schemaVersion: "2.0",
+    schedulingCompleted: summary?.schedulingCompleted ?? Boolean(run.finishedAt),
+    executionStarted: summary?.executionStarted ?? Boolean(run.attempts?.length),
+    executionSucceeded: summary?.executionSucceeded ?? false,
+    requirementCovered: summary?.requirementCovered ?? false,
+    requirementPassed: summary?.requirementPassed ?? false,
+    artifactIntegrityVerified: summary?.artifactIntegrityVerified ?? false,
+    evidenceGrounded: summary?.evidenceGrounded ?? false,
+    gateEligible: summary?.gateEligible ?? false,
     machineGate: run.machineGate?.status,
     judgeRecommendation: run.judgeRecommendation?.status,
     finalStatus: run.finalStatus
@@ -518,7 +540,7 @@ export async function runDemoVerification() {
     restoreEnv("BOT_WEBHOOK_URL", previousWebhook);
     restoreEnv("ALLOW_PRIVATE_CONNECTOR_URLS", previousAllowPrivateConnectors);
     await fixture.close();
-    if (appProcess) appProcess.kill();
+    if (appProcess) await stopAppServer(appProcess);
   }
 
   let resultWithFile = await writeDemoVerification(result);

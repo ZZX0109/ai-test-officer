@@ -31,6 +31,8 @@ export interface BenchmarkRunRecord {
   startedAt: string;
   finishedAt: string;
   requirementCovered: boolean;
+  requirementPassed?: boolean;
+  executionStarted?: boolean;
   executionSucceeded: boolean;
   retryCount: number;
   experimentId?: string;
@@ -44,6 +46,8 @@ export interface BenchmarkRunRecord {
   projectedScenarioId?: string;
   executedScenarioId?: string;
   selectedScenarioId?: string;
+  failedStepId?: string;
+  executionErrorCode?: string;
   finalStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
   planProvenance?: {
     source: "deterministic" | "llm" | "scenario_fallback" | "adaptive-rule-fallback" | "cached-llm";
@@ -73,6 +77,16 @@ export interface BenchmarkRunRecord {
     errorCode?: string;
     durationMs?: number;
     usage?: JudgeLaneRecord["usage"];
+    transportAttempts?: Array<{
+      attempt: number;
+      status: "passed" | "failed";
+      startedAt: string;
+      durationMs: number;
+      requestId?: string;
+      errorCode?: string;
+      bytesReceived: number;
+      eventTypes: string[];
+    }>;
   }>;
   baselineDerivedFromRunId?: string;
   initialVerdict?: BenchmarkVerdict;
@@ -83,6 +97,8 @@ export interface BenchmarkRunRecord {
   executionOrigin?: "agent-run" | "command-baseline" | "seeded-fixture" | "static-report";
   gateEligible?: boolean;
   artifactIntegrityVerified?: boolean;
+  evidenceGrounded?: boolean;
+  outcomeSchemaVersion?: "2.0";
   agentVersion?: string;
   configHash?: string;
   targetVersion?: string;
@@ -147,12 +163,18 @@ export interface BenchmarkRunDiagnostic {
   lane: string;
   repetition: number;
   expectedScenarioId?: string;
+  requestedScenarioId?: string;
+  projectedScenarioId?: string;
+  executedScenarioId?: string;
   selectedScenarioId?: string;
+  failedStepId?: string;
+  executionErrorCode?: string;
   primaryCause?: BenchmarkFailureCategory;
   effects: BenchmarkFailureCategory[];
   browserStarted: boolean;
   executionSucceeded: boolean;
   requirementCovered: boolean;
+  requirementPassed: boolean;
   artifactIntegrityVerified: boolean;
   gateEligible: boolean;
   recommendation?: BenchmarkVerdict;
@@ -180,7 +202,7 @@ export function diagnoseBenchmarkRun(record: BenchmarkRunRecord, label?: HumanBe
   else if (plannerFailed) effects.push("plan_compilation_error");
   if (browserStarted && !record.executionSucceeded) effects.push("browser_execution_error");
   if (!record.requirementCovered) effects.push("requirement_not_covered");
-  if (!record.artifactIntegrityVerified || record.gateEligible !== true) effects.push("artifact_integrity_failure");
+  if (!record.artifactIntegrityVerified) effects.push("artifact_integrity_failure");
   if (record.llm && (record.llm.status === "failed" || record.llm.fallback || record.llmCalls?.some((call) => call.status !== "passed"))) effects.push("model_call_failure");
   if (record.llm && ((!recommendationValid && record.llmCalls?.some((call) => call.purpose === "judging")) || (recommendationValid && label && recommendation !== label.verdict))) effects.push("judge_recommendation_error");
   const priority: BenchmarkFailureCategory[] = ["planner_provider_failure", "plan_compilation_error", "browser_execution_error", "scenario_selection_error", "requirement_not_covered", "artifact_integrity_failure", "model_call_failure", "judge_recommendation_error"];
@@ -190,12 +212,18 @@ export function diagnoseBenchmarkRun(record: BenchmarkRunRecord, label?: HumanBe
     lane: record.lane ?? "unknown",
     repetition: record.repetition ?? 1,
     expectedScenarioId: label?.expectedScenarioId,
+    requestedScenarioId: record.requestedScenarioId,
+    projectedScenarioId: record.projectedScenarioId,
+    executedScenarioId: record.executedScenarioId,
     selectedScenarioId: scenarioSelection,
+    failedStepId: record.failedStepId,
+    executionErrorCode: record.executionErrorCode,
     primaryCause: priority.find((category) => effects.includes(category)),
     effects,
     browserStarted,
     executionSucceeded: record.executionSucceeded,
     requirementCovered: record.requirementCovered,
+    requirementPassed: record.requirementPassed === true,
     artifactIntegrityVerified: record.artifactIntegrityVerified === true,
     gateEligible: record.gateEligible === true,
     recommendation,
@@ -348,6 +376,7 @@ export function hasCompleteBenchmarkTrace(record: BenchmarkRunRecord) {
  */
 export function normalizeHistoricalBenchmarkRecord(record: BenchmarkRunRecord, label?: HumanBenchmarkLabel): { record: BenchmarkRunRecord; exclusion?: HistoricalBenchmarkExclusion } {
   const reasons: string[] = [];
+  if (record.outcomeSchemaVersion !== "2.0") reasons.push("legacy_outcome_semantics_unverified");
   const commandBaseline = record.lane === "test-command" || record.executionOrigin === "command-baseline";
   if (commandBaseline) reasons.push("command_baseline_not_formal_evidence");
   if (!record.finalStatus) reasons.push("final_status_missing");
@@ -356,7 +385,7 @@ export function normalizeHistoricalBenchmarkRecord(record: BenchmarkRunRecord, l
   if (record.artifactIntegrityVerified !== true) reasons.push("artifact_integrity_not_verified");
   if (!hasCompleteBenchmarkTrace(record)) reasons.push("artifact_v2_trace_incomplete");
   if (record.artifactsV2?.some((artifact) => artifact.integrityStatus !== "verified" || !/^[a-f0-9]{64}$/.test(artifact.sha256) || (artifact.origin !== "runtime-captured" && artifact.origin !== "fixture"))) reasons.push("artifact_v2_integrity_invalid");
-  if (label?.expectedScenarioId && record.selectedScenarioId !== label.expectedScenarioId) reasons.push("scenario_selection_mismatch");
+  if (label?.expectedScenarioId && (record.executedScenarioId ?? record.selectedScenarioId) !== label.expectedScenarioId) reasons.push("scenario_selection_mismatch");
   if (!reasons.length) return { record };
 
   const safeStatus = record.finalStatus === "fail" || record.finalStatus === "blocked"
@@ -367,6 +396,7 @@ export function normalizeHistoricalBenchmarkRecord(record: BenchmarkRunRecord, l
       ...record,
       status: "invalid",
       requirementCovered: false,
+      requirementPassed: false,
       gateEligible: false,
       artifactIntegrityVerified: false,
       finalStatus: safeStatus,
@@ -495,8 +525,8 @@ export function evaluateExperiment(input: {
       finalStatusAccuracy: ratio(finalCompared.filter((item) => item.finalVerdict === item.label.verdict).length, finalCompared.length),
       finalDecisionAccuracy: ratio(finalCompared.filter((item) => item.finalVerdict === item.label.verdict).length, finalCompared.length),
       macroF1: macroF1(finalCompared.map((item) => ({ actual: item.finalVerdict, expected: item.label.verdict }))),
-      taskSuccessRate: ratio(compared.filter((item) => item.record.executionSucceeded && item.record.planExecutable !== false && item.record.gateEligible === true && item.record.artifactIntegrityVerified === true && item.result.status === "passed" && (!item.label.expectedScenarioId || item.record.selectedScenarioId === item.label.expectedScenarioId)).length, compared.length),
-      scenarioSelectionAccuracy: ratio(scenarioSelections.filter((item) => item.record.selectedScenarioId === item.label.expectedScenarioId).length, scenarioSelections.length),
+      taskSuccessRate: ratio(finalCompared.filter((item) => item.record.executionSucceeded && item.record.requirementCovered && item.record.planExecutable !== false && item.record.gateEligible === true && item.record.artifactIntegrityVerified === true && item.record.evidenceGrounded === true && item.finalVerdict === item.label.verdict && (!item.label.expectedScenarioId || item.record.executedScenarioId === item.label.expectedScenarioId)).length, finalCompared.length),
+      scenarioSelectionAccuracy: ratio(scenarioSelections.filter((item) => item.record.executedScenarioId === item.label.expectedScenarioId).length, scenarioSelections.length),
       requirementCoverageRate: ratio(compared.filter((item) => item.record.requirementCovered).length, compared.length),
       falseReleaseRate: ratio(expectedFail.filter((item) => item.finalVerdict === "pass").length, expectedFail.length),
       falseBlockRate: ratio(expectedPass.filter((item) => item.finalVerdict !== "pass").length, expectedPass.length),
@@ -508,7 +538,7 @@ export function evaluateExperiment(input: {
       firstPassJudgeRate: ratio(judgeRuns.filter((record) => record.llm?.status === "passed" && (record.llmCalls ?? []).filter((call) => call.purpose === "judging").length === 1).length, judgeRuns.length),
       judgeRepairRate: ratio(repairedJudgeRuns.length, judgeRuns.length),
       averageJudgeCallsPerRun: judgeRuns.length ? judgingCalls.length / judgeRuns.length : null,
-      artifactIntegrityRate: ratio(compared.filter((item) => item.record.gateEligible && item.record.artifactIntegrityVerified === true && item.record.artifactsV2?.length && item.record.artifactsV2.every((artifact) => artifact.integrityStatus === "verified" && /^[a-f0-9]{64}$/.test(artifact.sha256) && (artifact.origin === "runtime-captured" || artifact.origin === "fixture"))).length, compared.length),
+      artifactIntegrityRate: ratio(compared.filter((item) => item.record.artifactIntegrityVerified === true && item.record.artifactsV2?.length && item.record.artifactsV2.every((artifact) => artifact.integrityStatus === "verified" && /^[a-f0-9]{64}$/.test(artifact.sha256) && (artifact.origin === "runtime-captured" || artifact.origin === "fixture"))).length, compared.length),
       groundedEvidenceRate: compared.length ? compared.reduce((sum, item) => sum + (item.record.evidenceQuality?.groundedPassedRate ?? 0), 0) / compared.length : null,
       evidenceReferenceAccuracy: ratio(validEvidenceReferences.filter(Boolean).length, validEvidenceReferences.length),
       runTraceabilityRate: ratio(compared.filter((item) => hasCompleteBenchmarkTrace(item.record)).length, compared.length),

@@ -12,6 +12,8 @@ import {
   ,fixtureVariantIdSchema
   ,planProvenanceSchema
   ,actionDslSchema
+  ,llmCallSchema
+  ,runOutcomeSummaryV2Schema
 } from "../src/index.js";
 
 const artifact = artifactV2Schema.parse({
@@ -83,4 +85,18 @@ assert.deepEqual(actionDslSchema.parse({ action: "select", selectorRef: "selectL
   action: "select", selectorRef: "selectLabel", valueRef: "selectValue"
 });
 assert.throws(() => actionDslSchema.parse({ action: "select", selectorRef: "selectLabel" }));
+const failedProductSummary = runOutcomeSummaryV2Schema.parse({
+  schemaVersion: "2.0", schedulingCompleted: true, executionStarted: true, executionSucceeded: true,
+  requirementCovered: true, requirementPassed: false, artifactIntegrityVerified: true, evidenceGrounded: true,
+  gateEligible: true, machineGate: { status: "fail", reasons: ["assertion"], assertionFailures: ["permission"], evidenceComplete: true }, finalStatus: "fail"
+});
+assert.equal(failedProductSummary.requirementCovered, true);
+assert.equal(failedProductSummary.requirementPassed, false);
+assert.throws(() => runOutcomeSummaryV2Schema.parse({ ...failedProductSummary, requirementCovered: false, requirementPassed: true }));
+assert.throws(() => runOutcomeSummaryV2Schema.parse({ ...failedProductSummary, requirementPassed: false, finalStatus: "pass" }));
+assert.equal(llmCallSchema.parse({
+  id: "llm-1", purpose: "judging", provider: "openai-compatible", model: "codex", startedAt: "2026-07-19T00:00:00.000Z",
+  durationMs: 12, status: "failed", usage: {}, errorCode: "provider_responses_incomplete",
+  transportAttempts: [1, 2, 3].map((attempt) => ({ attempt, status: "failed", startedAt: "2026-07-19T00:00:00.000Z", durationMs: 4, errorCode: "provider_responses_incomplete", bytesReceived: 32, eventTypes: ["response.output_text.delta"] }))
+}).transportAttempts?.length, 3);
 console.log("contracts tests passed");
