@@ -86,9 +86,9 @@ try {
     NO_PROXY: "127.0.0.1,localhost",
     BENCHMARK_MODEL_IDS: "sophnet-gpt-5.1-codex",
     BENCHMARK_SOPHNET_CREDENTIAL_ID: credentialId,
-    BENCHMARK_CASE_IDS: "todo-create-valid,todo-filter-completed,todo-viewer-permission,order-filter-pending,order-viewer-permission,order-api-failure",
+    BENCHMARK_CASE_IDS: process.env.BENCHMARK_CASE_IDS ?? "todo-create-valid,todo-filter-completed,todo-viewer-permission,order-filter-pending,order-viewer-permission,order-api-failure",
     BENCHMARK_EXPERIMENT_ID: experimentId,
-    BENCHMARK_REPETITIONS: "3",
+    BENCHMARK_REPETITIONS: process.env.BENCHMARK_REPETITIONS ?? "3",
     BENCHMARK_RUN_TIMEOUT_MS: "180000"
   };
   await run("benchmark", ["run", "benchmark:run"], benchmarkEnv);
