@@ -73,6 +73,11 @@ function openDb() {
   if (db) return db;
   mkdirSync(auditDir, { recursive: true });
   db = new DatabaseSync(auditDbFile);
+  // The local SQLite backend is development-only, but Demo and a running
+  // workbench server can legitimately write evidence at the same time. Let
+  // SQLite wait for the short WAL writer window instead of turning that
+  // harmless contention into a failed test run.
+  db.exec("PRAGMA busy_timeout = 10000;");
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(`
