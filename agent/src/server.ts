@@ -283,7 +283,10 @@ app.post("/api/credentials/:id/test", async (req, res, next) => {
         apiKey,
         system: "Return only a JSON object with key ok and boolean value.",
         prompt: `Preflight structured output check (${transportPreference}).`,
-        maxTokens: 64,
+        // Some OpenAI-compatible gateways wrap even a tiny JSON reply with
+        // internal formatting. 64 tokens can truncate that valid response and
+        // make a working credential look unsupported.
+        maxTokens: 256,
         timeoutMs: 30_000,
         transportPreference,
         context: { purpose: "planning", experimentId: "credential-preflight" }
