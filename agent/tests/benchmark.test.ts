@@ -140,6 +140,12 @@ export function testBenchmarkEvaluation() {
 
   const providerFailure = diagnoseBenchmarkRun({ ...record, selectedScenarioId: undefined, finalStatus: "blocked", executionSucceeded: false, requirementCovered: false, gateEligible: false, artifactIntegrityVerified: false, planExecutable: false, attempts: [], artifactsV2: [], planProvenance: { source: "llm", compilationStatus: "rejected", fallbackReason: "fetch_failed" }, llm: { verdict: "needs_review", evidenceRefs: [], status: "failed" } }, { ...labels[0], expectedScenarioId: "scenario-1" });
   assert.equal(providerFailure.primaryCause, "planner_provider_failure");
+  const judgeTransportFailure = diagnoseBenchmarkRun({
+    ...record,
+    llm: { verdict: "needs_review", evidenceRefs: [], status: "failed" },
+    llmCalls: [{ id: "judge-timeout", purpose: "judging", provider: "openai-compatible", model: "gpt-5.1-codex", status: "failed", errorCode: "The_operation_was_aborted_due_to_timeout" }]
+  });
+  assert.equal(judgeTransportFailure.primaryCause, "judge_provider_failure");
   assert.equal(providerFailure.browserStarted, false);
   assert.equal(providerFailure.effects.includes("browser_execution_error"), false, "planner failures must not be mislabeled as browser failures");
 }

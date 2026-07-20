@@ -153,6 +153,7 @@ export interface ExperimentEvaluation {
 export type BenchmarkFailureCategory =
   | "scenario_selection_error"
   | "planner_provider_failure"
+  | "judge_provider_failure"
   | "plan_compilation_error"
   | "browser_execution_error"
   | "requirement_not_covered"
@@ -196,6 +197,9 @@ export function diagnoseBenchmarkRun(record: BenchmarkRunRecord, label?: HumanBe
   const effects: BenchmarkFailureCategory[] = [];
   const plannerFailed = record.planProvenance?.compilationStatus === "rejected" || record.planExecutable === false;
   const providerFailure = plannerFailed && /fetch_failed|provider_http|timeout|llm_not_configured/i.test(record.planProvenance?.fallbackReason ?? "");
+  const judgeProviderFailure = record.llmCalls?.some((call) => call.purpose === "judging"
+    && call.status === "failed"
+    && /provider_|timeout|fetch_failed|aborted/i.test(call.errorCode ?? ""));
   const browserStarted = Boolean(record.attempts?.length || record.artifactsV2?.some((artifact) => artifact.origin === "runtime-captured"));
   const recommendation = record.llm?.verdict;
   const recommendationValid = Boolean(record.llm && record.llm.status === "passed" && !record.llm.fallback);
@@ -203,12 +207,13 @@ export function diagnoseBenchmarkRun(record: BenchmarkRunRecord, label?: HumanBe
   if (label?.expectedScenarioId && scenarioSelection && scenarioSelection !== label.expectedScenarioId) effects.push("scenario_selection_error");
   if (providerFailure) effects.push("planner_provider_failure");
   else if (plannerFailed) effects.push("plan_compilation_error");
+  if (judgeProviderFailure) effects.push("judge_provider_failure");
   if (browserStarted && !record.executionSucceeded) effects.push("browser_execution_error");
   if (!record.requirementCovered) effects.push("requirement_not_covered");
   if (!record.artifactIntegrityVerified) effects.push("artifact_integrity_failure");
   if (record.llm && (record.llm.status === "failed" || record.llm.fallback || record.llmCalls?.some((call) => call.status !== "passed"))) effects.push("model_call_failure");
   if (record.llm && ((!recommendationValid && record.llmCalls?.some((call) => call.purpose === "judging")) || (recommendationValid && label && recommendation !== label.verdict))) effects.push("judge_recommendation_error");
-  const priority: BenchmarkFailureCategory[] = ["planner_provider_failure", "plan_compilation_error", "browser_execution_error", "scenario_selection_error", "requirement_not_covered", "artifact_integrity_failure", "model_call_failure", "judge_recommendation_error"];
+  const priority: BenchmarkFailureCategory[] = ["planner_provider_failure", "judge_provider_failure", "plan_compilation_error", "browser_execution_error", "scenario_selection_error", "requirement_not_covered", "artifact_integrity_failure", "model_call_failure", "judge_recommendation_error"];
   return {
     benchmarkId: record.benchmarkId,
     runId: record.runId,
