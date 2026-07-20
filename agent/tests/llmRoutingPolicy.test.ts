@@ -14,4 +14,16 @@ export function testLlmRoutingPolicy() {
   const judge = { planJudge: { verdict: "pass" }, evidenceJudge: { verdict: "pass" }, releaseJudge: { verdict: "pass" } } as never;
   assert.equal(routeJudge({ baseline: judge, conflictStatus: "not_triggered", failedAssertionCount: 0, insufficientEvidenceCount: 0 }).route, "deterministic");
   assert.equal(routeJudge({ baseline: judge, conflictStatus: "needs_user_review", failedAssertionCount: 0, insufficientEvidenceCount: 0 }).route, "llm");
+  const classifiedFailure = {
+    planJudge: { verdict: "fail" },
+    evidenceJudge: { verdict: "fail" },
+    releaseJudge: { verdict: "needs_review", findings: [{ failureClass: "environment_issue" }] }
+  } as never;
+  assert.equal(routeJudge({ baseline: classifiedFailure, conflictStatus: "not_triggered", failedAssertionCount: 1, insufficientEvidenceCount: 0 }).route, "deterministic");
+  const unclassifiedFailure = {
+    planJudge: { verdict: "fail" },
+    evidenceJudge: { verdict: "fail" },
+    releaseJudge: { verdict: "needs_review", findings: [{ failureClass: "unknown" }] }
+  } as never;
+  assert.equal(routeJudge({ baseline: unclassifiedFailure, conflictStatus: "not_triggered", failedAssertionCount: 1, insufficientEvidenceCount: 0 }).route, "llm");
 }

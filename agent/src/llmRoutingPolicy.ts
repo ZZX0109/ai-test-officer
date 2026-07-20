@@ -43,8 +43,14 @@ export function routeJudge(input: {
   const signals: string[] = [];
   if (["needs_replay", "needs_user_review"].includes(input.conflictStatus)) signals.push(`evidence_conflict:${input.conflictStatus}`);
   if (input.baseline.planJudge.verdict !== input.baseline.evidenceJudge.verdict) signals.push("judge_layer_disagreement");
-  if (input.baseline.releaseJudge.verdict === "needs_review" && input.failedAssertionCount > 0) signals.push("failure_attribution_unclear");
-  if (input.insufficientEvidenceCount > 0) signals.push("evidence_insufficient");
+  const deterministicClasses = new Set((input.baseline.releaseJudge.findings ?? []).map((finding) => finding.failureClass).filter(Boolean));
+  const hasKnownAttribution = deterministicClasses.size === 1
+    && [...deterministicClasses].every((failureClass) => ["product_bug", "test_script_issue", "environment_issue", "insufficient_evidence"].includes(failureClass!));
+  // A deterministic product, environment, script, or evidence verdict is
+  // already actionable. Calling an LLM there only increases latency and must
+  // not be required for a formal decision.
+  if (input.baseline.releaseJudge.verdict === "needs_review" && input.failedAssertionCount > 0 && !hasKnownAttribution) signals.push("failure_attribution_unclear");
+  if (input.insufficientEvidenceCount > 0 && !hasKnownAttribution) signals.push("evidence_insufficient_unclassified");
   if (signals.length) return { route: "llm", reason: "conflict_or_unclear_attribution", signals };
   return { route: "deterministic", reason: "deterministic_evidence_sufficient", signals: ["no_conflict", "grounded_evidence"] };
 }

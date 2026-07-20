@@ -67,6 +67,17 @@ export async function testLlmProviderResponsesTransport() {
     assert.equal(requests, 1);
 
     requests = 0;
+    globalThis.fetch = (async () => {
+      requests += 1;
+      if (requests === 1) throw new Error("The_operation_was_aborted_due_to_timeout");
+      return jsonResponse({ id: "response-non-stream-retry", model: "gpt-5.1-codex", output_text: '{"ok":true}', usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } });
+    }) as typeof fetch;
+    const nonStreamRetry = await executeLlmCall({ credential, apiKey: "test-only", prompt: "{}", system: "json", maxTokens: 64, timeoutMs: 2_000, totalTimeoutMs: 8_000, transportPreference: "non-stream-retry", context: { purpose: "judging", experimentId: "provider-unit-test" } });
+    assert.equal(nonStreamRetry.call.status, "passed");
+    assert.deepEqual(nonStreamRetry.call.transportAttempts?.map((item) => item.mode), ["non-stream", "non-stream"]);
+    assert.equal(requests, 2);
+
+    requests = 0;
     globalThis.fetch = (async () => { requests += 1; return stream([{ type: "response.output_text.delta", delta: "{" }]); }) as typeof fetch;
     await assert.rejects(async () => {
       try {
