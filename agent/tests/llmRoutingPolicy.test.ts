@@ -25,7 +25,7 @@ export function testLlmRoutingPolicy() {
     evidenceJudge: { verdict: "fail" },
     releaseJudge: { verdict: "fail", findings: [{ failureClass: "unknown" }] }
   } as never;
-  assert.equal(routeJudge({ baseline: machineFailure, conflictStatus: "not_triggered", failedAssertionCount: 1, insufficientEvidenceCount: 0 }).route, "deterministic");
+  assert.equal(routeJudge({ baseline: machineFailure, conflictStatus: "needs_user_review", failedAssertionCount: 1, insufficientEvidenceCount: 0 }).route, "deterministic");
   const unclassifiedFailure = {
     planJudge: { verdict: "fail" },
     evidenceJudge: { verdict: "fail" },

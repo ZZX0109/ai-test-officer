@@ -46,8 +46,8 @@ export function routeJudge(input: {
   // A deterministic release failure is already a safe, actionable machine
   // conclusion. Do not spend a Judge call trying to reinterpret it; LLM
   // attribution is reserved for genuine conflicts and unresolved reviews.
-  if (input.baseline.releaseJudge.verdict === "fail" && signals.length === 0) {
-    return { route: "deterministic", reason: "deterministic_failure_is_actionable", signals: ["machine_fail"] };
+  if (input.baseline.releaseJudge.verdict === "fail" && input.failedAssertionCount > 0 && input.insufficientEvidenceCount === 0) {
+    return { route: "deterministic", reason: "deterministic_failure_is_actionable", signals: ["machine_fail", ...signals] };
   }
   const deterministicClasses = new Set((input.baseline.releaseJudge.findings ?? []).map((finding) => finding.failureClass).filter(Boolean));
   const hasKnownAttribution = deterministicClasses.size === 1
