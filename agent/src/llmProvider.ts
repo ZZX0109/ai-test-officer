@@ -246,7 +246,7 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
       const telemetry = error && typeof error === "object" && "transportTelemetry" in error ? (error as any).transportTelemetry : {};
       const mode = modes[attempt - 1];
       attempts.push({ attempt, mode, status: "failed", startedAt: telemetry.attemptStartedAt ?? new Date().toISOString(), durationMs: telemetry.durationMs ?? 0, requestId: telemetry.requestId, errorCode, bytesReceived: telemetry.bytesReceived ?? 0, eventTypes: telemetry.eventTypes ?? [] });
-      const retriable = responsesApi && input.transportPreference !== "non-stream" && /provider_responses_(incomplete|empty|invalid_event|body_missing)|TimeoutError|fetch_failed/.test(errorCode);
+      const retriable = responsesApi && input.transportPreference !== "non-stream" && /provider_responses_(incomplete|empty|invalid_event|body_missing)|TimeoutError|AbortError|fetch_failed|operation_was_aborted_due_to_timeout/.test(errorCode);
       if (!retriable || attempt === maxAttempts) break;
       await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 250 : 1_000));
     }
