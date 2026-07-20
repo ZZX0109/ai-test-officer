@@ -114,6 +114,19 @@ export async function parseResponsesStream(response: Response) {
   return { data: { ...completed, output_text: text }, telemetry: { bytesReceived, eventTypes: [...eventTypes] } };
 }
 
+async function parseResponsesJson(response: Response) {
+  const body = await response.text();
+  const bytesReceived = Buffer.byteLength(body, "utf8");
+  if (!body.trim()) throw new Error("provider_responses_empty");
+  let data: Record<string, any>;
+  try {
+    data = JSON.parse(body) as Record<string, any>;
+  } catch {
+    throw new Error("provider_responses_invalid_json");
+  }
+  return { data, telemetry: { bytesReceived, eventTypes: ["json_response"] } };
+}
+
 type ExecuteLlmCallInput = {
   credential: CredentialRecord;
   apiKey: string;
@@ -124,9 +137,12 @@ type ExecuteLlmCallInput = {
   temperature?: number;
   context: LlmCallContext;
   totalTimeoutMs?: number;
+  transportPreference?: "auto" | "stream" | "non-stream";
 };
 
-async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: number) {
+type ResponsesTransportMode = "stream" | "non-stream";
+
+async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: number, mode: ResponsesTransportMode) {
   const attemptStartedAt = new Date().toISOString();
   const attemptStarted = Date.now();
   let requestId: string | undefined;
@@ -146,7 +162,7 @@ async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: nu
         system: input.system, messages: [{ role: "user", content: input.prompt }]
       } : responsesApi ? {
         model: input.credential.model, instructions: input.system, input: `${input.prompt}\nReturn a JSON object.`,
-        max_output_tokens: input.maxTokens, stream: true, text: { format: { type: "json_object" } }
+        max_output_tokens: input.maxTokens, stream: mode === "stream", text: { format: { type: "json_object" } }
       } : {
         model: input.credential.model, temperature: input.temperature ?? 0, response_format: { type: "json_object" },
         max_tokens: input.maxTokens, messages: [{ role: "system", content: input.system }, { role: "user", content: input.prompt }]
@@ -154,14 +170,16 @@ async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: nu
     });
     requestId = response.headers.get("x-request-id") ?? undefined;
     if (!response.ok) throw new Error(`provider_http_${response.status}`);
-    const parsed = responsesApi ? await parseResponsesStream(response) : { data: await response.json(), telemetry: { bytesReceived: 0, eventTypes: ["json_response"] } };
+    const parsed = responsesApi
+      ? mode === "stream" ? await parseResponsesStream(response) : await parseResponsesJson(response)
+      : { data: await response.json(), telemetry: { bytesReceived: 0, eventTypes: ["json_response"] } };
     bytesReceived = parsed.telemetry.bytesReceived;
     eventTypes = parsed.telemetry.eventTypes;
     const data = parsed.data as Record<string, any>;
     requestId ??= data.id;
     return {
       data,
-      telemetry: { attemptStartedAt, durationMs: Date.now() - attemptStarted, requestId, bytesReceived, eventTypes }
+      telemetry: { attemptStartedAt, durationMs: Date.now() - attemptStarted, requestId, bytesReceived, eventTypes, mode }
     };
   } catch (error) {
     const streamTelemetry = error && typeof error === "object" && "streamTelemetry" in error
@@ -173,7 +191,8 @@ async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: nu
         durationMs: Date.now() - attemptStarted,
         requestId,
         bytesReceived: streamTelemetry?.bytesReceived ?? bytesReceived,
-        eventTypes: streamTelemetry?.eventTypes ?? eventTypes
+        eventTypes: streamTelemetry?.eventTypes ?? eventTypes,
+        mode
       }
     });
   }
@@ -185,14 +204,22 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
   const started = Date.now();
   const attempts: NonNullable<LlmCall["transportAttempts"]> = [];
   const responsesApi = input.credential.provider === "openai-compatible" && /codex/i.test(input.credential.model);
-  const maxAttempts = responsesApi ? 3 : 1;
+  const modes: ResponsesTransportMode[] = responsesApi
+    ? input.transportPreference === "non-stream"
+      ? ["non-stream"]
+      : input.transportPreference === "stream"
+        ? ["stream"]
+        : ["stream", "stream", "non-stream"]
+    : ["stream"];
+  const maxAttempts = modes.length;
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const remainingMs = (input.totalTimeoutMs ?? (input.timeoutMs ?? 30_000) * maxAttempts + 2_000) - (Date.now() - started);
     if (remainingMs <= 0) { lastError = new Error("provider_total_timeout"); break; }
     try {
-      const result = await executeTransportAttempt(input, Math.min(input.timeoutMs ?? Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 30_000), remainingMs));
-      attempts.push({ attempt, status: "passed", startedAt: result.telemetry.attemptStartedAt, durationMs: result.telemetry.durationMs, requestId: result.telemetry.requestId, bytesReceived: result.telemetry.bytesReceived, eventTypes: result.telemetry.eventTypes });
+      const mode = modes[attempt - 1];
+      const result = await executeTransportAttempt(input, Math.min(input.timeoutMs ?? Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 30_000), remainingMs), mode);
+      attempts.push({ attempt, mode, status: "passed", startedAt: result.telemetry.attemptStartedAt, durationMs: result.telemetry.durationMs, requestId: result.telemetry.requestId, bytesReceived: result.telemetry.bytesReceived, eventTypes: result.telemetry.eventTypes });
       const data = result.data as {
       id?: string;
       model?: string;
@@ -204,7 +231,9 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
       };
       const promptTokens = data.usage?.prompt_tokens ?? data.usage?.input_tokens;
       const completionTokens = data.usage?.completion_tokens ?? data.usage?.output_tokens;
-      const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: data.model ?? input.credential.model, requestId: result.telemetry.requestId ?? data.id, startedAt, durationMs: Date.now() - started, status: "passed", transportAttempts: attempts, usage: { promptTokens, completionTokens, totalTokens: data.usage?.total_tokens ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined), estimatedCostUsd: usageCost(input.credential.provider, data.model ?? input.credential.model, promptTokens, completionTokens) } });
+      const usedFallback = attempts.some((item) => item.mode === "non-stream");
+      const streamFailedBeforeFallback = usedFallback && attempts.some((item) => item.mode === "stream" && item.status === "failed");
+      const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: data.model ?? input.credential.model, requestId: result.telemetry.requestId ?? data.id, startedAt, durationMs: Date.now() - started, status: "passed", transportMode: usedFallback ? "non-stream-fallback" : "stream", fallbackReason: streamFailedBeforeFallback ? "stream_incomplete" : undefined, transportAttempts: attempts, usage: { promptTokens, completionTokens, totalTokens: data.usage?.total_tokens ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined), estimatedCostUsd: usageCost(input.credential.provider, data.model ?? input.credential.model, promptTokens, completionTokens) } });
       await persist(call);
       return { text: input.credential.provider === "anthropic"
         ? data.content?.find((item) => item.type === "text")?.text ?? ""
@@ -215,14 +244,17 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
       lastError = error;
       const errorCode = error instanceof Error ? error.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
       const telemetry = error && typeof error === "object" && "transportTelemetry" in error ? (error as any).transportTelemetry : {};
-      attempts.push({ attempt, status: "failed", startedAt: telemetry.attemptStartedAt ?? new Date().toISOString(), durationMs: telemetry.durationMs ?? 0, requestId: telemetry.requestId, errorCode, bytesReceived: telemetry.bytesReceived ?? 0, eventTypes: telemetry.eventTypes ?? [] });
-      const retriable = responsesApi && /provider_responses_(incomplete|empty|invalid_event|body_missing)|TimeoutError|fetch_failed/.test(errorCode);
+      const mode = modes[attempt - 1];
+      attempts.push({ attempt, mode, status: "failed", startedAt: telemetry.attemptStartedAt ?? new Date().toISOString(), durationMs: telemetry.durationMs ?? 0, requestId: telemetry.requestId, errorCode, bytesReceived: telemetry.bytesReceived ?? 0, eventTypes: telemetry.eventTypes ?? [] });
+      const retriable = responsesApi && input.transportPreference !== "non-stream" && /provider_responses_(incomplete|empty|invalid_event|body_missing)|TimeoutError|fetch_failed/.test(errorCode);
       if (!retriable || attempt === maxAttempts) break;
       await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 250 : 1_000));
     }
   }
   const errorCode = lastError instanceof Error ? lastError.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
-  const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: input.credential.model, startedAt, durationMs: Date.now() - started, status: "failed", usage: {}, errorCode, transportAttempts: attempts });
+  const usedFallback = attempts.some((item) => item.mode === "non-stream");
+  const streamFailedBeforeFallback = usedFallback && attempts.some((item) => item.mode === "stream" && item.status === "failed");
+  const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: input.credential.model, startedAt, durationMs: Date.now() - started, status: "failed", transportMode: usedFallback ? "non-stream-fallback" : "stream", fallbackReason: streamFailedBeforeFallback ? "stream_incomplete" : undefined, usage: {}, errorCode, transportAttempts: attempts });
   await persist(call);
   throw Object.assign(new Error(errorCode), { llmCall: call });
 }

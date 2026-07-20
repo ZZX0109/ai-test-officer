@@ -76,9 +76,12 @@ export interface BenchmarkRunRecord {
     status: string;
     errorCode?: string;
     durationMs?: number;
+    transportMode?: "stream" | "non-stream-fallback";
+    fallbackReason?: string;
     usage?: JudgeLaneRecord["usage"];
     transportAttempts?: Array<{
       attempt: number;
+      mode: "stream" | "non-stream";
       status: "passed" | "failed";
       startedAt: string;
       durationMs: number;
@@ -541,6 +544,7 @@ export function evaluateExperiment(input: {
       artifactIntegrityRate: ratio(compared.filter((item) => item.record.artifactIntegrityVerified === true && item.record.artifactsV2?.length && item.record.artifactsV2.every((artifact) => artifact.integrityStatus === "verified" && /^[a-f0-9]{64}$/.test(artifact.sha256) && (artifact.origin === "runtime-captured" || artifact.origin === "fixture"))).length, compared.length),
       groundedEvidenceRate: compared.length ? compared.reduce((sum, item) => sum + (item.record.evidenceQuality?.groundedPassedRate ?? 0), 0) / compared.length : null,
       evidenceReferenceAccuracy: ratio(validEvidenceReferences.filter(Boolean).length, validEvidenceReferences.length),
+      transportFallbackRate: ratio(calls.filter((call) => call.transportMode === "non-stream-fallback").length, calls.length),
       runTraceabilityRate: ratio(compared.filter((item) => hasCompleteBenchmarkTrace(item.record)).length, compared.length),
       meanConsistency: consistencies.length ? consistencies.reduce((sum, value) => sum + value, 0) / consistencies.length : null,
       modelFailureRate: ratio(selected.filter((item) => item.llm?.status === "failed" || item.llm?.status === "not_configured" || item.llm?.fallback).length, selected.length),

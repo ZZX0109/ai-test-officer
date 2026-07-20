@@ -277,18 +277,26 @@ app.post("/api/credentials/:id/test", async (req, res, next) => {
       return;
     }
     try {
-      const result = await executeLlmCall({
+      const apiKey = await decrypt(credential.apiKeyEncrypted);
+      const preflight = async (transportPreference: "stream" | "non-stream") => executeLlmCall({
         credential,
-        apiKey: await decrypt(credential.apiKeyEncrypted),
+        apiKey,
         system: "Return only a JSON object with key ok and boolean value.",
-        prompt: "Preflight structured output check.",
+        prompt: `Preflight structured output check (${transportPreference}).`,
         maxTokens: 64,
         timeoutMs: 30_000,
+        transportPreference,
         context: { purpose: "planning", experimentId: "credential-preflight" }
       });
-      let parsed: unknown;
-      try { parsed = JSON.parse(result.text); } catch { parsed = undefined; }
-      res.json({ ...connection, structuredOutput: parsed && typeof parsed === "object" && (parsed as { ok?: unknown }).ok === true, call: result.call });
+      const streamResult = await preflight("stream");
+      const nonStreamResult = await preflight("non-stream");
+      let streamParsed: unknown;
+      let nonStreamParsed: unknown;
+      try { streamParsed = JSON.parse(streamResult.text); } catch { streamParsed = undefined; }
+      try { nonStreamParsed = JSON.parse(nonStreamResult.text); } catch { nonStreamParsed = undefined; }
+      const streamStructured = streamParsed && typeof streamParsed === "object" && (streamParsed as { ok?: unknown }).ok === true;
+      const nonStreamStructured = nonStreamParsed && typeof nonStreamParsed === "object" && (nonStreamParsed as { ok?: unknown }).ok === true;
+      res.json({ ...connection, structuredOutput: streamStructured && nonStreamStructured, streamStructuredOutput: streamStructured, nonStreamStructuredOutput: nonStreamStructured, call: nonStreamResult.call, preflightCalls: [streamResult.call, nonStreamResult.call] });
     } catch (error) {
       const call = (error as { llmCall?: unknown }).llmCall;
       res.json({ ...connection, ok: false, structuredOutput: false, message: "结构化输出预检失败", call });

@@ -20,5 +20,18 @@
       {"id":"order_pending_dom","name":"订单表只展示待处理订单","type":"dom_text","locator":"[data-testid='order-table']","expectedTextIncludes":"ORD-1001","expected":"订单表展示 ORD-1001"}
     ]
   },
-  "regressionPath":{"stepId":"order_filter_regression","title":"保留订单筛选回归截图","action":"visual_check","triggerButtonName":"Load orders"}
+  "regressionPath":{"stepId":"order_filter_regression","title":"保留订单筛选回归截图","action":"visual_check","triggerButtonName":"Load orders"},
+  "compiledPlanContract": {
+    "routePath": "/",
+    "requiredSteps": [
+      {"pathId":"open_order_portal","action":{"action":"navigate","path":"/"}},
+      {"pathId":"order_pending_filter_path","action":{"action":"select","selectorRef":"selectLabel","valueRef":"selectValue"}},
+      {"pathId":"order_pending_filter_path","action":{"action":"click","selectorRef":"submitButtonName"}},
+      {"pathId":"order_pending_filter_path","action":{"action":"assert","oracleId":"order_pending_query"}},
+      {"pathId":"order_pending_filter_path","action":{"action":"assert","oracleId":"order_pending_dom"}},
+      {"pathId":"order_filter_regression","action":{"action":"click","selectorRef":"regressionTriggerButtonName"}}
+    ],
+    "requiredEvidenceKinds": ["screenshot","dom","network","console","trace"],
+    "allowOptionalWait": true
+  }
 }

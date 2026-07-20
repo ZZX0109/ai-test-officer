@@ -17,5 +17,17 @@
     "pathId":"order_viewer_permission_path","stepId":"switch_order_viewer","title":"切换 Viewer 并验证只读权限","action":"role_permission_matrix","selectLabel":"Role","selectValue":"viewer","submitButtonName":"Apply role","targetLocator":"[data-testid='permission-status']","expectedTextIncludes":"viewer: read-only","domAssertionName":"Viewer 显示订单只读权限","riskReason":"订单审批是高风险写操作，Viewer 必须明确处于只读状态。",
     "oracles":[{"id":"order_viewer_dom","name":"Viewer 显示订单只读权限","type":"role_permission_state","locator":"[data-testid='permission-status']","expectedTextIncludes":"viewer: read-only","expected":"切换 viewer 后展示 viewer: read-only"}]
   },
-  "regressionPath":{"stepId":"order_viewer_regression","title":"保留权限回归截图","action":"visual_check"}
+  "regressionPath":{"stepId":"order_viewer_regression","title":"保留权限回归截图","action":"visual_check"},
+  "compiledPlanContract": {
+    "routePath": "/",
+    "requiredSteps": [
+      {"pathId":"open_order_portal","action":{"action":"navigate","path":"/"}},
+      {"pathId":"order_viewer_permission_path","action":{"action":"select","selectorRef":"selectLabel","valueRef":"selectValue"}},
+      {"pathId":"order_viewer_permission_path","action":{"action":"click","selectorRef":"submitButtonName"}},
+      {"pathId":"order_viewer_permission_path","action":{"action":"assert","oracleId":"order_viewer_dom"}},
+      {"pathId":"order_viewer_regression","action":{"action":"wait","durationMs":0}}
+    ],
+    "requiredEvidenceKinds": ["screenshot","dom","network","console","trace"],
+    "allowOptionalWait": true
+  }
 }

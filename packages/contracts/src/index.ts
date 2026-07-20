@@ -283,6 +283,7 @@ export type LlmBudget = z.infer<typeof llmBudgetSchema>;
 
 export const llmTransportAttemptSchema = z.object({
   attempt: z.number().int().min(1).max(3),
+  mode: z.enum(["stream", "non-stream"]),
   status: z.enum(["passed", "failed"]),
   startedAt: z.string().datetime(),
   durationMs: z.number().int().nonnegative(),
@@ -311,6 +312,8 @@ export const llmCallSchema = z.object({
     estimatedCostUsd: z.number().nonnegative().optional()
   }).default({}),
   errorCode: z.string().min(1).optional(),
+  transportMode: z.enum(["stream", "non-stream-fallback"]).optional(),
+  fallbackReason: z.string().min(1).optional(),
   transportAttempts: z.array(llmTransportAttemptSchema).min(1).max(3).optional()
 });
 export type LlmCall = z.infer<typeof llmCallSchema>;

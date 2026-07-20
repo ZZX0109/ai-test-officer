@@ -97,6 +97,6 @@ assert.throws(() => runOutcomeSummaryV2Schema.parse({ ...failedProductSummary, r
 assert.equal(llmCallSchema.parse({
   id: "llm-1", purpose: "judging", provider: "openai-compatible", model: "codex", startedAt: "2026-07-19T00:00:00.000Z",
   durationMs: 12, status: "failed", usage: {}, errorCode: "provider_responses_incomplete",
-  transportAttempts: [1, 2, 3].map((attempt) => ({ attempt, status: "failed", startedAt: "2026-07-19T00:00:00.000Z", durationMs: 4, errorCode: "provider_responses_incomplete", bytesReceived: 32, eventTypes: ["response.output_text.delta"] }))
+  transportAttempts: [1, 2, 3].map((attempt) => ({ attempt, mode: attempt === 3 ? "non-stream" : "stream", status: "failed", startedAt: "2026-07-19T00:00:00.000Z", durationMs: 4, errorCode: "provider_responses_incomplete", bytesReceived: 32, eventTypes: ["response.output_text.delta"] }))
 }).transportAttempts?.length, 3);
 console.log("contracts tests passed");

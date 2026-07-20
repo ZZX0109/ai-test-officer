@@ -9,6 +9,13 @@ function stream(events: unknown[]) {
   });
 }
 
+function jsonResponse(value: unknown, status = 200) {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { "content-type": "application/json", "x-request-id": "req-json" }
+  });
+}
+
 const completedEvents = [
   { type: "response.output_text.delta", delta: '{"ok":true}' },
   { type: "response.completed", response: { id: "response-1", model: "gpt-5.1-codex", usage: { input_tokens: 4, output_tokens: 3, total_tokens: 7 } } }
@@ -29,13 +36,23 @@ export async function testLlmProviderResponsesTransport() {
   let requests = 0;
   globalThis.fetch = (async () => {
     requests += 1;
-    return requests < 3 ? stream([{ type: "response.output_text.delta", delta: "{" }]) : stream(completedEvents);
+    return requests < 3 ? stream([{ type: "response.output_text.delta", delta: "{" }]) : jsonResponse({ id: "response-fallback", model: "gpt-5.1-codex", output_text: '{"ok":true}', usage: { input_tokens: 4, output_tokens: 3, total_tokens: 7 } });
   }) as typeof fetch;
   try {
     const result = await executeLlmCall({ credential, apiKey: "test-only", prompt: "{}", system: "json", maxTokens: 64, timeoutMs: 2_000, totalTimeoutMs: 8_000, context: { purpose: "judging", experimentId: "provider-unit-test" } });
     assert.equal(result.call.status, "passed");
     assert.deepEqual(result.call.transportAttempts?.map((item) => item.status), ["failed", "failed", "passed"]);
+    assert.deepEqual(result.call.transportAttempts?.map((item) => item.mode), ["stream", "stream", "non-stream"]);
+    assert.equal(result.call.transportMode, "non-stream-fallback");
+    assert.equal(result.call.fallbackReason, "stream_incomplete");
     assert.equal(requests, 3);
+
+    requests = 0;
+    globalThis.fetch = (async () => { requests += 1; return jsonResponse({ id: "response-direct", model: "gpt-5.1-codex", output_text: '{"ok":true}', usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } }); }) as typeof fetch;
+    const direct = await executeLlmCall({ credential, apiKey: "test-only", prompt: "{}", system: "json", maxTokens: 64, timeoutMs: 2_000, totalTimeoutMs: 8_000, transportPreference: "non-stream", context: { purpose: "planning", experimentId: "provider-unit-test" } });
+    assert.equal(direct.call.transportMode, "non-stream-fallback");
+    assert.deepEqual(direct.call.transportAttempts?.map((item) => item.mode), ["non-stream"]);
+    assert.equal(requests, 1);
 
     requests = 0;
     globalThis.fetch = (async () => { requests += 1; return stream([{ type: "response.output_text.delta", delta: "{" }]); }) as typeof fetch;
@@ -47,7 +64,7 @@ export async function testLlmProviderResponsesTransport() {
         assert.equal(call?.transportAttempts?.length, 3);
         throw error;
       }
-    }, /provider_responses_incomplete/);
+    }, /provider_responses_invalid_json/);
   } finally {
     globalThis.fetch = originalFetch;
   }
