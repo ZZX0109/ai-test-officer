@@ -43,6 +43,12 @@ export function routeJudge(input: {
   const signals: string[] = [];
   if (["needs_replay", "needs_user_review"].includes(input.conflictStatus)) signals.push(`evidence_conflict:${input.conflictStatus}`);
   if (input.baseline.planJudge.verdict !== input.baseline.evidenceJudge.verdict) signals.push("judge_layer_disagreement");
+  // A deterministic release failure is already a safe, actionable machine
+  // conclusion. Do not spend a Judge call trying to reinterpret it; LLM
+  // attribution is reserved for genuine conflicts and unresolved reviews.
+  if (input.baseline.releaseJudge.verdict === "fail" && signals.length === 0) {
+    return { route: "deterministic", reason: "deterministic_failure_is_actionable", signals: ["machine_fail"] };
+  }
   const deterministicClasses = new Set((input.baseline.releaseJudge.findings ?? []).map((finding) => finding.failureClass).filter(Boolean));
   const hasKnownAttribution = deterministicClasses.size === 1
     && [...deterministicClasses].every((failureClass) => ["product_bug", "test_script_issue", "environment_issue", "insufficient_evidence"].includes(failureClass!));
