@@ -11,6 +11,7 @@ const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.
 const apiUrl = (process.env.AGENT_URL ?? "http://127.0.0.1:4317").replace(/\/$/, "");
 const token = process.env.AGENT_API_TOKEN ?? "dev-local-token";
 type Lane = "test-command" | "rules-deterministic" | "llm-plan-deterministic-judge" | "rules-plan-llm-judge" | "full-llm";
+const supportedLanes: Lane[] = ["test-command", "rules-deterministic", "llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"];
 type Case = { id: string; split: "development" | "blind"; projectId: string; scenarioId?: string; requirement: string; diff: string; risk: string; fixtureVariantId?: string };
 type Model = { id: string; credentialIdEnv: string; provider: string; model: string };
 type ExecutionMapping = { logicalProjectId: string; executionProjectId: string; targetUrl?: string; targetKind?: string };
@@ -379,6 +380,10 @@ export async function runBenchmarkExperiment() {
   }
   const llmEnabled = process.env.BENCHMARK_SKIP_LLM !== "1";
   const requestedModels = llmEnabled ? selectedModels(config.models) : [];
+  const requestedLanes = (process.env.BENCHMARK_LANES ?? supportedLanes.join(",")).split(",").map((item) => item.trim()).filter(Boolean) as Lane[];
+  if (!requestedLanes.length || requestedLanes.some((lane) => !supportedLanes.includes(lane))) {
+    throw new Error(`benchmark_lanes_invalid:${process.env.BENCHMARK_LANES ?? ""}`);
+  }
   const requestedSplit = process.env.BENCHMARK_SPLIT ?? (process.env.BENCHMARK_ENABLE_BLIND === "1" ? "development+blind" : "development");
   if (!['development', 'blind', 'development+blind'].includes(requestedSplit)) {
     throw new Error(`benchmark_split_invalid:${requestedSplit}`);
@@ -419,8 +424,10 @@ export async function runBenchmarkExperiment() {
   const check = await preflight(requestedModels);
   const runnableModels = requestedModels.filter((model) => check.credentials.has(model.id));
   const allowPartialModels = process.env.BENCHMARK_ALLOW_PARTIAL_MODELS === "1";
-  const requestedPlannedRuns = cases.length * repetitions * (2 + requestedModels.length * 3);
-  const plannedRuns = cases.length * repetitions * (2 + runnableModels.length * 3);
+  const deterministicLaneCount = requestedLanes.filter((lane) => lane === "test-command" || lane === "rules-deterministic").length;
+  const llmLaneCount = requestedLanes.filter((lane) => lane !== "test-command" && lane !== "rules-deterministic").length;
+  const requestedPlannedRuns = cases.length * repetitions * (deterministicLaneCount + requestedModels.length * llmLaneCount);
+  const plannedRuns = cases.length * repetitions * (deterministicLaneCount + runnableModels.length * llmLaneCount);
   const hardBlocked = llmEnabled && (!runnableModels.length || (check.failures.length > 0 && !allowPartialModels));
   const manifest = { experimentId, createdAt: new Date().toISOString(), split: requestedSplit, suites: [...(includeDevelopment ? ["core"] : []), ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : [])], caseCount: cases.length, caseIds: cases.map((item) => item.id), plannedRuns, requestedPlannedRuns, repetitions, promptVersion: config.promptVersion, llmEnabled, models: runnableModels.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), unavailableModels: requestedModels.filter((model) => !check.credentials.has(model.id)).map((model) => ({ id: model.id, provider: model.provider, model: model.model })), developmentGate, status: hardBlocked ? "blocked" : "running", blockers: check.failures, partial: check.failures.length > 0 };
   const existingManifestFile = path.join(directory, "manifest.json");
@@ -445,12 +452,16 @@ export async function runBenchmarkExperiment() {
     const target = projectMap.get(item.projectId);
     const projectId = target?.executionProjectId ?? item.projectId;
     for (let repetition = 1; repetition <= repetitions; repetition += 1) {
-      const rules = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane: "rules-deterministic", repetition, experimentId, promptVersion: config.promptVersion });
-      await writeFile(path.join(runsDir, `${item.id}.rules-deterministic.none.${repetition}.json`), JSON.stringify(rules, null, 2)); completedRuns += 1; await updateProgress();
-      const testCommand = await executeTestCommandCase({ item, projectId, experimentId, artifactRoot: path.join(directory, "command-artifacts"), promptVersion: config.promptVersion, repetition });
-      await writeFile(path.join(runsDir, `${item.id}.test-command.none.${repetition}.json`), JSON.stringify(testCommand, null, 2)); completedRuns += 1; await updateProgress();
+      if (requestedLanes.includes("rules-deterministic")) {
+        const rules = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane: "rules-deterministic", repetition, experimentId, promptVersion: config.promptVersion });
+        await writeFile(path.join(runsDir, `${item.id}.rules-deterministic.none.${repetition}.json`), JSON.stringify(rules, null, 2)); completedRuns += 1; await updateProgress();
+      }
+      if (requestedLanes.includes("test-command")) {
+        const testCommand = await executeTestCommandCase({ item, projectId, experimentId, artifactRoot: path.join(directory, "command-artifacts"), promptVersion: config.promptVersion, repetition });
+        await writeFile(path.join(runsDir, `${item.id}.test-command.none.${repetition}.json`), JSON.stringify(testCommand, null, 2)); completedRuns += 1; await updateProgress();
+      }
     }
-    for (const model of runnableModels) for (let repetition = 1; repetition <= repetitions; repetition += 1) for (const lane of ["llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"] as Lane[]) {
+    for (const model of runnableModels) for (let repetition = 1; repetition <= repetitions; repetition += 1) for (const lane of requestedLanes.filter((candidate) => candidate !== "test-command" && candidate !== "rules-deterministic")) {
       const record = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane, model, credentialId: check.credentials.get(model.id), repetition, experimentId, promptVersion: config.promptVersion });
       await writeFile(path.join(runsDir, `${item.id}.${lane}.${model.id}.${repetition}.json`), JSON.stringify(record, null, 2)); completedRuns += 1;
       await updateProgress();
