@@ -150,6 +150,12 @@ function extractJson(text: string) {
   throw new Error("LLM judge response did not contain JSON");
 }
 
+function classifyJudgeOutputError(error: unknown, call?: LayeredJudgeReport["llmCall"]) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/did not contain JSON/.test(message) && (call?.usage.completionTokens ?? 0) >= 768) return "model_output_truncated";
+  return message;
+}
+
 const llmJudgeSupplementSchema = z.object({
   verdict: z.enum(["pass", "needs_review", "fail"]),
   failureClass: z.enum(["product_bug", "test_script_issue", "environment_issue", "insufficient_evidence", "unknown"]),
@@ -301,6 +307,6 @@ export async function buildLlmJudgeReport(input: LlmJudgeInput) {
     const failedCall = error && typeof error === "object" && "llmCall" in error ? (error as { llmCall?: LayeredJudgeReport["llmCall"] }).llmCall : undefined;
     if (failedCall && !calls.some((call) => call.id === failedCall.id)) calls.push(failedCall);
     const llmCall = calls.at(-1);
-    return withFallbackStatus(input.baseline, error instanceof Error ? error.message : String(error), llmCall, calls.length ? calls : undefined);
+    return withFallbackStatus(input.baseline, classifyJudgeOutputError(error, llmCall), llmCall, calls.length ? calls : undefined);
   }
 }

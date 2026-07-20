@@ -77,6 +77,17 @@ export async function testLlmProviderResponsesTransport() {
     assert.deepEqual(nonStreamRetry.call.transportAttempts?.map((item) => item.mode), ["non-stream", "non-stream"]);
     assert.equal(requests, 2);
 
+    requests = 0;
+    globalThis.fetch = (async () => {
+      requests += 1;
+      if (requests === 1) return jsonResponse({ error: "busy" }, 503);
+      return jsonResponse({ id: "response-503-retry", model: "gpt-5.1-codex", output_text: '{"ok":true}', usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } });
+    }) as typeof fetch;
+    const serviceRetry = await executeLlmCall({ credential, apiKey: "test-only", prompt: "{}", system: "json", maxTokens: 64, timeoutMs: 2_000, totalTimeoutMs: 8_000, transportPreference: "non-stream-retry", context: { purpose: "judging", experimentId: "provider-unit-test" } });
+    assert.equal(serviceRetry.call.status, "passed");
+    assert.deepEqual(serviceRetry.call.transportAttempts?.map((item) => item.errorCode ?? item.status), ["provider_http_503", "passed"]);
+    assert.equal(requests, 2);
+
     let structuredRequest: Record<string, any> | undefined;
     globalThis.fetch = (async (_url, init) => {
       structuredRequest = JSON.parse(String(init?.body));
