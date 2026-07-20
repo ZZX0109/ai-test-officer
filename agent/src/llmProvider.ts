@@ -138,6 +138,7 @@ type ExecuteLlmCallInput = {
   context: LlmCallContext;
   totalTimeoutMs?: number;
   transportPreference?: "auto" | "stream" | "non-stream" | "non-stream-retry";
+  jsonSchema?: { name: string; schema: Record<string, unknown> };
 };
 
 type ResponsesTransportMode = "stream" | "non-stream";
@@ -162,7 +163,11 @@ async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: nu
         system: input.system, messages: [{ role: "user", content: input.prompt }]
       } : responsesApi ? {
         model: input.credential.model, instructions: input.system, input: `${input.prompt}\nReturn a JSON object.`,
-        max_output_tokens: input.maxTokens, stream: mode === "stream", text: { format: { type: "json_object" } }
+        max_output_tokens: input.maxTokens,
+        stream: mode === "stream",
+        text: { format: input.jsonSchema
+          ? { type: "json_schema", name: input.jsonSchema.name, strict: true, schema: input.jsonSchema.schema }
+          : { type: "json_object" } }
       } : {
         model: input.credential.model, temperature: input.temperature ?? 0, response_format: { type: "json_object" },
         max_tokens: input.maxTokens, messages: [{ role: "system", content: input.system }, { role: "user", content: input.prompt }]

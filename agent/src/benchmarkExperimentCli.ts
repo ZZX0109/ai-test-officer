@@ -38,12 +38,16 @@ async function main() {
   if (!labelsRoot) throw new Error("BENCHMARK_LABELS_ROOT is required and must only be mounted into the evaluator");
   const config = await json<{ acceptance: Parameters<typeof evaluateExperiment>[0]["thresholds"]; roi?: { manualMinutesPerCase: number; reviewMinutesPerCase: number } }>(path.join(rootDir, "data", "benchmark", "experiment.json"));
   const directory = path.join(rootDir, "reports", "benchmarks", "experiments", experimentId);
-  const manifest = await json<{ plannedRuns: number; split: string; suites?: string[]; status: string; caseIds?: string[]; repetitions?: number; models?: Array<{ id: string }> }>(path.join(directory, "manifest.json"));
+  const manifest = await json<{ plannedRuns: number; split: string; suites?: string[]; status: string; caseIds?: string[]; repetitions?: number; lanes?: BenchmarkRunRecord["lane"][]; models?: Array<{ id: string }> }>(path.join(directory, "manifest.json"));
   if (manifest.status !== "awaiting_evaluation") throw new Error(`experiment_not_ready:${manifest.status}`);
   if (!manifest.caseIds?.length) throw new Error("experiment_manifest_case_ids_missing");
   if (!manifest.repetitions || !manifest.models) throw new Error("experiment_manifest_matrix_definition_missing");
   const files = (await readdir(path.join(directory, "runs"))).filter((file) => file.endsWith(".json"));
   const records = await Promise.all(files.map((file) => json<BenchmarkRunRecord>(path.join(directory, "runs", file))));
+  // Older scoped experiments predate the lanes field; infer their exact matrix
+  // from persisted records rather than pretending they must be a full 90-run
+  // release experiment.
+  const matrixLanes = manifest.lanes?.length ? manifest.lanes : [...new Set(records.map((record) => record.lane))];
   const selectedCaseIds = new Set(manifest.caseIds);
   const evaluations: ReturnType<typeof evaluateExperiment>[] = [];
   if (manifest.split.includes("development")) {
@@ -54,7 +58,7 @@ async function main() {
     const allDevelopmentCases = [...developmentCases, ...extendedCases].filter((item) => selectedCaseIds.has(item.id));
     const allDevelopmentLabels = [...developmentLabels, ...extendedLabels].filter((item) => selectedCaseIds.has(item.benchmarkId));
     const developmentRecords = records.filter((record) => record.split === "development");
-    const developmentMatrix = validateExperimentRunMatrix({ records: developmentRecords, caseIds: allDevelopmentCases.map((item) => item.id), modelIds: manifest.models.map((model) => model.id), repetitions: manifest.repetitions });
+    const developmentMatrix = validateExperimentRunMatrix({ records: developmentRecords, caseIds: allDevelopmentCases.map((item) => item.id), modelIds: manifest.models.map((model) => model.id), repetitions: manifest.repetitions, lanes: matrixLanes });
     if (!developmentMatrix.complete) throw new Error(`experiment_run_matrix_incomplete:${JSON.stringify(developmentMatrix)}`);
     evaluations.push(evaluateExperiment({ experimentId, split: "development", cases: allDevelopmentCases, labels: allDevelopmentLabels, records, plannedRuns: developmentMatrix.expectedRuns, thresholds: config.acceptance, roi: config.roi }));
   }
@@ -63,7 +67,7 @@ async function main() {
     const blindLabels = (await json<Array<HumanBenchmarkLabel & { requiredEvidenceTypes?: string[] }>>(path.join(labelsRoot, "blind.json"))).map((item) => ({ ...item, requiredEvidenceTypes: item.requiredEvidenceTypes ?? ["screenshot", "dom", "network", "console", "trace"] }));
     const selectedBlindLabels = blindLabels.filter((item) => selectedCaseIds.has(item.benchmarkId));
     const blindRecords = records.filter((record) => record.split === "blind");
-    const blindMatrix = validateExperimentRunMatrix({ records: blindRecords, caseIds: blindCases.map((item) => item.id), modelIds: manifest.models.map((model) => model.id), repetitions: manifest.repetitions });
+    const blindMatrix = validateExperimentRunMatrix({ records: blindRecords, caseIds: blindCases.map((item) => item.id), modelIds: manifest.models.map((model) => model.id), repetitions: manifest.repetitions, lanes: matrixLanes });
     if (!blindMatrix.complete) throw new Error(`experiment_blind_run_matrix_incomplete:${JSON.stringify(blindMatrix)}`);
     evaluations.push(evaluateExperiment({ experimentId, split: "blind", cases: blindCases, labels: selectedBlindLabels, records, plannedRuns: blindMatrix.expectedRuns, thresholds: config.acceptance, roi: config.roi }));
   }

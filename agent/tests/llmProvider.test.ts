@@ -77,6 +77,19 @@ export async function testLlmProviderResponsesTransport() {
     assert.deepEqual(nonStreamRetry.call.transportAttempts?.map((item) => item.mode), ["non-stream", "non-stream"]);
     assert.equal(requests, 2);
 
+    let structuredRequest: Record<string, any> | undefined;
+    globalThis.fetch = (async (_url, init) => {
+      structuredRequest = JSON.parse(String(init?.body));
+      return jsonResponse({ id: "response-schema", model: "gpt-5.1-codex", output_text: '{"ok":true}', usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } });
+    }) as typeof fetch;
+    await executeLlmCall({
+      credential, apiKey: "test-only", prompt: "{}", system: "json", maxTokens: 64, timeoutMs: 2_000, totalTimeoutMs: 8_000,
+      transportPreference: "non-stream", jsonSchema: { name: "test_schema", schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false } },
+      context: { purpose: "judging", experimentId: "provider-unit-test" }
+    });
+    assert.equal(structuredRequest?.text?.format?.type, "json_schema");
+    assert.equal(structuredRequest?.text?.format?.name, "test_schema");
+
     requests = 0;
     globalThis.fetch = (async () => { requests += 1; return stream([{ type: "response.output_text.delta", delta: "{" }]); }) as typeof fetch;
     await assert.rejects(async () => {

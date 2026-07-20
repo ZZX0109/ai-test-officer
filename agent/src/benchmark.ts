@@ -246,14 +246,17 @@ export function validateExperimentRunMatrix(input: {
   caseIds: string[];
   modelIds: string[];
   repetitions: number;
+  lanes?: Array<BenchmarkRunRecord["lane"]>;
 }) {
+  const lanes = input.lanes ?? ["rules-deterministic", "test-command", "llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"];
   const expected = new Set<string>();
   for (const caseId of input.caseIds) {
     for (let repetition = 1; repetition <= input.repetitions; repetition += 1) {
-      expected.add(`${caseId}:rules-deterministic:none:${repetition}`);
-      expected.add(`${caseId}:test-command:none:${repetition}`);
+      if (lanes.includes("rules-deterministic")) expected.add(`${caseId}:rules-deterministic:none:${repetition}`);
+      if (lanes.includes("test-command")) expected.add(`${caseId}:test-command:none:${repetition}`);
       for (const modelId of input.modelIds) {
-        for (const lane of ["llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"]) {
+        for (const lane of ["llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"] as const) {
+          if (!lanes.includes(lane)) continue;
           expected.add(`${caseId}:${lane}:${modelId}:${repetition}`);
         }
       }
