@@ -49,6 +49,14 @@ function benchmarkScenario(item: Case) {
   return item.scenarioId ?? scenarioByBenchmarkId[item.id];
 }
 
+/** Rules are the hand-authored baseline. LLM planning lanes must select from
+ * requirement/diff-grounded contracts and never receive the evaluator answer. */
+export function requestedScenarioForLane(item: Case, lane: Lane) {
+  return lane === "llm-plan-deterministic-judge" || lane === "full-llm"
+    ? undefined
+    : benchmarkScenario(item);
+}
+
 export function validateBenchmarkProjectMappings(input: {
   development: Array<Pick<Case, "id" | "projectId">>;
   extended: Array<Pick<Case, "id" | "projectId">>;
@@ -302,13 +310,14 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const startedAt = new Date().toISOString();
   const key = `benchmark:${input.experimentId}:${input.item.id}:${input.lane}:${input.model?.id ?? "none"}:${input.repetition}`;
   const plannerMode = input.lane === "llm-plan-deterministic-judge" || input.lane === "full-llm" ? "llm" : "deterministic";
+  const requestedScenarioId = requestedScenarioForLane(input.item, input.lane);
   // Judge lanes remain LLM-assisted, but the runtime only invokes the model when
   // deterministic evidence actually conflicts. Normal, fully-grounded passes do
   // not spend model budget or become provider-failure samples.
   const judgeMode = input.lane === "rules-plan-llm-judge" || input.lane === "full-llm" ? "adaptive" : "deterministic";
   let run = (await request<{ run: { id: string; state: string; version: number; gateStatus?: string; selectedScenarioId?: string } }>("/v1/runs", {
     method: "POST",
-    body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: benchmarkScenario(input.item), requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 2, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 2000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
+    body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: requestedScenarioId, requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 2, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 2000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
   })).run;
   // A rejected LLM plan deliberately blocks the run.  It is an experiment result,
   // not a transport failure: preserve it and do not issue invalid approval events.
@@ -325,7 +334,6 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
     run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}`)).run;
   }
   const projection = run;
-  const requestedScenarioId = benchmarkScenario(input.item);
   const report = (await request<{ report: Record<string, any> }>(`/v1/runs/${run.id}/report`)).report;
   const artifacts = (await request<{ artifacts: Array<Record<string, any>> }>(`/v1/runs/${run.id}/artifacts`)).artifacts;
   const judgeCall = report.judgeReport?.llmCall;

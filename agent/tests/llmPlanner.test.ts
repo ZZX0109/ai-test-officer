@@ -1,8 +1,21 @@
 import assert from "node:assert/strict";
-import { buildRepairPrompt, compileLlmPlanCandidate, generatePlan } from "../src/llmPlanner.js";
+import { buildRepairPrompt, compileLlmPlanCandidate, generatePlan, groundedPlannerScenarioIds } from "../src/llmPlanner.js";
 import { reserveLlmOutputTokens } from "../src/llmProvider.js";
+import { listExecutableScenarios } from "../src/scenarios.js";
 
 export async function testLlmPlannerFailClosed() {
+  const orderCandidates = groundedPlannerScenarioIds({
+    projectId: "order_portal_lite",
+    requirement: "Approving a pending order must display approved",
+    diff: "+pending: { approve: 'approved' }"
+  });
+  assert.ok(orderCandidates.includes("order_approval_transition"));
+  assert.ok(!orderCandidates.includes("task_state_transition"));
+  assert.deepEqual(groundedPlannerScenarioIds({
+    projectId: "todo_lite",
+    requirement: "Restore archived work to active",
+    diff: "+archived: { restore: 'active' }"
+  }), [], "unsupported business semantics must become a harness gap");
   await assert.rejects(() => generatePlan({ requirement: "test", diff: "", credentialId: "credential-that-does-not-exist", requireLlm: true }), /llm_not_configured/);
   const repair = buildRepairPrompt(
     { requirement: "Only completed tasks", diff: "+ status=completed" },
@@ -49,4 +62,10 @@ export async function testLlmPlannerFailClosed() {
   ];
   assert.equal(compileLlmPlanCandidate({ scenarioId: "order_api_failure", actions: orderActions }, "order_api_failure").steps.length, 5);
   assert.throws(() => compileLlmPlanCandidate({ scenarioId: "order_api_failure", actions: orderActions.filter((_, index) => index !== 1) }, "order_api_failure"), /compiled_plan_semantic_sequence_mismatch/);
+
+  for (const scenario of listExecutableScenarios().filter((item) => item.compiledPlanContract)) {
+    const scenarioId = scenario.id;
+    const actions = scenario.compiledPlanContract.requiredSteps.map((step) => ({ pathId: step.pathId, action: step.action }));
+    assert.equal(compileLlmPlanCandidate({ scenarioId, actions }, scenarioId).scenarioId, scenarioId);
+  }
 }

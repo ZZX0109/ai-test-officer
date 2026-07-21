@@ -203,7 +203,7 @@ function normalizeScenario(raw: LegacyScenario): ExecutableScenario {
     ? raw.corePath.oracles
     : buildDefaultOracles(raw, queryAssertionName, domAssertionName);
 
-  return {
+  const normalized: ExecutableScenario = {
     ...raw,
     capabilityKind: raw.capabilityKind ?? "domain_specific",
     genericTemplate: raw.genericTemplate ?? false,
@@ -224,7 +224,113 @@ function normalizeScenario(raw: LegacyScenario): ExecutableScenario {
         action: "click_filter",
         ...raw.regressionPath
       }
-      : undefined
+      : undefined,
+    compiledPlanContract: raw.compiledPlanContract
+  };
+  normalized.compiledPlanContract ??= deriveCompiledPlanContract(normalized);
+  return normalized;
+}
+
+/** Builds a closed-world semantic contract from an already trusted scenario
+ * definition. The model never invents selectors, routes, or oracles: it only
+ * chooses among contracts compiled from the registry. Unsupported action
+ * families remain harness gaps instead of becoming arbitrary browser plans. */
+export function deriveCompiledPlanContract(scenario: ExecutableScenario): ScenarioCompiledPlanContract | undefined {
+  const core = scenario.corePath;
+  const requiredSteps: ScenarioCompiledPlanContract["requiredSteps"] = [
+    { pathId: scenario.smoke.pathId, action: { action: "navigate", path: "/" } }
+  ];
+  const add = (action: ScenarioCompiledPlanContract["requiredSteps"][number]["action"]) => requiredSteps.push({ pathId: core.pathId, action });
+  switch (core.action) {
+    case "click_filter":
+    case "change_task_status":
+    case "edit_task_title":
+      if (!core.triggerButtonName) return undefined;
+      add({ action: "click", selectorRef: "triggerButtonName" });
+      break;
+    case "expect_empty_state":
+    case "search_keyword":
+      if (!core.inputLabel || core.input === undefined || !core.submitButtonName) return undefined;
+      add({ action: "fill", selectorRef: "inputLabel", valueRef: "input" });
+      add({ action: "click", selectorRef: "submitButtonName" });
+      break;
+    case "login_as_test_user":
+    case "login_invalid_user":
+      if (!core.triggerButtonName || !core.submitButtonName) return undefined;
+      add({ action: "click", selectorRef: "triggerButtonName" });
+      add({ action: "click", selectorRef: "submitButtonName" });
+      break;
+    case "require_permission":
+      if (!core.triggerButtonName) return undefined;
+      add({ action: "click", selectorRef: "triggerButtonName" });
+      break;
+    case "submit_empty_form":
+      if (!core.submitButtonName) return undefined;
+      add({ action: "click", selectorRef: "submitButtonName" });
+      break;
+    case "fill_and_submit":
+      if (!core.inputLabel || core.input === undefined || !core.submitButtonName) return undefined;
+      add({ action: "fill", selectorRef: "inputLabel", valueRef: "input" });
+      if (core.selectLabel && core.selectValue !== undefined) add({ action: "select", selectorRef: "selectLabel", valueRef: "selectValue" });
+      add({ action: "click", selectorRef: "submitButtonName" });
+      break;
+    case "simulate_error_and_retry":
+      if (!core.triggerButtonName) return undefined;
+      add({ action: "click", selectorRef: "triggerButtonName" });
+      break;
+    case "approval_flow_transition":
+      if (!core.triggerButtonName) return undefined;
+      if (core.inputLabel && core.input !== undefined) add({ action: "fill", selectorRef: "inputLabel", valueRef: "input" });
+      add({ action: "click", selectorRef: "triggerButtonName" });
+      break;
+    case "complex_form_validate":
+      if (!core.submitButtonName) return undefined;
+      add({ action: "click", selectorRef: "submitButtonName" });
+      break;
+    case "file_upload_validate":
+      if (!core.inputLabel) return undefined;
+      add({ action: "upload", selectorRef: "inputLabel", fixtureRef: "scenarioFixture" });
+      if (core.submitButtonName) add({ action: "click", selectorRef: "submitButtonName" });
+      break;
+    case "openapi_schema_contract":
+      if (!core.triggerButtonName) return undefined;
+      add({ action: "click", selectorRef: "triggerButtonName" });
+      break;
+    case "table_sort_filter_paginate":
+      if (core.triggerButtonName) add({ action: "click", selectorRef: "triggerButtonName" });
+      if (core.selectLabel && core.selectValue !== undefined) add({ action: "select", selectorRef: "selectLabel", valueRef: "selectValue" });
+      if (core.inputLabel && core.input !== undefined) add({ action: "fill", selectorRef: "inputLabel", valueRef: "input" });
+      if (core.submitButtonName) add({ action: "click", selectorRef: "submitButtonName" });
+      if (core.retryButtonName) add({ action: "click", selectorRef: "retryButtonName" });
+      if (requiredSteps.length === 1) return undefined;
+      break;
+    case "role_permission_matrix":
+      if (!core.selectLabel || core.selectValue === undefined || !core.submitButtonName) return undefined;
+      add({ action: "select", selectorRef: "selectLabel", valueRef: "selectValue" });
+      add({ action: "click", selectorRef: "submitButtonName" });
+      break;
+    case "visual_check":
+      add(core.triggerButtonName
+        ? { action: "click", selectorRef: "triggerButtonName" }
+        : { action: "wait", durationMs: 0 });
+      break;
+    default:
+      return undefined;
+  }
+  for (const oracle of core.oracles) add({ action: "assert", oracleId: oracle.id });
+  if (scenario.regressionPath) {
+    const regressionAction = core.action === "simulate_error_and_retry" && core.retryButtonName
+      ? { action: "click" as const, selectorRef: "retryButtonName" }
+      : scenario.regressionPath.triggerButtonName
+        ? { action: "click" as const, selectorRef: "regressionTriggerButtonName" }
+        : { action: "wait" as const, durationMs: 0 };
+    requiredSteps.push({ pathId: scenario.regressionPath.stepId, action: regressionAction });
+  }
+  return {
+    routePath: "/",
+    requiredSteps,
+    requiredEvidenceKinds: ["screenshot", "dom", "network", "console", "trace"],
+    allowOptionalWait: true
   };
 }
 

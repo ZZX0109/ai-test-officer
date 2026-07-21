@@ -15,6 +15,7 @@ const APP_API_URL = import.meta.env.VITE_APP_API_URL ?? "http://localhost:6172";
 const ENABLE_TASK_FILTER_FIXTURE_BUG = import.meta.env.VITE_TASK_FILTER_FIXTURE_BUG === "1";
 const FIXTURE_VARIANT_ID = new URLSearchParams(window.location.search).get("fixtureVariantId");
 const VIEWER_PERMISSION_FIXTURE_BUG = FIXTURE_VARIANT_ID === "fxv_d10a7e1c4b298f63";
+const SEARCH_SELECTOR_DRIFT_FIXTURE = FIXTURE_VARIANT_ID === "fxv_9c4d0a73e1b625f8";
 const TEST_USER = "qa.officer@example.com";
 
 async function fetchTasks(status: Filter, keyword: string, forceError: boolean): Promise<Task[]> {
@@ -199,7 +200,7 @@ function App() {
 
       <form className="search-form" onSubmit={runSearch}>
         <input
-          aria-label="搜索任务"
+          aria-label={SEARCH_SELECTOR_DRIFT_FIXTURE ? "查找工作项" : "搜索任务"}
           data-testid="task-search-input"
           value={searchDraft}
           onChange={(event) => setSearchDraft(event.target.value)}

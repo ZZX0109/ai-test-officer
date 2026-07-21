@@ -274,7 +274,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   // Evidence degradation is selected by an opaque evaluator-owned variant. The
   // semantic failure class is intentionally absent from the Agent-visible input.
   const recordTrace = (envFlag("TRACE") || compiledPlan?.requiredEvidenceKinds.includes("trace") === true)
-    && input.fixtureVariantId !== "fxv_a6d2c904f7b138e5";
+    && input.fixtureVariantId !== "fxv_a6d2c904f7b138e5"
+    && input.fixtureVariantId !== "fxv_c8b3e157d0a624f9";
   const configuredProject = input.projectId ? await getProject(input.projectId) : undefined;
   const budgetTracker = new BudgetTracker(configuredProject?.budget);
   const runDeadline = Date.now() + (configuredProject?.budget?.runTimeoutMs ?? budgetTracker.budget.runTimeoutMs);
@@ -991,7 +992,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       assertWithinRunBudget();
       budgetTracker.consume({ steps: 1 });
       const assertionStart = assertions.length;
-      const fixturePath = path.join(runDir, `${step.id}-fixture.txt`);
+      const fixturePath = path.join(runDir, "invoice-fixture.txt");
       if (scenario.regressionPath && step.pathId === scenario.regressionPath.stepId && !regressionTelemetryStart) {
         regressionTelemetryStart = { network: network.length, console: consoleEvents.length };
       }

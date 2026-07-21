@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { diagnoseBenchmarkRun } from "../src/benchmark.js";
-import { assessPlannerOutcome, deriveBenchmarkExecutionSignals, validateBenchmarkFixtureBindings, validateBenchmarkProjectMappings } from "../src/benchmarkRunner.js";
+import { assessPlannerOutcome, deriveBenchmarkExecutionSignals, requestedScenarioForLane, validateBenchmarkFixtureBindings, validateBenchmarkProjectMappings } from "../src/benchmarkRunner.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
 export async function testBenchmarkContract() {
+  const scenarioCase = { id: "todo-filter-completed", split: "development" as const, projectId: "todo_lite", requirement: "filter", diff: "filter", risk: "high" };
+  assert.equal(requestedScenarioForLane(scenarioCase, "rules-deterministic"), "task_filter_completed");
+  assert.equal(requestedScenarioForLane(scenarioCase, "llm-plan-deterministic-judge"), undefined);
+  assert.equal(requestedScenarioForLane(scenarioCase, "full-llm"), undefined);
   assert.deepEqual(assessPlannerOutcome("llm"), { planExecutable: false, plannerFailed: true });
   assert.deepEqual(assessPlannerOutcome("llm", { source: "llm", compilationStatus: "rejected", model: "model", llmCallId: "call" }), { planExecutable: false, plannerFailed: true });
   assert.deepEqual(assessPlannerOutcome("llm", { source: "llm", compilationStatus: "validated", model: "model", llmCallId: "call" }), { planExecutable: true, plannerFailed: false });

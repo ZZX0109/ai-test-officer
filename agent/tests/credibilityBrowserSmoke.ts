@@ -3,6 +3,7 @@ import { access } from "node:fs/promises";
 import path from "node:path";
 import { runVisualGrayTest } from "../src/testRunner.js";
 import type { CompiledPlan } from "@ai-test-officer/contracts";
+import { getScenario } from "../src/scenarios.js";
 
 const todoUrl = process.env.CREDIBILITY_TODO_URL ?? "http://127.0.0.1:6173";
 const orderUrl = process.env.CREDIBILITY_ORDER_URL ?? "http://127.0.0.1:6183";
@@ -77,6 +78,22 @@ function assertAuditable(result: Awaited<ReturnType<typeof runVisualGrayTest>>, 
   }
 }
 
+function planFromScenarioContract(scenarioId: string): CompiledPlan {
+  const scenario = getScenario(scenarioId);
+  const contract = scenario.compiledPlanContract;
+  if (!contract) throw new Error(`credibility_compiled_contract_missing:${scenarioId}`);
+  return {
+    scenarioId,
+    steps: contract.requiredSteps.map((step, index) => ({
+      id: `${scenarioId}-${index + 1}`,
+      pathId: step.pathId,
+      action: step.action
+    })),
+    requiredOracleIds: scenario.corePath.oracles.map((oracle) => oracle.id),
+    requiredEvidenceKinds: contract.requiredEvidenceKinds
+  };
+}
+
 const todoServer = await ensureService("todo", todoUrl, ["--workspace", "app-under-test", "run", "dev"], Boolean(process.env.CREDIBILITY_TODO_URL));
 const orderServer = await ensureService("order", `${orderUrl}/health`, ["--prefix", "fixtures/order-portal-lite", "run", "start"], Boolean(process.env.CREDIBILITY_ORDER_URL), { PORT: "6183" });
 try {
@@ -87,6 +104,21 @@ for (let repetition = 1; repetition <= 3; repetition += 1) {
 
   const order = await runVisualGrayTest({ appUrl: orderUrl, scenarioId: orderPlan.scenarioId, fixtureVariantId: "fxv_7f3a1c92d6e8405b", permissionProfile, compiledPlan: orderPlan });
   assertAuditable(order, orderPlan.scenarioId);
+}
+
+// These scenarios previously existed in the registry but had no executable
+// contract, which made every Full LLM run fail before browser execution. Run
+// the derived, closed-world contract against the real fixture once each so a
+// registry entry cannot silently regress into a prompt-only scenario again.
+for (const [scenarioId, appUrl] of [
+  ["task_api_failure", todoUrl],
+  ["task_search_keyword", todoUrl],
+  ["task_state_transition", todoUrl],
+  ["order_approval_transition", orderUrl]
+] as const) {
+  const result = await runVisualGrayTest({ appUrl, scenarioId, permissionProfile, compiledPlan: planFromScenarioContract(scenarioId) });
+  assertAuditable(result, scenarioId);
+  if (!result.outcomeSummary?.requirementPassed) throw new Error(`credibility_derived_contract_failed:${scenarioId}`);
 }
 
 const partial = await runVisualGrayTest({ appUrl: orderUrl, scenarioId: todoPlan.scenarioId, permissionProfile, compiledPlan: todoPlan });

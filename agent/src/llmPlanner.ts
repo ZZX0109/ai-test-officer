@@ -8,6 +8,7 @@ import type { CredentialRecord, ImpactAnalysis } from "./types.js";
 import { assertCompiledPlanSemanticContract } from "./compiledPlanContract.js";
 
 interface GeneratePlanInput {
+  projectId?: string;
   requirement: string;
   diff: string;
   credentialId?: string;
@@ -41,11 +42,44 @@ async function resolveCredential(id?: string) {
   return selected ? getCredential(selected.id) : undefined;
 }
 
+function transitionObligations(diff: string) {
+  const obligations = new Set<string>();
+  const transition = /([a-zA-Z][\w-]*)\s*:\s*\{\s*([a-zA-Z][\w-]*)\s*:\s*['"]([a-zA-Z][\w-]*)['"]/g;
+  for (const match of diff.matchAll(transition)) {
+    for (const token of match.slice(1)) obligations.add(token.toLowerCase());
+  }
+  return [...obligations];
+}
+
+export function groundedPlannerScenarioIds(input: Pick<GeneratePlanInput, "requirement" | "diff" | "projectId" | "preferredScenarioId">) {
+  if (input.preferredScenarioId) {
+    if (!hasScenario(input.preferredScenarioId)) return [];
+    const preferred = getScenario(input.preferredScenarioId);
+    return preferred.compiledPlanContract ? [preferred.id] : [];
+  }
+  const obligations = transitionObligations(input.diff);
+  return matchScenariosForContext({ requirement: input.requirement, diff: input.diff, projectId: input.projectId })
+    .map((match) => match.scenario)
+    .filter((scenario) => Boolean(scenario.compiledPlanContract))
+    .filter((scenario) => {
+      if (!obligations.length) return true;
+      const contractText = JSON.stringify({
+        id: scenario.id,
+        summary: scenario.summary,
+        corePath: scenario.corePath,
+        regressionPath: scenario.regressionPath,
+        compiledPlanContract: scenario.compiledPlanContract
+      }).toLowerCase();
+      return obligations.every((token) => contractText.includes(token));
+    })
+    .map((scenario) => scenario.id);
+}
+
 function buildPrompt(input: GeneratePlanInput) {
   const impactByScenario = new Map((input.impactAnalysis?.recommendedScenarios ?? []).map((item) => [item.scenarioId, item]));
+  const groundedIds = new Set(groundedPlannerScenarioIds(input));
   const executableScenarios = listExecutableScenarios()
-    .filter((scenario) => !input.preferredScenarioId || scenario.id === input.preferredScenarioId)
-    .filter((scenario) => Boolean(scenario.compiledPlanContract))
+    .filter((scenario) => groundedIds.has(scenario.id))
     .map((scenario) => ({
     id: scenario.id,
     selectorRefs: [
@@ -68,7 +102,11 @@ function buildPrompt(input: GeneratePlanInput) {
       ...(scenario.regressionPath ? [{ levelId: "regression", pathId: scenario.regressionPath.stepId, guidance: scenario.regressionPath.triggerButtonName ? "click regressionTriggerButtonName once" : "non-mutating wait only" }] : [])
     ]
   }));
-  if (!executableScenarios.length) throw new Error(`llm_plan_unknown_preferred_scenario:${input.preferredScenarioId}`);
+  if (!executableScenarios.length) {
+    throw new Error(input.preferredScenarioId
+      ? `llm_plan_unknown_preferred_scenario:${input.preferredScenarioId}`
+      : "llm_plan_no_grounded_scenario");
+  }
   return `你是 AI 测试官的受限动作规划器。必须只输出一个可被 JSON.parse 解析的 JSON 对象，不要输出 Markdown、解释、注释或额外字段。
 
 JSON schema:

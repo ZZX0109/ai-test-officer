@@ -14,6 +14,17 @@ export function testScenarioParser() {
     assert.equal(getScenario(id).id, id);
   }
   assert.equal(getScenario("visual_regression_basic").corePath.oracles.some((oracle) => oracle.type === "console_no_error"), true);
+  for (const id of ["order_approval_transition", "task_api_failure", "task_search_keyword", "task_state_transition"]) {
+    const scenario = getScenario(id);
+    assert.ok(scenario.compiledPlanContract, `${id} should receive a deterministic compiled plan contract`);
+    assert.equal(scenario.compiledPlanContract?.requiredSteps[0]?.action.action, "navigate");
+    assert.deepEqual(
+      scenario.compiledPlanContract?.requiredSteps.filter((step) => step.action.action === "assert").map((step) => step.action.action === "assert" ? step.action.oracleId : ""),
+      scenario.corePath.oracles.map((oracle) => oracle.id)
+    );
+  }
+  const contractGaps = scenarios.filter((scenario) => !getScenario(scenario.id).compiledPlanContract).map((scenario) => scenario.id);
+  assert.deepEqual(contractGaps, ["investment_agent_workflow_auth_portfolio_research"], "only the cross-page external workflow may remain outside the bounded browser DSL");
   const genericCapabilities = new Map(
     scenarios
       .filter((scenario) => scenario.genericTemplate)
