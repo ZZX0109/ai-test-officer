@@ -7,9 +7,40 @@ import { PatrolPanel } from "../src/components/PatrolPanel";
 import { BenchmarkPanel } from "../src/components/BenchmarkPanel";
 import { OidcSessionPanel } from "../src/components/OidcSessionPanel";
 import { RunTimeline } from "../src/components/RunTimeline";
+import { ProjectWizardPanel } from "../src/components/ProjectWizardPanel";
 import { subscribeRunEvents } from "../src/api";
 
 describe("Workbench interactions", () => {
+  it("guides a new user through project setup without exposing technical details first", async () => {
+    const detect = vi.fn();
+    const apply = vi.fn();
+    const diagnose = vi.fn();
+    render(<ProjectWizardPanel
+      projectPath="app-under-test"
+      detection={{
+        exists: true,
+        detectedStack: ["Vite"],
+        packageManagers: ["npm"],
+        suggestedConfig: { startCommand: "npm run dev", healthCheckUrl: "http://localhost:6173" },
+        healthCandidates: ["http://localhost:6173"],
+        ports: [],
+        plainLanguageFixes: [],
+        warnings: []
+      } as never}
+      onProjectPathChange={() => undefined}
+      onDetect={detect}
+      onApplySuggestion={apply}
+      onDiagnose={diagnose}
+    />);
+    expect(screen.getByText("告诉我你要测试哪个项目")).toBeTruthy();
+    expect(screen.getByText(/不会修改项目代码/)).toBeTruthy();
+    expect(screen.getByText("查看系统识别到的技术信息").closest("details")?.open).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: "使用推荐设置" }));
+    await userEvent.click(screen.getByRole("button", { name: "检查能否运行" }));
+    expect(apply).toHaveBeenCalledOnce();
+    expect(diagnose).toHaveBeenCalledOnce();
+  });
+
   it("propagates connector input and strict mode decisions", async () => {
     const requirement = vi.fn();
     const strict = vi.fn();
