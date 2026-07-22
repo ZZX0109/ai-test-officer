@@ -7,10 +7,31 @@ const rootDir = path.resolve(import.meta.dirname, "..");
 const experimentId = process.env.BENCHMARK_EXPERIMENT_ID ?? `sophnet-development-${new Date().toISOString().replace(/[:.]/g, "-")}`;
 const credentialId = process.env.BENCHMARK_SOPHNET_CREDENTIAL_ID;
 if (!credentialId) throw new Error("BENCHMARK_SOPHNET_CREDENTIAL_ID is required; pass only the local credential ID, never an API key.");
+const benchmarkSplit = process.env.BENCHMARK_SPLIT ?? "development";
+const sealedRun = ["blind", "development+blind", "holdout", "development+holdout"].includes(benchmarkSplit);
+const evaluatorLabelsRoot = process.env.BENCHMARK_LABELS_ROOT;
+const evaluatorReportsRoot = process.env.BENCHMARK_EVALUATOR_REPORTS_ROOT;
+
+function assertExternalEvaluatorDirectory(value, name) {
+  if (!value) throw new Error(`${name}_required_for_blind_benchmark`);
+  const resolved = path.resolve(value);
+  if (resolved === rootDir || resolved.startsWith(`${rootDir}${path.sep}`)) {
+    throw new Error(`${name}_must_be_outside_workspace_for_blind_benchmark`);
+  }
+  return resolved;
+}
+
+const sealedLabelsRoot = sealedRun ? assertExternalEvaluatorDirectory(evaluatorLabelsRoot, "BENCHMARK_LABELS_ROOT") : undefined;
+const sealedReportsRoot = sealedRun ? assertExternalEvaluatorDirectory(evaluatorReportsRoot, "BENCHMARK_EVALUATOR_REPORTS_ROOT") : undefined;
 
 const backgroundDir = path.join(rootDir, "reports", "background", experimentId);
 const statusFile = path.join(backgroundDir, "status.json");
 const children = [];
+const {
+  BENCHMARK_LABELS_ROOT: _evaluatorLabelsRoot,
+  BENCHMARK_EVALUATOR_REPORTS_ROOT: _evaluatorReportsRoot,
+  ...runtimeEnvironment
+} = process.env;
 
 async function status(state, extra = {}) {
   await writeFile(statusFile, JSON.stringify({ experimentId, state, updatedAt: new Date().toISOString(), pids: children.map((child) => child.pid).filter(Boolean), ...extra }, null, 2));
@@ -21,7 +42,10 @@ function start(name, args, env = {}) {
     cwd: rootDir,
     detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, ...env }
+    // Labels are evaluator-only. Do not inherit them into the agent, fixture,
+    // or benchmark-runner process even when this parent has them for the final
+    // evaluation step.
+    env: { ...runtimeEnvironment, ...env }
   });
   children.push(child);
   const log = path.join(backgroundDir, `${name}.log`);
@@ -82,18 +106,26 @@ try {
   await waitFor("http://127.0.0.1:6173/");
   await status("running", { agentPid: agent.pid, todoApiPid: api.pid, todoWebPid: web.pid });
 
-  const benchmarkEnv = {
+  const benchmarkEnv = Object.fromEntries(Object.entries({
     NO_PROXY: "127.0.0.1,localhost",
     BENCHMARK_MODEL_IDS: "sophnet-gpt-5.1-codex",
     BENCHMARK_SOPHNET_CREDENTIAL_ID: credentialId,
-    BENCHMARK_CASE_IDS: process.env.BENCHMARK_CASE_IDS ?? "todo-create-valid,todo-filter-completed,todo-viewer-permission,order-filter-pending,order-viewer-permission,order-api-failure",
+    BENCHMARK_SPLIT: benchmarkSplit,
+    BENCHMARK_HOLDOUT_CASES_FILE: process.env.BENCHMARK_HOLDOUT_CASES_FILE,
+    BENCHMARK_DEVELOPMENT_EXPERIMENT_ID: process.env.BENCHMARK_DEVELOPMENT_EXPERIMENT_ID,
+    BENCHMARK_LANES: process.env.BENCHMARK_LANES,
+    BENCHMARK_CASE_IDS: process.env.BENCHMARK_CASE_IDS ?? (sealedRun ? undefined : "todo-create-valid,todo-filter-completed,todo-viewer-permission,order-filter-pending,order-viewer-permission,order-api-failure"),
     BENCHMARK_EXPERIMENT_ID: experimentId,
     BENCHMARK_REPETITIONS: process.env.BENCHMARK_REPETITIONS ?? "3",
     BENCHMARK_RUN_TIMEOUT_MS: "180000"
-  };
+  }).filter(([, value]) => value !== undefined));
   await run("benchmark", ["run", "benchmark:run"], benchmarkEnv);
   await status("evaluating", { progress: await readProgress() });
-  await run("evaluator", ["run", "benchmark:evaluate"], { ...benchmarkEnv, BENCHMARK_LABELS_ROOT: path.join(rootDir, "evaluation", "benchmark-labels") });
+  await run("evaluator", ["run", "benchmark:evaluate"], {
+    ...benchmarkEnv,
+    BENCHMARK_LABELS_ROOT: sealedLabelsRoot ?? process.env.BENCHMARK_LABELS_ROOT ?? path.join(rootDir, "evaluation", "benchmark-labels"),
+    BENCHMARK_EVALUATOR_REPORTS_ROOT: sealedReportsRoot ?? process.env.BENCHMARK_EVALUATOR_REPORTS_ROOT
+  });
   await run("tests", ["test"]);
   await run("typecheck", ["run", "typecheck"]);
   await run("build", ["run", "build"]);

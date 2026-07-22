@@ -58,9 +58,18 @@ export function groundedPlannerScenarioIds(input: Pick<GeneratePlanInput, "requi
     return preferred.compiledPlanContract ? [preferred.id] : [];
   }
   const obligations = transitionObligations(input.diff);
-  return matchScenariosForContext({ requirement: input.requirement, diff: input.diff, projectId: input.projectId })
+  const matches = matchScenariosForContext({ requirement: input.requirement, diff: input.diff, projectId: input.projectId })
+    .filter((match) => Boolean(match.scenario.compiledPlanContract));
+  // A large semantic margin is a deterministic disambiguation signal. Expose
+  // only the winning contract to the model so it cannot select a generic auth
+  // or validation scenario that merely shares one keyword with a project-
+  // specific requirement. Ambiguous/close candidates remain available for
+  // genuine LLM planning.
+  const top = matches[0];
+  const second = matches[1];
+  const candidates = top && (!second || top.score - second.score >= 20) ? [top] : matches;
+  return candidates
     .map((match) => match.scenario)
-    .filter((scenario) => Boolean(scenario.compiledPlanContract))
     .filter((scenario) => {
       if (!obligations.length) return true;
       const contractText = JSON.stringify({

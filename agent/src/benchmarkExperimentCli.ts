@@ -1,10 +1,32 @@
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { evaluateExperiment, validateExperimentRunMatrix, type BenchmarkCase, type BenchmarkRunRecord, type HumanBenchmarkLabel } from "./benchmark.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
 async function json<T>(file: string) { return JSON.parse(await readFile(file, "utf8")) as T; }
+
+function externalDirectory(value: string | undefined, name: string) {
+  if (!value) throw new Error(`${name}_required_for_blind_evaluation`);
+  const resolved = path.resolve(value);
+  if (resolved === rootDir || resolved.startsWith(`${rootDir}${path.sep}`)) {
+    throw new Error(`${name}_must_be_outside_workspace_for_blind_evaluation`);
+  }
+  return resolved;
+}
+
+function publicEvaluation(output: any) {
+  return {
+    ...output,
+    evaluations: output.evaluations.map((evaluation: any) => ({
+      ...evaluation,
+      // A public blind report must not let a developer infer evaluator labels
+      // from a per-run mismatch, failure category, or expected scenario. The
+      // complete diagnostic stays in the evaluator-owned report directory.
+      diagnostics: evaluation.split === "blind" || evaluation.split === "holdout" ? [] : evaluation.diagnostics
+    }))
+  };
+}
 
 function pct(value: unknown) {
   return typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "—";
@@ -39,6 +61,11 @@ async function main() {
   const config = await json<{ acceptance: Parameters<typeof evaluateExperiment>[0]["thresholds"]; roi?: { manualMinutesPerCase: number; reviewMinutesPerCase: number } }>(path.join(rootDir, "data", "benchmark", "experiment.json"));
   const directory = path.join(rootDir, "reports", "benchmarks", "experiments", experimentId);
   const manifest = await json<{ plannedRuns: number; split: string; suites?: string[]; status: string; caseIds?: string[]; repetitions?: number; lanes?: BenchmarkRunRecord["lane"][]; models?: Array<{ id: string }> }>(path.join(directory, "manifest.json"));
+  const sealedEvaluation = manifest.split.includes("blind") || manifest.split.includes("holdout");
+  const evaluatorReportsRoot = sealedEvaluation
+    ? externalDirectory(process.env.BENCHMARK_EVALUATOR_REPORTS_ROOT, "BENCHMARK_EVALUATOR_REPORTS_ROOT")
+    : undefined;
+  if (sealedEvaluation) externalDirectory(labelsRoot, "BENCHMARK_LABELS_ROOT");
   if (manifest.status !== "awaiting_evaluation") throw new Error(`experiment_not_ready:${manifest.status}`);
   if (!manifest.caseIds?.length) throw new Error("experiment_manifest_case_ids_missing");
   if (!manifest.repetitions || !manifest.models) throw new Error("experiment_manifest_matrix_definition_missing");
@@ -71,19 +98,37 @@ async function main() {
     if (!blindMatrix.complete) throw new Error(`experiment_blind_run_matrix_incomplete:${JSON.stringify(blindMatrix)}`);
     evaluations.push(evaluateExperiment({ experimentId, split: "blind", cases: blindCases, labels: selectedBlindLabels, records, plannedRuns: blindMatrix.expectedRuns, thresholds: config.acceptance, roi: config.roi }));
   }
+  if (manifest.split.includes("holdout")) {
+    const holdoutCaseFile = path.basename(process.env.BENCHMARK_HOLDOUT_CASES_FILE ?? "holdout-cases.json");
+    const holdoutCases = (await json<Array<BenchmarkCase & { projectId: string }>>(path.join(rootDir, "data", "benchmark", holdoutCaseFile))).filter((item) => selectedCaseIds.has(item.id));
+    const holdoutLabels = (await json<Array<HumanBenchmarkLabel & { requiredEvidenceTypes?: string[] }>>(path.join(labelsRoot, "holdout.json"))).map((item) => ({ ...item, requiredEvidenceTypes: item.requiredEvidenceTypes ?? ["screenshot", "dom", "network", "console", "trace"] }));
+    const selectedHoldoutLabels = holdoutLabels.filter((item) => selectedCaseIds.has(item.benchmarkId));
+    const holdoutRecords = records.filter((record) => record.split === "holdout");
+    const holdoutMatrix = validateExperimentRunMatrix({ records: holdoutRecords, caseIds: holdoutCases.map((item) => item.id), modelIds: manifest.models.map((model) => model.id), repetitions: manifest.repetitions, lanes: matrixLanes });
+    if (!holdoutMatrix.complete) throw new Error(`experiment_holdout_run_matrix_incomplete:${JSON.stringify(holdoutMatrix)}`);
+    evaluations.push(evaluateExperiment({ experimentId, split: "holdout", cases: holdoutCases, labels: selectedHoldoutLabels, records, plannedRuns: holdoutMatrix.expectedRuns, thresholds: config.acceptance, roi: config.roi }));
+  }
   const blind = evaluations.find((item) => item.split === "blind");
+  const holdout = evaluations.find((item) => item.split === "holdout");
   const output = {
     experimentId,
     createdAt: new Date().toISOString(),
-    status: blind ? evaluations.every((item) => item.status === "completed") ? "completed" : "awaiting_agent_runs" : "awaiting_blind_runs",
-    conclusion: blind ? blind.acceptance.proven ? "llm_gain_proven" : "llm_gain_not_proven" : "development_only",
-    provenance: { kind: "live-evaluation", rawRecordsModified: false, blindDataIncluded: Boolean(blind) },
+    status: blind || holdout ? evaluations.every((item) => item.status === "completed") ? "completed" : "awaiting_agent_runs" : "awaiting_blind_runs",
+    conclusion: blind ? blind.acceptance.proven ? "llm_gain_proven" : "llm_gain_not_proven" : holdout ? holdout.acceptance.reasons.length === 0 ? "holdout_validation_passed" : "holdout_validation_failed" : "development_only",
+    provenance: { kind: "live-evaluation", rawRecordsModified: false, blindDataIncluded: Boolean(blind), holdoutDataIncluded: Boolean(holdout), holdoutIsThirdPartyBlind: false },
     evaluations
   };
-  await writeFile(path.join(directory, "evaluation.json"), JSON.stringify(output, null, 2));
-  await writeFile(path.join(directory, "evaluation-summary.md"), evaluationMarkdown(output));
-  await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify(output, null, 2));
-  console.log(JSON.stringify(output, null, 2));
+  const publicOutput = sealedEvaluation ? publicEvaluation(output) : output;
+  if (sealedEvaluation) {
+    const evaluatorDirectory = path.join(evaluatorReportsRoot!, experimentId);
+    await mkdir(evaluatorDirectory, { recursive: true });
+    await writeFile(path.join(evaluatorDirectory, "evaluation.json"), JSON.stringify(output, null, 2));
+    await writeFile(path.join(evaluatorDirectory, "evaluation-summary.md"), evaluationMarkdown(output));
+  }
+  await writeFile(path.join(directory, "evaluation.json"), JSON.stringify(publicOutput, null, 2));
+  await writeFile(path.join(directory, "evaluation-summary.md"), evaluationMarkdown(publicOutput));
+  await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify(publicOutput, null, 2));
+  console.log(JSON.stringify(publicOutput, null, 2));
   if (blind && !blind.acceptance.proven) process.exitCode = 3;
 }
 

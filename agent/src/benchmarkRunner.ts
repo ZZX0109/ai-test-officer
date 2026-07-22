@@ -12,7 +12,7 @@ const apiUrl = (process.env.AGENT_URL ?? "http://127.0.0.1:4317").replace(/\/$/,
 const token = process.env.AGENT_API_TOKEN ?? "dev-local-token";
 type Lane = "test-command" | "rules-deterministic" | "llm-plan-deterministic-judge" | "rules-plan-llm-judge" | "full-llm";
 const supportedLanes: Lane[] = ["test-command", "rules-deterministic", "llm-plan-deterministic-judge", "rules-plan-llm-judge", "full-llm"];
-type Case = { id: string; split: "development" | "blind"; projectId: string; scenarioId?: string; requirement: string; diff: string; risk: string; fixtureVariantId?: string };
+type Case = { id: string; split: "development" | "blind" | "holdout"; projectId: string; scenarioId?: string; requirement: string; diff: string; risk: string; fixtureVariantId?: string };
 type Model = { id: string; credentialIdEnv: string; provider: string; model: string };
 type ExecutionMapping = { logicalProjectId: string; executionProjectId: string; targetUrl?: string; targetKind?: string };
 type FixtureVariantBinding = { fixtureVariantId: string; logicalProjectId: string; executionProjectId: string };
@@ -36,16 +36,14 @@ const scenarioByBenchmarkId: Record<string, string> = {
   "todo-pagination-contract": "generic_table_sort_filter_pagination",
   "order-requirement-diff": "order_approval_transition",
   "order-visual-regression": "order_visual_regression",
-  "order-openapi-contract": "order_openapi_contract",
-  "blind-001": "order_approval_transition",
-  "blind-002": "task_api_failure",
-  "blind-003": "task_search_keyword",
-  "blind-004": "order_viewer_permission",
-  "blind-005": "task_filter_completed",
-  "blind-006": "task_state_transition"
+  "order-openapi-contract": "order_openapi_contract"
 };
 
 function benchmarkScenario(item: Case) {
+  // Sealed-suite scenarios are selected from public requirement/diff and
+  // project boundaries. Evaluator labels must never become a runner-side
+  // lookup table or a deterministic baseline hint.
+  if (item.split === "blind" || item.split === "holdout") return undefined;
   return item.scenarioId ?? scenarioByBenchmarkId[item.id];
 }
 
@@ -61,6 +59,7 @@ export function validateBenchmarkProjectMappings(input: {
   development: Array<Pick<Case, "id" | "projectId">>;
   extended: Array<Pick<Case, "id" | "projectId">>;
   blind: Array<Pick<Case, "id" | "projectId">>;
+  holdout?: Array<Pick<Case, "id" | "projectId">>;
   mappings: ExecutionMapping[];
 }) {
   const byLogicalProject = new Map<string, ExecutionMapping>();
@@ -88,6 +87,7 @@ export function validateBenchmarkProjectMappings(input: {
   assertSuite("development", input.development, ["todo_lite", "order_portal_lite"]);
   assertSuite("extended", input.extended, ["customer_portal_lite"]);
   assertSuite("blind", input.blind, ["todo_lite", "order_portal_lite"]);
+  assertSuite("holdout", input.holdout ?? [], ["todo_lite", "order_portal_lite"]);
   return byLogicalProject;
 }
 
@@ -317,7 +317,7 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const judgeMode = input.lane === "rules-plan-llm-judge" || input.lane === "full-llm" ? "adaptive" : "deterministic";
   let run = (await request<{ run: { id: string; state: string; version: number; gateStatus?: string; selectedScenarioId?: string } }>("/v1/runs", {
     method: "POST",
-    body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: requestedScenarioId, requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 2, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 2000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
+    body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { logicalProjectId: input.item.projectId, appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: requestedScenarioId, requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 2, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 2000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
   })).run;
   // A rejected LLM plan deliberately blocks the run.  It is an experiment result,
   // not a transport failure: preserve it and do not issue invalid approval events.
@@ -393,28 +393,31 @@ export async function runBenchmarkExperiment() {
     throw new Error(`benchmark_lanes_invalid:${process.env.BENCHMARK_LANES ?? ""}`);
   }
   const requestedSplit = process.env.BENCHMARK_SPLIT ?? (process.env.BENCHMARK_ENABLE_BLIND === "1" ? "development+blind" : "development");
-  if (!['development', 'blind', 'development+blind'].includes(requestedSplit)) {
+  if (!['development', 'blind', 'development+blind', 'holdout', 'development+holdout'].includes(requestedSplit)) {
     throw new Error(`benchmark_split_invalid:${requestedSplit}`);
   }
-  const includeDevelopment = requestedSplit !== "blind";
-  const includeBlind = requestedSplit !== "development";
+  const includeDevelopment = requestedSplit !== "blind" && requestedSplit !== "holdout";
+  const includeBlind = requestedSplit === "blind" || requestedSplit === "development+blind";
+  const includeHoldout = requestedSplit === "holdout" || requestedSplit === "development+holdout";
   const includeExtended = process.env.BENCHMARK_EXTENDED === "1";
   const development = includeDevelopment ? JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "cases.json"), "utf8")) as Case[] : [];
   const extended = includeDevelopment && includeExtended ? JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "extended-cases.json"), "utf8")) as Case[] : [];
   const blind = includeBlind ? JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8")) as Case[] : [];
+  const holdoutCaseFile = path.basename(process.env.BENCHMARK_HOLDOUT_CASES_FILE ?? "holdout-cases.json");
+  const holdout = includeHoldout ? JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", holdoutCaseFile), "utf8")) as Case[] : [];
   let developmentGate: { experimentId: string; readyForBlind: boolean } | undefined;
-  if (requestedSplit === "blind") {
+  if (requestedSplit === "blind" || requestedSplit === "holdout") {
     const developmentExperimentId = process.env.BENCHMARK_DEVELOPMENT_EXPERIMENT_ID;
-    if (!developmentExperimentId) throw new Error("benchmark_blind_requires_development_experiment");
+    if (!developmentExperimentId) throw new Error(`benchmark_${requestedSplit}_requires_development_experiment`);
     const evaluation = JSON.parse(await readFile(path.join(rootDir, "reports", "benchmarks", "experiments", developmentExperimentId, "evaluation.json"), "utf8")) as {
       experimentId: string;
       evaluations?: Array<{ split?: string; acceptance?: { readyForBlind?: boolean } }>;
     };
     const readyForBlind = evaluation.evaluations?.find((item) => item.split === "development")?.acceptance?.readyForBlind === true;
     developmentGate = { experimentId: developmentExperimentId, readyForBlind };
-    if (!readyForBlind) throw new Error(`benchmark_blind_development_gate_failed:${developmentExperimentId}`);
+    if (!readyForBlind) throw new Error(`benchmark_${requestedSplit}_development_gate_failed:${developmentExperimentId}`);
   }
-  const catalogCases = [...development, ...extended, ...blind];
+  const catalogCases = [...development, ...extended, ...blind, ...holdout];
   const requestedCaseIds = (process.env.BENCHMARK_CASE_IDS ?? "").split(",").map((item) => item.trim()).filter(Boolean);
   const unknownCaseIds = requestedCaseIds.filter((id) => !catalogCases.some((item) => item.id === id));
   if (unknownCaseIds.length) throw new Error(`benchmark_case_not_declared:${unknownCaseIds.join(",")}`);
@@ -422,9 +425,9 @@ export async function runBenchmarkExperiment() {
   const missingChangeContext = cases.filter((item) => !item.diff?.trim()).map((item) => item.id);
   if (missingChangeContext.length) throw new Error(`benchmark_case_diff_missing:${missingChangeContext.join(",")}`);
   const mapping = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "execution-map.json"), "utf8")) as { mappings: ExecutionMapping[] };
-  const projectMap = validateBenchmarkProjectMappings({ development, extended, blind, mappings: mapping.mappings });
+  const projectMap = validateBenchmarkProjectMappings({ development, extended, blind, holdout, mappings: mapping.mappings });
   const fixtureManifest = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "fixture-variants.json"), "utf8")) as { variants: FixtureVariantBinding[] };
-  validateBenchmarkFixtureBindings({ cases: [...development, ...extended, ...blind], mappings: projectMap, variants: fixtureManifest.variants });
+  validateBenchmarkFixtureBindings({ cases: [...development, ...extended, ...blind, ...holdout], mappings: projectMap, variants: fixtureManifest.variants });
   const experimentId = process.env.BENCHMARK_EXPERIMENT_ID ?? `experiment_${new Date().toISOString().replace(/[:.]/g, "-")}`;
   const directory = path.join(rootDir, "reports", "benchmarks", "experiments", experimentId);
   const runsDir = path.join(directory, "runs");
@@ -437,7 +440,7 @@ export async function runBenchmarkExperiment() {
   const requestedPlannedRuns = cases.length * repetitions * (deterministicLaneCount + requestedModels.length * llmLaneCount);
   const plannedRuns = cases.length * repetitions * (deterministicLaneCount + runnableModels.length * llmLaneCount);
   const hardBlocked = llmEnabled && (!runnableModels.length || (check.failures.length > 0 && !allowPartialModels));
-  const manifest = { experimentId, createdAt: new Date().toISOString(), split: requestedSplit, suites: [...(includeDevelopment ? ["core"] : []), ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : [])], caseCount: cases.length, caseIds: cases.map((item) => item.id), plannedRuns, requestedPlannedRuns, repetitions, promptVersion: config.promptVersion, lanes: requestedLanes, llmEnabled, models: runnableModels.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), unavailableModels: requestedModels.filter((model) => !check.credentials.has(model.id)).map((model) => ({ id: model.id, provider: model.provider, model: model.model })), developmentGate, status: hardBlocked ? "blocked" : "running", blockers: check.failures, partial: check.failures.length > 0 };
+  const manifest = { experimentId, createdAt: new Date().toISOString(), split: requestedSplit, suites: [...(includeDevelopment ? ["core"] : []), ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : []), ...(includeHoldout ? ["holdout"] : [])], caseCount: cases.length, caseIds: cases.map((item) => item.id), plannedRuns, requestedPlannedRuns, repetitions, promptVersion: config.promptVersion, lanes: requestedLanes, llmEnabled, models: runnableModels.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), unavailableModels: requestedModels.filter((model) => !check.credentials.has(model.id)).map((model) => ({ id: model.id, provider: model.provider, model: model.model })), developmentGate, status: hardBlocked ? "blocked" : "running", blockers: check.failures, partial: check.failures.length > 0 };
   const existingManifestFile = path.join(directory, "manifest.json");
   let existingManifest: any;
   try { existingManifest = JSON.parse(await readFile(existingManifestFile, "utf8")); } catch { /* first run */ }

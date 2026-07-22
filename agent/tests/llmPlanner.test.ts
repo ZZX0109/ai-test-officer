@@ -1,9 +1,24 @@
 import assert from "node:assert/strict";
 import { buildRepairPrompt, compileLlmPlanCandidate, generatePlan, groundedPlannerScenarioIds } from "../src/llmPlanner.js";
 import { reserveLlmOutputTokens } from "../src/llmProvider.js";
-import { listExecutableScenarios } from "../src/scenarios.js";
+import { listExecutableScenarios, matchScenariosForContext } from "../src/scenarios.js";
 
 export async function testLlmPlannerFailClosed() {
+  assert.equal(matchScenariosForContext({
+    projectId: "todo_lite",
+    requirement: "Create a task with a valid title",
+    diff: "+ createTask(title)"
+  })[0]?.scenario.id, "task_create_success");
+  assert.equal(matchScenariosForContext({
+    projectId: "todo_lite",
+    requirement: "Unauthenticated visitors cannot read the task list and must see login required",
+    diff: "+ if (!session.user) return login_required"
+  })[0]?.scenario.id, "todo_visitor_permission");
+  assert.equal(matchScenariosForContext({
+    projectId: "order_portal_lite",
+    requirement: "Order API failure should show an error",
+    diff: "+ response.status >= 500"
+  })[0]?.scenario.id, "order_api_failure");
   const orderCandidates = groundedPlannerScenarioIds({
     projectId: "order_portal_lite",
     requirement: "Approving a pending order must display approved",
