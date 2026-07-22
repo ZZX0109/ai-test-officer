@@ -175,6 +175,7 @@ export async function runRequirementAcceptance(
     requirement: context.requirement,
     diff: context.diff,
     bugTicket: context.bugTicket,
+    projectId: input.projectId,
     prUrl: context.prUrl,
     sources: context.sources,
     sourceContexts: context.sourceContexts

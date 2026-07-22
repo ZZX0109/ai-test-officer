@@ -443,6 +443,7 @@ export interface PermissionProfile {
 export interface RunRequest {
   appUrl?: string;
   projectId?: string;
+  logicalProjectId?: string;
   planId?: string;
   target?: TargetAppRuntime;
   keepProjectRunning?: boolean;
@@ -934,6 +935,9 @@ export interface ConnectorContext {
   requirement: string;
   diff: string;
   bugTicket: string;
+  /** Known project boundary used to prevent generic scenarios leaking into a
+   * project-specific fixture during impact analysis. */
+  projectId?: string;
   prUrl?: string;
   prMeta?: {
     provider: "github";

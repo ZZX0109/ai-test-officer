@@ -492,13 +492,14 @@ app.post("/v1/runs", async (req, res, next) => {
         })
         : undefined;
       const codeGraph = repositoryGraph && project ? { ...repositoryGraph, repositoryRoot: `project://${project.id}` } : repositoryGraph;
-      const intake = analyzeIntake({ requirement: body.input.requirement ?? "", diff, projectId: body.projectId, sourceContexts, codeGraph });
+      const plannerProjectId = body.input.logicalProjectId ?? body.projectId;
+      const intake = analyzeIntake({ requirement: body.input.requirement ?? "", diff, projectId: plannerProjectId, sourceContexts, codeGraph });
       const plannerRouting = body.input.plannerMode === "adaptive"
         ? routePlanner({ requirement: body.input.requirement, explicitScenarioId: body.input.scenarioId, intake, impactAnalysis: intake.impactAnalysis })
         : { route: body.input.plannerMode, reason: "explicit_mode", signals: [`mode:${body.input.plannerMode}`] };
       if (plannerRouting.route === "llm") {
         try {
-          const cacheKey = planCacheKey({ projectId: body.projectId, targetVersion: body.input.targetVersion, requirement: body.input.requirement, diff, promptVersion: body.input.promptVersion, modelProfileId: body.input.modelProfileId });
+          const cacheKey = planCacheKey({ projectId: plannerProjectId, targetVersion: body.input.targetVersion, requirement: body.input.requirement, diff, promptVersion: body.input.promptVersion, modelProfileId: body.input.modelProfileId });
           const cached = body.input.plannerMode === "adaptive" && body.input.cachePolicy === "auto" && !body.input.experimentId
             ? await readCachedPlan(cacheKey)
             : undefined;
@@ -506,7 +507,7 @@ app.post("/v1/runs", async (req, res, next) => {
             const provenance = planProvenanceSchema.parse({ source: "cached-llm", promptVersion: body.input.promptVersion, modelProfileId: body.input.modelProfileId, model: cached.model, compilationStatus: "validated", cacheKey, originLlmCallId: cached.originLlmCallId });
             planPayload = { plan: cached.plan, compiledPlan: cached.compiledPlan, provenance, scenarioId: cached.scenarioId, impactAnalysis: intake.impactAnalysis, plannerRouting: { ...plannerRouting, signals: [...plannerRouting.signals, "plan_cache_hit"] } };
           } else {
-            const generated = await generatePlan({ projectId: body.projectId, requirement: body.input.requirement ?? "", diff, impactAnalysis: intake.impactAnalysis, credentialId: body.input.modelProfileId, requireLlm: true, runId: created.id, experimentId: body.input.experimentId, promptVersion: body.input.promptVersion, preferredScenarioId: body.input.scenarioId, llmBudget: body.input.llmBudget, browserControlAllowed: body.input.permissionProfile.browserControl });
+            const generated = await generatePlan({ projectId: plannerProjectId, requirement: body.input.requirement ?? "", diff, impactAnalysis: intake.impactAnalysis, credentialId: body.input.modelProfileId, requireLlm: true, runId: created.id, experimentId: body.input.experimentId, promptVersion: body.input.promptVersion, preferredScenarioId: body.input.scenarioId, llmBudget: body.input.llmBudget, browserControlAllowed: body.input.permissionProfile.browserControl });
             planPayload = { plan: generated.plan, compiledPlan: generated.compiledPlan, provenance: generated.provenance, llmCall: generated.llmCall, llmCalls: generated.llmCalls, scenarioId: generated.scenarioId, impactAnalysis: intake.impactAnalysis, plannerRouting };
             if (body.input.plannerMode === "adaptive" && body.input.cachePolicy === "auto" && !body.input.experimentId && generated.compiledPlan && generated.scenarioId && generated.llmCall && generated.provenance?.model) {
               await writeCachedPlan({ key: cacheKey, plan: generated.plan, compiledPlan: generated.compiledPlan, scenarioId: generated.scenarioId, model: generated.provenance.model, originLlmCallId: generated.llmCall.id, createdAt: new Date().toISOString() });

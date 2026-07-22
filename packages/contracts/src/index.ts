@@ -399,6 +399,10 @@ export const createRunRequestSchema = z.object({
   idempotencyKey: z.string().min(1),
   input: z.object({
     appUrl: z.string().url().optional(),
+    /** Logical benchmark project used for scenario/impact matching. It may
+     * differ from projectId when a logical project maps to an execution
+     * fixture (for example todo_lite -> local_demo_app). */
+    logicalProjectId: z.string().min(1).optional(),
     scenarioId: z.string().optional(),
     requirement: z.string().optional(),
     diff: z.string().optional(),

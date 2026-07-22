@@ -221,29 +221,30 @@ export async function runDiscoveryScan(input: {
       }
     });
     await page.goto(url, { waitUntil: "networkidle", timeout: 20_000 });
-    const pageModel = await page.evaluate(`(() => {
-      const textOf = (element) => element && element.textContent ? element.textContent.replace(/\\s+/g, " ").trim() : "";
-      const labelFor = (input) => {
-        const id = input.getAttribute("id");
-        const explicit = id ? document.querySelector("label[for='" + CSS.escape(id) + "']") : undefined;
-        return textOf(explicit) || textOf(input.closest("label")) || input.getAttribute("aria-label") || input.getAttribute("placeholder") || input.getAttribute("name") || undefined;
-      };
-      return {
-        url: location.href,
-        title: document.title,
-        headings: Array.from(document.querySelectorAll("h1,h2,h3")).map(textOf).filter(Boolean).slice(0, 12),
-        links: Array.from(document.querySelectorAll("a")).map((item) => ({ text: textOf(item), href: item.href })).filter((item) => item.text || item.href).slice(0, 30),
-        buttons: Array.from(document.querySelectorAll("button,[role='button']")).map((item) => ({ text: textOf(item), testId: item.getAttribute("data-testid") || undefined, role: item.getAttribute("role") || "button" })).filter((item) => item.text || item.testId).slice(0, 30),
-        inputs: Array.from(document.querySelectorAll("input,textarea,select")).map((input) => ({
-          label: labelFor(input),
-          name: input.getAttribute("name") || undefined,
-          type: input.getAttribute("type") || input.tagName.toLowerCase(),
-          testId: input.getAttribute("data-testid") || undefined
-        })).slice(0, 30),
-        forms: Array.from(document.querySelectorAll("form")).map((form) => ({ action: form.action || undefined, method: form.method || undefined, inputCount: form.querySelectorAll("input,textarea,select").length })).slice(0, 20),
-        testIds: Array.from(document.querySelectorAll("[data-testid]")).map((item) => item.getAttribute("data-testid")).filter(Boolean).slice(0, 80)
-      };
-    })()`) as DiscoveryScanResult["page"];
+    let pageModel: DiscoveryScanResult["page"];
+    try {
+      pageModel = await page.evaluate(() => ({
+      url: location.href,
+      title: document.title,
+      headings: Array.from(document.querySelectorAll("h1,h2,h3")).map((element) => element.textContent?.replace(/\s+/g, " ").trim() ?? "").filter(Boolean).slice(0, 12),
+      links: Array.from(document.querySelectorAll("a")).map((element) => ({ text: element.textContent?.replace(/\s+/g, " ").trim() ?? "", href: element.href })).filter((item) => item.text || item.href).slice(0, 30),
+      buttons: Array.from(document.querySelectorAll("button,[role='button']")).map((element) => ({ text: element.textContent?.replace(/\s+/g, " ").trim() ?? "", testId: element.getAttribute("data-testid") || undefined, role: element.getAttribute("role") || "button" })).filter((item) => item.text || item.testId).slice(0, 30),
+      inputs: Array.from(document.querySelectorAll("input,textarea,select")).map((element) => {
+        const id = element.getAttribute("id");
+        const label = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : undefined;
+        return {
+          label: label?.textContent?.replace(/\s+/g, " ").trim() || element.closest("label")?.textContent?.replace(/\s+/g, " ").trim() || element.getAttribute("aria-label") || element.getAttribute("placeholder") || element.getAttribute("name") || undefined,
+          name: element.getAttribute("name") || undefined,
+          type: element.getAttribute("type") || element.tagName.toLowerCase(),
+          testId: element.getAttribute("data-testid") || undefined
+        };
+      }).slice(0, 30),
+      forms: Array.from(document.querySelectorAll("form")).map((element) => ({ action: element.action || undefined, method: element.method || undefined, inputCount: element.querySelectorAll("input,textarea,select").length })).slice(0, 20),
+      testIds: Array.from(document.querySelectorAll("[data-testid]")).map((element) => element.getAttribute("data-testid")).filter(Boolean).slice(0, 80)
+      })) as DiscoveryScanResult["page"];
+    } catch (error) {
+      throw new Error(`discovery_page_model_failed:${error instanceof Error ? error.message : String(error)}`);
+    }
     const suggestions = buildSuggestions({ page: pageModel, networkEndpoints, openApiOperations });
     const heading = pageModel.headings[0] ?? pageModel.title ?? "页面";
     const drafts = await Promise.all(suggestions.map((suggestion) => writeScenarioDraft(suggestionDraft({ suggestion, heading, url }))));

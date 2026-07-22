@@ -464,6 +464,11 @@ export function matchScenariosForContext(input: {
   bugTicket?: string;
   projectId?: string;
 }) {
+  const semanticText = `${input.requirement} ${input.diff} ${input.bugTicket ?? ""}`.toLowerCase();
+  const validCreateIntent = /\b(valid|success|successful|non[- ]?empty|创建成功|新增成功|提交成功)\b/i.test(semanticText)
+    && !/\b(empty|required|validation|invalid|必填|为空|校验|拒绝)\b/i.test(semanticText);
+  const visitorPermissionIntent = /unauthenticated|未登录|访客|visitor|login[- ]required|权限|permission/i.test(semanticText);
+  const orderFailureIntent = /order|订单/i.test(semanticText) && /api|接口|5xx|503|failure|失败|error|错误|not found/i.test(semanticText);
   return scenarioList
     .map((scenario) => {
       const matcher = scenario.matcher ?? {
@@ -483,13 +488,24 @@ export function matchScenariosForContext(input: {
       const bugHits = keywordHits(input.bugTicket ?? "", matcher.keywords);
       const matchedKeywords = Array.from(new Set([...requirementHits, ...diffHits, ...bugHits]));
       const query = scenario.corePath.expectedQueryFragment;
-      const score =
+      let score =
         requirementHits.length * 8 +
         diffHits.length * 12 +
         bugHits.length * 14 +
         (hasExactQuery(input.requirement, query) ? 18 : 0) +
         (hasExactQuery(input.diff, query) ? 28 : 0) +
         (hasExactQuery(input.bugTicket ?? "", query) ? 30 : 0);
+      // Phrase-level intent is stronger than generic keyword overlap. Without
+      // this guard, "create a task with a valid title" can select the
+      // required-fields negative path, and an unauthenticated Todo request
+      // can select the generic auth interceptor. These are mutually exclusive
+      // contracts and must not be left to model tie-breaking.
+      if (validCreateIntent && scenario.id === "task_create_success") score += 40;
+      if (validCreateIntent && scenario.id === "task_create_required_fields") score -= 40;
+      if (visitorPermissionIntent && input.projectId === "todo_lite" && scenario.id === "todo_visitor_permission") score += 36;
+      if (visitorPermissionIntent && input.projectId === "todo_lite"
+        && ["auth_permission_intercept", "auth_login_permission", "auth_login_failure"].includes(scenario.id)) score -= 48;
+      if (orderFailureIntent && scenario.id === "order_api_failure") score += 36;
       return {
         scenario,
         score,

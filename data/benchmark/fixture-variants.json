@@ -9,6 +9,15 @@
     { "fixtureVariantId": "fxv_d20b8f2d5c3a9074", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
     { "fixtureVariantId": "fxv_d30c9a3e6d4b0185", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
     { "fixtureVariantId": "fxv_7f3a1c92d6e8405b", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
-    { "fixtureVariantId": "fxv_5e1f8b26c4a907d3", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" }
+    { "fixtureVariantId": "fxv_5e1f8b26c4a907d3", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
+    { "fixtureVariantId": "fxv_11aa22bb33cc44dd", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_22aa22bb33cc44dd", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_33aa22bb33cc44dd", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_44aa22bb33cc44dd", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_55aa22bb33cc44dd", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
+    { "fixtureVariantId": "fxv_66aa22bb33cc44dd", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
+    { "fixtureVariantId": "fxv_77aa22bb33cc44dd", "logicalProjectId": "todo_lite", "executionProjectId": "local_demo_app" },
+    { "fixtureVariantId": "fxv_88aa22bb33cc44dd", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" },
+    { "fixtureVariantId": "fxv_99aa22bb33cc44dd", "logicalProjectId": "order_portal_lite", "executionProjectId": "order_portal_lite" }
   ]
 }

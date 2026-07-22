@@ -146,6 +146,7 @@ export function analyzeIntake(input: AnalyzeIntakeInput): IntakeAnalysis {
       requirement: input.requirement,
       diff: input.diff,
       bugTicket: input.bugTicket ?? "",
+      projectId: input.projectId,
       prUrl: input.prUrl,
       sourceContexts,
       sources: input.sources ?? buildSources(input)

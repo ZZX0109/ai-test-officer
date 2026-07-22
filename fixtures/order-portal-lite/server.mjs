@@ -28,7 +28,7 @@ function page(response, variant = "") {
     document.querySelector('#simulateError').onclick=async()=>{const r=await fetch('/api/orders?status=error'+suffix);document.querySelector('[data-testid=order-error-state]').textContent=r.ok?'unexpected success':'order API failure';};
     document.querySelector('#retryError').onclick=()=>{document.querySelector('[data-testid=order-error-state]').textContent='recovered';};
     document.querySelector('#schema').onclick=async()=>{const r=await fetch('/openapi.json');const d=await r.json();document.querySelector('[data-testid=schema-state]').textContent=d.paths['/api/orders/{id}/approve']?'schema ok':'schema missing';};
-    const permissionBypass=${variant === "fxv_d30c9a3e6d4b0185" || variant === "fxv_5e1f8b26c4a907d3"};document.querySelector('#apply').onclick=()=>{const role=document.querySelector('#role').value;document.querySelector('[data-testid=permission-status]').textContent=role==='viewer'&&!permissionBypass?'viewer: read-only':'reviewer: approve pending orders';};load();
+    const permissionBypass=${variant === "fxv_d30c9a3e6d4b0185" || variant === "fxv_5e1f8b26c4a907d3" || variant === "fxv_66aa22bb33cc44dd" || variant === "fxv_99aa22bb33cc44dd"};document.querySelector('#apply').onclick=()=>{const role=document.querySelector('#role').value;document.querySelector('[data-testid=permission-status]').textContent=role==='viewer'&&!permissionBypass?'viewer: read-only':'reviewer: approve pending orders';};load();
   </script></main></body></html>`, "text/html; charset=utf-8");
 }
 
@@ -46,7 +46,7 @@ const server = http.createServer((request, response) => {
     const order = orders.find((item) => item.id === approval[1]);
     if (!order) return send(response, 404, { error: "order not found" });
     if (order.status !== "pending") return send(response, 409, { error: "only pending orders can be approved" });
-    const status = url.searchParams.get("fixtureVariantId") === "fxv_7f3a1c92d6e8405b" ? "pending" : "approved";
+    const status = ["fxv_7f3a1c92d6e8405b", "fxv_55aa22bb33cc44dd", "fxv_88aa22bb33cc44dd"].includes(url.searchParams.get("fixtureVariantId") ?? "") ? "pending" : "approved";
     return send(response, 200, { ok: true, order: { ...order, status } });
   }
   return page(response, url.searchParams.get("fixtureVariantId") ?? "");

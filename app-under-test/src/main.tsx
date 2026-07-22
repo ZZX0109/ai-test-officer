@@ -15,7 +15,7 @@ const APP_API_URL = import.meta.env.VITE_APP_API_URL ?? "http://localhost:6172";
 const ENABLE_TASK_FILTER_FIXTURE_BUG = import.meta.env.VITE_TASK_FILTER_FIXTURE_BUG === "1";
 const FIXTURE_VARIANT_ID = new URLSearchParams(window.location.search).get("fixtureVariantId");
 const VIEWER_PERMISSION_FIXTURE_BUG = FIXTURE_VARIANT_ID === "fxv_d10a7e1c4b298f63";
-const SEARCH_SELECTOR_DRIFT_FIXTURE = FIXTURE_VARIANT_ID === "fxv_9c4d0a73e1b625f8";
+const SEARCH_SELECTOR_DRIFT_FIXTURE = FIXTURE_VARIANT_ID === "fxv_9c4d0a73e1b625f8" || FIXTURE_VARIANT_ID === "fxv_33aa22bb33cc44dd";
 const TEST_USER = "qa.officer@example.com";
 
 async function fetchTasks(status: Filter, keyword: string, forceError: boolean): Promise<Task[]> {

@@ -11,6 +11,10 @@ export async function testBenchmarkContract() {
   assert.equal(requestedScenarioForLane(scenarioCase, "rules-deterministic"), "task_filter_completed");
   assert.equal(requestedScenarioForLane(scenarioCase, "llm-plan-deterministic-judge"), undefined);
   assert.equal(requestedScenarioForLane(scenarioCase, "full-llm"), undefined);
+  const blindCase = { id: "blind-001", split: "blind" as const, projectId: "todo_lite", requirement: "unknown requirement", diff: "unknown diff", risk: "high" };
+  assert.equal(requestedScenarioForLane(blindCase, "rules-deterministic"), undefined, "blind rules lane must not receive evaluator scenario labels");
+  const holdoutCase = { id: "holdout-001", split: "holdout" as const, projectId: "todo_lite", requirement: "unknown requirement", diff: "unknown diff", risk: "high" };
+  assert.equal(requestedScenarioForLane(holdoutCase, "rules-deterministic"), undefined, "holdout rules lane must not receive evaluator scenario labels");
   assert.deepEqual(assessPlannerOutcome("llm"), { planExecutable: false, plannerFailed: true });
   assert.deepEqual(assessPlannerOutcome("llm", { source: "llm", compilationStatus: "rejected", model: "model", llmCallId: "call" }), { planExecutable: false, plannerFailed: true });
   assert.deepEqual(assessPlannerOutcome("llm", { source: "llm", compilationStatus: "validated", model: "model", llmCallId: "call" }), { planExecutable: true, plannerFailed: false });
@@ -50,6 +54,9 @@ export async function testBenchmarkContract() {
   assert.match(todoPermissionScenario, /"triggerButtonName":"退出登录"/);
   assert.match(todoPermissionScenario, /"triggerButtonName":"登录测试账号"/);
   const blindManifestText = await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8");
+  const benchmarkRunnerText = await readFile(path.join(rootDir, "agent", "src", "benchmarkRunner.ts"), "utf8");
+  assert.doesNotMatch(benchmarkRunnerText, /"blind-\d+"\s*:/, "runner must not hard-code blind case mappings");
+  assert.doesNotMatch(benchmarkRunnerText, /"holdout-\d+"\s*:/, "runner must not hard-code holdout case mappings");
   const blindCases = JSON.parse(blindManifestText) as Array<{ id: string; fixtureVariantId: string } & Record<string, unknown>>;
   assert.equal(blindCases.length, 6);
   assert.ok(blindCases.every((item, index) => item.id === `blind-${String(index + 1).padStart(3, "0")}`));
@@ -59,6 +66,14 @@ export async function testBenchmarkContract() {
     assert.ok(blindCases.every((item) => !(forbiddenKey in item)), `blind manifest must not expose ${forbiddenKey}`);
   }
   assert.doesNotMatch(blindManifestText, /product[_ -]?bug|environment[_ -]?(?:issue|error)|selector[_ -]?drift|permission[_ -]?bypass|insufficient[_ -]?evidence|drop[_ -]?trace|ambiguous[_ -]?oracle/i);
+  const holdoutManifestText = await readFile(path.join(rootDir, "data", "benchmark", "holdout-cases.json"), "utf8");
+  const holdoutCases = JSON.parse(holdoutManifestText) as Array<{ id: string; fixtureVariantId: string } & Record<string, unknown>>;
+  assert.equal(holdoutCases.length, 6);
+  assert.ok(holdoutCases.every((item, index) => item.id === `holdout-${String(index + 1).padStart(3, "0")}`));
+  assert.ok(holdoutCases.every((item) => /^fxv_[a-f0-9]{16}$/.test(item.fixtureVariantId)));
+  for (const forbiddenKey of ["scenarioId", "expectedScenarioId", "expectedVerdict", "verdict", "failureClass", "category", "faultProfile", "expectedEvidence", "requiredEvidenceTypes"]) {
+    assert.ok(holdoutCases.every((item) => !(forbiddenKey in item)), `holdout manifest must not expose ${forbiddenKey}`);
+  }
   const extendedCases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "extended-cases.json"), "utf8")) as Array<{ id: string; projectId: string; scenarioId?: string }>;
   assert.equal(extendedCases.length, 6);
   assert.equal(new Set(extendedCases.map((item) => item.projectId)).size, 1);
@@ -83,10 +98,10 @@ export async function testBenchmarkContract() {
     { logicalProjectId: "order_portal_lite", executionProjectId: "order_portal_lite", targetKind: "independent-fixture" },
     { logicalProjectId: "customer_portal_lite", executionProjectId: "customer_portal_lite", targetKind: "independent-fixture" }
   ]);
-  assert.doesNotThrow(() => validateBenchmarkProjectMappings({ development: cases, extended: extendedCases, blind: blindCases, mappings: executionMap.mappings }));
+  assert.doesNotThrow(() => validateBenchmarkProjectMappings({ development: cases, extended: extendedCases, blind: blindCases, holdout: holdoutCases, mappings: executionMap.mappings }));
   const fixtureVariants = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "fixture-variants.json"), "utf8")) as { variants: Array<{ fixtureVariantId: string; logicalProjectId: string; executionProjectId: string }> };
-  const mappings = validateBenchmarkProjectMappings({ development: cases, extended: extendedCases, blind: blindCases, mappings: executionMap.mappings });
-  assert.doesNotThrow(() => validateBenchmarkFixtureBindings({ cases: [...cases, ...extendedCases, ...blindCases], mappings, variants: fixtureVariants.variants }));
+  const mappings = validateBenchmarkProjectMappings({ development: cases, extended: extendedCases, blind: blindCases, holdout: holdoutCases, mappings: executionMap.mappings });
+  assert.doesNotThrow(() => validateBenchmarkFixtureBindings({ cases: [...cases, ...extendedCases, ...blindCases, ...holdoutCases], mappings, variants: fixtureVariants.variants }));
   assert.throws(() => validateBenchmarkFixtureBindings({
     cases: [...cases, ...extendedCases, ...blindCases],
     mappings,
