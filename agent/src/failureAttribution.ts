@@ -457,6 +457,7 @@ export function buildFailureAttributions(input: {
   const failedNames = failedAssertions.map((assertion) => assertion.name);
   const evidenceRefs = evidenceRefsForFailure({ failedNames, evidence: input.evidence });
   const networkFailures = input.network.filter((entry) => !entry.status || entry.status >= 400);
+  const environmentNetworkFailures = networkFailures.filter((entry) => (entry.status ?? 0) >= 500 || (entry as unknown as Record<string, unknown>).failed === true);
   const consoleErrors = input.console.filter((entry) => /error|exception|failed/i.test(`${entry.type} ${entry.text}`));
   const recentSteps = input.steps.slice(-3).map((step) => `${step.title}: ${step.status}`).join(" -> ");
   const changedTargets = [
@@ -483,8 +484,8 @@ export function buildFailureAttributions(input: {
     attributions.push({
       id: `attr_network_${Date.now()}`,
       rank: attributions.length + 1,
-      failureClass: "product_bug",
-      title: "接口失败或异常响应最可能导致断言失败",
+      failureClass: environmentNetworkFailures.length ? "environment_issue" : "product_bug",
+      title: environmentNetworkFailures.length ? "上游接口或测试环境返回 5xx" : "接口失败或异常响应最可能导致断言失败",
       reasoning: `失败断言=${failedNames.join(", ")}；网络失败=${networkFailures.map((entry) => `${entry.status ?? "failed"} ${entry.url}`).slice(0, 4).join(" | ")}${changedContext}。`,
       reproductionSteps: input.steps.map((step) => step.title),
       suggestedFix,

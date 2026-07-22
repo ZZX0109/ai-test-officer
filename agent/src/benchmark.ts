@@ -36,7 +36,7 @@ export interface BenchmarkRunRecord {
   executionSucceeded: boolean;
   retryCount: number;
   experimentId?: string;
-  split?: "development" | "blind";
+  split?: "development" | "blind" | "holdout";
   lane?: "test-command" | "rules-deterministic" | "llm-plan-deterministic-judge" | "rules-plan-llm-judge" | "full-llm";
   modelProfileId?: string;
   repetition?: number;
@@ -142,7 +142,7 @@ export interface HistoricalBenchmarkRecompute {
 export interface ExperimentEvaluation {
   experimentId: string;
   status: "awaiting_agent_runs" | "completed" | "blocked";
-  split: "development" | "blind";
+  split: "development" | "blind" | "holdout";
   plannedRuns: number;
   completedRuns: number;
   lanes: Record<string, Record<string, number | null>>;
@@ -156,6 +156,7 @@ export type BenchmarkFailureCategory =
   | "judge_provider_failure"
   | "plan_compilation_error"
   | "browser_execution_error"
+  | "test_script_issue"
   | "requirement_not_covered"
   | "artifact_integrity_failure"
   | "judge_recommendation_error"
@@ -204,16 +205,19 @@ export function diagnoseBenchmarkRun(record: BenchmarkRunRecord, label?: HumanBe
   const recommendation = record.llm?.verdict;
   const recommendationValid = Boolean(record.llm && record.llm.status === "passed" && !record.llm.fallback);
   const scenarioSelection = record.executedScenarioId ?? record.selectedScenarioId;
+  const testScriptFailure = /action_binding|compiled_plan|selector/i.test(record.executionErrorCode ?? "");
   if (label?.expectedScenarioId && scenarioSelection && scenarioSelection !== label.expectedScenarioId) effects.push("scenario_selection_error");
   if (providerFailure) effects.push("planner_provider_failure");
   else if (plannerFailed) effects.push("plan_compilation_error");
   if (judgeProviderFailure) effects.push("judge_provider_failure");
-  if (browserStarted && !record.executionSucceeded) effects.push("browser_execution_error");
+  if (testScriptFailure) effects.push("test_script_issue");
+  else if (browserStarted && !record.executionSucceeded) effects.push("browser_execution_error");
   if (!record.requirementCovered) effects.push("requirement_not_covered");
   if (!record.artifactIntegrityVerified) effects.push("artifact_integrity_failure");
   if (record.llm && (record.llm.status === "failed" || record.llm.fallback || record.llmCalls?.some((call) => call.status !== "passed"))) effects.push("model_call_failure");
-  if (record.llm && ((!recommendationValid && record.llmCalls?.some((call) => call.purpose === "judging")) || (recommendationValid && label && recommendation !== label.verdict))) effects.push("judge_recommendation_error");
-  const priority: BenchmarkFailureCategory[] = ["planner_provider_failure", "judge_provider_failure", "plan_compilation_error", "browser_execution_error", "scenario_selection_error", "requirement_not_covered", "artifact_integrity_failure", "model_call_failure", "judge_recommendation_error"];
+  const judgeWasRouted = record.llmCalls?.some((call) => call.purpose === "judging") === true;
+  if (judgeWasRouted && record.llm && ((!recommendationValid) || (recommendationValid && label && recommendation !== label.verdict))) effects.push("judge_recommendation_error");
+  const priority: BenchmarkFailureCategory[] = ["planner_provider_failure", "judge_provider_failure", "plan_compilation_error", "test_script_issue", "browser_execution_error", "scenario_selection_error", "requirement_not_covered", "artifact_integrity_failure", "model_call_failure", "judge_recommendation_error"];
   return {
     benchmarkId: record.benchmarkId,
     runId: record.runId,
@@ -487,7 +491,7 @@ function percentile(values: number[], quantile: number) {
 
 export function evaluateExperiment(input: {
   experimentId: string;
-  split: "development" | "blind";
+  split: "development" | "blind" | "holdout";
   cases: BenchmarkCase[];
   labels: HumanBenchmarkLabel[];
   records: BenchmarkRunRecord[];
@@ -604,7 +608,7 @@ export function evaluateExperiment(input: {
     metrics.macroF1GainCiLow = percentile(gains, 0.025);
     metrics.macroF1GainCiHigh = percentile(gains, 0.975);
   }
-  if (input.split === "blind") {
+  if (input.split === "blind" || input.split === "holdout") {
     if (full.some((lane) => (lane.falseReleaseRate ?? 1) > input.thresholds.blindFalseReleaseMax)) reasons.push("blind_false_release");
     if (full.some((lane) => (lane.artifactIntegrityRate ?? 0) < input.thresholds.artifactIntegrityMin)) reasons.push("artifact_integrity");
     if (full.some((lane) => (lane.evidenceReferenceAccuracy ?? 0) < input.thresholds.evidenceReferenceMin)) reasons.push("evidence_reference_accuracy");

@@ -148,4 +148,7 @@ export function testBenchmarkEvaluation() {
   assert.equal(judgeTransportFailure.primaryCause, "judge_provider_failure");
   assert.equal(providerFailure.browserStarted, false);
   assert.equal(providerFailure.effects.includes("browser_execution_error"), false, "planner failures must not be mislabeled as browser failures");
+  const selectorFailure = diagnoseBenchmarkRun({ ...record, executionErrorCode: "action_binding_failure", executionSucceeded: false, requirementCovered: false, finalStatus: "needs-human-review" }, labels[0]);
+  assert.equal(selectorFailure.primaryCause, "test_script_issue");
+  assert.equal(selectorFailure.effects.includes("browser_execution_error"), false);
 }

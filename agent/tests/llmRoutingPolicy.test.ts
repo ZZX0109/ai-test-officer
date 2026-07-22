@@ -20,6 +20,7 @@ export function testLlmRoutingPolicy() {
     releaseJudge: { verdict: "needs_review", findings: [{ failureClass: "environment_issue" }] }
   } as never;
   assert.equal(routeJudge({ baseline: classifiedFailure, conflictStatus: "not_triggered", failedAssertionCount: 1, insufficientEvidenceCount: 0 }).route, "deterministic");
+  assert.equal(routeJudge({ baseline: { ...classifiedFailure, releaseJudge: { verdict: "needs_review", findings: [{ failureClass: "unknown" }] } }, conflictStatus: "needs_user_review", failedAssertionCount: 1, insufficientEvidenceCount: 0, knownEnvironmentFailureCount: 1 }).route, "deterministic");
   const machineFailure = {
     planJudge: { verdict: "fail" },
     evidenceJudge: { verdict: "fail" },

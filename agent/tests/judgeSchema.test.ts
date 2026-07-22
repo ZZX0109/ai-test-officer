@@ -71,7 +71,7 @@ export function testJudgeSchema() {
       uncoveredRisks: []
     } satisfies ImpactAnalysis
   });
-  assert.equal(attributions[0].failureClass, "product_bug");
+  assert.equal(attributions[0].failureClass, "environment_issue");
   assert.ok(attributions[0].evidenceRefs.includes("ev_network_1"));
   assert.equal(attributions[0].changeRefs?.[0]?.file, "app-under-test/server/mockServer.ts");
   assert.equal(attributions[0].changeRefs?.[0]?.lineStart, 40);

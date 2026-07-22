@@ -1346,12 +1346,19 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     evidence: latestEvidence
   });
   const judgeRouting = input.judgeMode === "adaptive"
-    ? routeJudge({
+    ? executionError?.failureClass === "test_script_issue"
+      ? { route: "deterministic" as const, reason: "test_script_failure_is_actionable", signals: ["test_script_failure"] }
+      : routeJudge({
       baseline: baselineJudgeReport,
       conflictStatus: conflictPacket.status,
       failedAssertionCount: assertions.filter((item) => !item.passed).length,
-      insufficientEvidenceCount: evidenceQuality.assertions.filter((item) => item.status === "insufficient").length
-    })
+      insufficientEvidenceCount: evidenceQuality.assertions.filter((item) => item.status === "insufficient").length,
+      knownEnvironmentFailureCount: network.filter((item) => {
+        const candidate = item as unknown as Record<string, unknown>;
+        return (typeof candidate.status === "number" && candidate.status >= 500)
+          || candidate.failed === true || Boolean(candidate.error);
+      }).length
+      })
     : { route: input.judgeMode === "llm-assisted" ? "llm" as const : "deterministic" as const, reason: "explicit_mode", signals: [`mode:${input.judgeMode ?? "deterministic"}`] };
   const assistedJudgeReport = judgeRouting.route === "llm"
     ? await buildLlmJudgeReport({
@@ -1387,10 +1394,17 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const uncoveredRequirementRisks = riskCoverageMatrix
     .filter((item) => !item.covered)
     .map((item) => `requirement_not_covered:${item.riskId}`);
+  const environmentFailureObserved = network.some((item) => {
+    const candidate = item as unknown as Record<string, unknown>;
+    return (typeof candidate.status === "number" && candidate.status >= 500)
+      || candidate.failed === true || Boolean(candidate.error);
+  });
   const machineGateStatus = artifactGate.status !== "pass"
     ? artifactGate.status
     : executionError?.failureClass === "environment_issue"
       ? "blocked" as const
+      : environmentFailureObserved
+        ? "blocked" as const
       : executionError
         ? "needs-human-review" as const
     : failed

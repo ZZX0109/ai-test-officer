@@ -39,6 +39,7 @@ export function routeJudge(input: {
   conflictStatus: "not_triggered" | "needs_replay" | "resolved" | "needs_user_review";
   failedAssertionCount: number;
   insufficientEvidenceCount: number;
+  knownEnvironmentFailureCount?: number;
 }): LlmRoutingDecision {
   const signals: string[] = [];
   if (["needs_replay", "needs_user_review"].includes(input.conflictStatus)) signals.push(`evidence_conflict:${input.conflictStatus}`);
@@ -48,6 +49,9 @@ export function routeJudge(input: {
   // attribution is reserved for genuine conflicts and unresolved reviews.
   if (input.baseline.releaseJudge.verdict === "fail" && input.failedAssertionCount > 0 && input.insufficientEvidenceCount === 0) {
     return { route: "deterministic", reason: "deterministic_failure_is_actionable", signals: ["machine_fail", ...signals] };
+  }
+  if ((input.knownEnvironmentFailureCount ?? 0) > 0 && input.insufficientEvidenceCount === 0) {
+    return { route: "deterministic", reason: "captured_environment_failure_is_actionable", signals: ["known_environment_failure", ...signals] };
   }
   const deterministicClasses = new Set((input.baseline.releaseJudge.findings ?? []).map((finding) => finding.failureClass).filter(Boolean));
   const hasKnownAttribution = deterministicClasses.size === 1
