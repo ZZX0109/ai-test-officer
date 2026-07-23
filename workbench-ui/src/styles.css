@@ -1645,6 +1645,74 @@ select:focus {
   font-size: 11px;
 }
 
+.project-file-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  color: #445065;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 0.78rem;
+}
+
+.project-file-tree .project-file-tree {
+  margin: 0 0 0 18px;
+}
+
+.project-file-tree__toggle,
+.project-file-tree__file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 27px;
+  width: 100%;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 5px;
+  color: #465267;
+  text-align: left;
+}
+
+.project-file-tree__toggle {
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.project-file-tree__toggle:hover,
+.project-file-tree__toggle:focus-visible,
+.project-file-tree__file:hover {
+  background: #e8f0fb;
+  color: #263b5a;
+  outline: none;
+}
+
+.project-file-tree__toggle > svg:first-child {
+  flex: 0 0 auto;
+  color: #91a0b5;
+}
+
+.project-file-tree__toggle > svg:nth-child(2) {
+  flex: 0 0 auto;
+  color: #6f9bd2;
+}
+
+.project-file-tree__node--directory > .project-file-tree__toggle {
+  color: #48566b;
+  font-weight: 500;
+}
+
+.project-file-tree__node--file > .project-file-tree__file {
+  color: #59667a;
+}
+
+.project-file-tree__file > svg {
+  flex: 0 0 auto;
+  color: #7c8ba1;
+}
+
 .project-file-browser ul {
   display: grid;
   gap: 2px;

@@ -1,7 +1,87 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
-import { CheckCircle2, ChevronRight, FolderSearch, Info, Stethoscope, Upload, Wand2 } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronRight, File, Folder, FolderOpen, FolderSearch, Info, Stethoscope, Upload, Wand2 } from "lucide-react";
 import type { ProjectDetectionResult, ProjectDiagnosis } from "../types";
+
+interface FileTreeNode {
+  name: string;
+  path: string;
+  kind: "directory" | "file";
+  children: FileTreeNode[];
+}
+
+function buildFileTree(paths: string[]): FileTreeNode[] {
+  const roots: FileTreeNode[] = [];
+
+  for (const path of paths) {
+    const parts = path.split("/").filter(Boolean);
+    let siblings = roots;
+    let parentPath = "";
+
+    parts.forEach((name, index) => {
+      const currentPath = parentPath ? `${parentPath}/${name}` : name;
+      const kind = index === parts.length - 1 ? "file" : "directory";
+      let node = siblings.find((candidate) => candidate.name === name && candidate.kind === kind);
+      if (!node) {
+        node = { name, path: currentPath, kind, children: [] };
+        siblings.push(node);
+        siblings.sort((left, right) => {
+          if (left.kind !== right.kind) return left.kind === "directory" ? -1 : 1;
+          return left.name.localeCompare(right.name);
+        });
+      }
+      parentPath = currentPath;
+      siblings = node.children;
+    });
+  }
+
+  return roots;
+}
+
+function collectDirectoryPaths(nodes: FileTreeNode[], depth = 0): string[] {
+  return nodes.flatMap((node) => node.kind === "directory"
+    ? [node.path, ...(depth < 1 ? collectDirectoryPaths(node.children, depth + 1) : [])]
+    : []);
+}
+
+function FileTree({ nodes, expandedPaths, onToggle }: {
+  nodes: FileTreeNode[];
+  expandedPaths: Set<string>;
+  onToggle: (path: string) => void;
+}) {
+  return (
+    <ul className="project-file-tree" aria-label="项目文件夹目录">
+      {nodes.map((node) => {
+        const isExpanded = node.kind === "directory" && expandedPaths.has(node.path);
+        return (
+          <li className={`project-file-tree__node project-file-tree__node--${node.kind}`} key={node.path}>
+            {node.kind === "directory" ? (
+              <button
+                className="project-file-tree__toggle"
+                type="button"
+                aria-expanded={isExpanded}
+                aria-label={`${isExpanded ? "收起" : "展开"} ${node.name}`}
+                onClick={() => onToggle(node.path)}
+              >
+                {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                {isExpanded ? <FolderOpen size={15} /> : <Folder size={15} />}
+                <span>{node.name}</span>
+              </button>
+            ) : (
+              <div className="project-file-tree__file">
+                <File size={14} />
+                <span>{node.name}</span>
+              </div>
+            )}
+            {node.kind === "directory" && isExpanded ? (
+              <FileTree nodes={node.children} expandedPaths={expandedPaths} onToggle={onToggle} />
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
 interface ProjectWizardPanelProps {
   projectPath: string;
@@ -24,6 +104,8 @@ export function ProjectWizardPanel({
 }: ProjectWizardPanelProps) {
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const fileTree = useMemo(() => buildFileTree(selectedFiles.slice(0, 80)), [selectedFiles]);
 
   function selectProjectFolder() {
     folderInputRef.current?.click();
@@ -35,7 +117,17 @@ export function ProjectWizardPanel({
     const paths = files.map((file) => file.webkitRelativePath || file.name).sort();
     const root = paths[0]?.split("/")[0] ?? projectPath;
     setSelectedFiles(paths);
+    setExpandedPaths(new Set(collectDirectoryPaths(buildFileTree(paths.slice(0, 80)))));
     onProjectPathChange(root);
+  }
+
+  function toggleDirectory(path: string) {
+    setExpandedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
   }
 
   return (
@@ -67,9 +159,7 @@ export function ProjectWizardPanel({
               </div>
               <button type="button" onClick={selectProjectFolder}>重新选择</button>
             </div>
-            <ul aria-label="项目文件夹目录">
-              {selectedFiles.slice(0, 80).map((file) => <li key={file}>{file}</li>)}
-            </ul>
+            <FileTree nodes={fileTree} expandedPaths={expandedPaths} onToggle={toggleDirectory} />
             {selectedFiles.length > 80 ? <p>仅显示前 80 个文件，完整目录仍会用于识别。</p> : null}
           </div>
         )}

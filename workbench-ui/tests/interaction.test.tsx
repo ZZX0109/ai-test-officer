@@ -32,7 +32,9 @@ describe("Workbench interactions", () => {
     const file = new File(["export default {}"], "src/main.tsx", { type: "text/plain" });
     Object.defineProperty(file, "webkitRelativePath", { value: "demo-project/src/main.tsx" });
     await userEvent.upload(input, [file]);
-    expect(screen.getByText("demo-project/src/main.tsx")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起 demo-project" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起 src" })).toBeTruthy();
+    expect(screen.getByText("main.tsx")).toBeTruthy();
     expect(pathChange).toHaveBeenCalledWith("demo-project");
     expect(screen.getByRole("button", { name: "识别项目" })).toBeTruthy();
     expect(apply).not.toHaveBeenCalled();
