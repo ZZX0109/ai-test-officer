@@ -20,11 +20,17 @@ SOFT = "EAF1EB"
 LINE = "D8E1DA"
 
 
-def set_font(run, name="Aptos", size=None, color=None, bold=None):
+FONT = "PingFang SC"
+
+
+def set_font(run, name=FONT, size=None, color=None, bold=None):
     run.font.name = name
-    run._element.rPr.rFonts.set(qn("w:ascii"), name)
-    run._element.rPr.rFonts.set(qn("w:hAnsi"), name)
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "PingFang SC")
+    fonts = run._element.rPr.rFonts
+    fonts.set(qn("w:ascii"), name)
+    fonts.set(qn("w:hAnsi"), name)
+    fonts.set(qn("w:eastAsia"), name)
+    fonts.set(qn("w:cs"), name)
+    fonts.set(qn("w:hint"), "eastAsia")
     if size:
         run.font.size = Pt(size)
     if color:
@@ -130,8 +136,8 @@ def configure(doc):
 
     styles = doc.styles
     normal = styles["Normal"]
-    normal.font.name = "Aptos"
-    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "PingFang SC")
+    normal.font.name = FONT
+    normal._element.rPr.rFonts.set(qn("w:eastAsia"), FONT)
     normal.font.size = Pt(10.5)
     normal.font.color.rgb = INK
     normal.paragraph_format.space_after = Pt(6)
@@ -139,8 +145,8 @@ def configure(doc):
 
     for name, size, before, after in (("Heading 1", 18, 16, 6), ("Heading 2", 13, 12, 4), ("Heading 3", 11, 8, 3)):
         style = styles[name]
-        style.font.name = "Aptos Display" if name == "Heading 1" else "Aptos"
-        style._element.rPr.rFonts.set(qn("w:eastAsia"), "PingFang SC")
+        style.font.name = FONT
+        style._element.rPr.rFonts.set(qn("w:eastAsia"), FONT)
         style.font.size = Pt(size)
         style.font.color.rgb = GREEN
         style.font.bold = True
@@ -170,7 +176,7 @@ def build():
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(5)
     r = p.add_run("零基础使用说明")
-    set_font(r, name="Aptos Display", size=30, color=GREEN, bold=True)
+    set_font(r, name=FONT, size=30, color=GREEN, bold=True)
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(14)
     r = p.add_run("从接入一个本地项目，到拿到一份可追溯的测试结论。")
@@ -201,11 +207,12 @@ def build():
     doc.add_page_break()
     add_text(doc, "2. 接入要测试的项目", style="Heading 1")
     add_text(doc, "这是第一次使用时最需要完成的设置。点击顶部“详细配置”，左侧会打开项目接入向导。它不会把密码写进项目配置；账号和密钥使用环境变量或凭据引用。", after=8)
-    add_figure(doc, "02-project-onboarding-inputs.png", "图 2：项目接入向导。左侧抽屉只在配置时打开，避免打断日常测试。")
-    add_step(doc, "第一步", "填写项目文件夹", "把要测试的 React、Vite、Next、FastAPI 或 Express 项目所在文件夹填入“项目文件夹”。若项目在当前测试平台目录之外，勾选“允许外部绝对路径”。")
-    add_step(doc, "第二步", "点击自动识别", "系统会猜测项目技术栈、常用安装与启动命令、前端/后端端口和健康检查地址。你可以点击“套用建议”，再按项目实际情况修改。")
-    add_step(doc, "第三步", "测试连接", "点击“测试连接”。成功表示系统能访问项目；失败会告诉你问题属于安装、启动、端口、健康检查或缺少登录账号中的哪一种，并给出白话修复提示。")
-    add_callout(doc, "小白判断标准", "只要“测试连接”通过，并且浏览器能打开前端地址，就说明这个项目已经可以成为测试对象。无需先理解 Playwright 或 API。")
+    add_callout(doc, "新版向导怎么读", "页面会先显示“第 1 步：告诉我你要测试哪个项目”。识别成功后才出现下一步按钮；技术栈、端口和命令默认收在“查看系统识别到的技术信息”中，不会打断首次使用。")
+    add_step(doc, "第一步", "告诉系统项目在哪", "在“告诉我你要测试哪个项目”中填写项目文件夹。可以填写 app-under-test，也可以填写完整路径。若项目在当前测试平台目录之外，按提示允许外部路径。")
+    add_step(doc, "第二步", "点击“帮我识别项目”", "系统会自动识别项目类型，并准备启动方式和测试地址。你不需要先理解 Vite、端口或健康检查；它不会修改你的项目代码。")
+    add_step(doc, "第三步", "使用推荐设置", "看到“已找到项目”后，点击“使用推荐设置”。系统会把识别出的设置填入项目配置；如果你的项目有特殊账号或环境变量，再按项目实际情况补充。")
+    add_step(doc, "第四步", "检查能否运行", "点击“检查能否运行”。通过表示系统能访问项目；失败会先用白话告诉你该处理什么。完整的端口、命令和技术诊断收在“查看完整检查结果（高级）”中。")
+    add_callout(doc, "小白判断标准", "只要看到“项目已准备好测试”，并且浏览器能打开前端地址，就说明这个项目已经可以成为测试对象。无需先理解 Playwright、端口或 API。")
 
     # Let the next section start on the following natural page boundary.
     add_text(doc, "3. 告诉系统：这次为什么要测", style="Heading 1")
