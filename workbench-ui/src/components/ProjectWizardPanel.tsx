@@ -1,4 +1,6 @@
-import { CheckCircle2, ChevronRight, FolderSearch, Info, Stethoscope, Wand2 } from "lucide-react";
+import { useRef, useState } from "react";
+import type { ChangeEvent } from "react";
+import { CheckCircle2, ChevronRight, FolderSearch, Info, Stethoscope, Upload, Wand2 } from "lucide-react";
 import type { ProjectDetectionResult, ProjectDiagnosis } from "../types";
 
 interface ProjectWizardPanelProps {
@@ -20,27 +22,62 @@ export function ProjectWizardPanel({
   onApplySuggestion,
   onDiagnose
 }: ProjectWizardPanelProps) {
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+
+  function selectProjectFolder() {
+    folderInputRef.current?.click();
+  }
+
+  function handleFolderSelected(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+    const paths = files.map((file) => file.webkitRelativePath || file.name).sort();
+    const root = paths[0]?.split("/")[0] ?? projectPath;
+    setSelectedFiles(paths);
+    onProjectPathChange(root);
+  }
+
   return (
     <section className="wizard-box">
-      <div className="wizard-heading">
-        <span className="wizard-step">第 1 步</span>
-        <div>
-          <h3>告诉我你要测试哪个项目</h3>
-          <p>选择项目文件夹后，系统会帮你准备测试设置。不会修改项目代码。</p>
-        </div>
-      </div>
-      <label>
-        项目文件夹
+      <div className={`project-upload-box ${selectedFiles.length ? "has-files" : ""}`}>
         <input
-          value={projectPath}
-          onChange={(event) => onProjectPathChange(event.target.value)}
-          placeholder="例如：app-under-test 或 /Users/you/my-project"
+          ref={(node) => {
+            folderInputRef.current = node;
+            node?.setAttribute("webkitdirectory", "");
+          }}
+          className="project-folder-input"
+          type="file"
+          multiple
+          onChange={handleFolderSelected}
+          aria-label="选择项目文件夹"
         />
-      </label>
-      <div className="form-actions">
-        <button className="primary" type="button" onClick={onDetect}>
+        {!selectedFiles.length ? (
+          <button className="project-upload-trigger" type="button" onClick={selectProjectFolder}>
+            <Upload size={26} />
+            <strong>点击上传项目</strong>
+            <span>选择项目文件夹，系统会读取目录结构并准备识别</span>
+          </button>
+        ) : (
+          <div className="project-file-browser">
+            <div className="project-file-browser-header">
+              <div>
+                <strong>{projectPath || "已选择项目"}</strong>
+                <span>{selectedFiles.length} 个文件</span>
+              </div>
+              <button type="button" onClick={selectProjectFolder}>重新选择</button>
+            </div>
+            <ul aria-label="项目文件夹目录">
+              {selectedFiles.slice(0, 80).map((file) => <li key={file}>{file}</li>)}
+            </ul>
+            {selectedFiles.length > 80 ? <p>仅显示前 80 个文件，完整目录仍会用于识别。</p> : null}
+          </div>
+        )}
+      </div>
+      <div className="project-identify-actions">
+        <button className="primary" type="button" onClick={onDetect} disabled={!selectedFiles.length}>
           <FolderSearch size={15} />
-          帮我识别项目
+          识别项目
         </button>
       </div>
 
@@ -95,7 +132,7 @@ export function ProjectWizardPanel({
           ) : null}
         </article>
       ) : (
-        <p className="empty">不知道项目用了什么技术也没关系。点击“帮我识别项目”，系统会自动查找启动方式和测试地址。</p>
+        null
       )}
 
       {diagnosis ? (

@@ -1550,6 +1550,125 @@ select:focus {
   padding: 10px 0 12px;
 }
 
+.project-upload-box {
+  min-height: 210px;
+  border: 1px dashed #9ab6d1;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(239, 247, 255, 0.86), rgba(248, 251, 255, 0.72));
+  overflow: hidden;
+}
+
+.project-upload-box.has-files {
+  min-height: 230px;
+  border-style: solid;
+  border-color: var(--border);
+  background: var(--bg-primary);
+}
+
+.project-folder-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.project-upload-trigger {
+  display: grid;
+  width: 100%;
+  min-height: 210px;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--blue);
+}
+
+.project-upload-trigger:hover {
+  background: rgba(219, 234, 254, 0.5);
+}
+
+.project-upload-trigger strong {
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.project-upload-trigger span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.project-identify-actions {
+  margin-top: 8px;
+}
+
+.project-identify-actions button {
+  width: 100%;
+}
+
+.project-file-browser {
+  padding: 11px;
+}
+
+.project-file-browser-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.project-file-browser-header div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.project-file-browser-header strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-file-browser-header span,
+.project-file-browser p {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.project-file-browser-header button {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.project-file-browser ul {
+  display: grid;
+  gap: 2px;
+  max-height: 175px;
+  margin: 9px 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.project-file-browser li {
+  overflow: hidden;
+  padding: 2px 5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-file-browser li:hover {
+  background: var(--bg-tertiary);
+}
+
 .wizard-heading {
   display: flex;
   align-items: flex-start;

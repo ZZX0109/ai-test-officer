@@ -11,34 +11,32 @@ import { ProjectWizardPanel } from "../src/components/ProjectWizardPanel";
 import { subscribeRunEvents } from "../src/api";
 
 describe("Workbench interactions", () => {
-  it("guides a new user through project setup without exposing technical details first", async () => {
+  it("shows a single project upload box and the folder tree after selection", async () => {
     const detect = vi.fn();
     const apply = vi.fn();
     const diagnose = vi.fn();
+    const pathChange = vi.fn();
     render(<ProjectWizardPanel
-      projectPath="app-under-test"
-      detection={{
-        exists: true,
-        detectedStack: ["Vite"],
-        packageManagers: ["npm"],
-        suggestedConfig: { startCommand: "npm run dev", healthCheckUrl: "http://localhost:6173" },
-        healthCandidates: ["http://localhost:6173"],
-        ports: [],
-        plainLanguageFixes: [],
-        warnings: []
-      } as never}
-      onProjectPathChange={() => undefined}
+      projectPath=""
+      detection={null}
+      diagnosis={null}
+      onProjectPathChange={pathChange}
       onDetect={detect}
       onApplySuggestion={apply}
       onDiagnose={diagnose}
     />);
-    expect(screen.getByText("告诉我你要测试哪个项目")).toBeTruthy();
-    expect(screen.getByText(/不会修改项目代码/)).toBeTruthy();
-    expect(screen.getByText("查看系统识别到的技术信息").closest("details")?.open).toBe(false);
-    await userEvent.click(screen.getByRole("button", { name: "使用推荐设置" }));
-    await userEvent.click(screen.getByRole("button", { name: "检查能否运行" }));
-    expect(apply).toHaveBeenCalledOnce();
-    expect(diagnose).toHaveBeenCalledOnce();
+    expect(screen.getByText("点击上传项目")).toBeTruthy();
+    expect(screen.queryByText("第 1 步")).toBeNull();
+    expect((screen.getByRole("button", { name: "识别项目" }) as HTMLButtonElement).disabled).toBe(true);
+    const input = screen.getByLabelText("选择项目文件夹") as HTMLInputElement;
+    const file = new File(["export default {}"], "src/main.tsx", { type: "text/plain" });
+    Object.defineProperty(file, "webkitRelativePath", { value: "demo-project/src/main.tsx" });
+    await userEvent.upload(input, [file]);
+    expect(screen.getByText("demo-project/src/main.tsx")).toBeTruthy();
+    expect(pathChange).toHaveBeenCalledWith("demo-project");
+    expect(screen.getByRole("button", { name: "识别项目" })).toBeTruthy();
+    expect(apply).not.toHaveBeenCalled();
+    expect(diagnose).not.toHaveBeenCalled();
   });
 
   it("propagates connector input and strict mode decisions", async () => {
