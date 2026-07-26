@@ -128,6 +128,28 @@ function buildSuggestions(input: {
     const id = `discovery_${slug(item.title)}_${suggestions.length + 1}`;
     suggestions.push({ id, humanReviewRequired: true, ...item });
   };
+  const pageHeading = input.page.headings[0] ?? input.page.title ?? "页面";
+  // Every unknown project gets one safe, executable baseline before we infer
+  // project-specific controls. It only navigates, captures the page and checks
+  // a heading that was actually observed during Discovery.
+  add({
+    title: "页面可访问与视觉基线",
+    riskKind: "navigation",
+    reason: "先验证真实页面可以加载并保留截图、DOM、网络和 console 证据。",
+    capabilityKind: "domain_specific",
+    suggestedScenarioId: `discovered_${slug(input.page.title ?? pageHeading)}_visual_baseline`,
+    selectors: selectorForSuggestion({ inputLabel: pageHeading }),
+    actions: ["visual_check"],
+    oracles: [{
+      id: "discovered_visual_baseline_dom",
+      name: "页面核心标题可见",
+      type: "dom_text",
+      locator: "body",
+      expectedTextIncludes: pageHeading,
+      expected: `页面正文包含 ${pageHeading}`
+    }],
+    evidenceRequirements: ["screenshot", "dom", "network", "console", "trace"]
+  });
   const firstFormInput = input.page.inputs[0];
   const primaryButton = input.page.buttons.find((button) => /提交|保存|创建|登录|submit|save|create|login/i.test(button.text)) ?? input.page.buttons[0];
   if (input.page.inputs.length || input.page.forms.length) {
@@ -201,7 +223,9 @@ export async function runDiscoveryScan(input: {
   sourceContexts?: SourceReadEnvelope[];
 }): Promise<DiscoveryScanResult> {
   const target = await resolveProjectTarget(input);
-  const url = input.appUrl ?? target.frontendUrl;
+  // For a managed project the runtime-mapped URL is authoritative. A caller
+  // may still carry the saved container port from before sandbox startup.
+  const url = input.projectId ? target.frontendUrl : input.appUrl ?? target.frontendUrl;
   const openApiOperations = operationList(input.sourceContexts);
   const browser = await chromium.launch({ headless: process.env.HEADLESS !== "0" });
   const networkEndpoints: DiscoveryScanResult["networkEndpoints"] = [];

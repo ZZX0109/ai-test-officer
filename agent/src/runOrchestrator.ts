@@ -50,6 +50,7 @@ function recommendationFromResult(result: Awaited<ReturnType<typeof runVisualGra
 export function buildQueuedRunRequest(projection: RunProjection, signal: AbortSignal): RunRequest {
   const input = projection.input as Record<string, unknown>;
   return {
+    runId: projection.id,
     appUrl: typeof input.appUrl === "string" ? input.appUrl : undefined,
     projectId: typeof input.projectId === "string" ? input.projectId : undefined,
     scenarioId: projection.selectedScenarioId ?? (typeof input.scenarioId === "string" ? input.scenarioId : undefined),

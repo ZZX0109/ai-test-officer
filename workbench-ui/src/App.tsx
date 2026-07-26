@@ -336,7 +336,18 @@ export function App() {
   const evidenceCount = result?.evidence?.length ?? 0;
   const sourceContextCount = analysis?.sourceContexts?.length ?? 0;
   const planStepCount = activeExecutablePlan?.steps.length ?? plan?.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0) ?? 0;
-  const latestDecision = result?.finalStatus ?? result?.gateStatus ?? commitCheck?.run?.finalStatus ?? commitCheck?.run?.gateStatus ?? requirementAcceptance?.run?.finalStatus ?? requirementAcceptance?.run?.gateStatus ?? "未运行";
+  const latestDecision = result?.finalStatus
+    ?? result?.gateStatus
+    ?? activeRun?.finalStatus
+    ?? activeRun?.gateStatus
+    ?? (activeRun?.state && !["draft", "awaiting-plan-approval", "awaiting-permission"].includes(activeRun.state)
+      ? activeRun.state === "awaiting-human-review" ? "needs-human-review" : activeRun.state
+      : undefined)
+    ?? commitCheck?.run?.finalStatus
+    ?? commitCheck?.run?.gateStatus
+    ?? requirementAcceptance?.run?.finalStatus
+    ?? requirementAcceptance?.run?.gateStatus
+    ?? "未运行";
   const primaryReason = selectedCandidate?.reason ?? selectedScenario?.summary ?? "填写需求并分析后，系统会生成需要验证的测试内容。";
   const nextSuggestion = result?.failureAttributions?.[0]?.suggestedFix ??
     result?.failureAttributions?.[0]?.topSuspects?.[0]?.suggestedFix ??
@@ -1417,7 +1428,10 @@ export function App() {
     }
     setPlan(planningResult.plan);
     setPlanningConfirmed(true);
-    if (planningResult.recommendedScenarioId) {
+    // Registry scenarios are fixture-specific. Uploaded/OCI projects must
+    // first bind a path to their live DOM instead of executing a similarly
+    // named scenario from another project.
+    if (planningResult.recommendedScenarioId && selectedProjectExecutionMode !== "oci") {
       setScenarioId(planningResult.recommendedScenarioId);
       await executeConfirmedScenarioAutomatically(planningResult.recommendedScenarioId);
     } else {

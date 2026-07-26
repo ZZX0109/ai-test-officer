@@ -464,6 +464,9 @@ export interface PermissionProfile {
 }
 
 export interface RunRequest {
+  /** Stable control-plane run id. Queue executions reuse it so live evidence,
+   * SSE state and the final report share one identity. */
+  runId?: string;
   appUrl?: string;
   projectId?: string;
   logicalProjectId?: string;

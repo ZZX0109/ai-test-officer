@@ -75,6 +75,8 @@ export async function testDiscoveryScanDrafts() {
     assert.equal(discovery.status, "passed");
     assert.equal(discovery.page.testIds.includes("task-table"), true);
     assert.equal(discovery.openApiOperations[0]?.operationId, "listItems");
+    assert.equal(discovery.suggestions[0]?.riskKind, "navigation");
+    assert.deepEqual(discovery.suggestions[0]?.actions, ["visual_check"]);
     assert.equal(discovery.suggestions.some((suggestion) => suggestion.riskKind === "form"), true);
     assert.equal(discovery.suggestions.some((suggestion) => suggestion.riskKind === "table"), true);
     assert.equal(discovery.drafts.length, discovery.suggestions.length);

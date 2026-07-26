@@ -107,6 +107,7 @@ export async function testCompiledPlanExecution() {
     selectedScenarioId: scenario.id,
     compiledPlan
   }, new AbortController().signal);
+  assert.equal(queued.runId, "run-test", "worker evidence must use the control-plane run id");
   assert.equal(queued.compiledPlan, compiledPlan, "worker must pass the persisted compiled plan to the browser runner");
   assert.equal(targetFrontendUrl("http://127.0.0.1:4173/base?existing=1", "fxv_d10a7e1c4b298f63"), "http://127.0.0.1:4173/base?existing=1&fixtureVariantId=fxv_d10a7e1c4b298f63");
 }

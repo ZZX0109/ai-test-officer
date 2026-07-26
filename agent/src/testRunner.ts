@@ -244,7 +244,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const compiledPlan = input.compiledPlan ? assertCompiledPlanBinding(input.compiledPlan, scenario) : undefined;
   let targetRuntime = await resolveProjectTarget(input);
   let frontendUrl = targetFrontendUrl(targetRuntime.frontendUrl, input.fixtureVariantId);
-  const id = `run_${Date.now()}`;
+  const id = input.runId ?? `run_${Date.now()}`;
   const startedAt = new Date().toISOString();
   const attemptClock = new AttemptClock();
   const artifactsV2: ArtifactV2[] = [];
