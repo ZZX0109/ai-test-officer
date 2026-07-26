@@ -7,7 +7,7 @@
 [![Playwright](https://img.shields.io/badge/Playwright-browser%20evidence-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
 [![Docker](https://img.shields.io/badge/Sandbox-Docker%20%2F%20Podman-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 
-![AI Test Officer Workbench](docs/assets/ai-test-officer-workbench.png)
+![AI Test Officer 当前版 Workbench：项目接入、测试规划、沙盒执行与证据裁决](docs/assets/ai-test-officer-workbench-v2.png)
 
 ## 这个项目解决什么问题
 
