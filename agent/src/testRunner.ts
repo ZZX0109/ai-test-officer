@@ -186,7 +186,11 @@ export async function executeCompiledAction(action: ActionDsl, stepId: string, c
     const destination = new URL(action.path, base);
     if (destination.origin !== base.origin) throw new Error("compiled_plan_cross_origin_navigation");
     if (!destination.search && base.search) destination.search = base.search;
-    await page.goto(destination.toString(), { waitUntil: "networkidle", timeout: 15_000 });
+    // Vite HMR, SSE, analytics and long-polling connections can keep
+    // Playwright's network-idle counter busy forever even though the page is
+    // fully interactive. DOM readiness plus scenario-bound assertions is the
+    // reliable condition for a test target.
+    await page.goto(destination.toString(), { waitUntil: "domcontentloaded", timeout: 15_000 });
     return;
   }
   if (action.action === "click") {
@@ -238,8 +242,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   assertRunRequestExecutablePlan(input);
   const scenario = getScenario(input.scenarioId);
   const compiledPlan = input.compiledPlan ? assertCompiledPlanBinding(input.compiledPlan, scenario) : undefined;
-  const targetRuntime = await resolveProjectTarget(input);
-  const frontendUrl = targetFrontendUrl(targetRuntime.frontendUrl, input.fixtureVariantId);
+  let targetRuntime = await resolveProjectTarget(input);
+  let frontendUrl = targetFrontendUrl(targetRuntime.frontendUrl, input.fixtureVariantId);
   const id = `run_${Date.now()}`;
   const startedAt = new Date().toISOString();
   const attemptClock = new AttemptClock();
@@ -314,12 +318,13 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       : undefined;
   if (configuredProject) {
     if (healthResult?.ok) {
+      targetRuntime = await resolveProjectTarget({ projectId: configuredProject.id });
       runtimeStatus = {
         projectId: configuredProject.id,
         status: "running",
-        frontendUrl: configuredProject.frontendUrl,
-        backendUrl: configuredProject.backendUrl,
-        healthCheckUrl: configuredProject.healthCheckUrl,
+        frontendUrl: targetRuntime.frontendUrl,
+        backendUrl: targetRuntime.backendUrl,
+        healthCheckUrl: targetRuntime.healthCheckUrl,
         failureReason: "none",
         message: "Project is already healthy."
       };
@@ -341,6 +346,13 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   }
   if (runtimeStatus?.status === "failed") {
     throw new Error(`runtime_unavailable:${runtimeStatus.failureReason ?? "unknown"}:${runtimeStatus.message ?? "Project runtime failed."}`);
+  }
+  if (configuredProject) {
+    // Starting or recovering an OCI sandbox can allocate a new host port.
+    // Resolve the target again only after the runtime is healthy so Playwright
+    // never navigates to the persisted container URL.
+    targetRuntime = await resolveProjectTarget({ projectId: configuredProject.id });
+    frontendUrl = targetFrontendUrl(targetRuntime.frontendUrl, input.fixtureVariantId);
   }
 
   await appendLoopEvent(id, {
@@ -441,28 +453,41 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     }));
   });
   page.on("response", (response) => {
+    const request = response.request();
+    const resourceType = request.resourceType();
+    const persistable = ["document", "xhr", "fetch", "websocket", "eventsource"].includes(resourceType)
+      || response.status() >= 400;
+    // A large Vite application can load thousands of JS chunks. Persisting
+    // every static asset as an individual evidence item rewrites the run
+    // bundle repeatedly and makes a healthy run appear frozen. Runtime APIs,
+    // documents and failures remain first-class evidence.
+    if (!persistable) return;
     const item = {
-      method: response.request().method(),
+      method: request.method(),
       url: response.url(),
       status: response.status()
     };
-    network.push(item);
-    evidenceWrites.push(appendEvidence(id, {
-      type: "network",
-      title: `Network ${item.method} ${item.status}`,
-      url: item.url,
-      payload: item
-    }));
+    if (network.length < 1_000) network.push(item);
+    if (evidenceWrites.length < 500) {
+      evidenceWrites.push(appendEvidence(id, {
+        type: "network",
+        title: `Network ${item.method} ${item.status}`,
+        url: item.url,
+        payload: { ...item, resourceType }
+      }));
+    }
   });
   page.on("requestfailed", (request) => {
     const item = { method: request.method(), url: request.url() };
-    network.push(item);
-    evidenceWrites.push(appendEvidence(id, {
-      type: "network",
-      title: `Network failed ${item.method}`,
-      url: item.url,
-      payload: item
-    }));
+    if (network.length < 1_000) network.push(item);
+    if (evidenceWrites.length < 500) {
+      evidenceWrites.push(appendEvidence(id, {
+        type: "network",
+        title: `Network failed ${item.method}`,
+        url: item.url,
+        payload: { ...item, resourceType: request.resourceType() }
+      }));
+    }
   });
 
   async function screenshot(stepId: string) {
@@ -926,7 +951,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       decisionReason: "retry_budget=1",
       evidenceRefs: assertions.filter((item) => !item.passed).map((item) => item.name)
     });
-    await page.reload({ waitUntil: "networkidle" });
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 15_000 });
     const assertionStart = assertions.length;
     await runCoreAction(core.action);
     await page.waitForTimeout(core.waitMs ?? 700);
@@ -1084,7 +1109,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       decisionReason: "先确认页面基础可用",
       evidenceRefs: []
     });
-    await page.goto(frontendUrl, { waitUntil: "networkidle", timeout: 15000 });
+    await page.goto(frontendUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
     await appendAudit({
       type: "agent_action",
       action: "browser_open",

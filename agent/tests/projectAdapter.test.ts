@@ -8,6 +8,7 @@ import {
   getProjectRuntimeStatus,
   listProjects,
   recordProjectRuntimeStatus,
+  resolveProjectTarget,
   saveProject,
   startProject,
   stopProject,
@@ -93,6 +94,7 @@ export async function testProjectAdapter() {
   await removeProjectFixture("multi_process_registrytest_project_adapter");
   await removeProjectFixture("restart_after_exit_registrytest_project_adapter");
   await removeProjectFixture("cleanup_failure_registrytest_project_adapter");
+  await removeProjectFixture("runtime_target_registrytest_project_adapter");
   const demo = defaultProjectConfig();
   assert.equal(demo.frontendUrl, "http://localhost:6173");
   const saved = await saveProject({
@@ -108,6 +110,34 @@ export async function testProjectAdapter() {
   assert.equal(saved.installCommand, "");
   assert.equal(saved.env?.API_TOKEN, "[REDACTED]");
   assert.ok((await listProjects()).some((project) => project.id === saved.id));
+  const runtimeTargetProject = await saveProject({
+    ...saved,
+    id: "runtime_target_registrytest_project_adapter",
+    frontendUrl: "http://127.0.0.1:8080",
+    healthCheckUrl: "http://127.0.0.1:8080"
+  });
+  recordProjectRuntimeStatus({
+    projectId: runtimeTargetProject.id,
+    status: "running",
+    frontendUrl: "http://127.0.0.1:65403",
+    healthCheckUrl: "http://127.0.0.1:65403",
+    failureReason: "none",
+    message: "Test sandbox runtime is healthy."
+  });
+  const resolvedRuntimeTarget = await resolveProjectTarget({
+    projectId: runtimeTargetProject.id,
+    // A stale client value must not override the managed runtime endpoint.
+    appUrl: "http://127.0.0.1:8080"
+  });
+  assert.equal(resolvedRuntimeTarget.frontendUrl, "http://127.0.0.1:65403");
+  assert.equal(resolvedRuntimeTarget.healthCheckUrl, "http://127.0.0.1:65403");
+  recordProjectRuntimeStatus({
+    projectId: runtimeTargetProject.id,
+    status: "stopped",
+    frontendUrl: "http://127.0.0.1:65403",
+    healthCheckUrl: "http://127.0.0.1:65403",
+    message: "Test runtime stopped."
+  });
   const connection = await testProjectConnection({
     ...saved,
     frontendUrl: "http://127.0.0.1:1",
@@ -421,4 +451,5 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   await removeProjectFixture("multi_process_registrytest_project_adapter");
   await removeProjectFixture("restart_after_exit_registrytest_project_adapter");
   await removeProjectFixture("cleanup_failure_registrytest_project_adapter");
+  await removeProjectFixture("runtime_target_registrytest_project_adapter");
 }

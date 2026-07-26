@@ -1567,18 +1567,23 @@ export async function stopProject(id: string): Promise<ProjectRuntimeStatus> {
 }
 
 export async function resolveProjectTarget(input: { projectId?: string; appUrl?: string; target?: TargetAppRuntime }) {
-  if (input.target) return input.target;
   if (input.projectId) {
     const project = await getProject(input.projectId);
     if (project) {
+      // A managed runtime owns its externally reachable endpoint. The URL
+      // supplied by a client or persisted plan may still contain the container
+      // port (for example 8080) while OCI has published it on an ephemeral host
+      // port. Never let that stale value override the active runtime mapping.
+      const activeProject = projectWithActiveRuntime(project);
       return {
-        projectId: project.id,
-        frontendUrl: input.appUrl ?? project.frontendUrl,
-        backendUrl: project.backendUrl,
-        healthCheckUrl: project.healthCheckUrl
+        projectId: activeProject.id,
+        frontendUrl: activeProject.frontendUrl,
+        backendUrl: activeProject.backendUrl,
+        healthCheckUrl: activeProject.healthCheckUrl
       };
     }
   }
+  if (input.target) return input.target;
   return {
     frontendUrl: input.appUrl ?? "http://localhost:6173"
   };

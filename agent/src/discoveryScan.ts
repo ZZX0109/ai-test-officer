@@ -220,7 +220,10 @@ export async function runDiscoveryScan(input: {
         networkEndpoints.push({ method: response.request().method(), url: response.url(), status: response.status() });
       }
     });
-    await page.goto(url, { waitUntil: "networkidle", timeout: 20_000 });
+    // Dev servers commonly keep HMR/SSE connections open. Discovery only
+    // needs a parsed DOM; waiting for global network idleness makes healthy
+    // projects look hung.
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20_000 });
     let pageModel: DiscoveryScanResult["page"];
     try {
       pageModel = await page.evaluate(() => ({

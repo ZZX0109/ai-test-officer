@@ -1280,7 +1280,10 @@ export function App() {
     const currentConnection = await testProjectConnection(saved.project.id).catch(() => null);
     if (currentConnection?.result.ok) {
       setProjectConnection(currentConnection.result);
-      return saved.project;
+      const liveUrl = projectRuntime?.status === "running"
+        ? projectRuntime.frontendUrl ?? saved.project.frontendUrl
+        : saved.project.frontendUrl;
+      return { ...saved.project, frontendUrl: liveUrl, healthCheckUrl: liveUrl };
     }
     const started = await startProject(saved.project.id);
     setProjectRuntime(started.runtime);
@@ -1292,7 +1295,14 @@ export function App() {
     const connected = await testProjectConnection(saved.project.id);
     setProjectConnection(connected.result);
     if (!connected.result.ok) throw new Error(connected.result.message || "项目启动后仍无法访问。");
-    return saved.project;
+    const liveUrl = started.runtime.frontendUrl ?? saved.project.frontendUrl;
+    setAppUrl(liveUrl);
+    return {
+      ...saved.project,
+      frontendUrl: liveUrl,
+      backendUrl: started.runtime.backendUrl ?? saved.project.backendUrl,
+      healthCheckUrl: started.runtime.healthCheckUrl ?? liveUrl
+    };
   }
 
   function chooseDiscoveryDraft(result: DiscoveryScanResult) {
@@ -1327,7 +1337,7 @@ export function App() {
     setPlanningAutomation({ phase: "starting-run", detail: "正在创建运行并自动完成计划审批。", scenarioId: selectedScenarioId });
     setIsRunning(true);
     try {
-      const created = await createVisualRun(targetOverride?.appUrl ?? appUrl, grantedProfile, selectedScenarioId, {
+      const created = await createVisualRun(targetOverride?.appUrl ?? previewUrl, grantedProfile, selectedScenarioId, {
         requirement: requirementText,
         diff: diffText,
         projectId: targetOverride?.projectId ?? (selectedProjectId || projectDraft?.id),
@@ -1534,7 +1544,7 @@ export function App() {
     setIsRunning(true);
     setMessage("正在创建运行，等待你确认测试计划。");
     try {
-      const response = await createVisualRun(appUrl, permissionProfile, scenarioId, {
+      const response = await createVisualRun(previewUrl, permissionProfile, scenarioId, {
         requirement: requirementText,
         diff: diffText,
         projectId: selectedProjectId || projectDraft?.id,
