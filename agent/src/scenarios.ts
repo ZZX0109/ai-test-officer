@@ -389,22 +389,25 @@ function loadScenarioDirectory() {
   }
 }
 
-const loadedScenarios = loadScenarioDirectory();
-const scenarioList = loadedScenarios.length ? loadedScenarios : [fallbackTaskFilterScenario];
-const defaultScenario =
-  scenarioList.find((scenario) => scenario.id === fallbackTaskFilterScenario.id) ??
-  scenarioList[0] ??
-  fallbackTaskFilterScenario;
+function currentScenarioList() {
+  const loaded = loadScenarioDirectory();
+  return loaded.length ? loaded : [fallbackTaskFilterScenario];
+}
 
-const scenarios: Record<string, ExecutableScenario> = Object.fromEntries(
-  scenarioList.map((scenario) => [scenario.id, scenario])
-);
+const initialScenarioList = currentScenarioList();
+const defaultScenario =
+  initialScenarioList.find((scenario) => scenario.id === fallbackTaskFilterScenario.id) ??
+  initialScenarioList[0] ??
+  fallbackTaskFilterScenario;
 
 export function getDefaultScenarioId() {
   return defaultScenario.id;
 }
 
 export function getScenario(id = defaultScenario.id) {
+  const scenarios: Record<string, ExecutableScenario> = Object.fromEntries(
+    currentScenarioList().map((scenario) => [scenario.id, scenario])
+  );
   const scenario = scenarios[id];
   if (!scenario) {
     throw new Error(`Unknown scenarioId: ${id}. Register it in data/scenarios/*.json before execution.`);
@@ -413,11 +416,11 @@ export function getScenario(id = defaultScenario.id) {
 }
 
 export function hasScenario(id: string | undefined) {
-  return Boolean(id && scenarios[id]);
+  return Boolean(id && currentScenarioList().some((scenario) => scenario.id === id));
 }
 
 export function listScenarios() {
-  return scenarioList.map((scenario) => ({
+  return currentScenarioList().map((scenario) => ({
     id: scenario.id,
     title: scenario.title,
     summary: scenario.summary,
@@ -435,7 +438,7 @@ export function listScenarios() {
 }
 
 export function listExecutableScenarios() {
-  return scenarioList;
+  return currentScenarioList();
 }
 
 function keywordHits(text: string, keywords: string[]) {
@@ -469,7 +472,7 @@ export function matchScenariosForContext(input: {
     && !/\b(empty|required|validation|invalid|必填|为空|校验|拒绝)\b/i.test(semanticText);
   const visitorPermissionIntent = /unauthenticated|未登录|访客|visitor|login[- ]required|权限|permission/i.test(semanticText);
   const orderFailureIntent = /order|订单/i.test(semanticText) && /api|接口|5xx|503|failure|失败|error|错误|not found/i.test(semanticText);
-  return scenarioList
+  return currentScenarioList()
     .map((scenario) => {
       const matcher = scenario.matcher ?? {
         keywords: [scenario.id, scenario.title],

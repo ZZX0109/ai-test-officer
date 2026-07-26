@@ -12,8 +12,9 @@
     "workbench-ui"
   ],
   "scripts": {
-    "dev": "npm run dev:agent & npm run dev:app & npm run dev:workbench",
+    "dev": "node scripts/dev-supervisor.mjs",
     "dev:all": "npm run dev",
+    "dev:background": "node scripts/start-dev-services.mjs",
     "stop:dev": "node scripts/stop-dev-services.mjs",
     "health:check": "node scripts/dev-service-health.mjs",
     "dev:agent": "npm --workspace @ai-test-officer/agent run dev",

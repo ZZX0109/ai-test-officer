@@ -7,6 +7,7 @@ import {
   defaultProjectConfig,
   getProjectRuntimeStatus,
   listProjects,
+  recordProjectRuntimeStatus,
   saveProject,
   startProject,
   stopProject,
@@ -83,20 +84,20 @@ async function waitForRuntimeStatus(id: string, expected: string, timeoutMs = 3_
 }
 
 export async function testProjectAdapter() {
-  await removeProjectFixture("selftest_project_adapter");
-  await removeProjectFixture("external_selftest_project_adapter");
-  await removeProjectFixture("install_failure_selftest_project_adapter");
-  await removeProjectFixture("install_stop_selftest_project_adapter");
-  await removeProjectFixture("redacted_env_selftest_project_adapter");
-  await removeProjectFixture("external_runtime_selftest_project_adapter");
-  await removeProjectFixture("multi_process_selftest_project_adapter");
-  await removeProjectFixture("restart_after_exit_selftest_project_adapter");
-  await removeProjectFixture("cleanup_failure_selftest_project_adapter");
+  await removeProjectFixture("registrytest_project_adapter");
+  await removeProjectFixture("external_registrytest_project_adapter");
+  await removeProjectFixture("install_failure_registrytest_project_adapter");
+  await removeProjectFixture("install_stop_registrytest_project_adapter");
+  await removeProjectFixture("redacted_env_registrytest_project_adapter");
+  await removeProjectFixture("external_runtime_registrytest_project_adapter");
+  await removeProjectFixture("multi_process_registrytest_project_adapter");
+  await removeProjectFixture("restart_after_exit_registrytest_project_adapter");
+  await removeProjectFixture("cleanup_failure_registrytest_project_adapter");
   const demo = defaultProjectConfig();
   assert.equal(demo.frontendUrl, "http://localhost:6173");
   const saved = await saveProject({
     ...demo,
-    id: "selftest_project_adapter",
+    id: "registrytest_project_adapter",
     name: "Self Test Project Adapter",
     env: {
       API_TOKEN: "secret-token",
@@ -142,13 +143,13 @@ export async function testProjectAdapter() {
   await assert.rejects(() => saveProject({ ...saved, id: "escape", projectPath: "../outside" }));
   const external = await saveProject({
     ...saved,
-    id: "external_selftest_project_adapter",
+    id: "external_registrytest_project_adapter",
     projectPath: "/tmp",
     allowExternalProjectPath: true
   });
   assert.equal(external.allowExternalProjectPath, true);
   const externalRuntimeDir = await mkdtemp(path.join(os.tmpdir(), "ai-test-officer-external-project-"));
-  const externalRuntimeId = "external_runtime_selftest_project_adapter";
+  const externalRuntimeId = "external_runtime_registrytest_project_adapter";
   const externalRuntimePort = await freePort();
   const externalRuntimeUrl = `http://127.0.0.1:${externalRuntimePort}/health`;
   await writeFile(path.join(externalRuntimeDir, "child-server.mjs"), `
@@ -195,20 +196,38 @@ setInterval(() => {}, 1000);
       timeoutMs: 5_000
     });
     assert.equal(externalRuntime.allowExternalProjectPath, true);
-    const externalStatus = await startProject(externalRuntime.id);
-    assert.equal(externalStatus.status, "running");
+    const concurrentStarts = await Promise.all([
+      startProject(externalRuntime.id),
+      startProject(externalRuntime.id),
+      startProject(externalRuntime.id)
+    ]);
+    assert.equal(concurrentStarts.every((status) => status.status === "running"), true);
+    assert.equal(new Set(concurrentStarts.map((status) => status.pid)).size, 1);
     const externalHealth = await testProjectConnection(externalRuntime);
     assert.equal(externalHealth.ok, true);
     const externalStopped = await stopProject(externalRuntime.id);
     assert.equal(externalStopped.status, "stopped");
     await expectUrlUnreachable(externalRuntimeUrl);
+    // An adopted local process may disappear without emitting a child-process
+    // exit event. A later start must probe the endpoint instead of trusting a
+    // stale in-memory "running" snapshot.
+    recordProjectRuntimeStatus({
+      projectId: externalRuntime.id,
+      status: "running",
+      frontendUrl: externalRuntimeUrl,
+      healthCheckUrl: externalRuntimeUrl,
+      message: "stale adopted runtime"
+    });
+    const restartedFromStaleRuntime = await startProject(externalRuntime.id);
+    assert.equal(restartedFromStaleRuntime.status, "running");
+    assert.equal((await testProjectConnection(externalRuntime)).ok, true);
   } finally {
     await stopProject(externalRuntimeId);
     await removeProjectFixture(externalRuntimeId);
     await rm(externalRuntimeDir, { recursive: true, force: true });
   }
   const multiProcessDir = await mkdtemp(path.join(os.tmpdir(), "ai-test-officer-multi-process-project-"));
-  const multiProcessId = "multi_process_selftest_project_adapter";
+  const multiProcessId = "multi_process_registrytest_project_adapter";
   const multiApiPort = await freePort();
   const multiWebPort = await freePort();
   const multiApiUrl = `http://127.0.0.1:${multiApiPort}/health`;
@@ -260,7 +279,7 @@ process.on("SIGINT", () => server.close(() => process.exit(0)));
     await rm(multiProcessDir, { recursive: true, force: true });
   }
   const restartRuntimeDir = await mkdtemp(path.join(os.tmpdir(), "ai-test-officer-restart-project-"));
-  const restartRuntimeId = "restart_after_exit_selftest_project_adapter";
+  const restartRuntimeId = "restart_after_exit_registrytest_project_adapter";
   const restartRuntimePort = await freePort();
   const restartRuntimeUrl = `http://127.0.0.1:${restartRuntimePort}/health`;
   await writeFile(path.join(restartRuntimeDir, "server-once.mjs"), `
@@ -304,7 +323,7 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
     await rm(restartRuntimeDir, { recursive: true, force: true });
   }
   const cleanupFailureDir = await mkdtemp(path.join(os.tmpdir(), "ai-test-officer-cleanup-project-"));
-  const cleanupFailureId = "cleanup_failure_selftest_project_adapter";
+  const cleanupFailureId = "cleanup_failure_registrytest_project_adapter";
   const cleanupFailurePort = await freePort();
   const cleanupFailureUrl = `http://127.0.0.1:${cleanupFailurePort}/health`;
   await writeFile(path.join(cleanupFailureDir, "server.mjs"), `
@@ -346,7 +365,7 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   }
   const installFailure = await saveProject({
     ...saved,
-    id: "install_failure_selftest_project_adapter",
+    id: "install_failure_registrytest_project_adapter",
     projectPath: ".",
     installCommand: "node -e \"process.exit(1)\"",
     startCommand: "node -e \"setTimeout(() => {}, 1000)\"",
@@ -357,7 +376,7 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   assert.equal(status.failureReason, "install_failed");
   const longInstall = await saveProject({
     ...saved,
-    id: "install_stop_selftest_project_adapter",
+    id: "install_stop_registrytest_project_adapter",
     projectPath: ".",
     installCommand: "node -e \"setTimeout(() => {}, 5000)\"",
     startCommand: "node -e \"setTimeout(() => {}, 1000)\"",
@@ -367,6 +386,9 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   await new Promise((resolve) => setTimeout(resolve, 350));
   const installing = getProjectRuntimeStatus(longInstall.id);
   assert.equal(installing.status, "installing");
+  assert.equal(installing.phase, "installing_dependencies");
+  assert.ok((installing.remainingMs ?? 0) > 0);
+  assert.ok((installing.progressPercent ?? -1) >= 0);
   assert.ok(installing.pid);
   const stopped = await stopProject(longInstall.id);
   assert.equal(stopped.status, "stopped");
@@ -376,7 +398,7 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   await withEnv({ API_TOKEN: "real-token" }, async () => {
     const redactedEnv = await saveProject({
       ...saved,
-      id: "redacted_env_selftest_project_adapter",
+      id: "redacted_env_registrytest_project_adapter",
       projectPath: ".",
       env: { API_TOKEN: "should-not-overwrite-process-env" },
       installCommand: "node -e \"process.exit(process.env.API_TOKEN === 'real-token' ? 0 : 1)\"",
@@ -394,9 +416,9 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   await removeProjectFixture(external.id);
   await removeProjectFixture(installFailure.id);
   await removeProjectFixture(longInstall.id);
-  await removeProjectFixture("redacted_env_selftest_project_adapter");
-  await removeProjectFixture("external_runtime_selftest_project_adapter");
-  await removeProjectFixture("multi_process_selftest_project_adapter");
-  await removeProjectFixture("restart_after_exit_selftest_project_adapter");
-  await removeProjectFixture("cleanup_failure_selftest_project_adapter");
+  await removeProjectFixture("redacted_env_registrytest_project_adapter");
+  await removeProjectFixture("external_runtime_registrytest_project_adapter");
+  await removeProjectFixture("multi_process_registrytest_project_adapter");
+  await removeProjectFixture("restart_after_exit_registrytest_project_adapter");
+  await removeProjectFixture("cleanup_failure_registrytest_project_adapter");
 }

@@ -20,7 +20,12 @@ export function useWorkbenchState({
   isCommitChecking,
   isAcceptingRequirement
 }: WorkbenchStateInput) {
-  const defaultCredential = useMemo(() => credentials.find((item) => item.isDefault), [credentials]);
+  // Poe is retained only for historical audit. New planning and judging calls
+  // must select an active provider such as SophNet instead.
+  const defaultCredential = useMemo(() => {
+    const activeCredentials = credentials.filter((item) => !/api\.poe\.com/i.test(item.baseUrl));
+    return activeCredentials.find((item) => item.isDefault) ?? activeCredentials[0];
+  }, [credentials]);
   const isBusy = isRunning || isPatrolling || isCommitChecking || isAcceptingRequirement;
   const latestScreenshot =
     (isBusy ? liveRun?.latestScreenshot : undefined) ??

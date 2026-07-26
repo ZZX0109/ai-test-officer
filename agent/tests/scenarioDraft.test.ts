@@ -8,6 +8,7 @@ import {
   probeScenarioDraft,
   writeHarnessGaps
 } from "../src/harnessGapStore.js";
+import { getScenario, hasScenario } from "../src/scenarios.js";
 import type { HarnessGap } from "../src/types.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
@@ -38,6 +39,8 @@ export async function testScenarioDraftLifecycle() {
   assert.equal(approved?.selectorProbeStatus, "passed");
   assert.ok(approved?.installedFile?.includes("data/scenarios"));
   assert.ok((await listScenarioDrafts()).some((item) => item.scenarioId === draft.scenarioId));
+  assert.equal(hasScenario(draft.scenarioId), true, "an approved draft must be executable without restarting the Agent");
+  assert.equal(getScenario(draft.scenarioId).id, draft.scenarioId);
   if (approved?.installedFile) {
     await rm(path.join(rootDir, approved.installedFile), { force: true });
   }

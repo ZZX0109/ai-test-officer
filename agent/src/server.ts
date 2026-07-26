@@ -3,7 +3,7 @@ import express from "express";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { commandSpecSchema, llmCallSchema, planProvenanceSchema } from "@ai-test-officer/contracts";
+import { commandSpecSchema, llmCallSchema, planProvenanceSchema, projectManifestSchema } from "@ai-test-officer/contracts";
 import {
   createCredential,
   decrypt,
@@ -75,6 +75,7 @@ import { requireRunnableTarget, runnableTargetShape, targetRuntimeSchema } from 
 import {
   getProject,
   getProjectRuntimeStatus,
+  recordProjectRuntimeStatus,
   listProjects,
   saveProject,
   startProject,
@@ -83,7 +84,9 @@ import {
   resolveProjectTarget,
   toTargetProjectConfig
 } from "./projectAdapter.js";
-import { detectProject, diagnoseProject } from "./projectDetection.js";
+import { detectProject, detectProjectManifest, diagnoseProject } from "./projectDetection.js";
+import { createRuntimeRecoveryAdvice } from "./runtimeStartupAdvisor.js";
+import { saveProjectLoginSecret } from "./projectLoginStore.js";
 import { runDiscoveryScan } from "./discoveryScan.js";
 import { createProjectGrant, deleteProjectGrant, hasProjectScope, listProjectGrants } from "./projectAccess.js";
 import {
@@ -100,12 +103,57 @@ import type { RunEventType } from "@ai-test-officer/contracts";
 import { createRunRequestSchema } from "@ai-test-officer/contracts";
 import { buildCodeImpactGraph, changedFilesFromDiff } from "./codeImpactGraph.js";
 import { createMissionPreview } from "./missionPreview.js";
+import { buildPlanningConversation } from "./planningConversation.js";
+import { createLlmPlanningAdvice } from "./llmPlanningAdvisor.js";
 import { enqueueRun, executeQueuedRun, interruptRun } from "./runOrchestrator.js";
 import { buildBenchmarkCatalog, trustedBenchmarkRuntimeMetrics } from "./benchmarkSummary.js";
+import { chooseNativeProjectFolder, listProjectDirectory } from "./projectFolderBrowser.js";
 
 const app = express();
+const projectStartTasks = new Map<string, Promise<Awaited<ReturnType<typeof startProject>>>>();
 const port = Number(process.env.PORT ?? 4317);
 const host = process.env.HOST ?? (process.env.AGENT_API_TOKEN ? "0.0.0.0" : "127.0.0.1");
+
+async function refreshExternalProjectLaunchContract(id: string) {
+  const current = await getProject(id);
+  if (!current?.allowExternalProjectPath) return current;
+  const detection = await detectProject(current.projectPath);
+  if (!detection.exists || detection.executionReady === false) return current;
+  const detected = detection.suggestedConfig;
+  const detectedManifest = detected.manifest;
+  const currentManifest = current.manifest;
+  const manifest = detectedManifest ? {
+    ...detectedManifest,
+    projectId: current.id,
+    // The inspected package.json is authoritative for the sandbox base image:
+    // retaining an older generic Node image can fail an engines.node check
+    // before the target has even started.  External projects are always OCI;
+    // only the selected container engine remains a user/deployment choice.
+    execution: {
+      ...detectedManifest.execution,
+      mode: "oci" as const,
+      engine: currentManifest?.execution.engine ?? detectedManifest.execution.engine
+    },
+    network: currentManifest?.network ?? detectedManifest.network,
+    budget: currentManifest?.budget ?? detectedManifest.budget,
+    environmentAllowlist: Array.from(new Set([
+      ...detectedManifest.environmentAllowlist,
+      ...(currentManifest?.environmentAllowlist ?? [])
+    ]))
+  } : currentManifest;
+  return saveProject({
+    ...current,
+    installCommand: detected.installCommand,
+    installCommandSpec: detected.installCommandSpec,
+    startCommand: detected.startCommand,
+    startCommandSpec: detected.startCommandSpec,
+    processes: detected.processes,
+    frontendUrl: detected.frontendUrl,
+    backendUrl: detected.backendUrl,
+    healthCheckUrl: detected.healthCheckUrl,
+    manifest
+  });
+}
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
 
@@ -791,6 +839,7 @@ const projectSchema = z.object({
       expectedText: z.string().optional()
     })).optional()
   }).optional(),
+  manifest: projectManifestSchema.optional(),
   createdAt: z.string().optional(),
   updatedAt: z.string().optional()
 });
@@ -867,10 +916,87 @@ app.post("/api/projects/detect", async (req, res, next) => {
   }
 });
 
+app.post("/api/projects/choose-folder", async (_req, res, next) => {
+  try {
+    res.json({ selection: await chooseNativeProjectFolder() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/list-directory", async (req, res, next) => {
+  try {
+    const body = z.object({
+      projectPath: z.string().min(1).max(4096),
+      relativePath: z.string().max(4096).optional()
+    }).parse(req.body);
+    res.json({ entries: await listProjectDirectory(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/detect-manifest", async (req, res, next) => {
+  try {
+    const body = z.object({
+      rootName: z.string().min(1).max(255),
+      files: z.array(z.object({
+        relativePath: z.string().min(1).max(1024),
+        content: z.string().max(300_000).optional()
+      })).max(250)
+    }).parse(req.body);
+    res.json({ detection: await detectProjectManifest(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/projects", async (req, res, next) => {
   try {
     const project = await saveProject(projectSchema.parse(req.body) as ProjectConfig);
     res.status(201).json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/:id/login-credential", requireRole(["admin", "runner"]), async (req, res, next) => {
+  try {
+    const body = z.object({
+      username: z.string().min(1).max(320),
+      password: z.string().min(1).max(4096),
+      usernameEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).default("E2E_USERNAME"),
+      passwordEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).default("E2E_PASSWORD")
+    }).parse(req.body);
+    const current = await getProject(req.params.id);
+    if (!current) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const credential = await saveProjectLoginSecret({
+      projectId: current.id,
+      username: body.username,
+      password: body.password
+    });
+    const environmentAllowlist = Array.from(new Set([
+      ...(current.manifest?.environmentAllowlist ?? []),
+      body.usernameEnv,
+      body.passwordEnv
+    ]));
+    const project = await saveProject({
+      ...current,
+      login: {
+        method: "env",
+        usernameEnv: body.usernameEnv,
+        passwordEnv: body.passwordEnv,
+        credentialId: credential.id
+      },
+      manifest: current.manifest ? {
+        ...current.manifest,
+        environmentAllowlist
+      } : undefined
+    });
+    res.status(201).json({ project, credential });
   } catch (error) {
     next(error);
   }
@@ -909,7 +1035,7 @@ app.get("/api/projects/:id/target-contract", async (req, res, next) => {
 
 app.post("/api/projects/:id/test-connection", async (req, res, next) => {
   try {
-    const project = await getProject(req.params.id);
+    const project = await refreshExternalProjectLaunchContract(req.params.id);
     if (!project) {
       res.status(404).json({ error: "Project not found" });
       return;
@@ -922,6 +1048,7 @@ app.post("/api/projects/:id/test-connection", async (req, res, next) => {
 
 app.post("/api/projects/:id/diagnose", async (req, res, next) => {
   try {
+    await refreshExternalProjectLaunchContract(req.params.id);
     res.json({ diagnosis: await diagnoseProject(req.params.id) });
   } catch (error) {
     next(error);
@@ -960,7 +1087,75 @@ app.delete("/api/projects/:id/grants/:grantId", requireRole(["admin"]), async (r
 
 app.post("/api/projects/:id/start", async (req, res, next) => {
   try {
+    await refreshExternalProjectLaunchContract(req.params.id);
     res.json({ runtime: await startProject(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// The interactive Workbench must not hold the browser request open while an
+// install or health check runs. The task is still owned by the Agent; clients
+// observe it through the runtime endpoint until a terminal status is reached.
+app.post("/api/projects/:id/start-async", (req, res, next) => {
+  try {
+    if (!projectStartTasks.has(req.params.id)) {
+      const previous = getProjectRuntimeStatus(req.params.id);
+      // Return a fresh in-progress state immediately. Without this marker the
+      // first poll after a retry can receive a failed status from an earlier
+      // attempt and the Workbench appears to flash/exit before the new task
+      // has even reached startProject.
+      recordProjectRuntimeStatus({
+        projectId: req.params.id,
+        status: "starting",
+        phase: "starting_processes",
+        updatedAt: new Date().toISOString(),
+        frontendUrl: previous.frontendUrl,
+        backendUrl: previous.backendUrl,
+        healthCheckUrl: previous.healthCheckUrl,
+        message: "Start task accepted; preparing the project runtime.",
+        failureReason: "none"
+      });
+      const task = refreshExternalProjectLaunchContract(req.params.id)
+        .then(() => startProject(req.params.id))
+        .then((status) => {
+          if (!["installing", "starting", "running"].includes(status.status)) recordProjectRuntimeStatus(status);
+          return status;
+        })
+        .catch(() => {
+          const failed = {
+            ...getProjectRuntimeStatus(req.params.id),
+            projectId: req.params.id,
+            status: "failed" as const,
+            phase: "failed" as const,
+            remainingMs: 0,
+            updatedAt: new Date().toISOString(),
+            stoppedAt: new Date().toISOString(),
+            failureReason: "unknown" as const,
+            message: "Project start task failed unexpectedly. Retry after the Agent is healthy."
+          };
+          recordProjectRuntimeStatus(failed);
+          return failed;
+        })
+        .finally(() => projectStartTasks.delete(req.params.id));
+      projectStartTasks.set(req.params.id, task);
+      task.catch(() => undefined);
+    }
+    res.status(202).json({ accepted: true, runtime: getProjectRuntimeStatus(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/:id/ai-start-recovery", async (req, res, next) => {
+  try {
+    const body = z.object({ credentialId: z.string().optional() }).parse(req.body ?? {});
+    const project = await getProject(req.params.id);
+    if (!project) return void res.status(404).json({ error: "project_not_found" });
+    const runtime = getProjectRuntimeStatus(req.params.id);
+    if (runtime.status !== "failed") return void res.status(409).json({ error: "runtime_not_failed" });
+    const advice = await createRuntimeRecoveryAdvice({ project, runtime, credentialId: body.credentialId });
+    res.json({ advice });
   } catch (error) {
     next(error);
   }
@@ -1021,10 +1216,76 @@ app.post("/api/intake/analyze", (req, res, next) => {
         requirement: z.string().default(""),
         diff: z.string().default(""),
         bugTicket: z.string().optional(),
-        prUrl: z.string().optional()
+        prUrl: z.string().optional(),
+        projectId: z.string().optional()
       })
       .parse(req.body);
     res.json({ analysis: analyzeIntake(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/planning/conversation", async (req, res, next) => {
+  try {
+    const body = z.object({
+      projectId: z.string().min(1),
+      message: z.string().trim().min(1).max(20_000),
+      diff: z.string().max(2_000_000).default(""),
+      bugTicket: z.string().max(200_000).optional(),
+      planningMode: z.enum(["llm-guided", "scan-only"]).default("llm-guided"),
+      credentialId: z.string().optional(),
+      history: z.array(z.object({
+        id: z.string(),
+        role: z.enum(["user", "assistant"]),
+        content: z.string().max(20_000),
+        createdAt: z.string()
+      })).max(100).default([])
+    }).parse(req.body);
+    const project = await getProject(body.projectId);
+    if (!project) return void res.status(404).json({ error: "project_not_found" });
+    const scenarioContracts = listScenarios()
+      .filter((scenario) => !scenario.matcher?.projectIds?.length || scenario.matcher.projectIds.includes(project.id))
+      .map((scenario) => ({
+      id: scenario.id,
+      keywords: scenario.matcher?.keywords ?? [scenario.id, scenario.title]
+      }));
+    const graph = await buildCodeImpactGraph({
+      repositoryRoot: project.projectPath,
+      files: changedFilesFromDiff(body.diff),
+      diff: body.diff || undefined,
+      includeRepositorySources: true,
+      scenarios: scenarioContracts,
+      cacheFile: path.join(reportsDir, "planning-cache", `${project.id}.json`)
+    });
+    const analysis = analyzeIntake({
+      projectId: project.id,
+      requirement: body.message,
+      diff: body.diff,
+      bugTicket: body.bugTicket,
+      codeGraph: graph
+    });
+    const planning = buildPlanningConversation({
+      project,
+      message: body.message,
+      history: body.history,
+      graph,
+      analysis
+    });
+    if (body.planningMode === "llm-guided") {
+      const advice = await createLlmPlanningAdvice({
+        project,
+        goal: body.message,
+        flows: planning.businessFlows,
+        credentialId: body.credentialId
+      });
+      planning.llmPlanning = advice;
+      if (advice.status === "passed") {
+        planning.reply = `${planning.reply}\n\nAI 规划建议：${advice.summary}`;
+        planning.clarificationQuestions = [...new Set([...planning.clarificationQuestions, ...advice.clarificationQuestions])].slice(0, 6);
+      }
+    }
+    res.json({ planning });
   } catch (error) {
     next(error);
   }

@@ -14,6 +14,8 @@ import type {
   PatrolJob,
   PatrolRunResult,
   PermissionProfile,
+  PlanningConversationResult,
+  PlanningMessage,
   PlatformCapability,
   ProjectConfig,
   ProjectDetectionResult,
@@ -21,6 +23,7 @@ import type {
   ProjectGrant,
   ProjectHealthCheckResult,
   ProjectRuntimeStatus,
+  RuntimeRecoveryAdvice,
   RequirementAcceptanceResult,
   RunBundle,
   RunBundleDownloadManifest,
@@ -39,8 +42,13 @@ import { getAccessToken } from "./auth";
 
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
 
-export const AGENT_URL = viteEnv.VITE_AGENT_URL ?? "http://localhost:4317";
-export const AGENT_TOKEN = viteEnv.VITE_AGENT_TOKEN;
+// Use a same-origin reverse proxy by default. This keeps the browser unaware of
+// the Agent's internal port and avoids CORS/localhost differences in development.
+export const AGENT_URL = (viteEnv.VITE_AGENT_URL ?? "/agent-api").replace(/\/$/, "");
+// The loopback Agent intentionally accepts this token in NODE_ENV=development.
+// Keep production builds explicit: a deployed Workbench must use OIDC or an
+// injected VITE_AGENT_TOKEN rather than silently relying on the dev credential.
+export const AGENT_TOKEN = viteEnv.VITE_AGENT_TOKEN ?? (viteEnv.DEV ? "dev-local-token" : undefined);
 
 export function getBenchmarkSummary() {
   return request<BenchmarkSummary>("/api/benchmark/summary");
@@ -50,6 +58,8 @@ interface RunTargetPayload {
   appUrl?: string;
   projectId?: string;
   target?: TargetAppRuntime;
+  /** Mirrors the selected project's manifest; never silently downgrades OCI. */
+  executionMode?: "oci" | "trusted-local";
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -58,16 +68,56 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   if (AGENT_TOKEN) headers.set("x-agent-token", AGENT_TOKEN);
   const accessToken = getAccessToken();
   if (accessToken) headers.set("authorization", `Bearer ${accessToken}`);
-  const response = await fetch(`${AGENT_URL}${path}`, {
-    credentials: "include",
-    ...options,
-    headers
-  });
+  const method = (options?.method ?? "GET").toUpperCase();
+  const maxAttempts = method === "GET" ? 3 : 1;
+  // A slow optional dashboard endpoint must not leave the whole Workbench in
+  // an endless "connecting" state. Mutating/LLM requests keep their own
+  // operation budgets; ordinary reads receive a bounded total deadline.
+  const requestSignal = options?.signal
+    ?? (method === "GET" ? AbortSignal.timeout(12_000) : undefined);
+  let response: Response | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      response = await fetch(`${AGENT_URL}${path}`, {
+        credentials: "include",
+        ...options,
+        headers,
+        signal: requestSignal
+      });
+      if (response.ok || ![500, 502, 503, 504].includes(response.status) || attempt === maxAttempts) break;
+    } catch {
+      if (attempt === maxAttempts) {
+        throw new Error("AI 测试服务正在启动或暂时不可用，请稍候。");
+      }
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 250 * attempt));
+  }
+  if (!response) throw new Error("AI 测试服务正在启动或暂时不可用，请稍候。");
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(detail || `HTTP ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+export async function waitForAgentReady(timeoutMs = 15_000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const headers = new Headers();
+      if (AGENT_TOKEN) headers.set("x-agent-token", AGENT_TOKEN);
+      const response = await fetch(`${AGENT_URL}/api/health`, {
+        headers,
+        credentials: "include",
+        signal: AbortSignal.timeout(2_000)
+      });
+      if (response.ok) return;
+    } catch {
+      // The supervisor may still be starting or restarting the Agent.
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+  }
+  throw new Error("AI 测试服务启动超时，请重新启动工作台。");
 }
 
 export function listCredentials() {
@@ -139,8 +189,23 @@ export function generatePlan(payload: { requirement: string; diff: string; crede
   });
 }
 
-export function analyzeIntake(payload: { requirement: string; diff: string; bugTicket?: string; prUrl?: string }) {
+export function analyzeIntake(payload: { requirement: string; diff: string; bugTicket?: string; prUrl?: string; projectId?: string }) {
   return request<{ analysis: IntakeAnalysis }>("/api/intake/analyze", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function continuePlanningConversation(payload: {
+  projectId: string;
+  message: string;
+  diff?: string;
+  bugTicket?: string;
+  history: PlanningMessage[];
+  planningMode?: "llm-guided" | "scan-only";
+  credentialId?: string;
+}) {
+  return request<{ planning: PlanningConversationResult }>("/api/planning/conversation", {
     method: "POST",
     body: JSON.stringify(payload)
   });
@@ -273,7 +338,7 @@ export function createVisualRun(
         requirement: context.requirement,
         diff: context.diff,
         permissionProfile,
-        executionMode: "trusted-local",
+        executionMode: "oci",
         capabilities: ["browser"]
       }
     })
@@ -342,7 +407,7 @@ async function runThroughV1(payload: Record<string, unknown>, onCreated?: (runId
         requirement: payload.requirement,
         diff: payload.diff,
         permissionProfile: payload.permissionProfile,
-        executionMode: "trusted-local",
+        executionMode: "oci",
         capabilities: ["browser"]
       }
     })
@@ -558,8 +623,27 @@ export function listProjects() {
   return request<{ projects: ProjectConfig[] }>("/api/projects");
 }
 
+export function getProjectRuntime(projectId: string) {
+  return request<{ runtime: ProjectRuntimeStatus }>(`/api/projects/${projectId}/runtime`);
+}
+
 export function saveProject(payload: ProjectConfig) {
   return request<{ project: ProjectConfig }>("/api/projects", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function saveProjectLoginCredential(id: string, payload: {
+  username: string;
+  password: string;
+  usernameEnv: string;
+  passwordEnv: string;
+}) {
+  return request<{
+    project: ProjectConfig;
+    credential: { id: string; projectId: string; usernameMasked: string; updatedAt: string };
+  }>(`/api/projects/${id}/login-credential`, {
     method: "POST",
     body: JSON.stringify(payload)
   });
@@ -569,6 +653,38 @@ export function detectProject(projectPath: string) {
   return request<{ detection: ProjectDetectionResult }>("/api/projects/detect", {
     method: "POST",
     body: JSON.stringify({ projectPath })
+  });
+}
+
+export function chooseProjectFolder() {
+  return request<{
+    selection:
+      | { status: "selected"; projectPath: string; rootName: string }
+      | { status: "cancelled" }
+      | { status: "unsupported"; reason: string };
+  }>("/api/projects/choose-folder", { method: "POST" });
+}
+
+export function listProjectDirectory(payload: { projectPath: string; relativePath?: string }) {
+  return request<{
+    entries: Array<{
+      name: string;
+      relativePath: string;
+      kind: "directory" | "file";
+    }>;
+  }>("/api/projects/list-directory", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function detectProjectManifest(payload: {
+  rootName: string;
+  files: Array<{ relativePath: string; content?: string }>;
+}) {
+  return request<{ detection: ProjectDetectionResult }>("/api/projects/detect-manifest", {
+    method: "POST",
+    body: JSON.stringify(payload)
   });
 }
 
@@ -586,6 +702,30 @@ export function testProjectConnection(id: string) {
 
 export function startProject(id: string) {
   return request<{ runtime: ProjectRuntimeStatus }>(`/api/projects/${id}/start`, { method: "POST" });
+}
+
+export async function startProjectAsync(id: string) {
+  // start-async is idempotent on the Agent side. Retrying this one POST is
+  // safe and prevents a dev-server hot reload from looking like a button that
+  // did nothing to the person using the Workbench.
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await waitForAgentReady(4_000);
+      return await request<{ accepted: boolean; runtime: ProjectRuntimeStatus }>(`/api/projects/${id}/start-async`, { method: "POST" });
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("AI 测试服务暂时不可用，请稍候重试。");
+}
+
+export function getAiStartRecovery(id: string, credentialId?: string) {
+  return request<{ advice: RuntimeRecoveryAdvice }>(`/api/projects/${id}/ai-start-recovery`, {
+    method: "POST",
+    body: JSON.stringify({ credentialId })
+  });
 }
 
 export function stopProject(id: string) {
@@ -653,6 +793,10 @@ export function runStorageRetention(payload: { apply?: boolean; archive?: boolea
 
 export function getRunBundle(runId: string) {
   return request<RunBundle>(`/api/runs/${runId}`);
+}
+
+export function getRunEvidence(runId: string) {
+  return request<{ evidence: RunResult["evidence"] }>(`/api/runs/${runId}/evidence`);
 }
 
 export function createRunBundleDownload(runId: string, payload?: { maxInlineBytes?: number }) {

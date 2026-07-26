@@ -75,7 +75,7 @@ function maskKey(apiKey: string) {
   return `${apiKey.slice(0, 4)}****${apiKey.slice(-4)}`;
 }
 
-async function encrypt(value: string) {
+export async function encrypt(value: string) {
   const key = await getMasterKey();
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);

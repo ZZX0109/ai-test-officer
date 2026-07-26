@@ -102,6 +102,7 @@ export type ProjectRuntimeFailureReason =
   | "port_conflict"
   | "early_exit"
   | "permission_denied"
+  | "container_runtime_unavailable"
   | "budget_exceeded"
   | "cancelled"
   | "unknown";
@@ -163,8 +164,23 @@ export type TargetProjectConfig = Pick<
 export interface ProjectDetectionResult {
   projectPath: string;
   exists: boolean;
-  detectedStack: Array<"vite" | "next" | "fastapi" | "express" | "unknown">;
+  detectionSource?: "filesystem" | "browser-manifest";
+  executionReady?: boolean;
+  detectedStack: Array<
+    "node" | "react" | "vue" | "svelte" | "typescript" | "tailwind"
+    | "vite" | "next" | "nuxt" | "astro" | "angular" | "remix" | "express"
+    | "python" | "fastapi" | "django" | "flask" | "streamlit" | "gradio"
+    | "static" | "go" | "rust" | "java" | "spring" | "ruby" | "rails"
+    | "php" | "laravel" | "unknown"
+  >;
   packageManagers: Array<"npm" | "pnpm" | "yarn" | "pip" | "uv" | "poetry">;
+  loginCapability?: {
+    detected: boolean;
+    confidence: "high" | "medium" | "none";
+    signals: string[];
+    usernameEnv?: string;
+    passwordEnv?: string;
+  };
   suggestedConfig: ProjectConfig;
   ports: Array<{
     port: number;
@@ -195,6 +211,13 @@ export interface ProjectDiagnosis {
 export interface ProjectRuntimeStatus {
   projectId: string;
   status: "idle" | "installing" | "starting" | "running" | "stopped" | "failed";
+  phase?: "idle" | "installing_dependencies" | "starting_processes" | "waiting_for_health" | "ready" | "stopping" | "failed";
+  phaseStartedAt?: string;
+  deadlineAt?: string;
+  elapsedMs?: number;
+  remainingMs?: number;
+  progressPercent?: number;
+  updatedAt?: string;
   pid?: number;
   processes?: Array<{
     name: string;

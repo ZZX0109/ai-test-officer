@@ -141,7 +141,7 @@ function inferRisks(input: AnalyzeIntakeInput): GrayPlan["risks"] {
 export function analyzeIntake(input: AnalyzeIntakeInput): IntakeAnalysis {
   const scenarioCandidates = buildScenarioCandidates(input);
   const sourceContexts = input.sourceContexts ?? [];
-  const impactAnalysis = sourceContexts.length
+  const impactAnalysis = sourceContexts.length || input.codeGraph
     ? buildImpactAnalysis({
       requirement: input.requirement,
       diff: input.diff,

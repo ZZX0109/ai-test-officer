@@ -1,11 +1,10 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { initializeOidc, oidcConfigured } from "./auth";
 import { OidcSessionPanel } from "./components/OidcSessionPanel";
 import {
   Activity,
   CalendarClock,
   CheckCircle2,
-  ClipboardList,
   FileSearch,
   KeyRound,
   Link2,
@@ -16,7 +15,6 @@ import {
   Play,
   RefreshCw,
   Save,
-  Search,
   Send,
   Star,
   Square,
@@ -37,15 +35,14 @@ import { ProjectPanel } from "./components/ProjectPanel";
 import { ProjectWizardPanel } from "./components/ProjectWizardPanel";
 import { RunTimeline } from "./components/RunTimeline";
 import { SecurityPanel } from "./components/SecurityPanel";
-import { ServiceHealthPanel } from "./components/ServiceHealthPanel";
 import { SourceStatusPanel } from "./components/SourceStatusPanel";
 import { StoragePanel } from "./components/StoragePanel";
 import { AuthenticatedArtifactImage, AuthenticatedArtifactLink } from "./components/AuthenticatedArtifact";
 import { useWorkbenchState } from "./hooks/useWorkbenchState";
+import { readProjectHistoryCache, writeProjectHistoryCache } from "./projectHistoryCache";
 import {
-  AGENT_URL,
   analyzeConnectedContext,
-  analyzeIntake,
+  continuePlanningConversation,
   controlRun,
   approveScenarioDraft,
   createCredential,
@@ -55,6 +52,7 @@ import {
   deletePatrolPlan,
   deliverRunToBot,
   detectProject,
+  detectProjectManifest,
   diagnoseProject,
   generatePlan,
   getAuditStoreStatus,
@@ -63,9 +61,12 @@ import {
   subscribeRunEvents,
   getGrayPlan,
   getPatrolTrend,
+  getProjectRuntime,
+  getAiStartRecovery,
   getSecuritySummary,
   getStorageStatus,
   getRunBundle,
+  getRunEvidence,
   getRunProjection,
   listHarnessGaps,
   listBotDeliveries,
@@ -92,16 +93,19 @@ import {
   grantRunPermissions,
   waitForRunReport,
   saveProject,
+  saveProjectLoginCredential,
   savePatrolPlan,
   startPatrolJob,
   startProject,
+  startProjectAsync,
   stopPatrolJob,
   stopProject,
   testCredential,
   testProjectConnection,
   installHarnessGapDraft,
   updateHarnessGap,
-  updateCredential
+  updateCredential,
+  waitForAgentReady
 } from "./api";
 import type {
   BotDelivery,
@@ -119,6 +123,8 @@ import type {
   PatrolRunResult,
   PatrolTrend,
   PermissionProfile,
+  PlanningConversationResult,
+  PlanningMessage,
   PlatformCapability,
   ProjectConfig,
   ProjectDetectionResult,
@@ -126,6 +132,7 @@ import type {
   ProjectGrant,
   ProjectHealthCheckResult,
   ProjectRuntimeStatus,
+  RuntimeRecoveryAdvice,
   RequirementAcceptanceResult,
   RunBundle,
   RunProjection,
@@ -139,27 +146,22 @@ import type {
 } from "./types";
 import "./styles.css";
 
-const taskFilterFixtureScenarioId = "task_filter_completed";
-
-const taskFilterFixtureRequirement =
-  '用户在任务列表页点击"已完成"时，系统必须只展示 status=completed 的任务，并且接口请求需要携带 status=completed 查询参数。';
-
-const taskFilterFixtureDiff = `diff --git a/app-under-test/src/api/tasks.ts b/app-under-test/src/api/tasks.ts
---- a/app-under-test/src/api/tasks.ts
-+++ b/app-under-test/src/api/tasks.ts
-@@ -1,6 +1,6 @@
- export async function fetchTasks(status) {
--  const query = status === "all" ? "" : \`?status=\${status}\`;
-+  const query = "";
- const response = await fetch(\`\${APP_API_URL}/api/tasks\${query}\`);
-}`;
-
 function auditStoreClass(auditStore: AuditStoreStatus | null) {
   if (!auditStore) return "warning";
   if (auditStore.schemaVersionMatches === false || auditStore.migrationComplete === false || auditStore.integrityOk === false) {
     return "failed";
   }
   return "passed";
+}
+
+function hasBlockingPlanningQuestions(result: PlanningConversationResult) {
+  return result.clarificationQuestions.some((question) =>
+    /可能修改数据|沙盒测试数据|哪些操作禁止|暂未识别到页面|最重要的入口页面/.test(question)
+  );
+}
+
+function isPlanningAutomationBusy(phase: "idle" | "preparing-project" | "discovering" | "binding" | "starting-run" | "running" | "ready" | "needs-permission" | "blocked") {
+  return ["preparing-project", "discovering", "binding", "starting-run", "running"].includes(phase);
 }
 
 function auditStoreSummary(auditStore: AuditStoreStatus | null) {
@@ -183,31 +185,52 @@ export function App() {
   const [plan, setPlan] = useState<GrayPlan | null>(null);
   const [result, setResult] = useState<RunResult | null>(null);
   const [appUrl, setAppUrl] = useState(viteEnv.VITE_APP_URL ?? "http://localhost:6173");
-  const [projects, setProjects] = useState<ProjectConfig[]>([]);
+  const [projects, setProjects] = useState<ProjectConfig[]>(() => readProjectHistoryCache());
+  const [projectListNotice, setProjectListNotice] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [projectDraft, setProjectDraft] = useState<ProjectConfig | null>(null);
   const [projectPathInput, setProjectPathInput] = useState(viteEnv.VITE_PROJECT_PATH ?? "app-under-test");
   const [projectDetection, setProjectDetection] = useState<ProjectDetectionResult | null>(null);
+  const [projectDetectMessage, setProjectDetectMessage] = useState("");
   const [projectDiagnosis, setProjectDiagnosis] = useState<ProjectDiagnosis | null>(null);
   const [projectGrants, setProjectGrants] = useState<ProjectGrant[]>([]);
   const [projectConnection, setProjectConnection] = useState<ProjectHealthCheckResult | null>(null);
   const [projectRuntime, setProjectRuntime] = useState<ProjectRuntimeStatus | null>(null);
+  const [projectLaunchPhase, setProjectLaunchPhase] = useState("");
+  const [runtimeRecoveryAdvice, setRuntimeRecoveryAdvice] = useState<RuntimeRecoveryAdvice | null>(null);
   const [runHistory, setRunHistory] = useState<RunHistoryEntry[]>([]);
-  const [scenarioId, setScenarioId] = useState(taskFilterFixtureScenarioId);
-  const [requirementText, setRequirementText] = useState(taskFilterFixtureRequirement);
-  const [diffText, setDiffText] = useState(taskFilterFixtureDiff);
-  const [bugTicketText, setBugTicketText] = useState("TAPD-1024：已完成任务筛选偶现返回全部数据，需回归核心路径。");
-  const [prUrl, setPrUrl] = useState("local://demo/pr/task-filter");
+  const [scenarioId, setScenarioId] = useState("");
+  const [requirementText, setRequirementText] = useState("");
+  const [diffText, setDiffText] = useState("");
+  const [bugTicketText, setBugTicketText] = useState("");
+  const [prUrl, setPrUrl] = useState("");
   const [prDiffUrl, setPrDiffUrl] = useState("");
   const [openApiPath, setOpenApiPath] = useState("");
   const [openApiUrl, setOpenApiUrl] = useState("");
   const [strictInput, setStrictInput] = useState(false);
-  const [requirementPath, setRequirementPath] = useState("data/fixtures/task-filter-requirement.md");
+  const [requirementPath, setRequirementPath] = useState("");
   const [requirementUrl, setRequirementUrl] = useState("");
-  const [bugTicketPath, setBugTicketPath] = useState("data/fixtures/tapd-task-filter-bug.md");
+  const [bugTicketPath, setBugTicketPath] = useState("");
   const [bugTicketUrl, setBugTicketUrl] = useState("");
   const [notifyList, setNotifyList] = useState("oncall,frontend-owner");
   const [analysis, setAnalysis] = useState<IntakeAnalysis | null>(null);
+  const [planningMessages, setPlanningMessages] = useState<PlanningMessage[]>([{
+    id: "planning_welcome",
+    role: "assistant",
+    content: "告诉我你想验证什么。你也可以直接说“全面灰度测试”，我会先扫描项目，再列出可执行流程和覆盖缺口。",
+    createdAt: new Date().toISOString()
+  }]);
+  const [planningInput, setPlanningInput] = useState("");
+  const [planningResult, setPlanningResult] = useState<PlanningConversationResult | null>(null);
+  const [planningBusy, setPlanningBusy] = useState(false);
+  const [planningConfirmed, setPlanningConfirmed] = useState(false);
+  const [planningAutomation, setPlanningAutomation] = useState<{
+    phase: "idle" | "preparing-project" | "discovering" | "binding" | "starting-run" | "running" | "ready" | "needs-permission" | "blocked";
+    detail: string;
+    scenarioId?: string;
+  }>({ phase: "idle", detail: "" });
+  const [flowDeleteReadyId, setFlowDeleteReadyId] = useState<string | null>(null);
+  const flowDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [capabilities, setCapabilities] = useState<PlatformCapability[]>([]);
   const [deliveries, setDeliveries] = useState<BotDelivery[]>([]);
@@ -223,6 +246,7 @@ export function App() {
   const [commitCheck, setCommitCheck] = useState<CommitCheckResult | null>(null);
   const [requirementAcceptance, setRequirementAcceptance] = useState<RequirementAcceptanceResult | null>(null);
   const [liveRun, setLiveRun] = useState<LiveRunState | null>(null);
+  const [previewRevision, setPreviewRevision] = useState(0);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<RunProjection | null>(null);
   const [reviewReason, setReviewReason] = useState("");
@@ -232,12 +256,16 @@ export function App() {
   const [securitySummary, setSecuritySummary] = useState<SecuritySummary | null>(null);
   const [benchmarkSummary, setBenchmarkSummary] = useState<BenchmarkSummary | null>(null);
   const [message, setMessage] = useState("");
+  const [isRefreshingContext, setIsRefreshingContext] = useState(false);
+  const [contextRefreshStatus, setContextRefreshStatus] = useState("刷新会重新读取已保存项目、测试场景和运行记录。");
   const [isRunning, setIsRunning] = useState(false);
   const [isPatrolling, setIsPatrolling] = useState(false);
   const [isCommitChecking, setIsCommitChecking] = useState(false);
   const [isAcceptingRequirement, setIsAcceptingRequirement] = useState(false);
   const [isScheduling, setIsScheduling] = useState(false);
   const [editingCredentialId, setEditingCredentialId] = useState<string | null>(null);
+  const [credentialFormOpen, setCredentialFormOpen] = useState(false);
+  const [apiSettingsOpen, setApiSettingsOpen] = useState(false);
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
   const [permissionProfile, setPermissionProfile] = useState<PermissionProfile>({
@@ -282,11 +310,34 @@ export function App() {
   const selectedScenario = scenarios.find((scenario) => scenario.id === scenarioId);
   const selectedCandidate = analysis?.scenarioCandidates.find((candidate) => candidate.mappedScenarioId === scenarioId);
   const selectedProjectName = projectDraft?.name ?? projects.find((project) => project.id === selectedProjectId)?.name ?? "未选择项目";
+  const selectedProjectExecutionMode = projectDraft?.allowExternalProjectPath
+    ? "oci"
+    : projectDraft?.manifest?.execution.mode
+    ?? projects.find((project) => project.id === selectedProjectId)?.manifest?.execution.mode
+    // Built-in fixtures predate the manifest. They are trusted test assets,
+    // whereas every uploaded project gets an OCI manifest during detection.
+    ?? "trusted-local";
+  const hasSelectedProject = Boolean(selectedProjectId || (projectDraft?.id && projectDetection?.executionReady !== false));
+  const planningHasBlockingQuestions = planningResult ? hasBlockingPlanningQuestions(planningResult) : false;
+  const planningAutomationBusy = isPlanningAutomationBusy(planningAutomation.phase);
+  const canStartRun = hasSelectedProject && Boolean(requirementText.trim()) && Boolean(scenarioId) && planningConfirmed && !isRunning;
+  // A sandbox target is only ever rendered through the port allocated to its
+  // active runtime. Never fall back to the saved container port: another app
+  // may be listening there and would make a failed launch look like a live
+  // preview.
+  const previewUrl = projectRuntime?.status === "running"
+    ? projectRuntime.frontendUrl ?? appUrl
+    : appUrl;
+  const projectPreviewReady = Boolean(previewUrl && (
+    selectedProjectExecutionMode === "oci"
+      ? projectRuntime?.status === "running"
+      : projectConnection?.ok || projectRuntime?.status === "running"
+  ));
   const evidenceCount = result?.evidence?.length ?? 0;
   const sourceContextCount = analysis?.sourceContexts?.length ?? 0;
   const planStepCount = activeExecutablePlan?.steps.length ?? plan?.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0) ?? 0;
   const latestDecision = result?.finalStatus ?? result?.gateStatus ?? commitCheck?.run?.finalStatus ?? commitCheck?.run?.gateStatus ?? requirementAcceptance?.run?.finalStatus ?? requirementAcceptance?.run?.gateStatus ?? "未运行";
-  const primaryReason = selectedCandidate?.reason ?? selectedScenario?.summary ?? "当前场景来自 Scenario Registry，可先读取输入来源或执行 Discovery 生成更准确的测试点。";
+  const primaryReason = selectedCandidate?.reason ?? selectedScenario?.summary ?? "填写需求并分析后，系统会生成需要验证的测试内容。";
   const nextSuggestion = result?.failureAttributions?.[0]?.suggestedFix ??
     result?.failureAttributions?.[0]?.topSuspects?.[0]?.suggestedFix ??
     (patrolTrend?.riskIncreased ? "风险趋势升高，建议打开历史运行对比失败证据。" : "先确认项目连接、输入来源和浏览器授权，然后运行一次测试。");
@@ -308,7 +359,191 @@ export function App() {
     setRightDrawerOpen(false);
   }
 
-  async function refresh() {
+  function resetPlanningConversation() {
+    if (flowDeleteTimer.current) clearTimeout(flowDeleteTimer.current);
+    setFlowDeleteReadyId(null);
+    setPlanningMessages([{
+      id: `planning_welcome_${Date.now()}`,
+      role: "assistant",
+      content: "项目已切换。告诉我你想验证什么，或者直接说“全面灰度测试”。",
+      createdAt: new Date().toISOString()
+    }]);
+    setPlanningInput("");
+    setPlanningResult(null);
+    setPlanningConfirmed(false);
+    setPlanningAutomation({ phase: "idle", detail: "" });
+    setRequirementText("");
+    setScenarioId("");
+    setAnalysis(null);
+    setPlan(null);
+  }
+
+  function scheduleFlowDelete(flowId: string) {
+    if (flowDeleteTimer.current) clearTimeout(flowDeleteTimer.current);
+    flowDeleteTimer.current = setTimeout(() => setFlowDeleteReadyId(flowId), 1_000);
+  }
+
+  function hideFlowDelete(flowId: string) {
+    if (flowDeleteTimer.current) clearTimeout(flowDeleteTimer.current);
+    flowDeleteTimer.current = null;
+    setFlowDeleteReadyId((current) => current === flowId ? null : current);
+  }
+
+  function excludePlanningFlow(flowId: string) {
+    const removed = planningResult?.businessFlows.find((flow) => flow.id === flowId);
+    if (!removed) return;
+    setPlanningResult((current) => {
+      if (!current) return current;
+      const businessFlows = current.businessFlows.filter((flow) => flow.id !== flowId);
+      const executable = businessFlows.filter((flow) => flow.status === "executable").length;
+      const needsInput = businessFlows.filter((flow) => flow.status === "needs-input").length;
+      const gaps = businessFlows.filter((flow) => flow.status === "coverage-gap").length;
+      return {
+        ...current,
+        businessFlows,
+        coverage: {
+          ...current.coverage,
+          discovered: businessFlows.length,
+          executable,
+          needsInput,
+          gaps,
+          confidence: businessFlows.length && gaps === 0 ? "high" : businessFlows.length ? "medium" : "low"
+        },
+        plan: {
+          ...current.plan,
+          risks: current.plan.risks.filter((risk) => !risk.id.endsWith(flowId)),
+          levels: current.plan.levels.map((level) => ({
+            ...level,
+            paths: level.paths.filter((path) => path.id !== flowId)
+          }))
+        },
+        recommendedScenarioId: businessFlows.find((flow) => flow.status === "executable")?.scenarioId
+      };
+    });
+    if (removed.scenarioId && removed.scenarioId === scenarioId) setScenarioId("");
+    setFlowDeleteReadyId(null);
+    setMessage(`已从本次测试计划排除“${removed.title}”。不会修改项目代码。`);
+  }
+
+  function openCredentialSettings() {
+    setRightDrawerOpen(false);
+    setLeftDrawerOpen(false);
+    setEditingCredentialId(null);
+    setCredentialFormOpen(false);
+    setApiSettingsOpen(true);
+  }
+
+  function renderApiSettingsDialog() {
+    if (!apiSettingsOpen) return null;
+    return (
+      <div className="api-settings-backdrop" role="presentation" onMouseDown={() => setApiSettingsOpen(false)}>
+        <section
+          className="api-settings-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="api-settings-title"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <header>
+            <div>
+              <p className="eyebrow">AI 配置</p>
+              <h2 id="api-settings-title">API Key 与模型</h2>
+              <p>配置一次后，测试计划和问题分析会自动使用默认模型。</p>
+            </div>
+            <button className="icon-button" type="button" aria-label="关闭 API Key 配置" onClick={() => setApiSettingsOpen(false)}>
+              <X size={17} />
+            </button>
+          </header>
+
+          <button
+            className="add-credential-button"
+            type="button"
+            onClick={() => {
+              if (credentialFormOpen) {
+                cancelEdit();
+                return;
+              }
+              cancelEdit();
+              setCredentialFormOpen(true);
+            }}
+          >
+            {credentialFormOpen ? "收起配置" : "添加新的 API Key"}
+          </button>
+
+          {credentialFormOpen && <form className="api-settings-form" onSubmit={submitCredential}>
+            <label>
+              配置名称
+              <input aria-label="名称" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：我的 GPT" />
+            </label>
+            <label>
+              服务商
+              <select aria-label="Provider" value={form.provider} onChange={(event) => setForm({ ...form, provider: event.target.value })}>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai-compatible">兼容 OpenAI 的服务</option>
+                <option value="custom">自定义服务</option>
+              </select>
+            </label>
+            <label>
+              API 地址
+              <input aria-label="Base URL" value={form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" />
+            </label>
+            <label>
+              模型名称
+              <input aria-label="模型" value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="gpt-5.1-codex" />
+            </label>
+            <label>
+              API Key
+              <input aria-label="API Key" type="password" value={form.apiKey} onChange={(event) => setForm({ ...form, apiKey: event.target.value })} placeholder={editingCredentialId ? "留空则保留原来的 Key" : "粘贴 API Key"} />
+              <small>密钥不会显示在报告或测试证据中。</small>
+            </label>
+            <details className="api-settings-advanced">
+              <summary>高级设置</summary>
+              <label>标签<input aria-label="标签" value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} /></label>
+              <label>Owner<input aria-label="Owner" value={form.owner} onChange={(event) => setForm({ ...form, owner: event.target.value })} /></label>
+              <label>Scopes<input aria-label="Scopes" value={form.scopes} onChange={(event) => setForm({ ...form, scopes: event.target.value })} /></label>
+              <label className="checkbox-row"><input checked={form.isDefault} onChange={(event) => setForm({ ...form, isDefault: event.target.checked })} type="checkbox" />设为默认模型</label>
+            </details>
+            <div className="form-actions">
+              <button className="primary" type="submit"><Save size={15} />{editingCredentialId ? "保存修改" : "保存 API Key"}</button>
+              <button type="button" onClick={cancelEdit}>取消</button>
+            </div>
+          </form>}
+
+          <section className="saved-credentials" aria-label="已保存的模型配置">
+            <h3>已保存的配置</h3>
+            {credentials.length ? credentials.map((credential) => (
+              <article key={credential.id}>
+                <div><strong>{credential.name}</strong><span>{credential.provider} · {credential.model}</span><small>{credential.apiKeyMasked}</small></div>
+                <div className="row-actions">
+                  <button type="button" onClick={async () => { const response = await testCredential(credential.id); setMessage(response.message); }}><FileSearch size={15} />测试</button>
+                  <button className="icon-button" type="button" title="编辑" onClick={() => editCredential(credential)}><Pencil size={15} /></button>
+                  <button className="icon-button" disabled={credential.isDefault} type="button" title="设为默认" onClick={async () => { await updateCredential(credential.id, { isDefault: true }); await refresh(); }}><Star size={15} /></button>
+                  <button className="icon-button" type="button" title="删除" onClick={async () => { await deleteCredential(credential.id); await refresh(); }}><Trash2 size={15} /></button>
+                </div>
+              </article>
+            )) : <p>还没有配置 API Key。</p>}
+          </section>
+        </section>
+      </div>
+    );
+  }
+
+  async function refresh(includeSecondaryData = true) {
+    const projectRequest = listProjects()
+      .then((data) => {
+        writeProjectHistoryCache(data.projects);
+        setProjectListNotice(data.projects.length ? "" : "还没有接入过项目，请上传一个新项目。");
+        return data;
+      })
+      .catch(() => {
+        const cachedProjects = readProjectHistoryCache();
+        setProjectListNotice(cachedProjects.length
+          ? "Agent 暂时未连接，当前显示本机保存的最近项目；恢复连接后才能识别和运行。"
+          : "Agent 暂时未连接，历史项目列表目前无法读取。");
+        return { projects: cachedProjects };
+      });
     const [
       credentialData,
       planData,
@@ -320,32 +555,22 @@ export function App() {
       gapData,
       draftData,
       verificationData,
-      auditData,
       projectData,
-      historyData,
-      storageData,
-      archiveData,
       securityData,
-      trendData,
       benchmarkData
     ] = await Promise.all([
-      listCredentials(),
-      getGrayPlan(),
-      listScenarios(),
-      listPlatformCapabilities(),
-      listBotDeliveries(),
-      listPatrolJobs(),
+      listCredentials().catch(() => ({ credentials })),
+      getGrayPlan().catch(() => plan),
+      listScenarios().catch(() => ({ scenarios })),
+      listPlatformCapabilities().catch(() => ({ capabilities })),
+      listBotDeliveries().catch(() => ({ deliveries })),
+      listPatrolJobs().catch(() => ({ jobs: patrolJobs })),
       listPatrolPlans().catch(() => ({ plans: [] })),
-      listHarnessGaps(),
+      listHarnessGaps().catch(() => ({ gaps: harnessGaps })),
       listScenarioDrafts().catch(() => ({ drafts: [] })),
       getLatestDemoVerification().catch(() => ({ verification: null })),
-      getAuditStoreStatus().catch(() => ({ auditStore: null })),
-      listProjects().catch(() => ({ projects: [] })),
-      listRunHistory().catch(() => ({ runs: [] })),
-      getStorageStatus().catch(() => ({ storage: null })),
-      listStorageArchives().catch(() => ({ archives: [] })),
+      projectRequest,
       getSecuritySummary().catch(() => ({ security: null })),
-      getPatrolTrend({ projectId: selectedProjectId || undefined, scenarioId }).catch(() => ({ trend: null })),
       getBenchmarkSummary().catch(() => null)
     ]);
     setCredentials(credentialData.credentials);
@@ -358,45 +583,145 @@ export function App() {
     setHarnessGaps(gapData.gaps);
     setScenarioDrafts(draftData.drafts);
     setDemoVerification(verificationData.verification);
-    setAuditStore(auditData.auditStore);
     setProjects(projectData.projects);
-    setRunHistory(historyData.runs);
-    setStorageStatus(storageData.storage);
-    setStorageArchives(archiveData.archives);
     setSecuritySummary(securityData.security);
-    setPatrolTrend(trendData.trend);
     setBenchmarkSummary(benchmarkData);
-    const activeProjectId = selectedProjectId || projectData.projects[0]?.id;
-    if (projectData.projects.length && !selectedProjectId) {
-      const firstProject = projectData.projects[0];
-      setSelectedProjectId(firstProject.id);
-      setProjectDraft(firstProject);
-      setProjectPathInput(firstProject.projectPath);
-      setAppUrl(firstProject.frontendUrl);
+
+    if (includeSecondaryData) {
+      // These views touch the persistent audit store and can each take a
+      // couple of seconds on a large local database. They are deliberately
+      // excluded from the initial connection path and loaded sequentially on
+      // an explicit refresh, so onboarding and project launch stay responsive.
+      const auditData = await getAuditStoreStatus().catch(() => ({ auditStore: null }));
+      setAuditStore(auditData.auditStore);
+      const historyData = await listRunHistory({ limit: 100 }).catch(() => ({ runs: [] }));
+      setRunHistory(historyData.runs);
+      const storageData = await getStorageStatus().catch(() => ({ storage: null }));
+      setStorageStatus(storageData.storage);
+      const archiveData = await listStorageArchives().catch(() => ({ archives: [] }));
+      setStorageArchives(archiveData.archives);
+      const trendData = await getPatrolTrend({
+        projectId: selectedProjectId || undefined,
+        scenarioId
+      }).catch(() => ({ trend: null }));
+      setPatrolTrend(trendData.trend);
     }
-    if (activeProjectId) {
-      const grantData = await listProjectGrants(activeProjectId).catch(() => ({ grants: [] }));
+    if (selectedProjectId) {
+      const grantData = await listProjectGrants(selectedProjectId).catch(() => ({ grants: [] }));
       setProjectGrants(grantData.grants);
+      const runtimeData = await getProjectRuntime(selectedProjectId).catch(() => ({ runtime: null }));
+      setProjectRuntime(runtimeData.runtime);
     }
   }
 
-  function loadTaskFilterFixture() {
-    setScenarioId(taskFilterFixtureScenarioId);
-    setRequirementText(taskFilterFixtureRequirement);
-    setDiffText(taskFilterFixtureDiff);
-    setBugTicketText("TAPD-1024：已完成任务筛选偶现返回全部数据，需回归核心路径。");
-    setPrUrl("local://demo/pr/task-filter");
-    setPrDiffUrl("");
-    setRequirementPath("data/fixtures/task-filter-requirement.md");
-    setRequirementUrl("");
-    setBugTicketPath("data/fixtures/tapd-task-filter-bug.md");
-    setBugTicketUrl("");
-    setMessage("已加载任务筛选 fixture。");
+  async function refreshInputContext() {
+    if (isRefreshingContext) return;
+    setIsRefreshingContext(true);
+    setContextRefreshStatus("正在重新扫描当前项目…");
+    setMessage("正在刷新项目和测试上下文…");
+    try {
+      const [projectData, scenarioData, historyData, capabilityData] = await Promise.all([
+        listProjects(),
+        listScenarios(),
+        listRunHistory({ limit: 100 }),
+        listPlatformCapabilities()
+      ]);
+      writeProjectHistoryCache(projectData.projects);
+      setProjectListNotice(projectData.projects.length ? "" : "还没有接入过项目，请上传一个新项目。");
+      setProjects(projectData.projects);
+      setScenarios(scenarioData.scenarios);
+      setRunHistory(historyData.runs);
+      setCapabilities(capabilityData.capabilities);
+      const currentPath = projectDraft?.projectPath || projects.find((project) => project.id === selectedProjectId)?.projectPath;
+      if (currentPath) {
+        const response = await detectProject(currentPath);
+        setProjectDetection(response.detection);
+        if (response.detection.exists) {
+          const suggested = response.detection.suggestedConfig;
+          setProjectDraft((current) => current ? {
+            ...current,
+            installCommand: suggested.installCommand,
+            startCommand: suggested.startCommand,
+            processes: suggested.processes,
+            healthCheckUrl: suggested.healthCheckUrl,
+            frontendUrl: suggested.frontendUrl,
+            backendUrl: suggested.backendUrl
+          } : suggested);
+          setAppUrl(suggested.frontendUrl);
+        }
+      }
+      if (selectedProjectId) {
+        const runtimeData = await getProjectRuntime(selectedProjectId);
+        setProjectRuntime(runtimeData.runtime);
+      }
+      setContextRefreshStatus(`刷新完成 · ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`);
+      setMessage("项目与测试上下文已刷新。");
+    } catch (error) {
+      const cachedProjects = readProjectHistoryCache();
+      if (cachedProjects.length) setProjects(cachedProjects);
+      setProjectListNotice(cachedProjects.length
+        ? "Agent 暂时未连接，当前显示本机保存的最近项目；恢复连接后才能刷新。"
+        : "Agent 暂时未连接，历史项目列表目前无法读取。");
+      setContextRefreshStatus(error instanceof Error ? `刷新失败：${error.message}` : "刷新失败");
+      setMessage(error instanceof Error ? `刷新失败：${error.message}` : "刷新失败");
+    } finally {
+      setIsRefreshingContext(false);
+    }
   }
 
   useEffect(() => {
-    initializeOidc().then((session) => { setOidcAuthenticated(session.authenticated); if (!session.configured || session.authenticated) return refresh(); return undefined; }).catch((error) => setMessage(error.message));
+    initializeOidc()
+      .then(async (session) => {
+        setOidcAuthenticated(session.authenticated);
+        if (session.configured && !session.authenticated) return;
+        setProjectListNotice("正在连接 AI 测试服务…");
+        await waitForAgentReady();
+        await refresh(false);
+      })
+      .catch((error) => {
+        setProjectListNotice("AI 测试服务暂时不可用，正在自动重连。");
+        setMessage(error instanceof Error ? error.message : "AI 测试服务暂时不可用。");
+      });
   }, []);
+
+  useEffect(() => {
+    if (!projectListNotice.includes("暂时") && !projectListNotice.includes("正在连接")) return;
+    const interval = window.setInterval(() => {
+      void listProjects()
+        .then((data) => {
+          writeProjectHistoryCache(data.projects);
+          setProjects(data.projects);
+          setProjectListNotice(data.projects.length ? "" : "还没有接入过项目，请上传一个新项目。");
+          setMessage("AI 测试服务已恢复连接。");
+        })
+        .catch(() => undefined);
+    }, 2_000);
+    return () => window.clearInterval(interval);
+  }, [projectListNotice]);
+
+  // OCI projects can legitimately spend a few minutes installing dependencies
+  // in an empty, disposable sandbox. Keep this UI subscribed to the runtime
+  // until it reaches a stable state instead of leaving an old “installing” or
+  // recoverable “failed” card on screen after the initial polling window ends.
+  useEffect(() => {
+    if (!selectedProjectId || !projectRuntime || !["installing", "starting", "failed"].includes(projectRuntime.status)) return;
+    let disposed = false;
+    const refreshRuntime = async () => {
+      const snapshot = await getProjectRuntime(selectedProjectId).catch(() => null);
+      if (!snapshot || disposed) return;
+      setProjectRuntime(snapshot.runtime);
+      if (snapshot.runtime.status === "running") {
+        const connection = await testProjectConnection(selectedProjectId).catch(() => null);
+        if (!disposed && connection) setProjectConnection(connection.result);
+      }
+    };
+    void refreshRuntime();
+    const interval = window.setInterval(() => void refreshRuntime(), 1_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [selectedProjectId, projectRuntime?.status]);
 
   useEffect(() => {
     if (!activeRunId) return;
@@ -418,6 +743,7 @@ export function App() {
           evidenceRefs: []
         } satisfies RunResult["loopEvents"][number];
         return {
+          ...current,
           runId: activeRunId,
           status: finished ? "finished" : "running",
           evidenceCount: current?.evidenceCount ?? 0,
@@ -428,6 +754,38 @@ export function App() {
       void getRunProjection(activeRunId).then(({ run }) => setActiveRun(run)).catch(() => undefined);
     });
   }, [activeRunId]);
+
+  useEffect(() => {
+    if (!activeRunId || !activeRun || ["completed", "failed", "blocked", "cancelled"].includes(activeRun.state)) return;
+    let disposed = false;
+    const refreshEvidence = async () => {
+      try {
+        const response = await getRunEvidence(activeRunId);
+        if (disposed) return;
+        const latestCapturedScreenshot = [...response.evidence]
+          .reverse()
+          .find((item) => item.type === "screenshot" && item.file)?.file;
+        setLiveRun((current) => ({
+          runId: activeRunId,
+          status: "running",
+          latestScreenshot: latestCapturedScreenshot ?? current?.latestScreenshot,
+          latestEvent: current?.latestEvent,
+          evidenceCount: response.evidence.length,
+          events: current?.events ?? [],
+          evidence: response.evidence
+        }));
+      } catch {
+        // The evidence store may not exist until the worker has started the
+        // first attempt. SSE remains the source of run state while we wait.
+      }
+    };
+    void refreshEvidence();
+    const interval = window.setInterval(() => void refreshEvidence(), 900);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [activeRunId, activeRun?.state]);
 
   async function submitCredential(event: React.FormEvent) {
     event.preventDefault();
@@ -461,10 +819,12 @@ export function App() {
     }
     setForm((current) => ({ ...current, apiKey: "" }));
     await refresh();
+    setCredentialFormOpen(false);
   }
 
   function editCredential(credential: Credential) {
     setEditingCredentialId(credential.id);
+    setCredentialFormOpen(true);
     setForm({
       name: credential.name,
       provider: credential.provider,
@@ -481,6 +841,7 @@ export function App() {
 
   function cancelEdit() {
     setEditingCredentialId(null);
+    setCredentialFormOpen(false);
     setForm({
       name: "OpenAI Main",
       provider: "openai",
@@ -535,8 +896,23 @@ export function App() {
   }
 
   function selectProject(projectId: string) {
+    if (!projectId) {
+      setSelectedProjectId("");
+      setProjectDraft(null);
+      setProjectPathInput("");
+      setAppUrl("");
+      setProjectDetection(null);
+      setProjectDetectMessage("");
+      setProjectDiagnosis(null);
+      setProjectConnection(null);
+      setProjectRuntime(null);
+      setProjectGrants([]);
+      resetPlanningConversation();
+      return;
+    }
     const project = projects.find((item) => item.id === projectId);
     setSelectedProjectId(projectId);
+    resetPlanningConversation();
     if (project) {
       setProjectDraft(project);
       setProjectPathInput(project.projectPath);
@@ -544,88 +920,267 @@ export function App() {
       setProjectConnection(null);
       setProjectRuntime(null);
       setProjectDiagnosis(null);
+      setProjectDetection(null);
+      setProjectDetectMessage("");
+      detectProject(project.projectPath)
+        .then((response) => {
+          setProjectDetection(response.detection);
+          const detected = response.detection.suggestedConfig;
+          const isSystemFixture = new Set([
+            "customer_portal_lite",
+            "investment_agent_workflow_external",
+            "local_demo_app",
+            "order_portal_lite",
+            "todo_lite"
+          ]).has(projectId);
+          if (!project.allowExternalProjectPath || isSystemFixture) return;
+          setAppUrl(detected.frontendUrl);
+          setProjectDraft((current) => current?.id === projectId ? {
+            ...current,
+            installCommand: detected.installCommand,
+            installCommandSpec: detected.installCommandSpec,
+            startCommand: detected.startCommand,
+            startCommandSpec: detected.startCommandSpec,
+            processes: detected.processes,
+            // Re-detection must update the whole launch contract.  Keeping an
+            // older health URL here meant a correctly discovered workspace
+            // command could still be checked against a stale Vite port.
+            frontendUrl: detected.frontendUrl,
+            backendUrl: detected.backendUrl,
+            healthCheckUrl: detected.healthCheckUrl,
+            // Re-detection may refine capabilities, but it must not silently
+            // discard credentials or change the execution boundary that the
+            // user explicitly saved for this project.
+            login: current.login ?? detected.login ?? { method: "none" },
+            manifest: detected.manifest ? {
+              ...detected.manifest,
+              execution: current.allowExternalProjectPath
+                ? { ...detected.manifest.execution, mode: "oci" }
+                : current.manifest?.execution ?? detected.manifest.execution
+            } : current.manifest
+          } : current);
+        })
+        .catch(() => setProjectDetection(null));
+      getProjectRuntime(projectId)
+        .then((response) => setProjectRuntime(response.runtime))
+        .catch(() => setProjectRuntime(null));
       listProjectGrants(projectId).then((response) => setProjectGrants(response.grants)).catch(() => setProjectGrants([]));
       getPatrolTrend({ projectId, scenarioId }).then((response) => setPatrolTrend(response.trend)).catch(() => setPatrolTrend(null));
     }
   }
 
-  async function detectCurrentProjectPath() {
+  async function detectCurrentProjectPath(selection: {
+    rootName: string;
+    absolutePath?: string;
+    files: Array<{ relativePath: string; content?: string }>;
+  }) {
+    resetPlanningConversation();
+    setProjectDetectMessage("");
     setMessage("正在识别项目类型、命令和端口。");
     try {
-      const response = await detectProject(projectPathInput);
+      const response = selection.absolutePath
+        ? await detectProject(selection.absolutePath)
+        : await detectProjectManifest({ rootName: selection.rootName, files: selection.files });
       setProjectDetection(response.detection);
-      setMessage(response.detection.exists ? "项目识别完成，可以套用建议配置。" : "项目路径不可读，请检查文件夹。");
+      if (response.detection.exists) {
+        const suggested = { ...response.detection.suggestedConfig, allowExternalProjectPath: true };
+        setProjectDraft(suggested);
+        setSelectedProjectId(response.detection.executionReady === false ? "" : suggested.id);
+        setProjectPathInput(suggested.projectPath);
+        setAppUrl(suggested.frontendUrl);
+        if (response.detection.executionReady === false) {
+          setProjectDetectMessage("项目类型已识别，但浏览器无法读取本机完整路径。请在下面的 Target Project 中粘贴项目完整路径后保存。");
+          setMessage("项目类型已识别，仍需补充可执行路径。");
+        } else {
+          setProjectDetectMessage("识别成功，已同步到下面的 Target Project。请检查后保存配置。");
+          setMessage("项目识别完成，Target Project 已更新。");
+        }
+      } else {
+        setProjectDetectMessage("没有找到项目：请确认选择的是项目根目录，并检查 Agent 是否正在运行。");
+        setMessage("项目路径不可读，请检查文件夹。");
+      }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "项目识别失败");
+      const detail = error instanceof Error ? error.message : "项目识别失败";
+      setProjectDetectMessage(`识别失败：${detail}。请先启动 Agent 服务后重试。`);
+      setMessage(detail);
     }
   }
 
-  function applyDetectedProject() {
-    if (!projectDetection) return;
-    const suggested = {
-      ...projectDetection.suggestedConfig,
-      allowExternalProjectPath: true
-    };
-    setProjectDraft(suggested);
-    setSelectedProjectId(suggested.id);
-    setProjectPathInput(suggested.projectPath);
-    setAppUrl(suggested.frontendUrl);
-    setMessage("已把向导建议填入项目配置；请确认账号环境变量后保存或诊断。");
-  }
-
-  async function diagnoseCurrentProject() {
-    const candidate = projectDraft ?? projectDetection?.suggestedConfig;
-    if (!candidate) {
+  async function diagnoseAndRunCurrentProject(override?: ProjectConfig) {
+    const selectedCandidate = override ?? projectDraft ?? projectDetection?.suggestedConfig;
+    if (!selectedCandidate) {
       setMessage("请先识别或选择一个项目。");
       return;
     }
-    setMessage("正在诊断项目接入链路。");
+    const detectedCandidate = projectDetection?.suggestedConfig;
+    const canApplyDetectedLaunch = Boolean(
+      detectedCandidate
+      && selectedCandidate.allowExternalProjectPath
+      && detectedCandidate.projectPath === selectedCandidate.projectPath
+    );
+    const candidate: ProjectConfig = canApplyDetectedLaunch ? {
+      ...selectedCandidate,
+      installCommand: detectedCandidate!.installCommand,
+      installCommandSpec: detectedCandidate!.installCommandSpec,
+      startCommand: detectedCandidate!.startCommand,
+      startCommandSpec: detectedCandidate!.startCommandSpec,
+      processes: detectedCandidate!.processes,
+      frontendUrl: detectedCandidate!.frontendUrl,
+      backendUrl: detectedCandidate!.backendUrl,
+      healthCheckUrl: detectedCandidate!.healthCheckUrl,
+      manifest: detectedCandidate!.manifest ? {
+        ...detectedCandidate!.manifest,
+        execution: selectedCandidate.allowExternalProjectPath
+          ? { ...detectedCandidate!.manifest.execution, mode: "oci" }
+          : selectedCandidate.manifest?.execution ?? detectedCandidate!.manifest.execution
+      } : selectedCandidate.manifest
+    } : selectedCandidate;
+    setProjectConnection(null);
+    setProjectDiagnosis(null);
+    setRuntimeRecoveryAdvice(null);
+    setProjectLaunchPhase("正在确认项目设置…");
+    setMessage("正在保存设置、启动项目并检查运行条件。");
     try {
-      const saved = await saveProject({ ...candidate, allowExternalProjectPath: candidate.allowExternalProjectPath ?? true });
-      const response = await diagnoseProject(saved.project.id);
+      if (projectDetection?.executionReady === false) {
+        setProjectLaunchPhase("正在确认项目文件夹…");
+        const verified = await detectProject(candidate.projectPath);
+        if (!verified.detection.exists) {
+          setMessage("项目路径不可访问，请重新选择项目文件夹。");
+          return;
+        }
+        setProjectDetection(verified.detection);
+      }
+      setProjectLaunchPhase("正在保存运行设置…");
+      const saved = await saveProject({
+        ...candidate,
+        allowExternalProjectPath: candidate.allowExternalProjectPath ?? true
+      });
       setProjectDraft(saved.project);
       setSelectedProjectId(saved.project.id);
-      setProjectDiagnosis(response.diagnosis);
-      setMessage(response.diagnosis.stages.find((stage) => stage.status === "failed")?.humanMessage ?? "项目诊断完成。");
-      await refresh();
+      setProjectPathInput(saved.project.projectPath);
+      setAppUrl(saved.project.frontendUrl);
+
+      setProjectLaunchPhase("正在请求 Agent 启动项目…");
+      const accepted = await startProjectAsync(saved.project.id);
+      setProjectRuntime(accepted.runtime);
+      setProjectLaunchPhase("启动任务已提交，正在等待项目响应…");
+      const sandboxPrepareTimeout = saved.project.manifest?.execution.mode === "oci"
+        ? (saved.project.manifest.budget.prepareTimeoutMs ?? 300_000)
+        : 0;
+      const startupDeadline = Date.now()
+        + sandboxPrepareTimeout
+        + Math.max(saved.project.timeoutMs ?? 30_000, 30_000)
+        + 10_000;
+      let startedRuntime = accepted.runtime;
+      let missedRuntimePolls = 0;
+      while (Date.now() < startupDeadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        const snapshot = await getProjectRuntime(saved.project.id).catch(() => null);
+        if (!snapshot) {
+          missedRuntimePolls += 1;
+          setProjectLaunchPhase(missedRuntimePolls > 1 ? "Agent 暂时断开，正在自动重连…" : "正在同步启动状态…");
+          continue;
+        }
+        missedRuntimePolls = 0;
+        setProjectLaunchPhase(
+          snapshot.runtime.status === "installing"
+            ? "正在安装项目依赖…"
+            : snapshot.runtime.status === "starting"
+              ? "正在等待项目启动…"
+              : "正在确认项目运行状态…"
+        );
+        setProjectRuntime(snapshot.runtime);
+        startedRuntime = snapshot.runtime;
+        if (!["idle", "installing", "starting"].includes(snapshot.runtime.status)) break;
+      }
+      setProjectRuntime(startedRuntime);
+      if (startedRuntime.status !== "running") {
+        setProjectLaunchPhase("正在汇总失败诊断…");
+        const diagnosed = await diagnoseProject(saved.project.id).catch(() => null);
+        if (diagnosed) setProjectDiagnosis(diagnosed.diagnosis);
+        if (defaultCredential) {
+          setProjectLaunchPhase("正在使用 AI 分析启动日志…");
+          const recovery = await getAiStartRecovery(saved.project.id, defaultCredential.id).catch(() => null);
+          if (recovery) setRuntimeRecoveryAdvice(recovery.advice);
+        }
+        setMessage(startedRuntime.message ?? "项目启动失败，请查看诊断结果。");
+        return;
+      }
+
+      const [tested, diagnosed] = await Promise.all([
+        testProjectConnection(saved.project.id),
+        diagnoseProject(saved.project.id)
+      ]);
+      setProjectConnection(tested.result);
+      setProjectDiagnosis(diagnosed.diagnosis);
+      setMessage(
+        tested.result.ok && diagnosed.diagnosis.overallStatus === "passed"
+          ? "项目已准备好测试。"
+          : diagnosed.diagnosis.stages.find((stage) => stage.status === "failed")?.humanMessage
+            ?? tested.result.message
+      );
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "项目诊断失败");
+      const detail = error instanceof Error ? error.message : "项目诊断失败";
+      setProjectRuntime({
+        projectId: selectedCandidate.id,
+        status: "failed",
+        phase: "failed",
+        updatedAt: new Date().toISOString(),
+        failureReason: "unknown",
+        message: detail
+      });
+      setMessage(detail);
+    } finally {
+      setProjectLaunchPhase("");
     }
   }
 
-  async function saveCurrentProject() {
-    if (!projectDraft) return;
-    const response = await saveProject(projectDraft);
+  async function applyAiRecoveryCandidate(candidateId: string) {
+    const adviceCandidate = runtimeRecoveryAdvice?.candidates.find((item) => item.id === candidateId);
+    const current = projectDraft ?? projectDetection?.suggestedConfig;
+    if (!adviceCandidate || !current) return;
+    const parts = adviceCandidate.command.trim().split(/\s+/).filter(Boolean);
+    if (!parts.length || !["npm", "pnpm", "yarn", "node", "python", "python3", "uv", "uvicorn"].includes(parts[0])) {
+      setMessage("AI 返回的候选启动方式未通过本地 allowlist 校验。");
+      return;
+    }
+    const commandSpec = { executable: parts[0], args: parts.slice(1), timeoutMs: 300_000 };
+    const targetUrl = adviceCandidate.frontendUrl;
+    const recovered: ProjectConfig = current.processes?.length
+      ? {
+        ...current,
+        frontendUrl: targetUrl ?? current.frontendUrl,
+        healthCheckUrl: targetUrl ?? current.healthCheckUrl,
+        processes: current.processes.map((process, index) => index === 0
+          ? { ...process, command: adviceCandidate.command, commandSpec, healthCheckUrl: targetUrl ?? process.healthCheckUrl }
+          : process)
+      }
+      : { ...current, startCommand: adviceCandidate.command, startCommandSpec: commandSpec, frontendUrl: targetUrl ?? current.frontendUrl, healthCheckUrl: targetUrl ?? current.healthCheckUrl };
+    setProjectDraft(recovered);
+    setRuntimeRecoveryAdvice(null);
+    await diagnoseAndRunCurrentProject(recovered);
+  }
+
+  async function saveCurrentProjectLoginCredential(input: {
+    username: string;
+    password: string;
+    usernameEnv: string;
+    passwordEnv: string;
+  }) {
+    if (!projectDraft) throw new Error("请先识别项目。");
+    const prepared = await saveProject({
+      ...projectDraft,
+      login: {
+        ...projectDraft.login,
+        method: "env",
+        usernameEnv: input.usernameEnv,
+        passwordEnv: input.passwordEnv
+      }
+    });
+    const response = await saveProjectLoginCredential(prepared.project.id, input);
     setProjectDraft(response.project);
     setSelectedProjectId(response.project.id);
-    setProjectPathInput(response.project.projectPath);
-    setAppUrl(response.project.frontendUrl);
-    setMessage(`项目配置已保存：${response.project.name}`);
-    await refresh();
-  }
-
-  async function testCurrentProject() {
-    if (!projectDraft) return;
-    const saved = await saveProject(projectDraft);
-    const response = await testProjectConnection(saved.project.id);
-    setProjectDraft(saved.project);
-    setSelectedProjectId(saved.project.id);
-    setProjectPathInput(saved.project.projectPath);
-    setProjectConnection(response.result);
-    setAppUrl(saved.project.frontendUrl);
-    setMessage(response.result.message);
-  }
-
-  async function startCurrentProject() {
-    if (!projectDraft) return;
-    const saved = await saveProject(projectDraft);
-    const response = await startProject(saved.project.id);
-    setProjectRuntime(response.runtime);
-    setProjectDraft(saved.project);
-    setSelectedProjectId(saved.project.id);
-    setProjectPathInput(saved.project.projectPath);
-    setAppUrl(saved.project.frontendUrl);
-    setMessage(response.runtime.message ?? `项目状态：${response.runtime.status}`);
+    setMessage("测试账号已加密保存，运行时会自动注入沙盒。");
   }
 
   async function stopCurrentProject() {
@@ -641,25 +1196,232 @@ export function App() {
     return false;
   }
 
-  async function analyzeContext() {
-    setMessage("正在分析 Git/需求/TAPD 输入。");
+  async function continueTestPlanning(input?: string, planningMode: "llm-guided" | "scan-only" = "llm-guided") {
+    const content = (input ?? planningInput).trim();
+    const projectId = selectedProjectId || projectDraft?.id;
+    if (!projectId) {
+      setMessage("请先接入并识别项目，再开始规划测试。");
+      return;
+    }
+    if (!content) {
+      setMessage("请先描述你想测试什么。");
+      return;
+    }
+    const userMessage: PlanningMessage = {
+      id: `planning_user_${Date.now()}`,
+      role: "user",
+      content,
+      createdAt: new Date().toISOString()
+    };
+    setPlanningMessages((current) => [...current, userMessage]);
+    setPlanningInput("");
+    setPlanningBusy(true);
+    setPlanningConfirmed(false);
+    setPlanningAutomation({ phase: "idle", detail: "" });
+    setScenarioId("");
+    setMessage(planningMode === "scan-only" ? "正在快速扫描项目流程。" : "正在扫描项目，并由 AI 制定测试计划。");
     try {
-      const response = await analyzeIntake({
-        requirement: requirementText,
+      const response = await continuePlanningConversation({
+        projectId,
+        message: content,
         diff: diffText,
         bugTicket: bugTicketText,
-        prUrl
+        history: planningMessages,
+        planningMode,
+        credentialId: planningMode === "llm-guided" ? defaultCredential?.id : undefined
       });
-      setAnalysis(response.analysis);
-      const firstExecutable = response.analysis.scenarioCandidates.find((item) => item.executable && item.mappedScenarioId);
-      if (firstExecutable?.mappedScenarioId) setScenarioId(firstExecutable.mappedScenarioId);
-      setMessage(`已生成 ${response.analysis.scenarioCandidates.length} 个候选测试场景。`);
+      const assistantMessage: PlanningMessage = {
+        id: `planning_assistant_${Date.now()}`,
+        role: "assistant",
+        content: response.planning.reply,
+        createdAt: new Date().toISOString()
+      };
+      setPlanningMessages((current) => [...current, assistantMessage]);
+      setPlanningResult(response.planning);
+      setAnalysis(response.planning.analysis);
+      const combinedRequirement = [...planningMessages, userMessage]
+        .filter((item) => item.role === "user")
+        .map((item) => item.content)
+        .join("\n");
+      setRequirementText(combinedRequirement);
+      setMessage(response.planning.llmPlanning?.status === "failed"
+        ? "代码扫描已完成，但 AI 规划暂时不可用；已保留可继续编辑的规则计划。"
+        : response.planning.llmPlanning?.status === "not_configured"
+          ? "代码扫描已完成。配置 AI 模型后可获得优先级建议和追问。"
+        : response.planning.phase === "clarifying"
+        ? "系统需要你回答几个问题，回答后会更新计划。"
+        : "测试计划草案已生成，请检查业务流程后确认。");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "输入分析失败");
+      const detail = error instanceof Error ? error.message : "测试规划失败";
+      setPlanningMessages((current) => [...current, {
+        id: `planning_error_${Date.now()}`,
+        role: "assistant",
+        content: `暂时无法生成计划：${detail}`,
+        createdAt: new Date().toISOString()
+      }]);
+      setMessage(detail);
+    } finally {
+      setPlanningBusy(false);
+    }
+  }
+
+  async function ensureProjectReadyForAutomation() {
+    const candidate = projectDraft ?? projectDetection?.suggestedConfig;
+    if (!candidate) throw new Error("没有可运行的项目配置，请重新识别项目。");
+    const saved = await saveProject({
+      ...candidate,
+      allowExternalProjectPath: candidate.allowExternalProjectPath ?? true
+    });
+    setProjectDraft(saved.project);
+    setSelectedProjectId(saved.project.id);
+    setProjectPathInput(saved.project.projectPath);
+    setAppUrl(saved.project.frontendUrl);
+
+    const currentConnection = await testProjectConnection(saved.project.id).catch(() => null);
+    if (currentConnection?.result.ok) {
+      setProjectConnection(currentConnection.result);
+      return saved.project;
+    }
+    const started = await startProject(saved.project.id);
+    setProjectRuntime(started.runtime);
+    if (started.runtime.status !== "running") {
+      const diagnosed = await diagnoseProject(saved.project.id).catch(() => null);
+      if (diagnosed) setProjectDiagnosis(diagnosed.diagnosis);
+      throw new Error(started.runtime.message ?? "项目无法启动。");
+    }
+    const connected = await testProjectConnection(saved.project.id);
+    setProjectConnection(connected.result);
+    if (!connected.result.ok) throw new Error(connected.result.message || "项目启动后仍无法访问。");
+    return saved.project;
+  }
+
+  function chooseDiscoveryDraft(result: DiscoveryScanResult) {
+    const semanticText = `${requirementText} ${planningResult?.businessFlows.map((flow) => flow.title).join(" ") ?? ""}`.toLowerCase();
+    const scored = result.drafts.map((draft) => {
+      const draftText = `${draft.riskKind ?? ""} ${draft.actions?.join(" ") ?? ""} ${JSON.stringify(draft.scenario)}`.toLowerCase();
+      const terms = semanticText.split(/[^\p{L}\p{N}_-]+/u).filter((term) => term.length >= 2);
+      const matches = terms.filter((term) => draftText.includes(term)).length;
+      const riskBonus = /登录|权限|login|permission/.test(semanticText) && draft.riskKind === "auth" ? 8
+        : /接口|api|网络|network/.test(semanticText) && draft.riskKind === "api_contract" ? 8
+          : /筛选|列表|表格|filter|table/.test(semanticText) && draft.riskKind === "table" ? 8
+            : 0;
+      return { draft, score: matches + riskBonus };
+    });
+    return scored.sort((left, right) => right.score - left.score)[0]?.draft;
+  }
+
+  async function executeConfirmedScenarioAutomatically(
+    selectedScenarioId: string,
+    grantedProfile = permissionProfile,
+    targetOverride?: { appUrl: string; projectId: string }
+  ) {
+    if (!grantedProfile.browserControl) {
+      setPlanningAutomation({
+        phase: "needs-permission",
+        detail: "测试路径已准备好。允许本次浏览器操作后，系统会自动继续。",
+        scenarioId: selectedScenarioId
+      });
+      setMessage("测试路径已准备好，等待浏览器操作授权。");
+      return;
+    }
+    setPlanningAutomation({ phase: "starting-run", detail: "正在创建运行并自动完成计划审批。", scenarioId: selectedScenarioId });
+    setIsRunning(true);
+    try {
+      const created = await createVisualRun(targetOverride?.appUrl ?? appUrl, grantedProfile, selectedScenarioId, {
+        requirement: requirementText,
+        diff: diffText,
+        projectId: targetOverride?.projectId ?? (selectedProjectId || projectDraft?.id),
+        executionMode: selectedProjectExecutionMode
+      });
+      setActiveRunId(created.run.id);
+      setActiveRun(created.run);
+      const approved = await approveRunPlan(created.run.id, created.run.version);
+      setActiveRun(approved.run);
+      const granted = await grantRunPermissions(created.run.id, approved.run.version);
+      setActiveRun(granted.run);
+      setPlanningAutomation({ phase: "running", detail: "AI 正在操作浏览器并采集截图、DOM、网络和 Trace。", scenarioId: selectedScenarioId });
+      setMessage("计划已确认，AI 正在自动执行测试。");
+      const report = await waitForRunReport(created.run.id);
+      setResult(report);
+      setPlanningAutomation({ phase: "ready", detail: report.summary, scenarioId: selectedScenarioId });
+      setMessage(report.summary);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "自动化测试启动失败";
+      setPlanningAutomation({ phase: "blocked", detail, scenarioId: selectedScenarioId });
+      setMessage(detail);
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
+  async function continueAutomaticPlanning(grantedProfile = permissionProfile) {
+    if (!planningResult) return;
+    setPlanningAutomation({ phase: "preparing-project", detail: "正在启动并连接被测项目。" });
+    setMessage("计划已确认，正在自动准备项目。");
+    try {
+      const project = await ensureProjectReadyForAutomation();
+      if (!grantedProfile.observe || !grantedProfile.browserControl) {
+        setPlanningAutomation({
+          phase: "needs-permission",
+          detail: "允许本次浏览器操作后，系统会自动扫描页面、生成路径并开始测试。"
+        });
+        return;
+      }
+      setPlanningAutomation({ phase: "discovering", detail: "正在读取真实页面、控件、接口和可验证结果。" });
+      const response = await runDiscoveryScan({
+        appUrl: project.frontendUrl,
+        projectId: project.id,
+        sourceContexts: planningResult.analysis.sourceContexts
+      });
+      setDiscovery(response.discovery);
+      setScenarioDrafts(response.discovery.drafts);
+      if (response.discovery.status === "failed") throw new Error(response.discovery.message);
+      const selectedDraft = chooseDiscoveryDraft(response.discovery);
+      if (!selectedDraft) throw new Error("页面扫描没有找到可安全执行的测试路径。");
+      setPlanningAutomation({ phase: "binding", detail: "正在把 AI 计划绑定到真实页面元素、操作和预期结果。" });
+      const probed = await probeScenarioDraft(selectedDraft.scenarioId);
+      setScenarioDrafts((current) => [probed.draft, ...current.filter((draft) => draft.scenarioId !== probed.draft.scenarioId)]);
+      if (probed.draft.selectorProbeStatus !== "passed") {
+        throw new Error(`页面元素绑定失败：${probed.draft.missingInfo?.join("、") || "无法验证选择器和预期结果"}`);
+      }
+      const approved = await approveScenarioDraft(selectedDraft.scenarioId);
+      if (approved.draft.draftReviewStatus !== "approved") throw new Error("测试路径未通过自动可执行性校验。");
+      setScenarioId(approved.draft.scenarioId);
+      const scenarioResponse = await listScenarios();
+      setScenarios(scenarioResponse.scenarios);
+      await executeConfirmedScenarioAutomatically(approved.draft.scenarioId, grantedProfile, {
+        appUrl: project.frontendUrl,
+        projectId: project.id
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "自动生成可执行测试路径失败";
+      setPlanningAutomation({ phase: "blocked", detail });
+      setMessage(detail);
+    }
+  }
+
+  async function confirmPlanningDraft() {
+    if (!planningResult || hasBlockingPlanningQuestions(planningResult)) {
+      setMessage("请先回答规划中的澄清问题。");
+      return;
+    }
+    setPlan(planningResult.plan);
+    setPlanningConfirmed(true);
+    if (planningResult.recommendedScenarioId) {
+      setScenarioId(planningResult.recommendedScenarioId);
+      await executeConfirmedScenarioAutomatically(planningResult.recommendedScenarioId);
+    } else {
+      setScenarioId("");
+      await continueAutomaticPlanning();
     }
   }
 
   async function loadConnectedContext() {
+    if (!hasSelectedProject) {
+      setLeftDrawerOpen(true);
+      setMessage("请先完成项目接入，再读取外部测试依据。");
+      return;
+    }
     setMessage("正在通过连接器读取 Git/PR、需求文档和 TAPD/Bug 上下文。");
     try {
       const response = await analyzeConnectedContext(connectorInput());
@@ -677,6 +1439,11 @@ export function App() {
   }
 
   async function runDiscovery() {
+    if (!hasSelectedProject) {
+      setLeftDrawerOpen(true);
+      setMessage("请先完成项目接入，再扫描页面生成测试点。");
+      return;
+    }
     if (!requireBrowserAuthorization("扫描页面并生成测试点草案")) return;
     setMessage("正在扫描页面 DOM、按钮、表单、test-id、network 和 OpenAPI。");
     try {
@@ -743,6 +1510,26 @@ export function App() {
   }
 
   async function runPlan() {
+    if (!hasSelectedProject) {
+      setLeftDrawerOpen(true);
+      setMessage("请先在“项目接入”中选择或识别项目，再开始测试。");
+      return;
+    }
+    if (!requirementText.trim()) {
+      setLeftDrawerOpen(true);
+      setMessage("请先填写本次要验证的需求。");
+      return;
+    }
+    if (!planningConfirmed) {
+      setLeftDrawerOpen(true);
+      setMessage("请先在规划对话中确认测试计划。");
+      return;
+    }
+    if (!scenarioId) {
+      setLeftDrawerOpen(true);
+      setMessage("请先点击“分析输入”，让系统生成本次测试内容。");
+      return;
+    }
     if (!requireBrowserAuthorization("接管浏览器执行测试")) return;
     setIsRunning(true);
     setMessage("正在创建运行，等待你确认测试计划。");
@@ -750,7 +1537,8 @@ export function App() {
       const response = await createVisualRun(appUrl, permissionProfile, scenarioId, {
         requirement: requirementText,
         diff: diffText,
-        projectId: selectedProjectId || projectDraft?.id
+        projectId: selectedProjectId || projectDraft?.id,
+        executionMode: selectedProjectExecutionMode
       });
       setActiveRunId(response.run.id);
       setActiveRun(response.run);
@@ -885,6 +1673,16 @@ export function App() {
   }
 
   async function regeneratePlan() {
+    if (!hasSelectedProject) {
+      setLeftDrawerOpen(true);
+      setMessage("生成计划前，请先完成项目接入。");
+      return;
+    }
+    if (!requirementText.trim()) {
+      setLeftDrawerOpen(true);
+      setMessage("生成计划前，请先填写需求。");
+      return;
+    }
     setMessage("正在生成测试计划。");
     try {
       const response = await generatePlan({
@@ -1087,85 +1885,227 @@ export function App() {
         <div className="drawer-header">
           <h2>输入上下文</h2>
           <div className="drawer-toggles">
-            <button className="icon-button" onClick={() => refresh()} type="button" title="刷新">
-              <RefreshCw size={16} />
+            <button
+              className="icon-button"
+              onClick={() => void refreshInputContext()}
+              type="button"
+              title={isRefreshingContext ? "正在刷新" : "重新扫描当前项目并刷新上下文"}
+              disabled={isRefreshingContext}
+              aria-label={isRefreshingContext ? "正在刷新项目上下文" : "刷新项目上下文"}
+            >
+              <RefreshCw className={isRefreshingContext ? "spin" : undefined} size={16} />
             </button>
             <button className="icon-button" onClick={() => setLeftDrawerOpen(false)} type="button" title="关闭">
               <X size={16} />
             </button>
           </div>
         </div>
+        {contextRefreshStatus ? <p className="drawer-refresh-status" role="status">{contextRefreshStatus}</p> : null}
         <div className="drawer-body">
+          <section className="workflow-guide" aria-label="测试流程">
+            <strong>按这个顺序完成测试</strong>
+            <span>1. 接入项目</span>
+            <span>2. 对话规划</span>
+            <span>3. 确认计划</span>
+            <span>4. 审批计划并执行</span>
+          </section>
+
           <ProjectWizardPanel
+            projects={projects}
+            selectedProjectId={selectedProjectId}
             projectPath={projectPathInput}
             detection={projectDetection}
-            diagnosis={projectDiagnosis}
+            onSelectProject={selectProject}
             onProjectPathChange={setProjectPathInput}
             onDetect={detectCurrentProjectPath}
-            onApplySuggestion={applyDetectedProject}
-            onDiagnose={diagnoseCurrentProject}
+            detectMessage={projectDetectMessage}
+            projectListNotice={projectListNotice}
           />
 
           <ProjectPanel
             projects={projects}
             selectedProjectId={selectedProjectId}
             draft={projectDraft}
+            detection={projectDetection}
+            diagnosis={projectDiagnosis}
             status={projectRuntime}
             connection={projectConnection}
+            launchPhase={projectLaunchPhase}
+            recoveryAdvice={runtimeRecoveryAdvice}
             onSelect={selectProject}
             onDraftChange={setProjectDraft}
-            onSave={saveCurrentProject}
-            onTest={testCurrentProject}
-            onStart={startCurrentProject}
+            onRunDiagnosis={diagnoseAndRunCurrentProject}
             onStop={stopCurrentProject}
+            onApplyRecoveryCandidate={applyAiRecoveryCandidate}
+            onSaveLoginCredential={saveCurrentProjectLoginCredential}
           />
-          <ServiceHealthPanel />
 
-          <label>
-            Scenario Registry
-            <select value={scenarioId} onChange={(event) => setScenarioId(event.target.value)}>
-              {scenarios.map((scenario) => (
-                <option key={scenario.id} value={scenario.id}>
-                  {scenario.id} · {scenario.corePath?.action ?? "unknown"}
-                </option>
+          <section className="planning-conversation" aria-label="测试规划对话">
+            <header>
+              <div>
+                <h3>测试规划</h3>
+                <p>用自然语言描述目标，系统先扫描项目，再由 AI 排定优先级、提出问题并生成可确认的测试计划。</p>
+              </div>
+              <div className="planning-header-actions">
+                {planningResult && <span>{planningResult.llmPlanning?.status === "passed" ? "AI 辅助规划" : planningResult.coverage.scope === "comprehensive" ? "全面灰度" : "定向测试"}</span>}
+                <button type="button" disabled={planningBusy || !hasSelectedProject} onClick={() => void continueTestPlanning("请对当前项目进行全面灰度扫描，只盘点流程和覆盖缺口，不调用 AI。", "scan-only")}>快速扫描（省 Token）</button>
+              </div>
+            </header>
+
+            <div className="planning-messages" aria-live="polite">
+              {planningMessages.map((item) => (
+                <article className={`planning-message ${item.role}`} key={item.id}>
+                  <strong>{item.role === "assistant" ? "AI 测试官" : "你"}</strong>
+                  <p>{item.content}</p>
+                </article>
               ))}
-              {!scenarios.some((scenario) => scenario.id === scenarioId) && (
-                <option value={scenarioId}>{scenarioId}</option>
-              )}
-            </select>
-          </label>
-          {scenarios.find((scenario) => scenario.id === scenarioId) && (
-            <article className="scenario-summary">
-              <strong>{scenarios.find((scenario) => scenario.id === scenarioId)?.title}</strong>
-              <p>{scenarios.find((scenario) => scenario.id === scenarioId)?.summary}</p>
-              <code>
-                {scenarios.find((scenario) => scenario.id === scenarioId)?.corePath?.pathId} · oracles=
-                {scenarios.find((scenario) => scenario.id === scenarioId)?.corePath?.oracleCount}
-              </code>
-            </article>
-          )}
+              {planningBusy && <article className="planning-message assistant pending"><strong>AI 测试官</strong><p>正在扫描代码和整理业务流程…</p></article>}
+            </div>
 
-          <label>
-            需求
-            <textarea value={requirementText} onChange={(event) => setRequirementText(event.target.value)} rows={4} />
-          </label>
+            {planningResult && (
+              <section className="planning-draft">
+                <div className="planning-coverage">
+                  <article><strong>{planningResult.coverage.discovered}</strong><span>识别流程</span></article>
+                  <article><strong>{planningResult.coverage.executable}</strong><span>可直接执行</span></article>
+                  <article><strong>{planningResult.coverage.gaps}</strong><span>覆盖缺口</span></article>
+                </div>
+                {planningResult.llmPlanning?.status === "passed" && (
+                  <section className="llm-planning-advice" aria-label="AI 测试规划建议">
+                    <strong>AI 规划建议</strong>
+                    <p>{planningResult.llmPlanning.summary}</p>
+                    <small>{planningResult.llmPlanning.model} · {planningResult.llmPlanning.durationMs ? `${(planningResult.llmPlanning.durationMs / 1000).toFixed(1)} 秒` : "已完成"}</small>
+                  </section>
+                )}
+                {planningResult.llmPlanning?.status === "not_configured" && (
+                  <section className="llm-planning-advice muted" aria-label="AI 规划未配置">
+                    <strong>尚未启用 AI 规划</strong>
+                    <p>当前仅完成快速代码扫描。配置 API Key 后，自然语言规划会自动获得优先级建议和补充问题。</p>
+                  </section>
+                )}
+                {planningResult.clarificationQuestions.length > 0 && (
+                  <div className="planning-questions">
+                    <strong>{planningHasBlockingQuestions ? "执行前必须确认" : "可选补充（不影响确认）"}</strong>
+                    {planningResult.clarificationQuestions.map((question) => (
+                      <button type="button" key={question} onClick={() => setPlanningInput(`关于“${question}”，我的回答是：`)}>{question}</button>
+                    ))}
+                  </div>
+                )}
+                <details className="planning-flow-list" open>
+                  <summary>查看全部 {planningResult.businessFlows.length} 条业务流程</summary>
+                  {planningResult.businessFlows.map((flow) => (
+                    <article
+                      key={flow.id}
+                      className={`planning-flow ${flow.status}`}
+                      onMouseEnter={() => scheduleFlowDelete(flow.id)}
+                      onMouseLeave={() => hideFlowDelete(flow.id)}
+                    >
+                      <div>
+                        <strong>{flow.title}</strong>
+                        <span>{flow.kind === "page" ? "页面" : flow.kind === "component" ? "功能组件" : flow.kind === "api" ? "接口" : "测试场景"} · {flow.confidence} confidence</span>
+                      </div>
+                      <div className="planning-flow-actions">
+                        <span className="planning-flow-status">
+                          {flow.status === "executable" ? "可执行" : flow.status === "needs-input" ? "待补条件" : "覆盖缺口"}
+                        </span>
+                        {flowDeleteReadyId === flow.id && (
+                          <button
+                            className="planning-flow-delete"
+                            type="button"
+                            onClick={() => excludePlanningFlow(flow.id)}
+                            aria-label={`从本次测试计划删除 ${flow.title}`}
+                          >
+                            <Trash2 size={13} />删除
+                          </button>
+                        )}
+                      </div>
+                      <p>{flow.reason}</p>
+                    </article>
+                  ))}
+                </details>
+                <button
+                  className="confirm-planning-button"
+                  type="button"
+                  disabled={planningHasBlockingQuestions || planningConfirmed || planningAutomationBusy}
+                  onClick={() => void confirmPlanningDraft()}
+                >
+                  {planningAutomationBusy
+                    ? "正在自动准备并执行"
+                    : planningConfirmed ? "计划已确认" : planningHasBlockingQuestions ? "回答问题后确认" : "确认并自动执行"}
+                </button>
+                {planningConfirmed && planningAutomation.phase !== "idle" && (
+                  <section className={`planning-next-step ${planningAutomation.phase === "blocked" || planningAutomation.phase === "needs-permission" ? "planning-next-step--blocked" : ""}`} aria-live="polite">
+                    <strong>
+                      {planningAutomation.phase === "preparing-project" ? "正在准备项目"
+                        : planningAutomation.phase === "discovering" ? "正在理解真实页面"
+                          : planningAutomation.phase === "binding" ? "正在生成可执行测试步骤"
+                            : planningAutomation.phase === "starting-run" ? "正在启动自动化测试"
+                              : planningAutomation.phase === "running" ? "AI 正在执行测试"
+                                : planningAutomation.phase === "ready" ? "自动化测试已完成"
+                                  : planningAutomation.phase === "needs-permission" ? "需要一次浏览器授权"
+                                    : "自动化暂时无法继续"}
+                    </strong>
+                    <p>{planningAutomation.detail}</p>
+                    {planningAutomation.phase === "needs-permission" && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextPermission = { ...permissionProfile, observe: true, browserControl: true };
+                          setPermissionProfile(nextPermission);
+                          if (planningAutomation.scenarioId) {
+                            void executeConfirmedScenarioAutomatically(planningAutomation.scenarioId, nextPermission);
+                          } else {
+                            void continueAutomaticPlanning(nextPermission);
+                          }
+                        }}
+                      >
+                        允许本次浏览器操作并继续
+                      </button>
+                    )}
+                    {planningAutomation.phase === "blocked" && (
+                      <button type="button" onClick={() => {
+                        setPlanningConfirmed(false);
+                        setPlanningAutomation({ phase: "idle", detail: "" });
+                      }}>修改计划后重试</button>
+                    )}
+                  </section>
+                )}
+              </section>
+            )}
 
-          <label>
-            Git diff
-            <textarea value={diffText} onChange={(event) => setDiffText(event.target.value)} rows={6} />
-          </label>
+            <form className="planning-composer" onSubmit={(event) => { event.preventDefault(); void continueTestPlanning(); }}>
+              <textarea
+                aria-label="描述测试目标"
+                value={planningInput}
+                onChange={(event) => setPlanningInput(event.target.value)}
+                rows={3}
+                placeholder="例如：全面灰度测试；重点检查登录、权限、数据刷新和报告生成。"
+              />
+              <button className="primary" type="submit" disabled={planningBusy || !planningInput.trim()}>
+                <Send size={15} />
+                {planningBusy ? "规划中" : "发送"}
+              </button>
+            </form>
+          </section>
 
-          <label>
-            TAPD / Bug 单
-            <textarea value={bugTicketText} onChange={(event) => setBugTicketText(event.target.value)} rows={3} />
-          </label>
+          <details className="optional-context">
+            <summary>补充输入（可选）：代码变更、缺陷单、PR 和远程文档</summary>
+            <label>
+              代码变更（Git diff）
+              <textarea value={diffText} onChange={(event) => setDiffText(event.target.value)} rows={6} />
+              <small className="field-hint">可粘贴本次提交或 PR 的代码差异；没有也可以只按需求测试。</small>
+            </label>
 
-          <label>
-            PR 来源
-            <input value={prUrl} onChange={(event) => setPrUrl(event.target.value)} />
-          </label>
+            <label>
+              缺陷或任务编号（TAPD，可选）
+              <textarea value={bugTicketText} onChange={(event) => setBugTicketText(event.target.value)} rows={3} />
+            </label>
 
-          <ConnectorPanel
+            <label>
+              PR 来源（可选）
+              <input value={prUrl} onChange={(event) => setPrUrl(event.target.value)} placeholder="https://github.com/.../pull/123" />
+            </label>
+
+            <ConnectorPanel
             requirementPath={requirementPath}
             requirementUrl={requirementUrl}
             bugTicketPath={bugTicketPath}
@@ -1183,26 +2123,16 @@ export function App() {
             onOpenApiPathChange={setOpenApiPath}
             onOpenApiUrlChange={setOpenApiUrl}
             onStrictInputChange={setStrictInput}
-          />
-
-          <div className="form-actions">
+            />
             <button type="button" onClick={loadConnectedContext}>
               <Link2 size={16} />
-              读取连接器
+              读取以上资料
             </button>
-            <button type="button" onClick={analyzeContext}>
-              <Search size={16} />
-              分析输入
-            </button>
-            <button type="button" onClick={loadTaskFilterFixture}>
-              <ClipboardList size={16} />
-              加载 fixture
-            </button>
-          </div>
+          </details>
 
-          <section className="analysis-box">
-            <h3>Input Analysis</h3>
-            {analysis ? (
+          {analysis && (
+            <details className="analysis-box analysis-details">
+              <summary>查看系统如何生成这些测试内容</summary>
               <>
                 <div className="chip-list">
                   {analysis.changedAreas.map((area) => (
@@ -1230,20 +2160,21 @@ export function App() {
                       </span>
                       {candidate.mappedScenarioId && (
                         <button type="button" onClick={() => setScenarioId(candidate.mappedScenarioId!)}>
-                          使用 {candidate.mappedScenarioId}
+                          改用这项测试
                         </button>
                       )}
                     </article>
                   ))}
                 </div>
               </>
-            ) : (
-              <p className="empty">点击"分析输入"后会显示 MCP 输入源、影响面和候选测试场景。</p>
-            )}
-          </section>
+            </details>
+          )}
 
-          <section className="credential-box">
-            <h3>Credential Center</h3>
+          {false && (
+          <details className="optional-context" open={false} onToggle={() => undefined}>
+            <summary>AI 模型与权限（可选）</summary>
+            <section className="credential-box">
+            <h3>AI 模型凭据</h3>
             <form onSubmit={submitCredential}>
               <input
                 aria-label="名称"
@@ -1380,15 +2311,17 @@ export function App() {
                 </article>
               ))}
             </div>
-          </section>
-          <SecurityPanel
-            security={securitySummary}
-            credentials={credentials}
-            grants={projectGrants}
-            selectedProjectId={selectedProjectId}
-            onCreateGrant={createGrant}
-            onRotateCredential={rotateSelectedCredential}
-          />
+            </section>
+            <SecurityPanel
+              security={securitySummary}
+              credentials={credentials}
+              grants={projectGrants}
+              selectedProjectId={selectedProjectId}
+              onCreateGrant={createGrant}
+              onRotateCredential={rotateSelectedCredential}
+            />
+          </details>
+          )}
         </div>
       </>
     );
@@ -1441,12 +2374,19 @@ export function App() {
             证据详情
             <PanelRight size={15} />
           </button>
-          <div className="status-pill">
+          <button
+            className="status-pill"
+            type="button"
+            onClick={openCredentialSettings}
+            aria-label={defaultCredential ? `打开 API Key 配置：${defaultCredential.name}` : "打开 API Key 配置"}
+            title="打开 API Key 配置"
+          >
             <KeyRound size={16} />
             {defaultCredential ? `${defaultCredential.name} · ${defaultCredential.model}` : "未配置 API Key"}
-          </div>
+          </button>
         </div>
       </header>
+      {renderApiSettingsDialog()}
 
       <section className="workspace minimal-workspace">
         <div
@@ -1471,36 +2411,40 @@ export function App() {
               <small>项目与连接配置</small>
             </div>
           </button>
-          <button className="context-nav-item" onClick={loadConnectedContext} type="button">
+          <button className="context-nav-item" disabled={!hasSelectedProject} onClick={loadConnectedContext} title={!hasSelectedProject ? "先完成项目接入" : undefined} type="button">
             <span>02</span>
             <div>
               <strong>测试依据</strong>
               <small>{sourceContextCount || analysis?.sources.length || 0} 个已读取来源</small>
             </div>
           </button>
-          <button className="context-nav-item" onClick={analyzeContext} type="button">
+          <button className="context-nav-item" disabled={!hasSelectedProject} onClick={() => { setLeftDrawerOpen(true); setRightDrawerOpen(false); }} title={!hasSelectedProject ? "先完成项目接入" : "打开测试规划对话"} type="button">
             <span>03</span>
             <div>
-              <strong>分析影响</strong>
-              <small>{selectedCandidate ? "已找到推荐场景" : "识别需要验证的功能"}</small>
+              <strong>规划测试</strong>
+              <small>{planningConfirmed ? "计划已确认" : planningResult ? `${planningResult.coverage.discovered} 条流程待确认` : "描述目标并生成计划"}</small>
             </div>
           </button>
 
-          <div className="sidebar-rule" />
-          <div className="sidebar-label">测试场景</div>
-          <label className="scenario-picker">
-            <span>{selectedScenario?.title ?? scenarioId}</span>
-            <select value={scenarioId} onChange={(event) => setScenarioId(event.target.value)} aria-label="选择测试场景">
-              {scenarios.map((scenario) => (
-                <option key={scenario.id} value={scenario.id}>
-                  {scenario.title}
-                </option>
-              ))}
-              {!scenarios.some((scenario) => scenario.id === scenarioId) && (
-                <option value={scenarioId}>{scenarioId}</option>
-              )}
-            </select>
-          </label>
+          {scenarioId && (
+            <>
+              <div className="sidebar-rule" />
+              <div className="sidebar-label">本次测试内容</div>
+              <label className="scenario-picker">
+                <span>{selectedCandidate?.title ?? selectedScenario?.title ?? scenarioId}</span>
+                <select value={scenarioId} onChange={(event) => setScenarioId(event.target.value)} aria-label="选择测试内容">
+                  {scenarios.map((scenario) => (
+                    <option key={scenario.id} value={scenario.id}>
+                      {scenario.title}
+                    </option>
+                  ))}
+                  {!scenarios.some((scenario) => scenario.id === scenarioId) && (
+                    <option value={scenarioId}>{scenarioId}</option>
+                  )}
+                </select>
+              </label>
+            </>
+          )}
 
           <div className="sidebar-footer">
             <span>{runHistory.length} 次历史运行</span>
@@ -1512,11 +2456,17 @@ export function App() {
           <div className="mission-stage">
             <div>
               <p className="eyebrow">AI 测试任务</p>
-              <h2>{selectedCandidate?.title ?? selectedScenario?.title ?? scenarioId}</h2>
+              <h2>{selectedCandidate?.title ?? selectedScenario?.title ?? (scenarioId || "等待生成测试内容")}</h2>
               <p className="mission-reason"><span>为什么测</span>{primaryReason}</p>
             </div>
             <div className="run-command-actions">
-              <button className="primary" disabled={isRunning} onClick={runPlan} type="button">
+              <button
+                className="primary"
+                disabled={!canStartRun}
+                onClick={runPlan}
+                title={!hasSelectedProject ? "请先选择或识别项目" : !requirementText.trim() ? "请先填写需求" : undefined}
+                type="button"
+              >
                 {isRunning ? <Activity size={16} /> : <Play size={16} />}
                 {isRunning ? "执行中" : "开始测试"}
               </button>
@@ -1552,9 +2502,39 @@ export function App() {
             </article>
           </section>
 
-          <section className="live-view simple-live-view">
+          <section className="live-view simple-live-view" aria-label="测试现场">
+            <header className="live-view-toolbar">
+              <div className="live-view-window-dots" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+              <span className="live-view-mode">
+                {latestScreenshot ? "沙盒执行画面" : projectPreviewReady ? "内置项目画面" : "沙盒测试现场"}
+              </span>
+              <code title={previewUrl}>{previewUrl || "尚未启动项目"}</code>
+              {projectPreviewReady && !latestScreenshot && (
+                <button type="button" onClick={() => setPreviewRevision((current) => current + 1)} aria-label="刷新项目预览">
+                  <RefreshCw size={14} />
+                  刷新
+                </button>
+              )}
+            </header>
             {latestScreenshot ? (
-              <AuthenticatedArtifactImage artifactUrl={latestScreenshot} alt="最新测试画面" />
+              <div className="live-view-content">
+                <AuthenticatedArtifactImage artifactUrl={latestScreenshot} alt="Agent 最新测试画面" />
+                {isRunning && <span className="live-capture-badge"><Activity size={13} /> 正在执行</span>}
+              </div>
+            ) : projectPreviewReady ? (
+              <div className="live-view-content">
+                <iframe
+                  key={`${previewUrl}:${previewRevision}`}
+                  src={previewUrl}
+                  title={`${selectedProjectName} 项目预览`}
+                  sandbox="allow-downloads allow-forms allow-modals allow-same-origin allow-scripts"
+                />
+                {isRunning && <span className="live-capture-badge waiting"><Activity size={13} /> 等待第一帧执行证据</span>}
+              </div>
             ) : (
               <div className="live-view-placeholder">
                 <div className="live-view-grid" />
@@ -1564,7 +2544,7 @@ export function App() {
                   <span />
                   <span />
                 </div>
-                <p>Agent 就绪，等待执行测试</p>
+                <p>{hasSelectedProject ? "启动并检查项目后，这里会显示测试页面" : "选择项目后，这里会显示测试页面"}</p>
               </div>
             )}
           </section>

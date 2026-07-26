@@ -1,44 +1,205 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConnectorPanel } from "../src/components/ConnectorPanel";
 import { PatrolPanel } from "../src/components/PatrolPanel";
 import { BenchmarkPanel } from "../src/components/BenchmarkPanel";
 import { OidcSessionPanel } from "../src/components/OidcSessionPanel";
 import { RunTimeline } from "../src/components/RunTimeline";
-import { ProjectWizardPanel } from "../src/components/ProjectWizardPanel";
+import { buildFileTree, ProjectWizardPanel } from "../src/components/ProjectWizardPanel";
+import { ProjectPanel } from "../src/components/ProjectPanel";
 import { subscribeRunEvents } from "../src/api";
 
 describe("Workbench interactions", () => {
-  it("shows a single project upload box and the folder tree after selection", async () => {
+  it("shows login settings only for detected login projects and exposes one run action", async () => {
+    const project = {
+      id: "demo",
+      name: "Demo",
+      projectPath: "/tmp/demo",
+      frontendUrl: "http://127.0.0.1:5173",
+      healthCheckUrl: "http://127.0.0.1:5173",
+      startCommand: "npm run dev",
+      manifest: {
+        execution: { mode: "oci", image: "node:22-bookworm-slim", engine: "docker" }
+      }
+    };
+    const detection = {
+      projectPath: project.projectPath,
+      exists: true,
+      executionReady: true,
+      detectedStack: ["vite"],
+      packageManagers: ["npm"],
+      loginCapability: { detected: false, confidence: "none", signals: [] },
+      suggestedConfig: project,
+      ports: [],
+      healthCandidates: [],
+      warnings: [],
+      plainLanguageFixes: []
+    };
+    const props = {
+      projects: [project],
+      selectedProjectId: project.id,
+      draft: project,
+      detection,
+      onSelect: vi.fn(),
+      onDraftChange: vi.fn(),
+      onRunDiagnosis: vi.fn(),
+      onStop: vi.fn(),
+      onSaveLoginCredential: vi.fn()
+    };
+    const view = render(<ProjectPanel {...props as never} />);
+    expect(screen.queryByText("登录与测试账号（需要登录时配置）")).toBeNull();
+    expect(screen.getByRole("button", { name: "诊断并运行" })).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: /运行方式/ }) as HTMLInputElement).value).toContain("安全沙盒");
+    expect(screen.getByText(/源码只读挂载/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "仅检查连接" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "检查能否运行" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "保存设置" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "诊断并运行" }));
+    expect(props.onRunDiagnosis).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "正在启动…" })).toBeTruthy();
+
+    view.rerender(<ProjectPanel {...{
+      ...props,
+      detection: {
+        ...detection,
+        loginCapability: { detected: true, confidence: "high", signals: ["src/pages/login.tsx"] }
+      }
+    } as never} />);
+    await userEvent.click(screen.getByText("登录与测试账号（需要登录时配置）"));
+    fireEvent.change(screen.getByLabelText("测试账号"), { target: { value: "tester@example.test" } });
+    fireEvent.change(screen.getByLabelText("测试密码"), { target: { value: "secret-for-test" } });
+    await userEvent.click(screen.getByRole("button", { name: "保存测试账号" }));
+    expect(props.onSaveLoginCredential).toHaveBeenCalledWith({
+      username: "tester@example.test",
+      password: "secret-for-test",
+      usernameEnv: "E2E_USERNAME",
+      passwordEnv: "E2E_PASSWORD"
+    });
+  });
+
+  it("shows recent projects above inline upload controls and the folder tree after selection", async () => {
     const detect = vi.fn();
-    const apply = vi.fn();
-    const diagnose = vi.fn();
     const pathChange = vi.fn();
+    const selectProject = vi.fn();
     render(<ProjectWizardPanel
+      projects={[{ id: "user-project", name: "之前的项目", projectPath: "/tmp/user-project", frontendUrl: "http://127.0.0.1:3000" }]}
+      selectedProjectId=""
       projectPath=""
       detection={null}
-      diagnosis={null}
+      onSelectProject={selectProject}
       onProjectPathChange={pathChange}
       onDetect={detect}
-      onApplySuggestion={apply}
-      onDiagnose={diagnose}
     />);
-    expect(screen.getByText("点击上传项目")).toBeTruthy();
+    expect(screen.getByText("之前接入的项目")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "之前的项目" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "上传新项目" })).toBeTruthy();
     expect(screen.queryByText("第 1 步")).toBeNull();
     expect((screen.getByRole("button", { name: "识别项目" }) as HTMLButtonElement).disabled).toBe(true);
     const input = screen.getByLabelText("选择项目文件夹") as HTMLInputElement;
     const file = new File(["export default {}"], "src/main.tsx", { type: "text/plain" });
     Object.defineProperty(file, "webkitRelativePath", { value: "demo-project/src/main.tsx" });
     await userEvent.upload(input, [file]);
-    expect(screen.getByRole("button", { name: "收起 demo-project" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "收起 src" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "收起 demo-project" })).toBeTruthy();
+    const sourceDirectory = screen.getByRole("button", { name: "展开 src" });
+    await userEvent.click(sourceDirectory);
     expect(screen.getByText("main.tsx")).toBeTruthy();
     expect(pathChange).toHaveBeenCalledWith("demo-project");
     expect(screen.getByRole("button", { name: "识别项目" })).toBeTruthy();
-    expect(apply).not.toHaveBeenCalled();
-    expect(diagnose).not.toHaveBeenCalled();
+    expect(selectProject).toHaveBeenCalledWith("");
+  });
+
+  it("shows a bounded startup countdown and a differentiated failure", () => {
+    const project = {
+      id: "startup-demo",
+      name: "Startup Demo",
+      projectPath: "/tmp/startup-demo",
+      frontendUrl: "http://127.0.0.1:5173",
+      healthCheckUrl: "http://127.0.0.1:5173",
+      startCommand: "npm run dev"
+    };
+    const detection = {
+      projectPath: project.projectPath,
+      exists: true,
+      executionReady: true,
+      detectedStack: ["vite"],
+      packageManagers: ["npm"],
+      loginCapability: { detected: false, confidence: "none", signals: [] },
+      suggestedConfig: project,
+      ports: [],
+      healthCandidates: [],
+      warnings: [],
+      plainLanguageFixes: []
+    };
+    const baseProps = {
+      projects: [project],
+      selectedProjectId: project.id,
+      draft: project,
+      detection,
+      connection: null,
+      onSelect: vi.fn(),
+      onDraftChange: vi.fn(),
+      onRunDiagnosis: vi.fn(),
+      onStop: vi.fn(),
+      onSaveLoginCredential: vi.fn()
+    };
+    const view = render(<ProjectPanel {...{
+      ...baseProps,
+      status: {
+        projectId: project.id,
+        status: "starting",
+        phase: "waiting_for_health",
+        phaseStartedAt: new Date().toISOString(),
+        deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+        elapsedMs: 1_000,
+        remainingMs: 29_000,
+        progressPercent: 10,
+        message: "waiting"
+      }
+    } as never} />);
+    expect(screen.getByText("正在等待项目地址响应")).toBeTruthy();
+    expect(screen.getByText(/最多还需约 30 秒/)).toBeTruthy();
+
+    view.rerender(<ProjectPanel {...{
+      ...baseProps,
+      status: {
+        projectId: project.id,
+        status: "failed",
+        phase: "failed",
+        failureReason: "port_conflict",
+        message: "EADDRINUSE"
+      }
+    } as never} />);
+    expect(screen.getByText(/目标端口已被其他进程占用/)).toBeTruthy();
+  });
+
+  it("indexes a large project tree without dropping files", () => {
+    const paths = Array.from({ length: 20_000 }, (_, index) => `large-project/node_modules/pkg-${Math.floor(index / 100)}/file-${index}.js`);
+    paths.push("large-project/package.json", "large-project/src/main.tsx");
+    const tree = buildFileTree(paths);
+    const root = tree.find((node) => node.name === "large-project");
+    const dependencyDirectory = root?.children.find((node) => node.name === "node_modules");
+    const indexedFiles = dependencyDirectory?.children.reduce((total, directory) => total + directory.children.length, 0);
+    expect(indexedFiles).toBe(20_000);
+    expect(root?.children.some((node) => node.name === "package.json")).toBe(true);
+    expect(root?.children.some((node) => node.name === "src")).toBe(true);
+  });
+
+  it("keeps the recent-project control visible when the Agent project list is unavailable", () => {
+    const view = render(<ProjectWizardPanel
+      projects={[]}
+      selectedProjectId=""
+      projectPath=""
+      detection={null}
+      onSelectProject={() => undefined}
+      onProjectPathChange={() => undefined}
+      onDetect={() => undefined}
+      projectListNotice="Agent 暂时未连接，历史项目列表目前无法读取。"
+    />);
+    expect(view.container.textContent).toContain("之前接入的项目");
+    expect((view.container.querySelector("select") as HTMLSelectElement).disabled).toBe(true);
+    expect(view.container.textContent).toContain("Agent 暂时未连接，历史项目列表目前无法读取。");
   });
 
   it("propagates connector input and strict mode decisions", async () => {

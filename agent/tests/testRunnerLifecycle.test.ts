@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { buildExecutablePlan } from "../src/executablePlan.js";
 import { buildScenarioGrayPlan } from "../src/plan.js";
 import { getScenario } from "../src/scenarios.js";
-import { assertRunRequestExecutablePlan, shouldAutoStopProjectRuntime } from "../src/testRunner.js";
+import { assertRunRequestExecutablePlan, resolveBrowserHeadlessMode, shouldAutoStopProjectRuntime } from "../src/testRunner.js";
 
 export function testRunnerLifecyclePolicy() {
+  assert.equal(resolveBrowserHeadlessMode(undefined), true, "Workbench runs must not open a foreground browser by default");
+  assert.equal(resolveBrowserHeadlessMode("1"), true);
+  assert.equal(resolveBrowserHeadlessMode("0"), false, "a visible browser is reserved for explicit developer debugging");
   assert.equal(
     shouldAutoStopProjectRuntime({
       projectWasStartedByRunner: true,

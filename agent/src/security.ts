@@ -85,6 +85,9 @@ export function securitySummary() {
 export function createCorsOptions(): CorsOptions {
   const allowedOrigins = new Set(parseCsv(process.env.ALLOWED_ORIGINS, defaultAllowedOrigins));
   return {
+    // Workbench requests use credentials: include for the optional OIDC/BFF
+    // session. The origin is still restricted to the explicit allowlist above.
+    credentials: true,
     origin(origin, callback) {
       if (!origin || allowedOrigins.has(origin)) {
         callback(null, true);

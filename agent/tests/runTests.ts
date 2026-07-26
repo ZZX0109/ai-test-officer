@@ -12,6 +12,7 @@ import { testLocalConfigInit } from "./localConfigInit.test.js";
 import { testPlanStepSchema } from "./planStepSchema.test.js";
 import { testProjectDetectionWizard } from "./projectDetection.test.js";
 import { testProjectAdapter } from "./projectAdapter.test.js";
+import { testProjectLoginStore } from "./projectLoginStore.test.js";
 import { testReportRendererRedaction } from "./reportRenderer.test.js";
 import { testReportsRetention } from "./reportsRetention.test.js";
 import { testRunRequestContract } from "./runRequestContract.test.js";
@@ -42,10 +43,13 @@ import { testRedactionPreservesUsageTelemetry } from "./redaction.test.js";
 import { testCompiledPlanExecution } from "./compiledPlanExecution.test.js";
 import { testBenchmarkSummary } from "./benchmarkSummary.test.js";
 import { testLlmProviderResponsesTransport } from "./llmProvider.test.js";
+import { testPlanningConversation } from "./planningConversation.test.js";
+import { testProjectFolderBrowser } from "./projectFolderBrowser.test.js";
 
 async function main() {
   await testConnectorEnvelope();
   await testProjectDetectionWizard();
+  await testProjectFolderBrowser();
   await testDiscoveryScanDrafts();
   await testGovernanceSecurityBot();
   testCiContract();
@@ -53,12 +57,14 @@ async function main() {
   await testCiCliErrorReports();
   await testCiShellExitContract();
   await testProjectAdapter();
+  await testProjectLoginStore();
   await testExternalProjectSmoke();
   await testInvestmentAgentWorkflowExternalSmoke();
   await testBenchmarkContract();
   await testProductionAcceptanceContract();
   await testLlmPlannerFailClosed();
   await testLlmProviderResponsesTransport();
+  testPlanningConversation();
   testEvidenceQuality();
   testUntrustedInputDefense();
   testRedactionPreservesUsageTelemetry();

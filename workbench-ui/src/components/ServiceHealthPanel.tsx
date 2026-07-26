@@ -5,7 +5,7 @@ type ServiceStatus = "listening" | "missing" | "unhealthy";
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
 
 const serviceChecks = [
-  { id: "agent", label: "Agent", url: viteEnv.VITE_AGENT_HEALTH_URL ?? "http://127.0.0.1:4317/api/health" },
+  { id: "agent", label: "AI 测试服务", url: viteEnv.VITE_AGENT_HEALTH_URL ?? "/agent-api/api/health" },
   { id: "appApi", label: "App API", url: viteEnv.VITE_APP_API_HEALTH_URL ?? "http://127.0.0.1:6172/api/health" },
   { id: "appWeb", label: "App Web", url: viteEnv.VITE_APP_URL ?? "http://127.0.0.1:6173" },
   { id: "workbench", label: "Workbench", url: viteEnv.VITE_WORKBENCH_URL ?? "http://127.0.0.1:6174" }

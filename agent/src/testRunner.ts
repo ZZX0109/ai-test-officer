@@ -35,6 +35,7 @@ import { assessArtifactGate, enforceMachineGate } from "./evidencePolicy.js";
 import { BudgetTracker } from "@ai-test-officer/execution-worker";
 import { classifyRetry } from "./retryPolicy.js";
 import { mirrorArtifactsToConfiguredStore } from "./artifactObjectStore.js";
+import { getProjectLoginSecret } from "./projectLoginStore.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
@@ -60,6 +61,10 @@ function classifyExecutionError(error: unknown, stepId?: string): NonNullable<Vi
 
 function envFlag(name: string) {
   return ["1", "true", "yes", "on"].includes((process.env[name] ?? "").toLowerCase());
+}
+
+export function resolveBrowserHeadlessMode(value = process.env.HEADLESS) {
+  return value !== "0";
 }
 
 async function ensureReportDirs(runId: string) {
@@ -269,7 +274,11 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const screenshotDir = path.join(reportsDir, "screenshots", id);
   const runDir = path.join(reportsDir, "runs", id);
   const evidenceWrites: Promise<unknown>[] = [];
-  const headless = envFlag("HEADLESS");
+  // Product runs are rendered inside the Workbench live view. Launching an
+  // extra OS browser window steals focus from the user and is not part of the
+  // sandbox boundary. Keep execution headless unless a developer explicitly
+  // opts into a visible debugging browser with HEADLESS=0.
+  const headless = resolveBrowserHeadlessMode();
   const recordVideo = envFlag("RECORD_VIDEO") || compiledPlan?.requiredEvidenceKinds.includes("video") === true;
   // Evidence degradation is selected by an opaque evaluator-owned variant. The
   // semantic failure class is intentionally absent from the Agent-visible input.
@@ -277,6 +286,9 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     && input.fixtureVariantId !== "fxv_a6d2c904f7b138e5"
     && input.fixtureVariantId !== "fxv_c8b3e157d0a624f9";
   const configuredProject = input.projectId ? await getProject(input.projectId) : undefined;
+  const projectLoginSecret = configuredProject?.login?.credentialId?.startsWith("login_")
+    ? await getProjectLoginSecret(configuredProject.login.credentialId)
+    : undefined;
   const budgetTracker = new BudgetTracker(configuredProject?.budget);
   const runDeadline = Date.now() + (configuredProject?.budget?.runTimeoutMs ?? budgetTracker.budget.runTimeoutMs);
   const assertWithinRunBudget = () => {
@@ -744,9 +756,11 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       return;
     }
     if (action === "authenticated_onboarding_workflow") {
-      const email = process.env[core.usernameEnv ?? "TEST_WORKFLOW_USERNAME"]?.trim()
+      const email = projectLoginSecret?.username
+        || process.env[core.usernameEnv ?? "TEST_WORKFLOW_USERNAME"]?.trim()
         || `ai-test-officer-${Date.now()}@example.com`;
-      const password = process.env[core.passwordEnv ?? "TEST_WORKFLOW_PASSWORD"]?.trim()
+      const password = projectLoginSecret?.password
+        || process.env[core.passwordEnv ?? "TEST_WORKFLOW_PASSWORD"]?.trim()
         || "InvestmentAgent123!";
       await page.getByRole("button", { name: core.registerButtonName ?? "注册", exact: true }).click();
       await page.getByLabel(core.usernameLabel ?? "邮箱").fill(email);

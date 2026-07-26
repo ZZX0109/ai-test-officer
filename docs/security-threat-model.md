@@ -22,6 +22,8 @@ The system protects credentials, requirement and diff text, screenshots, DOM/net
 | Prompt injection in DOM or diff | Separate untrusted payload section and deterministic baseline | LLM provider isolation is deployment-specific |
 | Credential leakage | AES-GCM, external master key, redaction and atomic writes | Production should use a secret manager |
 | Artifact disclosure | Token-gated artifact route and run-scoped records | Development loopback bypass is for local mode only |
-| Malicious target process | Explicit workspace and process controls | Full container sandbox is deployment work |
+| Malicious target process | Uploaded projects default to OCI with read-only source, ephemeral writable workspace, non-root UID, dropped capabilities, no-new-privileges and CPU/memory/PID limits | `allow-target` networking still requires a deployment egress policy for strict hostname-level filtering |
+
+Trusted local execution remains available only as an explicit compatibility choice. OCI dependency installation and the target process share one ephemeral container workspace; stopping the container removes installed dependencies and build output without modifying the uploaded source directory.
 
 Release findings without valid evidence references are rejected or downgraded to `needs_review`. Simulated and fallback results remain visible as such.

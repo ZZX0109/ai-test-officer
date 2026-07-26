@@ -2,7 +2,8 @@ import { createServer } from "node:net";
 import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { ProjectConfig, ProjectDetectionResult, ProjectDiagnosis, ProjectHealthCheckResult } from "./types.js";
-import { getProject, testProjectConnection } from "./projectAdapter.js";
+import type { CommandSpec, ProjectManifest } from "@ai-test-officer/contracts";
+import { getProject, projectWithActiveRuntime, testProjectConnection } from "./projectAdapter.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
@@ -37,6 +38,56 @@ function scriptsOf(pkg: Record<string, unknown> | undefined) {
   return pkg?.scripts && typeof pkg.scripts === "object" ? pkg.scripts as Record<string, string> : {};
 }
 
+async function detectLoginCapability(projectPath: string, dependencies: Record<string, unknown>) {
+  const dependencySignals: string[] = [];
+  const implementationSignals: string[] = [];
+  let usernameEnv: string | undefined;
+  let passwordEnv: string | undefined;
+  const authDependencies = [
+    "next-auth", "@auth/core", "passport", "@supabase/supabase-js",
+    "firebase", "firebase-admin", "auth0", "@auth0/auth0-react"
+  ];
+  for (const dependency of authDependencies) {
+    if (dependencies[dependency]) dependencySignals.push(`dependency:${dependency}`);
+  }
+  const ignored = new Set(["node_modules", "dist", "build", ".git", ".next", "coverage"]);
+  const pending = [{ directory: projectPath, depth: 0 }];
+  let scanned = 0;
+  while (pending.length && scanned < 500) {
+    const current = pending.shift()!;
+    const entries = await readdir(current.directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (scanned++ >= 500) break;
+      if (ignored.has(entry.name)) continue;
+      const entryPath = path.join(current.directory, entry.name);
+      const relative = path.relative(projectPath, entryPath).replaceAll("\\", "/");
+      if (/(^|\/)(login|sign-?in|sign-?up)(\/|\.|-|_)/i.test(relative)) implementationSignals.push(`path:${relative}`);
+      if (entry.isFile() && /\.(?:[cm]?[jt]sx?|vue|svelte|py)$/i.test(entry.name) && !/(?:migration|generated|fixture)/i.test(relative)) {
+        const source = await readFile(entryPath, "utf8").catch(() => "");
+        const sample = source.slice(0, 250_000);
+        const hasLoginCall = /signInWithPassword|signInWithEmailAndPassword|passport\.authenticate|authenticateUser|\/api\/(?:auth\/)?login/i.test(sample);
+        const hasIdentityField = /(?:name|id|type)\s*=\s*["'](?:email|username|user)["']|getByLabelText\(\s*["'][^"']*(?:email|username|用户名|邮箱)/i.test(sample);
+        const hasPasswordField = /(?:name|id|type)\s*=\s*["']password["']|getByLabelText\(\s*["'][^"']*(?:password|密码)/i.test(sample);
+        if (hasLoginCall || (hasIdentityField && hasPasswordField)) implementationSignals.push(`code:${relative}`);
+        usernameEnv ??= /(?:process\.env\.|import\.meta\.env\.)([A-Z0-9_]*(?:USER|EMAIL|LOGIN)[A-Z0-9_]*)/.exec(sample)?.[1];
+        passwordEnv ??= /(?:process\.env\.|import\.meta\.env\.)([A-Z0-9_]*(?:PASSWORD|PASSWD|PWD)[A-Z0-9_]*)/.exec(sample)?.[1];
+      }
+      if (entry.isDirectory() && current.depth < 4) pending.push({ directory: entryPath, depth: current.depth + 1 });
+    }
+  }
+  const uniqueImplementationSignals = Array.from(new Set(implementationSignals));
+  const uniqueSignals = Array.from(new Set([...uniqueImplementationSignals, ...dependencySignals])).slice(0, 12);
+  const hasLoginPath = uniqueImplementationSignals.some((signal) => signal.startsWith("path:"));
+  const hasLoginCode = uniqueImplementationSignals.some((signal) => signal.startsWith("code:"));
+  return {
+    detected: hasLoginPath || hasLoginCode,
+    confidence: hasLoginPath ? "high" as const : hasLoginCode ? "medium" as const : "none" as const,
+    signals: uniqueSignals,
+    usernameEnv,
+    passwordEnv
+  };
+}
+
 async function detectPythonStack(projectPath: string) {
   const candidates = [
     path.join(projectPath, "requirements.txt"),
@@ -48,15 +99,178 @@ async function detectPythonStack(projectPath: string) {
   return /fastapi|uvicorn/i.test(text) || await exists(path.join(projectPath, "backend", "app.py"));
 }
 
+type EcosystemLaunch = {
+  stack: ProjectDetectionResult["detectedStack"];
+  installCommand?: string;
+  command: string;
+  port: number;
+  processName: string;
+  image: string;
+  allowlist: string[];
+};
+
+async function readFirstExisting(projectPath: string, candidates: string[]) {
+  for (const candidate of candidates) {
+    const filePath = path.join(projectPath, candidate);
+    if (await exists(filePath)) return { relativePath: candidate, content: await readFile(filePath, "utf8").catch(() => "") };
+  }
+  return undefined;
+}
+
+async function detectNonNodeLaunch(projectPath: string, files: string[]): Promise<EcosystemLaunch | undefined> {
+  const pythonDefinition = await readFirstExisting(projectPath, [
+    "pyproject.toml", "requirements.txt", "backend/pyproject.toml", "backend/requirements.txt"
+  ]);
+  const pythonText = pythonDefinition?.content ?? "";
+  if (files.includes("manage.py") || /(?:^|\n)\s*django(?:[<>=~ ]|$)/im.test(pythonText)) {
+    return {
+      stack: ["python", "django"],
+      installCommand: files.includes("uv.lock") ? "uv sync" : files.includes("requirements.txt") ? "pip install -r requirements.txt" : "pip install -e .",
+      command: "python manage.py runserver 0.0.0.0:8000",
+      port: 8000,
+      processName: "web",
+      image: "python:3.12-slim-bookworm",
+      allowlist: ["python", "python3", "pip", "uv"]
+    };
+  }
+  const streamlitEntry = ["streamlit_app.py", "app.py", "main.py"].find((file) => files.includes(file));
+  if (streamlitEntry && /\bstreamlit\b/i.test(pythonText)) {
+    return {
+      stack: ["python", "streamlit"],
+      installCommand: files.includes("uv.lock") ? "uv sync" : "pip install -r requirements.txt",
+      command: `python -m streamlit run ${streamlitEntry} --server.address 0.0.0.0 --server.port 8501`,
+      port: 8501,
+      processName: "web",
+      image: "python:3.12-slim-bookworm",
+      allowlist: ["python", "python3", "pip", "uv"]
+    };
+  }
+  const pythonEntry = ["app.py", "main.py", "backend/app.py", "backend/main.py"].find((file) => files.includes(file));
+  if (pythonEntry && /\bgradio\b/i.test(pythonText)) {
+    return {
+      stack: ["python", "gradio"],
+      installCommand: files.includes("uv.lock") ? "uv sync" : "pip install -r requirements.txt",
+      command: `python ${pythonEntry}`,
+      port: 7860,
+      processName: "web",
+      image: "python:3.12-slim-bookworm",
+      allowlist: ["python", "python3", "pip", "uv"]
+    };
+  }
+  if (pythonEntry && /\bflask\b/i.test(pythonText)) {
+    const moduleName = pythonEntry.replace(/\.py$/i, "").replaceAll("/", ".");
+    return {
+      stack: ["python", "flask"],
+      installCommand: files.includes("uv.lock") ? "uv sync" : "pip install -r requirements.txt",
+      command: `python -m flask --app ${moduleName} run --host 0.0.0.0 --port 5000`,
+      port: 5000,
+      processName: "web",
+      image: "python:3.12-slim-bookworm",
+      allowlist: ["python", "python3", "pip", "uv"]
+    };
+  }
+  if (pythonEntry && /\b(?:fastapi|uvicorn)\b/i.test(pythonText)) {
+    const moduleName = pythonEntry.replace(/\.py$/i, "").replaceAll("/", ".");
+    return {
+      stack: ["python", "fastapi"],
+      installCommand: files.includes("uv.lock") ? "uv sync" : "pip install -r requirements.txt",
+      command: `python -m uvicorn ${moduleName}:app --host 0.0.0.0 --port 8000`,
+      port: 8000,
+      processName: "api",
+      image: "python:3.12-slim-bookworm",
+      allowlist: ["python", "python3", "pip", "uv", "uvicorn"]
+    };
+  }
+  if (files.includes("go.mod")) {
+    return {
+      stack: ["go"],
+      command: "go run .",
+      port: 8080,
+      processName: "web",
+      image: "golang:1.23-bookworm",
+      allowlist: ["go"]
+    };
+  }
+  if (files.includes("Cargo.toml")) {
+    return {
+      stack: ["rust"],
+      command: "cargo run",
+      port: 8080,
+      processName: "web",
+      image: "rust:1.84-bookworm",
+      allowlist: ["cargo"]
+    };
+  }
+  if (files.includes("pom.xml") || files.includes("mvnw")) {
+    return {
+      stack: ["java", "spring"],
+      command: files.includes("mvnw") ? "./mvnw spring-boot:run" : "mvn spring-boot:run",
+      port: 8080,
+      processName: "web",
+      image: "maven:3.9-eclipse-temurin-21",
+      allowlist: ["mvn", "./mvnw", "java"]
+    };
+  }
+  if (files.includes("build.gradle") || files.includes("build.gradle.kts") || files.includes("gradlew")) {
+    return {
+      stack: ["java", "spring"],
+      command: files.includes("gradlew") ? "./gradlew bootRun" : "gradle bootRun",
+      port: 8080,
+      processName: "web",
+      image: "gradle:8.12-jdk21",
+      allowlist: ["gradle", "./gradlew", "java"]
+    };
+  }
+  if (files.includes("Gemfile") && (files.includes("config.ru") || await exists(path.join(projectPath, "bin", "rails")))) {
+    return {
+      stack: ["ruby", "rails"],
+      installCommand: "bundle install",
+      command: "bundle exec rails server -b 0.0.0.0 -p 3000",
+      port: 3000,
+      processName: "web",
+      image: "ruby:3.3-bookworm",
+      allowlist: ["bundle", "ruby"]
+    };
+  }
+  if (files.includes("artisan")) {
+    return {
+      stack: ["php", "laravel"],
+      installCommand: "composer install",
+      command: "php artisan serve --host 0.0.0.0 --port 8000",
+      port: 8000,
+      processName: "web",
+      image: "composer:2",
+      allowlist: ["php", "composer"]
+    };
+  }
+  if (files.includes("index.html")) {
+    return {
+      stack: ["static"],
+      command: "python3 -m http.server 4173 --bind 0.0.0.0",
+      port: 4173,
+      processName: "web",
+      image: "python:3.12-slim-bookworm",
+      allowlist: ["python3"]
+    };
+  }
+  return undefined;
+}
+
 async function detectPackageManagers(projectPath: string): Promise<ProjectDetectionResult["packageManagers"]> {
   const managers: ProjectDetectionResult["packageManagers"] = [];
-  if (await exists(path.join(projectPath, "package-lock.json"))) managers.push("npm");
-  if (await exists(path.join(projectPath, "pnpm-lock.yaml"))) managers.push("pnpm");
-  if (await exists(path.join(projectPath, "yarn.lock"))) managers.push("yarn");
+  const hasNpmLock = await exists(path.join(projectPath, "package-lock.json"));
+  const hasPnpmLock = await exists(path.join(projectPath, "pnpm-lock.yaml"));
+  const hasYarnLock = await exists(path.join(projectPath, "yarn.lock"));
+  if (hasNpmLock) managers.push("npm");
+  if (hasPnpmLock) managers.push("pnpm");
+  if (hasYarnLock) managers.push("yarn");
+  if (!hasNpmLock && !hasPnpmLock && !hasYarnLock && await exists(path.join(projectPath, "package.json"))) {
+    managers.push("npm");
+  }
   if (await exists(path.join(projectPath, "requirements.txt")) || await exists(path.join(projectPath, "backend", "requirements.txt"))) managers.push("pip");
   if (await exists(path.join(projectPath, "uv.lock"))) managers.push("uv");
   if (await exists(path.join(projectPath, "poetry.lock"))) managers.push("poetry");
-  return managers.length ? managers : ["npm"];
+  return managers;
 }
 
 async function portStatus(port: number) {
@@ -79,8 +293,213 @@ function firstScript(scripts: Record<string, string>, names: string[]) {
   return undefined;
 }
 
+function configuredFrontendPort(scripts: Record<string, string>, configText: string, fallback: number) {
+  const scriptText = Object.values(scripts).join("\n");
+  const scriptMatch = /(?:--port|-p)\s*[= ]\s*(\d{2,5})\b/.exec(scriptText);
+  if (scriptMatch) return Number(scriptMatch[1]);
+  const viteConfigMatch = /\bserver\s*:\s*\{[\s\S]{0,2500}?\bport\s*:\s*(\d{2,5})\b/m.exec(configText);
+  if (viteConfigMatch) return Number(viteConfigMatch[1]);
+  const viteDefaultPort = /\bport\s*:\s*[\s\S]{0,180}?\|\|\s*(\d{2,5})\b/m.exec(configText);
+  if (viteDefaultPort) return Number(viteDefaultPort[1]);
+  return fallback;
+}
+
+async function readFrontendConfig(projectPath: string) {
+  const candidates = ["vite.config.ts", "vite.config.js", "vite.config.mjs", "vite.config.cjs"];
+  for (const candidate of candidates) {
+    const filePath = path.join(projectPath, candidate);
+    if (await exists(filePath)) return readFile(filePath, "utf8").catch(() => "");
+  }
+  return "";
+}
+
+type NodePackageManager = "npm" | "pnpm" | "yarn";
+type FrontendFramework = "vite" | "next" | "react-scripts" | "generic";
+
+function workspacePatterns(pkg: Record<string, unknown> | undefined) {
+  const value = pkg?.workspaces;
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  if (value && typeof value === "object" && Array.isArray((value as { packages?: unknown }).packages)) {
+    return (value as { packages: unknown[] }).packages.filter((item): item is string => typeof item === "string");
+  }
+  return [];
+}
+
+async function workspaceDirectories(projectPath: string, pkg: Record<string, unknown> | undefined) {
+  const roots = new Set<string>(["packages", "apps", "frontend", "client", "web", "ui"]);
+  const direct = new Set<string>();
+  for (const pattern of workspacePatterns(pkg)) {
+    const normalized = pattern.replaceAll("\\", "/").replace(/^\.\/+/, "").replace(/\/+$/, "");
+    if (!normalized || normalized.startsWith("..")) continue;
+    const wildcardIndex = normalized.search(/[*{[]/);
+    if (wildcardIndex === -1) direct.add(normalized);
+    else {
+      const prefix = normalized.slice(0, wildcardIndex).replace(/\/+$/, "");
+      if (prefix) roots.add(prefix);
+    }
+  }
+  const directories = new Set<string>();
+  for (const relative of direct) {
+    const candidate = path.join(projectPath, relative);
+    if (await exists(path.join(candidate, "package.json"))) directories.add(candidate);
+  }
+  for (const relative of roots) {
+    const root = path.join(projectPath, relative);
+    if (await exists(path.join(root, "package.json"))) directories.add(root);
+    const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries.slice(0, 80)) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const candidate = path.join(root, entry.name);
+      if (await exists(path.join(candidate, "package.json"))) directories.add(candidate);
+    }
+  }
+  return Array.from(directories).slice(0, 120);
+}
+
+function frontendFramework(dependencies: Record<string, unknown>, scripts: Record<string, string>): FrontendFramework | undefined {
+  const scriptText = Object.values(scripts).join("\n");
+  if (dependencies.vite || /\bvite\b/i.test(scriptText)) return "vite";
+  if (dependencies.next || /\bnext\s+dev\b/i.test(scriptText)) return "next";
+  if (dependencies["react-scripts"] || /\breact-scripts\s+start\b/i.test(scriptText)) return "react-scripts";
+  const hasUiDependency = Boolean(dependencies.react || dependencies.vue || dependencies.svelte || dependencies["@angular/core"]);
+  return hasUiDependency && (scripts.dev || scripts.start || scripts.serve) ? "generic" : undefined;
+}
+
+function workspaceStartCommand(input: {
+  manager: NodePackageManager;
+  packageName: string;
+  framework: FrontendFramework;
+  script: "dev" | "start" | "serve";
+  port: number;
+}) {
+  const { manager, packageName, framework, script, port } = input;
+  if (framework === "vite" && manager === "pnpm") {
+    return `pnpm --filter ${packageName} exec vite --host 0.0.0.0 --port ${port} --strictPort`;
+  }
+  const prefix = manager === "pnpm"
+    ? `pnpm --filter ${packageName} run ${script}`
+    : manager === "npm"
+      ? `npm --workspace ${packageName} run ${script} --`
+      : `yarn workspace ${packageName} run ${script}`;
+  if (framework === "vite") return `${prefix} --host 0.0.0.0 --port ${port} --strictPort`;
+  if (framework === "next") return `${prefix} --hostname 0.0.0.0 --port ${port}`;
+  return prefix;
+}
+
+async function detectWorkspaceFrontend(
+  projectPath: string,
+  pkg: Record<string, unknown> | undefined,
+  manager: NodePackageManager
+) {
+  const candidates: Array<{
+    name: string;
+    framework: FrontendFramework;
+    port: number;
+    command: string;
+    score: number;
+  }> = [];
+  for (const workspacePath of await workspaceDirectories(projectPath, pkg)) {
+    const workspacePackage = await readJson(path.join(workspacePath, "package.json"));
+    const workspaceDeps = depsOf(workspacePackage);
+    const workspaceScripts = scriptsOf(workspacePackage);
+    const packageName = typeof workspacePackage?.name === "string" ? workspacePackage.name : "";
+    if (!packageName || !/^[@a-zA-Z0-9._/-]+$/.test(packageName)) continue;
+    const framework = frontendFramework(workspaceDeps, workspaceScripts);
+    const script = (["dev", "start", "serve"] as const).find((name) => Boolean(workspaceScripts[name]));
+    if (!framework || !script) continue;
+    const config = await readFrontendConfig(workspacePath);
+    const fallbackPort = framework === "vite" ? 5173 : 3000;
+    const port = configuredFrontendPort(workspaceScripts, config, fallbackPort);
+    const label = `${packageName} ${path.basename(workspacePath)}`;
+    const score = (framework === "vite" || framework === "next" ? 100 : 50)
+      + (/(?:^|[-_/])(ui|web|client|frontend|app)(?:$|[-_/])/i.test(label) ? 30 : 0)
+      + (workspaceDeps.react || workspaceDeps.vue || workspaceDeps.svelte ? 15 : 0)
+      - (/(?:server|api|worker|cli)/i.test(label) ? 80 : 0);
+    candidates.push({
+      name: packageName,
+      framework,
+      port,
+      command: workspaceStartCommand({ manager, packageName, framework, script, port }),
+      score
+    });
+  }
+  return candidates.sort((left, right) => right.score - left.score)[0];
+}
+
 function projectIdFromPath(projectPath: string) {
   return path.basename(projectPath).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `project_${Date.now()}`;
+}
+
+function commandSpec(command: string | undefined, timeoutMs = 300_000): CommandSpec | undefined {
+  const parts = command?.trim().split(/\s+/).filter(Boolean) ?? [];
+  if (!parts.length || parts.some((part) => /[;&|`$<>]/.test(part))) return undefined;
+  return { executable: parts[0], args: parts.slice(1), timeoutMs };
+}
+
+function nodeEngineFromPackage(pkg: Record<string, unknown> | undefined) {
+  const engines = pkg?.engines;
+  if (!engines || typeof engines !== "object") return undefined;
+  const node = (engines as Record<string, unknown>).node;
+  return typeof node === "string" ? node.trim() : undefined;
+}
+
+function sandboxImage(stack: ProjectDetectionResult["detectedStack"], nodeEngine?: string) {
+  return stack.includes("python") || stack.includes("fastapi")
+    ? "python:3.12-slim-bookworm"
+    : (() => {
+      // Prefer a pinned image when a project declares an exact Node engine.
+      // This keeps package-manager engine checks inside the sandbox aligned
+      // with the uploaded repository, rather than silently using the Agent's
+      // own Node version.
+      const exact = (nodeEngine?.match(/(?:^|[^0-9])(\d+\.\d+\.\d+)(?:$|[^0-9])/) ?? [])[1];
+      if (exact) return `node:${exact}-bookworm-slim`;
+      const major = nodeEngine?.match(/\d{2}/)?.[0];
+      return `node:${major ?? "22"}-bookworm-slim`;
+    })();
+}
+
+function sandboxManifest(input: {
+  projectId: string;
+  stack: ProjectDetectionResult["detectedStack"];
+  nodeEngine?: string;
+  image?: string;
+  commandAllowlist?: string[];
+  install?: CommandSpec;
+  start?: CommandSpec;
+  frontendPort: number;
+  backendPort?: number;
+}): ProjectManifest {
+  return {
+    schemaVersion: "1.0",
+    projectId: input.projectId,
+    workspaceRoot: ".",
+    commands: { install: input.install, start: input.start },
+    commandAllowlist: input.commandAllowlist
+      ?? ["npm", "npx", "node", "pnpm", "yarn", "python", "python3", "pip", "uv", "uvicorn"],
+    ports: [
+      { name: "frontend", env: "FRONTEND_PORT", purpose: "frontend" },
+      ...(input.backendPort ? [{ name: "backend", env: "BACKEND_PORT", purpose: "backend" as const }] : [])
+    ],
+    healthCheck: { path: "/", timeoutMs: 30_000 },
+    environmentAllowlist: ["NODE_ENV", "FRONTEND_PORT", "BACKEND_PORT"],
+    network: { mode: "allow-target", allowedHosts: ["127.0.0.1", "localhost"] },
+    fixtures: [],
+    capabilities: { browser: true, desktop: false, allowedBundleIds: [] },
+    execution: { mode: "oci", image: input.image ?? sandboxImage(input.stack, input.nodeEngine), engine: "docker" },
+    budget: {
+      runTimeoutMs: 1_200_000,
+      prepareTimeoutMs: 300_000,
+      scenarioTimeoutMs: 300_000,
+      stepTimeoutMs: 45_000,
+      maxSteps: 50,
+      maxAttempts: 2,
+      maxScreenshots: 100,
+      maxVideoBytes: 500 * 1024 * 1024,
+      maxLogBytes: 50 * 1024 * 1024,
+      maxArtifactBytes: 1024 * 1024 * 1024,
+      maxConcurrency: 2
+    }
+  };
 }
 
 export async function detectProject(projectPathInput: string): Promise<ProjectDetectionResult> {
@@ -90,34 +509,100 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
   const deps = depsOf(pkg);
   const scripts = scriptsOf(pkg);
   const files = projectExists ? await readdir(projectPath).catch(() => []) : [];
+  const ecosystemLaunch = projectExists && !pkg
+    ? await detectNonNodeLaunch(projectPath, files)
+    : undefined;
   const hasFastApi = projectExists ? await detectPythonStack(projectPath) : false;
+  const frontendConfigText = projectExists ? await readFrontendConfig(projectPath) : "";
+  const loginCapability = projectExists
+    ? await detectLoginCapability(projectPath, deps)
+    : { detected: false, confidence: "none" as const, signals: [], usernameEnv: undefined, passwordEnv: undefined };
   const detectedStack: ProjectDetectionResult["detectedStack"] = [];
+  if (pkg) detectedStack.push("node");
+  if (deps.react) detectedStack.push("react");
+  if (deps.vue) detectedStack.push("vue");
+  if (deps.svelte) detectedStack.push("svelte");
+  if (deps.typescript || files.some((file) => file.startsWith("tsconfig"))) detectedStack.push("typescript");
+  if (deps.tailwindcss || files.some((file) => file.startsWith("tailwind.config."))) detectedStack.push("tailwind");
+  if (hasFastApi || files.includes("requirements.txt") || files.includes("pyproject.toml")) detectedStack.push("python");
   if (deps.vite || /vite/i.test(Object.values(scripts).join("\n"))) detectedStack.push("vite");
   if (deps.next || files.some((file) => file === "next.config.js" || file === "next.config.mjs" || file === "next.config.ts")) detectedStack.push("next");
   if (deps.express || /express/i.test(Object.values(scripts).join("\n"))) detectedStack.push("express");
   if (hasFastApi) detectedStack.push("fastapi");
+  for (const stack of ecosystemLaunch?.stack ?? []) {
+    if (!detectedStack.includes(stack)) detectedStack.push(stack);
+  }
   if (!detectedStack.length) detectedStack.push("unknown");
 
   const packageManagers = await detectPackageManagers(projectPath);
-  const installCommand = packageManagers.includes("pnpm") ? "pnpm install" : packageManagers.includes("yarn") ? "yarn install" : "npm install";
-  const frontendPort = detectedStack.includes("next") ? 3000 : 5173;
-  const backendPort = detectedStack.includes("fastapi") ? 8000 : detectedStack.includes("express") ? 3000 : undefined;
+  const nodePackageManager: NodePackageManager = packageManagers.includes("pnpm")
+    ? "pnpm"
+    : packageManagers.includes("yarn")
+      ? "yarn"
+      : "npm";
+  const workspaceFrontend = projectExists && pkg
+    ? await detectWorkspaceFrontend(projectPath, pkg, nodePackageManager)
+    : undefined;
+  if (workspaceFrontend?.framework === "vite" && !detectedStack.includes("vite")) detectedStack.push("vite");
+  if (workspaceFrontend?.framework === "next" && !detectedStack.includes("next")) detectedStack.push("next");
+  const hasNpmLock = projectExists && await exists(path.join(projectPath, "package-lock.json"));
+  const installCommand = ecosystemLaunch?.installCommand ?? (packageManagers.includes("pnpm")
+    // A monorepo may contain heavyweight test tooling (for example Cypress)
+    // unrelated to the detected browser application.  Install only the
+    // selected UI workspace and its dependency graph inside the sandbox.
+    ? workspaceFrontend?.name
+      ? `pnpm --filter ${workspaceFrontend.name} install --frozen-lockfile`
+      : "pnpm install --frozen-lockfile"
+    : packageManagers.includes("yarn")
+      ? "yarn install"
+      : packageManagers.includes("uv")
+        ? "uv sync"
+        : packageManagers.includes("poetry")
+          ? "poetry install"
+          : packageManagers.includes("pip")
+            ? "pip install -r requirements.txt"
+            : packageManagers.includes("npm")
+              ? hasNpmLock ? "npm ci" : "npm install"
+              : "");
+  const frontendPort = ecosystemLaunch?.port
+    ?? workspaceFrontend?.port
+    ?? configuredFrontendPort(scripts, frontendConfigText, detectedStack.includes("next") ? 3000 : 5173);
+  const backendPort = ecosystemLaunch?.processName === "api"
+    ? ecosystemLaunch.port
+    : detectedStack.includes("fastapi")
+      ? 8000
+      : detectedStack.includes("express")
+        ? 3000
+        : undefined;
   const frontendUrl = `http://127.0.0.1:${frontendPort}`;
   const backendUrl = backendPort ? `http://127.0.0.1:${backendPort}/api/health` : undefined;
-  const devCommand = firstScript(scripts, ["dev", "start", "serve"]) ?? (detectedStack.includes("fastapi") ? "uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000" : "npm run dev");
+  const baseDevCommand = ecosystemLaunch?.command
+    ?? workspaceFrontend?.command
+    ?? firstScript(scripts, ["dev", "start", "serve"])
+    ?? (detectedStack.includes("fastapi") ? "python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000" : "npm run dev");
+  const devCommand = detectedStack.includes("vite") && !/--host\b/.test(baseDevCommand)
+    ? `${baseDevCommand} -- --host 0.0.0.0`
+    : baseDevCommand;
   const processes: ProjectConfig["processes"] = [];
-  if (detectedStack.includes("fastapi")) {
+  if (ecosystemLaunch) {
+    processes.push({
+      name: ecosystemLaunch.processName,
+      command: devCommand,
+      healthCheckUrl: frontendUrl,
+      required: true
+    });
+  } else if (detectedStack.includes("fastapi")) {
     processes.push({
       name: "api",
-      command: firstScript(scripts, ["dev:api", "api", "backend"]) ?? "uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000",
+      command: firstScript(scripts, ["dev:api", "api", "backend"]) ?? "python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000",
       healthCheckUrl: "http://127.0.0.1:8000/api/health",
       required: true
     });
   }
-  if (detectedStack.includes("vite") || detectedStack.includes("next")) {
+  if (!ecosystemLaunch && (workspaceFrontend || detectedStack.includes("vite") || detectedStack.includes("next"))) {
     processes.push({
       name: "web",
-      command: detectedStack.includes("vite") ? `${devCommand} -- --port ${frontendPort}` : devCommand,
+      command: workspaceFrontend ? workspaceFrontend.command : detectedStack.includes("vite") ? `${devCommand} --port ${frontendPort} --strictPort` : devCommand,
       healthCheckUrl: frontendUrl,
       required: true
     });
@@ -125,19 +610,39 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
     processes.push({ name: "app", command: devCommand, healthCheckUrl: frontendUrl, required: true });
   }
 
+  const projectId = projectIdFromPath(projectPath);
+  const installCommandSpec = commandSpec(projectExists && installCommand ? installCommand : undefined);
+  const processSpecs = processes.map((process) => ({ ...process, commandSpec: commandSpec(process.command) }));
   const suggestedConfig: ProjectConfig = {
-    id: projectIdFromPath(projectPath),
+    id: projectId,
     name: path.basename(projectPath).replace(/[-_]+/g, " "),
     projectPath,
     allowExternalProjectPath: path.isAbsolute(projectPathInput),
-    installCommand: projectExists && pkg ? installCommand : "",
+    installCommand: projectExists ? installCommand : "",
+    installCommandSpec,
     startCommand: processes.length ? "" : devCommand,
-    processes,
+    startCommandSpec: processes.length ? undefined : commandSpec(devCommand),
+    processes: processSpecs,
     healthCheckUrl: backendUrl ?? frontendUrl,
     frontendUrl,
     backendUrl,
-    login: { method: "none" },
+    login: loginCapability.detected ? {
+      method: "env",
+      usernameEnv: loginCapability.usernameEnv ?? "E2E_USERNAME",
+      passwordEnv: loginCapability.passwordEnv ?? "E2E_PASSWORD"
+    } : { method: "none" },
     env: {},
+    manifest: sandboxManifest({
+      projectId,
+      stack: detectedStack,
+      nodeEngine: nodeEngineFromPackage(pkg),
+      image: ecosystemLaunch?.image,
+      commandAllowlist: ecosystemLaunch?.allowlist,
+      install: installCommandSpec,
+      start: processSpecs[0]?.commandSpec ?? commandSpec(devCommand),
+      frontendPort,
+      backendPort
+    }),
     timeoutMs: 30_000,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -156,18 +661,190 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
   ].filter((value): value is string => Boolean(value));
   const warnings = [
     projectExists ? undefined : "项目路径不存在。",
-    !pkg && !hasFastApi ? "没有识别到 package.json 或 FastAPI 入口。" : undefined,
-    ports.some((port) => port.status === "listening") ? "检测到推荐端口已有服务监听，启动前请确认是否为目标项目。" : undefined
+    !pkg && !ecosystemLaunch ? "没有识别到受支持的项目入口或依赖清单。" : undefined
   ].filter((item): item is string => Boolean(item));
   const plainLanguageFixes = [
     projectExists ? "项目路径可以访问。" : "请确认项目文件夹路径是否正确，或者在 Finder 中复制完整路径。",
-    pkg ? `检测到前端/Node 项目，可先运行：${installCommand}` : "如果这是 Python 项目，请确认 requirements.txt 或 pyproject.toml 存在。",
-    ports.some((port) => port.status === "listening")
-      ? "如果启动失败提示端口占用，请先关闭占用端口的旧 dev server，或把项目端口改成未占用端口。"
-      : "推荐端口当前可用。",
+    pkg
+      ? `检测到前端/Node 项目，系统将自动准备：${installCommand || "无需安装依赖"}`
+      : ecosystemLaunch
+        ? `检测到 ${ecosystemLaunch.stack.join(" + ")} 项目，系统将自动在沙盒中启动。`
+        : "请确认项目根目录包含框架入口或依赖清单。",
     backendUrl ? `后端健康检查建议先打开 ${backendUrl}，看到 200/ok 再运行测试。` : `前端健康检查建议先打开 ${frontendUrl}。`
   ];
-  return { projectPath, exists: projectExists, detectedStack, packageManagers, suggestedConfig, ports, healthCandidates, warnings, plainLanguageFixes };
+  return {
+    projectPath,
+    exists: projectExists,
+    detectionSource: "filesystem",
+    executionReady: projectExists,
+    detectedStack,
+    packageManagers,
+    loginCapability,
+    suggestedConfig,
+    ports,
+    healthCandidates,
+    warnings,
+    plainLanguageFixes
+  };
+}
+
+export async function detectProjectManifest(input: {
+  rootName: string;
+  files: Array<{ relativePath: string; content?: string }>;
+}): Promise<ProjectDetectionResult> {
+  const normalizedRoot = input.rootName.trim() || "uploaded-project";
+  const safeRootName = path.basename(normalizedRoot);
+  const configuredDiscoveryRoots = (process.env.PROJECT_DISCOVERY_ROOTS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => path.resolve(value));
+  const developmentDiscoveryRoots = process.env.NODE_ENV === "development"
+    ? [rootDir, path.dirname(rootDir), path.dirname(path.dirname(rootDir))]
+    : [];
+  const discoveryRoots = Array.from(new Set([...configuredDiscoveryRoots, ...developmentDiscoveryRoots]));
+  for (const discoveryRoot of discoveryRoots) {
+    const candidate = path.resolve(discoveryRoot, safeRootName);
+    if (path.dirname(candidate) !== discoveryRoot || !await exists(candidate)) continue;
+    const detected = await detectProject(candidate);
+    if (detected.exists) return detected;
+  }
+
+  const fileNames = input.files.map((file) => file.relativePath.replaceAll("\\", "/"));
+  const packageEntry = input.files.find((file) => /(^|\/)package\.json$/i.test(file.relativePath));
+  let pkg: Record<string, unknown> | undefined;
+  try {
+    pkg = packageEntry?.content ? JSON.parse(packageEntry.content) as Record<string, unknown> : undefined;
+  } catch {
+    pkg = undefined;
+  }
+  const dependencyNames = depsOf(pkg);
+  const scripts = scriptsOf(pkg);
+  const textFiles = input.files.map((file) => file.content ?? "").join("\n");
+  const detectedStack: ProjectDetectionResult["detectedStack"] = [];
+  if (packageEntry) detectedStack.push("node");
+  if (dependencyNames.react) detectedStack.push("react");
+  if (dependencyNames.vue) detectedStack.push("vue");
+  if (dependencyNames.svelte) detectedStack.push("svelte");
+  if (dependencyNames.typescript || fileNames.some((name) => /(^|\/)tsconfig(?:\.[^/]+)?\.json$/i.test(name))) detectedStack.push("typescript");
+  if (dependencyNames.tailwindcss || fileNames.some((name) => /(^|\/)tailwind\.config\.[^/]+$/i.test(name))) detectedStack.push("tailwind");
+  if (fileNames.some((name) => /(^|\/)(requirements\.txt|pyproject\.toml)$/i.test(name))) detectedStack.push("python");
+  if (dependencyNames.vite || /vite/i.test(Object.values(scripts).join("\n")) || fileNames.some((name) => /(^|\/)vite\.config\.[^/]+$/i.test(name))) detectedStack.push("vite");
+  if (dependencyNames.next || fileNames.some((name) => /(^|\/)next\.config\.[^/]+$/i.test(name))) detectedStack.push("next");
+  if (dependencyNames.express || /express/i.test(Object.values(scripts).join("\n"))) detectedStack.push("express");
+  if (/fastapi|uvicorn/i.test(textFiles) || fileNames.some((name) => /(^|\/)backend\/app\.py$/i.test(name))) detectedStack.push("fastapi");
+  if (!detectedStack.length) detectedStack.push("unknown");
+
+  const packageManagers: ProjectDetectionResult["packageManagers"] = [];
+  if (fileNames.some((name) => /(^|\/)package-lock\.json$/i.test(name))) packageManagers.push("npm");
+  if (fileNames.some((name) => /(^|\/)pnpm-lock\.yaml$/i.test(name))) packageManagers.push("pnpm");
+  if (fileNames.some((name) => /(^|\/)yarn\.lock$/i.test(name))) packageManagers.push("yarn");
+  if (fileNames.some((name) => /(^|\/)requirements\.txt$/i.test(name))) packageManagers.push("pip");
+  if (fileNames.some((name) => /(^|\/)uv\.lock$/i.test(name))) packageManagers.push("uv");
+  if (fileNames.some((name) => /(^|\/)poetry\.lock$/i.test(name))) packageManagers.push("poetry");
+  if (!packageManagers.length && packageEntry) packageManagers.push("npm");
+
+  const frontendPort = configuredFrontendPort(scripts, textFiles, detectedStack.includes("next") ? 3000 : 5173);
+  const backendPort = detectedStack.includes("fastapi") ? 8000 : detectedStack.includes("express") ? 3000 : undefined;
+  const frontendUrl = `http://127.0.0.1:${frontendPort}`;
+  const backendUrl = backendPort ? `http://127.0.0.1:${backendPort}/api/health` : undefined;
+  const installCommand = packageManagers.includes("pnpm") ? "pnpm install" : packageManagers.includes("yarn") ? "yarn install" : packageManagers.includes("pip") ? "pip install -r requirements.txt" : "npm install";
+  const resolvedInstallCommand = packageManagers.includes("npm") && fileNames.some((name) => /(^|\/)package-lock\.json$/i.test(name))
+    ? "npm ci"
+    : installCommand;
+  const baseDevCommand = firstScript(scripts, ["dev", "start", "serve"]) ?? (detectedStack.includes("fastapi") ? "python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000" : "npm run dev");
+  const devCommand = detectedStack.includes("vite") && !/--host\b/.test(baseDevCommand)
+    ? `${baseDevCommand} -- --host 0.0.0.0 --port ${frontendPort} --strictPort`
+    : baseDevCommand;
+  const now = new Date().toISOString();
+  const projectId = projectIdFromPath(normalizedRoot);
+  const installCommandSpec = commandSpec(resolvedInstallCommand);
+  const startCommandSpec = commandSpec(devCommand);
+  const suggestedConfig: ProjectConfig = {
+    id: projectId,
+    name: normalizedRoot.replace(/[-_]+/g, " "),
+    projectPath: normalizedRoot,
+    allowExternalProjectPath: true,
+    installCommand: resolvedInstallCommand,
+    installCommandSpec,
+    startCommand: devCommand,
+    startCommandSpec,
+    healthCheckUrl: backendUrl ?? frontendUrl,
+    frontendUrl,
+    backendUrl,
+    login: { method: "none" },
+    env: {},
+    manifest: sandboxManifest({
+      projectId,
+      stack: detectedStack,
+      nodeEngine: nodeEngineFromPackage(pkg),
+      install: installCommandSpec,
+      start: startCommandSpec,
+      frontendPort,
+      backendPort
+    }),
+    timeoutMs: 30_000,
+    createdAt: now,
+    updatedAt: now
+  };
+  const portValues = Array.from(new Set([frontendPort, backendPort].filter((value): value is number => Boolean(value))));
+  const ports = await Promise.all(portValues.map(async (port) => ({
+    port,
+    purpose: port === frontendPort ? "frontend" as const : "backend" as const,
+    status: await portStatus(port),
+    url: `http://127.0.0.1:${port}`
+  })));
+  const recognized = Boolean(packageEntry || detectedStack.some((stack) => stack !== "unknown"));
+  const dependencyLoginSignals = [
+    ...["@supabase/supabase-js", "next-auth", "@auth/core", "passport", "firebase", "@auth0/auth0-react"]
+      .filter((dependency) => Boolean(dependencyNames[dependency]))
+      .map((dependency) => `dependency:${dependency}`),
+  ];
+  const implementationLoginSignals = [
+    ...fileNames
+      .filter((name) => /(^|\/)(login|sign-?in|sign-?up)(\/|\.|-|_)/i.test(name))
+      .slice(0, 12)
+      .map((name) => `path:${name}`),
+    ...input.files
+      .filter((file) => {
+        const sample = (file.content ?? "").slice(0, 250_000);
+        const hasLoginCall = /signInWithPassword|signInWithEmailAndPassword|passport\.authenticate|authenticateUser|\/api\/(?:auth\/)?login/i.test(sample);
+        const hasIdentityField = /(?:name|id|type)\s*=\s*["'](?:email|username|user)["']/i.test(sample);
+        const hasPasswordField = /(?:name|id|type)\s*=\s*["']password["']/i.test(sample);
+        return hasLoginCall || (hasIdentityField && hasPasswordField);
+      })
+      .slice(0, 12)
+      .map((file) => `code:${file.relativePath}`)
+  ];
+  const uniqueImplementationLoginSignals = Array.from(new Set(implementationLoginSignals));
+  const uniqueLoginSignals = Array.from(new Set([...uniqueImplementationLoginSignals, ...dependencyLoginSignals]));
+  const manifestText = input.files.map((file) => file.content ?? "").join("\n").slice(0, 1_000_000);
+  const usernameEnv = /(?:process\.env\.|import\.meta\.env\.)([A-Z0-9_]*(?:USER|EMAIL|LOGIN)[A-Z0-9_]*)/.exec(manifestText)?.[1];
+  const passwordEnv = /(?:process\.env\.|import\.meta\.env\.)([A-Z0-9_]*(?:PASSWORD|PASSWD|PWD)[A-Z0-9_]*)/.exec(manifestText)?.[1];
+  return {
+    projectPath: normalizedRoot,
+    exists: recognized,
+    detectionSource: "browser-manifest",
+    executionReady: false,
+    detectedStack,
+    packageManagers,
+    loginCapability: {
+      detected: uniqueImplementationLoginSignals.length > 0,
+      confidence: uniqueImplementationLoginSignals.some((signal) => signal.startsWith("path:")) ? "high" : uniqueImplementationLoginSignals.length ? "medium" : "none",
+      signals: uniqueLoginSignals,
+      usernameEnv,
+      passwordEnv
+    },
+    suggestedConfig,
+    ports,
+    healthCandidates: [backendUrl, frontendUrl].filter((value): value is string => Boolean(value)),
+    warnings: recognized
+      ? ["浏览器已识别项目清单，但不会暴露本机完整路径；运行前需要填写项目完整路径。"]
+      : ["选择的目录中没有找到可识别的 package.json、Python 清单或框架配置。"],
+    plainLanguageFixes: recognized
+      ? ["项目类型已识别。请在下方 Target Project 的“项目路径”中粘贴 Finder 显示的完整路径。"]
+      : ["请确认选择的是项目根目录，而不是 dist、build 或单独的子目录。"]
+  };
 }
 
 function diagnosisStage(input: {
@@ -191,8 +868,8 @@ function diagnosisStage(input: {
 }
 
 export async function diagnoseProject(id: string): Promise<ProjectDiagnosis> {
-  const project = await getProject(id);
-  if (!project) {
+  const storedProject = await getProject(id);
+  if (!storedProject) {
     return {
       projectId: id,
       checkedAt: new Date().toISOString(),
@@ -206,6 +883,7 @@ export async function diagnoseProject(id: string): Promise<ProjectDiagnosis> {
       })]
     };
   }
+  const project = projectWithActiveRuntime(storedProject);
   let connection: ProjectHealthCheckResult;
   try {
     connection = await testProjectConnection(project);
@@ -222,9 +900,14 @@ export async function diagnoseProject(id: string): Promise<ProjectDiagnosis> {
     };
   }
   const detection = await detectProject(project.projectPath);
-  const portConflicts = detection.ports
+  const portConflicts = connection.ok ? [] : detection.ports
     .filter((port) => port.status === "listening")
-    .map((port) => ({ port: port.port, fix: `端口 ${port.port} 已有服务监听。如果不是目标项目，请先停止旧服务或修改端口。` }));
+    .map((port) => ({
+      port: port.port,
+      fix: project.manifest?.execution.mode === "oci"
+        ? "目标地址当前无响应；沙盒启动时应改用空闲的宿主机映射端口。"
+        : "目标地址当前无响应，请改用空闲端口；系统不会终止来源不明的本机进程。"
+    }));
   const stages: ProjectDiagnosis["stages"] = [
     diagnosisStage({
       stage: "path",
@@ -259,7 +942,7 @@ export async function diagnoseProject(id: string): Promise<ProjectDiagnosis> {
       stage: "ports",
       status: portConflicts.length ? "warning" : "passed",
       reason: portConflicts.length ? "port_conflict_possible" : "ports_available",
-      humanMessage: portConflicts.length ? "有推荐端口正在被占用，可能是目标项目已启动，也可能是旧服务残留。" : "推荐端口没有明显冲突。",
+      humanMessage: portConflicts.length ? "目标地址无法连接，并且端口已由其他进程占用。" : connection.ok ? "目标项目已经连接，不需要处理端口。" : "没有检测到端口冲突。",
       suggestedCommands: portConflicts.map((item) => `lsof -nP -iTCP:${item.port} -sTCP:LISTEN`),
       portConflicts
     }

@@ -209,6 +209,54 @@ export interface IntakeAnalysis {
   recommendedTrigger: string;
 }
 
+export interface PlanningMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+}
+
+export interface PlannedBusinessFlow {
+  id: string;
+  title: string;
+  kind: "page" | "component" | "api" | "scenario";
+  target: string;
+  status: "executable" | "needs-input" | "coverage-gap";
+  confidence: "high" | "medium" | "low";
+  reason: string;
+  scenarioId?: string;
+  requiredInformation: string[];
+}
+
+export interface PlanningConversationResult {
+  id: string;
+  phase: "clarifying" | "draft-ready";
+  reply: string;
+  clarificationQuestions: string[];
+  businessFlows: PlannedBusinessFlow[];
+  coverage: {
+    discovered: number;
+    executable: number;
+    needsInput: number;
+    gaps: number;
+    confidence: "high" | "medium" | "low";
+    scope: "targeted" | "comprehensive";
+  };
+  plan: GrayPlan;
+  analysis: IntakeAnalysis;
+  recommendedScenarioId?: string;
+  llmPlanning?: {
+    status: "not_configured" | "passed" | "failed";
+    summary?: string;
+    prioritizedFlowIds: string[];
+    clarificationQuestions: string[];
+    model?: string;
+    callId?: string;
+    durationMs?: number;
+    errorCode?: string;
+  };
+}
+
 export interface HarnessGap {
   id: string;
   createdAt: string;
@@ -461,10 +509,25 @@ export interface ProjectConfig {
   projectPath: string;
   allowExternalProjectPath?: boolean;
   installCommand?: string;
+  installCommandSpec?: {
+    executable: string;
+    args: string[];
+    timeoutMs?: number;
+  };
   startCommand?: string;
+  startCommandSpec?: {
+    executable: string;
+    args: string[];
+    timeoutMs?: number;
+  };
   processes?: Array<{
     name: string;
     command: string;
+    commandSpec?: {
+      executable: string;
+      args: string[];
+      timeoutMs?: number;
+    };
     healthCheckUrl?: string;
     required?: boolean;
   }>;
@@ -480,6 +543,33 @@ export interface ProjectConfig {
   };
   env?: Record<string, string>;
   cleanupCommand?: string;
+  manifest?: {
+    schemaVersion: "1.0";
+    projectId: string;
+    workspaceRoot: string;
+    commands: Record<string, { executable: string; args: string[]; timeoutMs?: number } | undefined>;
+    commandAllowlist: string[];
+    ports: Array<{ name: string; env: string; purpose: "frontend" | "backend" | "health" | "auxiliary" }>;
+    healthCheck?: { path: string; timeoutMs: number };
+    environmentAllowlist: string[];
+    network: { mode: "deny" | "allow-target" | "allowlist"; allowedHosts: string[] };
+    fixtures: Array<{ id: string; path: string; sha256: string; destructive: boolean }>;
+    capabilities: { browser: boolean; desktop: boolean; allowedBundleIds: string[] };
+    execution: { mode: "oci" | "trusted-local"; image?: string; engine: "docker" | "podman" };
+    budget: {
+      runTimeoutMs: number;
+      prepareTimeoutMs: number;
+      scenarioTimeoutMs: number;
+      stepTimeoutMs: number;
+      maxSteps: number;
+      maxAttempts: number;
+      maxScreenshots: number;
+      maxVideoBytes: number;
+      maxLogBytes: number;
+      maxArtifactBytes: number;
+      maxConcurrency: number;
+    };
+  };
   timeoutMs?: number;
   externalSmokeProfile?: {
     login?: {
@@ -530,8 +620,23 @@ export interface ProjectConfig {
 export interface ProjectDetectionResult {
   projectPath: string;
   exists: boolean;
-  detectedStack: Array<"vite" | "next" | "fastapi" | "express" | "unknown">;
+  detectionSource?: "filesystem" | "browser-manifest";
+  executionReady?: boolean;
+  detectedStack: Array<
+    "node" | "react" | "vue" | "svelte" | "typescript" | "tailwind"
+    | "vite" | "next" | "nuxt" | "astro" | "angular" | "remix" | "express"
+    | "python" | "fastapi" | "django" | "flask" | "streamlit" | "gradio"
+    | "static" | "go" | "rust" | "java" | "spring" | "ruby" | "rails"
+    | "php" | "laravel" | "unknown"
+  >;
   packageManagers: Array<"npm" | "pnpm" | "yarn" | "pip" | "uv" | "poetry">;
+  loginCapability?: {
+    detected: boolean;
+    confidence: "high" | "medium" | "none";
+    signals: string[];
+    usernameEnv?: string;
+    passwordEnv?: string;
+  };
   suggestedConfig: ProjectConfig;
   ports: Array<{
     port: number;
@@ -596,6 +701,13 @@ export interface ProjectHealthCheckResult {
 export interface ProjectRuntimeStatus {
   projectId: string;
   status: "idle" | "installing" | "starting" | "running" | "failed" | "stopped";
+  phase?: "idle" | "installing_dependencies" | "starting_processes" | "waiting_for_health" | "ready" | "stopping" | "failed";
+  phaseStartedAt?: string;
+  deadlineAt?: string;
+  elapsedMs?: number;
+  remainingMs?: number;
+  progressPercent?: number;
+  updatedAt?: string;
   pid?: number;
   processes?: Array<{
     name: string;
@@ -613,6 +725,19 @@ export interface ProjectRuntimeStatus {
   healthCheckUrl?: string;
   failureReason?: string;
   message?: string;
+}
+
+export interface RuntimeRecoveryAdvice {
+  status: "not_configured" | "passed" | "failed";
+  summary?: string;
+  failureClass?: "configuration" | "dependency" | "port" | "runtime" | "environment" | "unknown";
+  selectedCandidateId?: string;
+  nextStep?: "retry_current" | "use_candidate" | "repair_dependencies" | "ask_user";
+  model?: string;
+  callId?: string;
+  durationMs?: number;
+  errorCode?: string;
+  candidates: Array<{ id: string; label: string; command: string; frontendUrl?: string }>;
 }
 
 export interface SourceReadEnvelope {

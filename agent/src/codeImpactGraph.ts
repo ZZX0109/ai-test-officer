@@ -5,12 +5,12 @@ import path from "node:path";
 import ts from "typescript";
 
 export type CodeGraphNodeKind = "file" | "symbol" | "api-route" | "frontend-call" | "page" | "scenario" | "historical-bug";
-export interface CodeGraphNode { id: string; kind: CodeGraphNodeKind; label: string; file?: string; line?: number; confidence: "high" | "medium" | "low" }
+export interface CodeGraphNode { id: string; kind: CodeGraphNodeKind; label: string; file?: string; line?: number; confidence: "high" | "medium" | "low"; symbolType?: "function" | "class" | "interface" }
 export interface CodeGraphEdge { from: string; to: string; kind: "exports" | "serves" | "calls" | "renders" | "covered-by" | "regressed-by"; reason: string }
 export interface CodeImpactGraph { version: "1.0"; createdAt: string; repositoryRoot: string; nodes: CodeGraphNode[]; edges: CodeGraphEdge[]; explanations: string[]; cacheHits: number }
 
 interface CachedFile { sha256: string; nodes: CodeGraphNode[]; edges: CodeGraphEdge[] }
-interface GraphCache { files: Record<string, CachedFile> }
+interface GraphCache { indexerVersion: "3"; files: Record<string, CachedFile> }
 
 function digest(value: string) { return createHash("sha256").update(value).digest("hex"); }
 function id(kind: string, value: string) { return `${kind}_${digest(value).slice(0, 16)}`; }
@@ -96,18 +96,27 @@ function indexTypeScript(file: string, relative: string, sourceText: string): Ca
   const fileId = id("file", relative);
   const nodes: CodeGraphNode[] = [{ id: fileId, kind: "file", label: relative, file: relative, confidence: "high" }];
   const edges: CodeGraphEdge[] = [];
-  const addSymbol = (name: string, node: ts.Node) => {
+  const addSymbol = (name: string, node: ts.Node, symbolType: NonNullable<CodeGraphNode["symbolType"]>) => {
     const symbolId = id("symbol", `${relative}:${name}`);
-    nodes.push({ id: symbolId, kind: "symbol", label: name, file: relative, line: lineOf(source, node), confidence: "high" });
+    nodes.push({ id: symbolId, kind: "symbol", label: name, file: relative, line: lineOf(source, node), confidence: "high", symbolType });
     edges.push({ from: fileId, to: symbolId, kind: "exports", reason: `${relative} declares ${name}` });
     return symbolId;
   };
+  const addPageRoute = (route: string, node: ts.Node, confidence: CodeGraphNode["confidence"] = "high") => {
+    const pageId = id("page", `${relative}:${route}`);
+    if (!nodes.some((item) => item.id === pageId)) {
+      nodes.push({ id: pageId, kind: "page", label: route, file: relative, line: lineOf(source, node), confidence });
+      edges.push({ from: fileId, to: pageId, kind: "renders", reason: `${relative} declares page route ${route}.` });
+    }
+  };
   const visit = (node: ts.Node, owner = fileId) => {
     let nextOwner = owner;
-    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)) && node.name) nextOwner = addSymbol(node.name.text, node);
+    if (ts.isFunctionDeclaration(node) && node.name) nextOwner = addSymbol(node.name.text, node, "function");
+    if (ts.isClassDeclaration(node) && node.name) nextOwner = addSymbol(node.name.text, node, "class");
+    if (ts.isInterfaceDeclaration(node) && node.name) nextOwner = addSymbol(node.name.text, node, "interface");
     if (ts.isVariableStatement(node)) {
       for (const declaration of node.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name) && declaration.initializer && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))) nextOwner = addSymbol(declaration.name.text, declaration);
+        if (ts.isIdentifier(declaration.name) && declaration.initializer && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))) nextOwner = addSymbol(declaration.name.text, declaration, "function");
       }
     }
     if (ts.isCallExpression(node) && node.arguments[0] && ts.isStringLiteralLike(node.arguments[0])) {
@@ -124,10 +133,19 @@ function indexTypeScript(file: string, relative: string, sourceText: string): Ca
         edges.push({ from: nextOwner, to: callId, kind: "calls", reason: `${expression} calls ${target}` });
       }
     }
+    if (ts.isJsxAttribute(node) && node.name.getText(source) === "path" && node.initializer && ts.isStringLiteral(node.initializer)) {
+      addPageRoute(node.initializer.text, node);
+    }
+    if (/(^|\/)(routes?|router|app)\//i.test(relative)
+      && ts.isPropertyAssignment(node)
+      && node.name.getText(source).replace(/['"]/g, "") === "path"
+      && ts.isStringLiteralLike(node.initializer)) {
+      addPageRoute(node.initializer.text, node, "medium");
+    }
     ts.forEachChild(node, (child) => visit(child, nextOwner));
   };
   visit(source);
-  if (/(^|\/)(pages|routes|app)\//.test(relative)) {
+  if (/(^|\/)(pages|routes|app)\//.test(relative) || /(^|\/)App\.(?:tsx?|jsx?)$/.test(relative)) {
     const pageId = id("page", relative);
     nodes.push({ id: pageId, kind: "page", label: relative.replace(/\.(tsx?|jsx?)$/, ""), file: relative, confidence: "medium" });
     edges.push({ from: fileId, to: pageId, kind: "renders", reason: "File path matches a page/router convention." });
@@ -153,8 +171,11 @@ async function indexPython(script: string, root: string, files: string[]) {
 export async function buildCodeImpactGraph(input: { repositoryRoot: string; files: string[]; diff?: string; cacheFile?: string; includeRepositorySources?: boolean; scenarios?: Array<{ id: string; keywords: string[] }>; historicalBugs?: Array<{ id: string; title: string; files: string[] }> }): Promise<CodeImpactGraph> {
   const root = path.resolve(input.repositoryRoot);
   const cacheFile = input.cacheFile ?? path.join(root, ".ai-test-officer", "impact-cache.json");
-  const cache: GraphCache = await readFile(cacheFile, "utf8").then((raw) => JSON.parse(raw) as GraphCache).catch(() => ({ files: {} }));
-  const nextCache: GraphCache = { files: { ...cache.files } };
+  const parsedCache = await readFile(cacheFile, "utf8").then((raw) => JSON.parse(raw) as Partial<GraphCache>).catch(() => undefined);
+  const cache: GraphCache = parsedCache?.indexerVersion === "3" && parsedCache.files
+    ? { indexerVersion: "3", files: parsedCache.files }
+    : { indexerVersion: "3", files: {} };
+  const nextCache: GraphCache = { indexerVersion: "3", files: { ...cache.files } };
   let cacheHits = 0;
   const pythonFiles: string[] = [];
   const indexedFiles = Array.from(new Set(input.includeRepositorySources ? [...input.files, ...await discoverSourceFiles(root)] : input.files)).sort();
@@ -165,7 +186,7 @@ export async function buildCodeImpactGraph(input: { repositoryRoot: string; file
     const source = await readFile(absolute, "utf8");
     const sha256 = digest(source);
     if (cache.files[relative]?.sha256 === sha256) { cacheHits += 1; continue; }
-    if (/\.tsx?$/.test(relative)) nextCache.files[relative] = indexTypeScript(absolute, relative, source);
+    if (/\.(?:tsx?|jsx?)$/.test(relative)) nextCache.files[relative] = indexTypeScript(absolute, relative, source);
     else if (/\.py$/.test(relative)) pythonFiles.push(relative);
   }
   if (pythonFiles.length) {
