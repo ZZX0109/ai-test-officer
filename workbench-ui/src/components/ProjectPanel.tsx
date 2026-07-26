@@ -12,6 +12,7 @@ interface ProjectPanelProps {
   connection?: ProjectHealthCheckResult | null;
   launchPhase?: string;
   recoveryAdvice?: RuntimeRecoveryAdvice | null;
+  revealLoginSettings?: boolean;
   onSelect: (id: string) => void;
   onDraftChange: (draft: ProjectConfig) => void;
   onRunDiagnosis: () => void;
@@ -35,6 +36,7 @@ export function ProjectPanel({
   connection,
   launchPhase,
   recoveryAdvice,
+  revealLoginSettings = false,
   onSelect,
   onDraftChange,
   onRunDiagnosis,
@@ -48,12 +50,17 @@ export function ProjectPanel({
   const [startRequested, setStartRequested] = useState(false);
   const [hasSeenLaunchPhase, setHasSeenLaunchPhase] = useState(false);
   const [loginSaveMessage, setLoginSaveMessage] = useState("");
+  const [loginSettingsOpen, setLoginSettingsOpen] = useState(false);
   const [, setClockTick] = useState(0);
   useEffect(() => {
     setLoginUsername("");
     setLoginPassword("");
     setLoginSaveMessage("");
+    setLoginSettingsOpen(false);
   }, [draft?.id]);
+  useEffect(() => {
+    if (revealLoginSettings) setLoginSettingsOpen(true);
+  }, [revealLoginSettings]);
   useEffect(() => {
     if (launchPhase) setHasSeenLaunchPhase(true);
     if (hasSeenLaunchPhase && !launchPhase && status?.status !== "installing" && status?.status !== "starting") {
@@ -109,7 +116,7 @@ export function ProjectPanel({
   const runtimeFailureMessage = status?.failureReason ? runtimeFailureMessages[status.failureReason] : undefined;
   const containerRuntimeUnavailable = status?.failureReason === "container_runtime_unavailable"
     || /failed to connect to the docker api|docker\.sock|docker daemon/i.test(status?.message ?? "");
-  const showLoginSettings = detection?.loginCapability?.detected || login.method !== "none";
+  const showLoginSettings = detection?.loginCapability?.detected || login.method !== "none" || revealLoginSettings;
   const sandboxMode = draft.allowExternalProjectPath ? "oci" : (draft.manifest?.execution.mode ?? "trusted-local");
   const isPreparing = startRequested || Boolean(launchPhase) || status?.status === "installing" || status?.status === "starting";
   const remainingMs = status?.deadlineAt
@@ -267,7 +274,12 @@ export function ProjectPanel({
           ))}
         </div>
       ) : null}
-      {showLoginSettings ? <details className="project-login-settings">
+      {showLoginSettings ? <details
+        id="project-login-settings"
+        className="project-login-settings"
+        open={loginSettingsOpen}
+        onToggle={(event) => setLoginSettingsOpen(event.currentTarget.open)}
+      >
         <summary>登录与测试账号（需要登录时配置）</summary>
         <p className="project-login-explanation">
           系统只识别登录功能和配置名称，不读取项目中的明文密码。这里填写的账号会加密保存，并仅在测试启动时注入沙盒。

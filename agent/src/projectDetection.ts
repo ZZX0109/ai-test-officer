@@ -426,6 +426,96 @@ async function detectWorkspaceFrontend(
   return candidates.sort((left, right) => right.score - left.score)[0];
 }
 
+async function detectWorkspaceBackend(
+  projectPath: string,
+  pkg: Record<string, unknown> | undefined
+) {
+  const candidates: Array<{ name: string; score: number; port: number; healthPath: string }> = [];
+  for (const workspacePath of await workspaceDirectories(projectPath, pkg)) {
+    const workspacePackage = await readJson(path.join(workspacePath, "package.json"));
+    const dependencies = depsOf(workspacePackage);
+    const workspaceScripts = scriptsOf(workspacePackage);
+    const packageName = typeof workspacePackage?.name === "string" ? workspacePackage.name : "";
+    const script = (["dev", "start", "serve"] as const).find((name) => Boolean(workspaceScripts[name]));
+    if (!packageName || !script || !/^[@a-zA-Z0-9._/-]+$/.test(packageName)) continue;
+    const label = `${packageName} ${path.basename(workspacePath)}`;
+    const hasServerDependency = Boolean(
+      dependencies.express
+      || dependencies.fastify
+      || dependencies.koa
+      || dependencies.hapi
+      || dependencies["@nestjs/core"]
+      || dependencies["@oclif/core"]
+    );
+    const serverNamed = /(?:^|[-_/])(server|api|backend)(?:$|[-_/])/i.test(label);
+    if (!hasServerDependency && !serverNamed) continue;
+    const envText = (await Promise.all(
+      [".env", ".env.local", ".env.development"].map((name) =>
+        readFile(path.join(workspacePath, name), "utf8").catch(() => "")
+      )
+    )).join("\n");
+    const scriptText = Object.values(workspaceScripts).join("\n");
+    const port = Number(
+      /(?:--port|-p)\s*[= ]\s*(\d{2,5})\b/.exec(scriptText)?.[1]
+      ?? /^\s*PORT\s*=\s*(\d{2,5})\s*$/m.exec(envText)?.[1]
+      ?? 3000
+    );
+    const healthSourceParts: string[] = [];
+    const pending = [{ directory: workspacePath, depth: 0 }];
+    let scanned = 0;
+    while (pending.length && scanned < 350) {
+      const current = pending.shift()!;
+      const entries = await readdir(current.directory, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (scanned++ >= 350) break;
+        if (["node_modules", "dist", "build", ".git", "coverage"].includes(entry.name)) continue;
+        const absolute = path.join(current.directory, entry.name);
+        if (entry.isDirectory() && current.depth < 4) {
+          pending.push({ directory: absolute, depth: current.depth + 1 });
+        } else if (entry.isFile() && /\.(?:[cm]?[jt]s|json)$/i.test(entry.name)) {
+          healthSourceParts.push((await readFile(absolute, "utf8").catch(() => "")).slice(0, 120_000));
+        }
+      }
+    }
+    const targetedHealthFiles = await Promise.all([
+      "src/utils/constants.ts",
+      "src/routes/index.ts",
+      "src/routes/health.ts",
+      "src/routes/health/index.ts",
+      "src/app.ts",
+      "src/server.ts",
+      "server.ts",
+      "server.js"
+    ].map((relative) => readFile(path.join(workspacePath, relative), "utf8").catch(() => "")));
+    const healthSource = [...targetedHealthFiles, ...healthSourceParts].join("\n");
+    const healthPath = ["/api/v1/health", "/api/health", "/health", "/api/v1/ping", "/ping"]
+      .find((candidate) => healthSource.includes(candidate))
+      ?? "/";
+    candidates.push({
+      name: packageName,
+      score: (hasServerDependency ? 80 : 0) + (serverNamed ? 60 : 0),
+      port,
+      healthPath
+    });
+  }
+  return candidates.sort((left, right) => right.score - left.score)[0];
+}
+
+function rootWorkspaceDevCommand(
+  manager: NodePackageManager,
+  frontendName: string,
+  backendName: string
+) {
+  // Turbo/Nx may refuse to start an otherwise valid repository when an old
+  // lockfile entry cannot be parsed. pnpm can launch the two verified
+  // workspaces directly in one container, preserving localhost proxying
+  // between UI and API without depending on the repository orchestrator.
+  if (manager === "pnpm") {
+    return `pnpm --parallel --filter ${backendName} --filter ${frontendName} run dev`;
+  }
+  return manager === "yarn" ? "yarn run dev" : "npm run dev";
+}
+
 function projectIdFromPath(projectPath: string) {
   return path.basename(projectPath).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `project_${Date.now()}`;
 }
@@ -543,14 +633,28 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
   const workspaceFrontend = projectExists && pkg
     ? await detectWorkspaceFrontend(projectPath, pkg, nodePackageManager)
     : undefined;
+  const workspaceBackend = projectExists && pkg
+    ? await detectWorkspaceBackend(projectPath, pkg)
+    : undefined;
+  const rootDevScript = scripts.dev ?? "";
+  const orchestratedWorkspace = Boolean(
+    workspaceFrontend
+    && workspaceBackend
+    && /\b(?:turbo|concurrently|nx|lerna)\b/i.test(rootDevScript)
+  );
   if (workspaceFrontend?.framework === "vite" && !detectedStack.includes("vite")) detectedStack.push("vite");
   if (workspaceFrontend?.framework === "next" && !detectedStack.includes("next")) detectedStack.push("next");
+  if (workspaceBackend && !detectedStack.includes("express")) detectedStack.push("express");
   const hasNpmLock = projectExists && await exists(path.join(projectPath, "package-lock.json"));
   const installCommand = ecosystemLaunch?.installCommand ?? (packageManagers.includes("pnpm")
     // A monorepo may contain heavyweight test tooling (for example Cypress)
     // unrelated to the detected browser application.  Install only the
-    // selected UI workspace and its dependency graph inside the sandbox.
-    ? workspaceFrontend?.name
+    // selected UI workspace and its dependency graph inside the sandbox. When
+    // the root dev script orchestrates both UI and API, install the root lock
+    // graph once so the frontend proxy does not start without its backend.
+    ? orchestratedWorkspace
+      ? `pnpm --filter ${workspaceBackend!.name}... --filter ${workspaceFrontend!.name}... install --frozen-lockfile`
+      : workspaceFrontend?.name
       ? `pnpm --filter ${workspaceFrontend.name} install --frozen-lockfile`
       : "pnpm install --frozen-lockfile"
     : packageManagers.includes("yarn")
@@ -567,7 +671,9 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
   const frontendPort = ecosystemLaunch?.port
     ?? workspaceFrontend?.port
     ?? configuredFrontendPort(scripts, frontendConfigText, detectedStack.includes("next") ? 3000 : 5173);
-  const backendPort = ecosystemLaunch?.processName === "api"
+  const backendPort = orchestratedWorkspace
+    ? workspaceBackend?.port
+    : ecosystemLaunch?.processName === "api"
     ? ecosystemLaunch.port
     : detectedStack.includes("fastapi")
       ? 8000
@@ -575,8 +681,16 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
         ? 3000
         : undefined;
   const frontendUrl = `http://127.0.0.1:${frontendPort}`;
-  const backendUrl = backendPort ? `http://127.0.0.1:${backendPort}/api/health` : undefined;
+  const backendHealthPath = orchestratedWorkspace
+    ? workspaceBackend?.healthPath ?? "/"
+    : detectedStack.includes("fastapi")
+      ? "/api/health"
+      : "/api/health";
+  const backendUrl = backendPort ? `http://127.0.0.1:${backendPort}${backendHealthPath}` : undefined;
   const baseDevCommand = ecosystemLaunch?.command
+    ?? (orchestratedWorkspace
+      ? rootWorkspaceDevCommand(nodePackageManager, workspaceFrontend!.name, workspaceBackend!.name)
+      : undefined)
     ?? workspaceFrontend?.command
     ?? firstScript(scripts, ["dev", "start", "serve"])
     ?? (detectedStack.includes("fastapi") ? "python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000" : "npm run dev");
@@ -584,7 +698,14 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
     ? `${baseDevCommand} -- --host 0.0.0.0`
     : baseDevCommand;
   const processes: ProjectConfig["processes"] = [];
-  if (ecosystemLaunch) {
+  if (orchestratedWorkspace) {
+    processes.push({
+      name: "app",
+      command: baseDevCommand,
+      healthCheckUrl: frontendUrl,
+      required: true
+    });
+  } else if (ecosystemLaunch) {
     processes.push({
       name: ecosystemLaunch.processName,
       command: devCommand,
@@ -599,7 +720,7 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
       required: true
     });
   }
-  if (!ecosystemLaunch && (workspaceFrontend || detectedStack.includes("vite") || detectedStack.includes("next"))) {
+  if (!orchestratedWorkspace && !ecosystemLaunch && (workspaceFrontend || detectedStack.includes("vite") || detectedStack.includes("next"))) {
     processes.push({
       name: "web",
       command: workspaceFrontend ? workspaceFrontend.command : detectedStack.includes("vite") ? `${devCommand} --port ${frontendPort} --strictPort` : devCommand,

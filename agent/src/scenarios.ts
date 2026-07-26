@@ -293,8 +293,12 @@ export function deriveCompiledPlanContract(scenario: ExecutableScenario): Scenar
       if (core.submitButtonName) add({ action: "click", selectorRef: "submitButtonName" });
       break;
     case "openapi_schema_contract":
-      if (!core.triggerButtonName) return undefined;
-      add({ action: "click", selectorRef: "triggerButtonName" });
+      // Some API calls happen during initial page hydration and have no
+      // dedicated UI trigger. In that case the trusted action is passive:
+      // retain a bounded observation window, then evaluate the network oracle.
+      add(core.triggerButtonName
+        ? { action: "click", selectorRef: "triggerButtonName" }
+        : { action: "wait", durationMs: Math.min(Math.max(core.waitMs ?? 250, 0), 2_000) });
       break;
     case "table_sort_filter_paginate":
       if (core.triggerButtonName) add({ action: "click", selectorRef: "triggerButtonName" });
@@ -332,6 +336,59 @@ export function deriveCompiledPlanContract(scenario: ExecutableScenario): Scenar
     requiredEvidenceKinds: ["screenshot", "dom", "network", "console", "trace"],
     allowOptionalWait: true
   };
+}
+
+/** Structural validation used before a discovered scenario is allowed into
+ * the executable registry. It intentionally validates action semantics again
+ * instead of trusting a draft's caller-supplied `missingInfo` array. */
+export function scenarioExecutabilityIssues(scenario: Record<string, unknown>) {
+  const smoke = scenario.smoke && typeof scenario.smoke === "object"
+    ? scenario.smoke as Record<string, unknown>
+    : {};
+  const core = scenario.corePath && typeof scenario.corePath === "object"
+    ? scenario.corePath as Record<string, unknown>
+    : {};
+  const action = typeof core.action === "string" ? core.action as ScenarioAction : undefined;
+  const oracles = Array.isArray(core.oracles) ? core.oracles as Array<Record<string, unknown>> : [];
+  const hasText = (key: string) => typeof core[key] === "string" && Boolean(String(core[key]).trim());
+  const issues: string[] = [];
+  if (typeof smoke.headingName !== "string" || !smoke.headingName.trim()) issues.push("smoke.headingName");
+  if (!action) issues.push("corePath.action");
+  if (!oracles.length) issues.push("corePath.oracles");
+  if (oracles.some((oracle) => typeof oracle.id !== "string" || !oracle.id.trim())) issues.push("oracle.id");
+  if (oracles.some((oracle) => typeof oracle.name !== "string" || !oracle.name.trim())) issues.push("oracle.name");
+
+  if (action) {
+    const requiresTrigger = new Set<ScenarioAction>([
+      "click_filter",
+      "require_permission",
+      "change_task_status",
+      "edit_task_title",
+      "simulate_error_and_retry",
+      "approval_flow_transition"
+    ]);
+    const requiresSubmit = new Set<ScenarioAction>(["submit_empty_form", "complex_form_validate"]);
+    if (requiresTrigger.has(action) && !hasText("triggerButtonName")) issues.push("corePath.triggerButtonName");
+    if (requiresSubmit.has(action) && !hasText("submitButtonName")) issues.push("corePath.submitButtonName");
+    if (["fill_and_submit", "search_keyword", "expect_empty_state"].includes(action)
+      && (!hasText("inputLabel") || !hasText("submitButtonName"))) {
+      issues.push("corePath.inputLabel/submitButtonName");
+    }
+    if (action === "file_upload_validate" && !hasText("inputLabel")) issues.push("corePath.inputLabel");
+    if (action === "role_permission_matrix"
+      && (!hasText("selectLabel") || !hasText("selectValue") || !hasText("submitButtonName"))) {
+      issues.push("corePath.selectLabel/selectValue/submitButtonName");
+    }
+    if (action === "openapi_schema_contract") {
+      const hasApiOracle = oracles.some((oracle) =>
+        oracle.type === "api_schema" &&
+        ((typeof oracle.networkUrlIncludes === "string" && oracle.networkUrlIncludes.trim())
+          || (typeof oracle.locator === "string" && oracle.locator.trim()))
+      );
+      if (!hasApiOracle) issues.push("api_schema oracle binding");
+    }
+  }
+  return Array.from(new Set(issues));
 }
 
 function buildDefaultOracles(

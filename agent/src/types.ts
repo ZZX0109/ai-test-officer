@@ -552,7 +552,7 @@ export interface DiscoveryScanResult {
     forms: Array<{ action?: string; method?: string; inputCount: number }>;
     testIds: string[];
   };
-  networkEndpoints: Array<{ method: string; url: string; status?: number; path?: string }>;
+  networkEndpoints: Array<{ method: string; url: string; status?: number; path?: string; resourceType?: string }>;
   openApiOperations: Array<{ method: string; path: string; operationId?: string; summary?: string }>;
   suggestions: DiscoveryScanSuggestion[];
   drafts: HarnessGapScenarioDraft[];

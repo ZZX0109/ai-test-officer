@@ -31,6 +31,14 @@ assert.match(invocation.args.join(" "), /--user 65532:65532/);
 assert.match(invocation.args.join(" "), /--memory 4g --memory-swap 4g/);
 assert.match(invocation.args.join(" "), /ai-test-officer\.managed=true/);
 assert.match(invocation.args.join(" "), /ai-test-officer\.project-id=demo/);
+assert.match(invocation.args.join(" "), /HOST=0\.0\.0\.0/);
+assert.match(invocation.args.join(" "), /DATABASE_PATH=\/tmp\/ato-data\/database/);
+assert.match(invocation.args.join(" "), /BLOB_STORAGE_PATH=\/tmp\/ato-data\/blob/);
+assert.match(invocation.args.join(" "), /mkdir -p \/tmp\/ato-home \/tmp\/ato-data\/database/);
+assert.match(invocation.args.join(" "), /find \/workspace -maxdepth 6/);
+assert.match(invocation.args.join(" "), /DATABASE_PATH=\/tmp\/ato-data\/database/);
+assert.match(invocation.args.join(" "), /UPLOAD_DIR=\/tmp\/ato-data\/uploads/);
+assert.match(invocation.args.join(" "), /! -path '\*\/node_modules\/\*'/);
 const cachedInvocation = buildOciInvocation({
   engine: "docker",
   image: "node:22",

@@ -85,6 +85,8 @@ export async function testProjectDetectionWizard() {
         scripts: { dev: "node src/server.js" },
         dependencies: { express: "^4.0.0" }
       }),
+      "packages/server/.env": "PORT=3456\nDATABASE_PATH=/Users/developer/project/data\n",
+      "packages/server/src/server.js": "app.get('/api/v1/health', (_req, res) => res.json({ ok: true }))",
       "packages/dashboard/package.json": JSON.stringify({
         name: "@fixture/dashboard",
         scripts: { dev: "vite" },
@@ -98,7 +100,14 @@ export async function testProjectDetectionWizard() {
     assert.equal(pnpmWorkspaceDetection.suggestedConfig.frontendUrl, "http://127.0.0.1:6123");
     assert.equal(
       pnpmWorkspaceDetection.suggestedConfig.processes?.[0]?.command,
-      "pnpm --filter @fixture/dashboard exec vite --host 0.0.0.0 --port 6123 --strictPort"
+      "pnpm --parallel --filter @fixture/server --filter @fixture/dashboard run dev"
+    );
+    assert.equal(pnpmWorkspaceDetection.suggestedConfig.processes?.length, 1);
+    assert.equal(pnpmWorkspaceDetection.suggestedConfig.backendUrl, "http://127.0.0.1:3456/api/v1/health");
+    assert.equal(pnpmWorkspaceDetection.suggestedConfig.manifest?.ports.some((item) => item.purpose === "backend"), true);
+    assert.equal(
+      pnpmWorkspaceDetection.suggestedConfig.installCommand,
+      "pnpm --filter @fixture/server... --filter @fixture/dashboard... install --frozen-lockfile"
     );
 
     const npmWorkspace = await makeFixture("ai-test-officer-npm-workspace-", {

@@ -124,7 +124,10 @@ services:
     healthcheck: { disable: true }
   workbench:
     build: { context: ../.., dockerfile: Dockerfile.production }
-    command: ["npm", "--workspace", "workbench-ui", "exec", "vite", "--", "preview", "--host", "0.0.0.0", "--port", "6174"]
+    # The production filesystem is read-only. Vite's default bundled config
+    # loader writes a temporary module under node_modules and exits with EROFS;
+    # runner mode loads the already-built config without mutating the image.
+    command: ["npm", "--workspace", "workbench-ui", "exec", "vite", "--", "preview", "--host", "0.0.0.0", "--port", "6174", "--configLoader", "runner"]
     read_only: true
     tmpfs: ["/tmp"]
     ports: ["127.0.0.1:16174:6174"]

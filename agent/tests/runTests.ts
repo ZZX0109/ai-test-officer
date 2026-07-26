@@ -1,5 +1,5 @@
 import { testConnectorEnvelope } from "./connector.test.js";
-import { testDiscoveryScanDrafts } from "./discoveryScan.test.js";
+import { testDiscoveryScanAcceptsVisibleStreamingDom, testDiscoveryScanDrafts } from "./discoveryScan.test.js";
 import { testCiCliErrorReports } from "./ciCliErrorReports.test.js";
 import { testCiContract } from "./ciContract.test.js";
 import { testCiGatePolicy } from "./ciGatePolicy.test.js";
@@ -19,7 +19,7 @@ import { testRunRequestContract } from "./runRequestContract.test.js";
 import { testRunBundleArchive } from "./runBundleArchive.test.js";
 import { testRunHistoryComparison } from "./runHistory.test.js";
 import { testRunLockGovernance } from "./runLock.test.js";
-import { testScenarioDraftLifecycle } from "./scenarioDraft.test.js";
+import { testScenarioDraftCannotTrustEmptyMissingInfo, testScenarioDraftLifecycle } from "./scenarioDraft.test.js";
 import { testScenarioParser } from "./scenarioParser.test.js";
 import { testSecurityBoundaries } from "./security.test.js";
 import { testServiceHealthContract } from "./serviceHealth.test.js";
@@ -51,6 +51,7 @@ async function main() {
   await testProjectDetectionWizard();
   await testProjectFolderBrowser();
   await testDiscoveryScanDrafts();
+  await testDiscoveryScanAcceptsVisibleStreamingDom();
   await testGovernanceSecurityBot();
   testCiContract();
   await testCiGatePolicy();
@@ -82,6 +83,7 @@ async function main() {
   testRunnerExecutablePlanBinding();
   await testCompiledPlanExecution();
   await testScenarioDraftLifecycle();
+  await testScenarioDraftCannotTrustEmptyMissingInfo();
   testScenarioParser();
   testPlanStepSchema();
   testJudgeSchema();

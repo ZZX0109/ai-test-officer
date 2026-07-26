@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { HarnessGap, HarnessGapScenarioDraft } from "./types.js";
+import { scenarioExecutabilityIssues } from "./scenarios.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const gapDir = path.join(rootDir, "reports", "harness-gaps");
@@ -197,7 +198,8 @@ function enrichDraft(draft: HarnessGapScenarioDraft): HarnessGapScenarioDraft {
   const missingInfo = [
     typeof core.action === "string" ? undefined : "corePath.action",
     typeof locator === "string" && locator.trim() ? undefined : "corePath selector locator",
-    oracles.length ? undefined : "corePath.oracles"
+    oracles.length ? undefined : "corePath.oracles",
+    ...scenarioExecutabilityIssues(draft.scenario)
   ].filter((item): item is string => Boolean(item));
   return {
     ...draft,
@@ -212,7 +214,9 @@ function enrichDraft(draft: HarnessGapScenarioDraft): HarnessGapScenarioDraft {
     actions: draft.actions ?? (typeof core.action === "string" ? [core.action] : []),
     oracles: draft.oracles ?? oracles,
     evidenceRequirements: draft.evidenceRequirements ?? draftEvidenceRequirements(draft.scenario),
-    missingInfo: draft.missingInfo ?? missingInfo
+    // Never trust an empty array supplied by a generator. Recompute the
+    // structural requirements and merge any human-entered gaps.
+    missingInfo: Array.from(new Set([...(draft.missingInfo ?? []), ...missingInfo]))
   };
 }
 

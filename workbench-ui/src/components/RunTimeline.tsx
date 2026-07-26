@@ -28,28 +28,45 @@ function friendlyEventDescription(event: NonNullable<RunTimelineProps["displayed
 
 export function RunTimeline({ result, displayedLoopEvents }: RunTimelineProps) {
   const loopFallback = displayedLoopEvents?.slice(-5).map((event) => (
-    <article key={event.id} className={`step ${event.status === "failed" ? "failed" : "passed"}`}>
-      {event.status === "failed" ? <XCircle size={16} /> : <Activity size={16} />}
+    <article key={event.id} className={`timeline-step ${event.status === "failed" ? "failed" : "running"}`}>
+      <span className="timeline-step-marker">
+        {event.status === "failed" ? <XCircle size={16} /> : <Activity size={16} />}
+      </span>
       <div>
-        <strong>{friendlyEventTitle(event.title)}</strong>
+        <header>
+          <strong>{friendlyEventTitle(event.title)}</strong>
+          <span>{event.status === "failed" ? "需要处理" : "进行中"}</span>
+        </header>
         <p>{friendlyEventDescription(event)}</p>
       </div>
     </article>
   ));
 
   return (
-    <section>
-      <h3>Agent Actions</h3>
-      <div className="step-list">
+    <section className="run-timeline" aria-label="Agent 执行记录">
+      <div className="run-timeline-list">
         {result?.steps.map((step) => (
-          <article key={step.stepId} className={`step ${step.status}`}>
-            {step.status === "passed" ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+          <article key={step.stepId} className={`timeline-step ${step.status}`}>
+            <span className="timeline-step-marker">
+              {step.status === "passed" ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+            </span>
             <div>
-              <strong>{step.title}</strong>
+              <header>
+                <strong>{step.title}</strong>
+                <span>{step.status === "passed" ? "已完成" : "执行失败"}</span>
+              </header>
               <p>{step.details}</p>
             </div>
           </article>
-        )) ?? loopFallback ?? <p className="empty">执行后会显示鼠标、键盘和浏览器操作。</p>}
+        )) ?? loopFallback ?? (
+          <div className="run-timeline-empty">
+            <Activity size={18} />
+            <div>
+              <strong>等待执行</strong>
+              <p>测试开始后，这里会按顺序显示浏览器操作和证据采集状态。</p>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );

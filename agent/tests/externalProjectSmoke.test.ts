@@ -4,6 +4,7 @@ import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { saveProject, startProject, stopProject, testProjectConnection } from "../src/projectAdapter.js";
+import { detectProject } from "../src/projectDetection.js";
 import { runVisualGrayTest } from "../src/testRunner.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
@@ -40,18 +41,32 @@ export async function testExternalProjectSmoke() {
   try {
     await cp(path.join(rootDir, "fixtures", "customer-portal-lite"), projectPath, { recursive: true });
     const timestamp = new Date().toISOString();
+    const detection = await detectProject(projectPath);
+    const detected = detection.suggestedConfig;
     const project = await saveProject({
+      ...detected,
       id: projectId,
       name: "External Project Smoke Test",
       projectPath,
       allowExternalProjectPath: true,
       installCommand: "",
-      startCommand: "node server.mjs",
+      installCommandSpec: undefined,
       healthCheckUrl: `${baseUrl}/health`,
       frontendUrl: baseUrl,
       backendUrl: `${baseUrl}/health`,
+      processes: detected.processes?.map((processConfig) => ({
+        ...processConfig,
+        healthCheckUrl: `${baseUrl}/health`
+      })),
       login: { method: "none" },
       env: { PORT: String(port) },
+      manifest: detected.manifest
+        ? {
+          ...detected.manifest,
+          projectId,
+          environmentAllowlist: Array.from(new Set([...detected.manifest.environmentAllowlist, "PORT"]))
+        }
+        : undefined,
       cleanupCommand: "",
       timeoutMs: 15_000,
       createdAt: timestamp,

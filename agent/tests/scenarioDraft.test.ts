@@ -6,6 +6,7 @@ import {
   createHarnessGapScenarioDraft,
   listScenarioDrafts,
   probeScenarioDraft,
+  writeScenarioDraft,
   writeHarnessGaps
 } from "../src/harnessGapStore.js";
 import { getScenario, hasScenario } from "../src/scenarios.js";
@@ -44,4 +45,52 @@ export async function testScenarioDraftLifecycle() {
   if (approved?.installedFile) {
     await rm(path.join(rootDir, approved.installedFile), { force: true });
   }
+}
+
+export async function testScenarioDraftCannotTrustEmptyMissingInfo() {
+  const scenarioId = `discovered_invalid_form_${Date.now()}`;
+  const draft = await writeScenarioDraft({
+    gapId: `gap_${scenarioId}`,
+    createdAt: new Date().toISOString(),
+    scenarioId,
+    draftReviewStatus: "draft",
+    selectorProbeStatus: "not_run",
+    missingInfo: [],
+    scenario: {
+      id: scenarioId,
+      title: "Invalid discovered form",
+      planObservation: "discovery",
+      smoke: {
+        pathId: "open",
+        stepId: "open",
+        title: "open",
+        headingName: "Fixture",
+        assertionName: "visible",
+        expected: "Fixture"
+      },
+      corePath: {
+        pathId: "form",
+        stepId: "form",
+        title: "submit",
+        action: "complex_form_validate",
+        targetLocator: "body",
+        riskReason: "test",
+        oracles: [{
+          id: "form_dom",
+          name: "form dom",
+          type: "dom_text",
+          locator: "body",
+          expectedTextIncludes: "Fixture",
+          expected: "Fixture"
+        }]
+      }
+    }
+  });
+  assert.equal(draft.missingInfo?.includes("corePath.submitButtonName"), true);
+  const probed = await probeScenarioDraft(scenarioId);
+  assert.equal(probed?.selectorProbeStatus, "failed");
+  const approved = await approveScenarioDraft(scenarioId);
+  assert.notEqual(approved?.draftReviewStatus, "approved");
+  assert.equal(hasScenario(scenarioId), false);
+  await rm(path.join(rootDir, "reports", "harness-gaps", "drafts", `${scenarioId}.json`), { force: true });
 }

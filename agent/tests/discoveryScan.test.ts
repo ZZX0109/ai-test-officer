@@ -3,6 +3,9 @@ import { rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { runDiscoveryScan } from "../src/discoveryScan.js";
+import { approveScenarioDraft, probeScenarioDraft } from "../src/harnessGapStore.js";
+import { getScenario } from "../src/scenarios.js";
+import { runVisualGrayTest } from "../src/testRunner.js";
 import type { SourceReadEnvelope } from "../src/types.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
@@ -78,9 +81,74 @@ export async function testDiscoveryScanDrafts() {
     assert.equal(discovery.suggestions[0]?.riskKind, "navigation");
     assert.deepEqual(discovery.suggestions[0]?.actions, ["visual_check"]);
     assert.equal(discovery.suggestions.some((suggestion) => suggestion.riskKind === "form"), true);
-    assert.equal(discovery.suggestions.some((suggestion) => suggestion.riskKind === "table"), true);
+    assert.equal(
+      discovery.suggestions.some((suggestion) => suggestion.riskKind === "table"),
+      true,
+      `expected table suggestion for ${JSON.stringify(discovery.page.buttons)}`
+    );
     assert.equal(discovery.drafts.length, discovery.suggestions.length);
     assert.equal(discovery.drafts.every((draft) => draft.draftReviewStatus === "draft"), true);
+    const apiDraft = discovery.drafts.find((draft) => draft.riskKind === "api_contract");
+    assert.ok(apiDraft, "runtime fetch must produce an API contract draft");
+    const probed = await probeScenarioDraft(apiDraft.scenarioId);
+    assert.equal(probed?.selectorProbeStatus, "passed");
+    const approved = await approveScenarioDraft(apiDraft.scenarioId);
+    assert.equal(approved?.draftReviewStatus, "approved");
+    const apiScenario = getScenario(apiDraft.scenarioId);
+    assert.equal(apiScenario.corePath.triggerButtonName, undefined, "observed API traffic must not invent a button");
+    assert.equal(
+      apiScenario.compiledPlanContract?.requiredSteps.some((step) => step.action.action === "click"),
+      false,
+      "a passive runtime API contract must not compile to a click"
+    );
+    const result = await runVisualGrayTest({
+      appUrl: baseUrl,
+      scenarioId: apiDraft.scenarioId,
+      permissionProfile: {
+        observe: true,
+        browserControl: true,
+        workspaceControl: false,
+        ideTerminalControl: false,
+        systemControl: false
+      }
+    });
+    assert.equal(result.executionError, undefined);
+    assert.equal(result.assertions.find((item) => item.name === "接口请求符合契约")?.passed, true);
+    if (approved?.installedFile) {
+      await rm(path.join(rootDir, approved.installedFile), { force: true });
+    }
+    await Promise.all(discovery.drafts.map((draft) =>
+      rm(path.join(rootDir, "reports", "harness-gaps", "drafts", `${draft.scenarioId}.json`), { force: true })
+    ));
+  });
+}
+
+export async function testDiscoveryScanAcceptsVisibleStreamingDom() {
+  await withHttpServer((_req, res) => {
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "transfer-encoding": "chunked"
+    });
+    res.write(`
+      <!doctype html>
+      <html>
+        <head><title>Streaming Fixture</title></head>
+        <body>
+          <h1>Streaming App Ready</h1>
+          <button type="button" data-testid="streaming-action">继续</button>
+    `);
+    // Keep the initial document open longer than Discovery's lifecycle grace.
+    // The visible DOM is still valid and should be scanned successfully.
+    setTimeout(() => {
+      if (!res.destroyed) res.end("</body></html>");
+    }, 2_000).unref();
+  }, async (baseUrl) => {
+    const discovery = await runDiscoveryScan({ appUrl: baseUrl });
+    assert.equal(discovery.status, "passed");
+    assert.equal(discovery.page.headings.includes("Streaming App Ready"), true);
+    assert.equal(discovery.page.testIds.includes("streaming-action"), true);
+    assert.equal(discovery.suggestions.some((suggestion) => suggestion.riskKind === "api_contract"), false);
+    assert.match(discovery.message, /页面已渲染/);
     await Promise.all(discovery.drafts.map((draft) =>
       rm(path.join(rootDir, "reports", "harness-gaps", "drafts", `${draft.scenarioId}.json`), { force: true })
     ));

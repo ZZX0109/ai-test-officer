@@ -53,7 +53,20 @@ function dockerCapture(args) {
   try { return redact(docker(args, { capture: true })).slice(-12_000); } catch (error) { return `capture_failed:${redact(error instanceof Error ? error.message : String(error))}`; }
 }
 function diagnostics() {
-  const services = ["agent-api", "worker", "keycloak", "postgres", "redis", "minio"];
+  const services = [
+    "agent-api",
+    "worker",
+    "workbench",
+    "keycloak",
+    "postgres",
+    "redis",
+    "minio",
+    "minio-init",
+    "reports-init",
+    "todo-lite",
+    "order-portal-lite",
+    "customer-portal-lite"
+  ];
   return {
     composeProject,
     config: dockerCapture(["config"]),

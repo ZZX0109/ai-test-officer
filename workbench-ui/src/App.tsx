@@ -34,6 +34,7 @@ import { PatrolPanel } from "./components/PatrolPanel";
 import { ProjectPanel } from "./components/ProjectPanel";
 import { ProjectWizardPanel } from "./components/ProjectWizardPanel";
 import { RunTimeline } from "./components/RunTimeline";
+import { RunAssistantPanel } from "./components/RunAssistantPanel";
 import { SecurityPanel } from "./components/SecurityPanel";
 import { SourceStatusPanel } from "./components/SourceStatusPanel";
 import { StoragePanel } from "./components/StoragePanel";
@@ -266,6 +267,7 @@ export function App() {
   const [editingCredentialId, setEditingCredentialId] = useState<string | null>(null);
   const [credentialFormOpen, setCredentialFormOpen] = useState(false);
   const [apiSettingsOpen, setApiSettingsOpen] = useState(false);
+  const [revealProjectLoginSettings, setRevealProjectLoginSettings] = useState(false);
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
   const [permissionProfile, setPermissionProfile] = useState<PermissionProfile>({
@@ -352,6 +354,31 @@ export function App() {
   const nextSuggestion = result?.failureAttributions?.[0]?.suggestedFix ??
     result?.failureAttributions?.[0]?.topSuspects?.[0]?.suggestedFix ??
     (patrolTrend?.riskIncreased ? "风险趋势升高，建议打开历史运行对比失败证据。" : "先确认项目连接、输入来源和浏览器授权，然后运行一次测试。");
+  const runDiagnosticText = [
+    result?.summary,
+    ...((result?.console ?? []).slice(-12).map((entry) => entry.text)),
+    ...((result?.assertions ?? []).filter((assertion) => !assertion.passed).flatMap((assertion) => [assertion.name, assertion.actual])),
+    ...((result?.failureAttributions ?? []).flatMap((failure) => [failure.title, failure.reasoning, failure.suggestedFix])),
+    planningAutomation.detail
+  ].filter(Boolean).join("\n");
+  const runIsBlocked = latestDecision === "blocked" || planningAutomation.phase === "blocked";
+  const loginServiceUnavailable = runIsBlocked &&
+    /resolveLogin[\s\S]{0,180}(retry|timeout|timed out|network|refused|502|503|unavailable)|maximum retry count[\s\S]{0,80}resolveLogin/i.test(runDiagnosticText);
+  const authBlockDetected = runIsBlocked && !loginServiceUnavailable &&
+    /credential_missing|invalid credentials|log[ -]?in failed|unauthori[sz]ed|forbidden|(?:^|\D)401(?:\D|$)|(?:^|\D)403(?:\D|$)|登录失败|缺少.*(?:凭据|账号|密码)|账号或密码/i.test(runDiagnosticText);
+  const hasConfiguredProjectLogin = Boolean(projectDraft?.login?.credentialId);
+  const authFeedbackRequired = authBlockDetected && !hasConfiguredProjectLogin;
+  const credentialReadyForRetry = authBlockDetected && hasConfiguredProjectLogin;
+  const latestPlanningAssistantMessage = [...planningMessages].reverse().find((item) => item.role === "assistant")?.content;
+  const runAssistantMessage = credentialReadyForRetry
+    ? "测试账号已加密保存。上一次阻塞记录会保留；点击下方按钮后，系统会使用新账号重新扫描登录路径并创建一次新的测试运行。"
+    : authFeedbackRequired
+    ? "测试已到达需要登录的页面，但没有可用的测试账号，因此没有继续尝试受保护功能。请配置专用测试账号，或告诉我应测试的公开路径。"
+    : loginServiceUnavailable
+      ? "页面已经打开，但登录解析依赖的后端接口没有响应。这属于运行服务问题，不是账号配置问题；请重新检查并继续，系统会同时恢复前后端服务。"
+    : runIsBlocked
+      ? (nextSuggestion || "本次测试遇到阻塞。你可以补充入口、运行条件或预期结果，我会据此修订计划。")
+      : (latestPlanningAssistantMessage ?? "可以随时补充测试目标、页面入口或预期结果。");
 
   function runResultFromBundle(bundle: RunBundle): RunResult {
     return {
@@ -368,6 +395,34 @@ export function App() {
   function closeDrawers() {
     setLeftDrawerOpen(false);
     setRightDrawerOpen(false);
+  }
+
+  function openProjectLoginSettings() {
+    setRevealProjectLoginSettings(true);
+    setLeftDrawerOpen(true);
+    setRightDrawerOpen(false);
+    setMessage("请在“登录与测试账号”中保存专用测试账号。密码会加密保存并仅在运行时注入沙盒。");
+    window.setTimeout(() => {
+      document.getElementById("project-login-settings")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 120);
+  }
+
+  async function submitRunAssistantFeedback(feedback: string) {
+    await continueTestPlanning(feedback);
+  }
+
+  async function retryWithConfiguredLogin(projectOverride?: ProjectConfig) {
+    setMessage("测试账号已就绪，正在重新扫描登录路径并创建新的测试运行。");
+    if (planningResult && selectedProjectExecutionMode === "oci") {
+      setPlanningConfirmed(true);
+      await continueAutomaticPlanning(permissionProfile, projectOverride);
+      return;
+    }
+    if (scenarioId) {
+      await executeConfirmedScenarioAutomatically(scenarioId);
+      return;
+    }
+    await continueTestPlanning("测试账号已经配置完成，请重新生成并执行需要登录的测试路径。");
   }
 
   function resetPlanningConversation() {
@@ -715,19 +770,19 @@ export function App() {
   // until it reaches a stable state instead of leaving an old “installing” or
   // recoverable “failed” card on screen after the initial polling window ends.
   useEffect(() => {
-    if (!selectedProjectId || !projectRuntime || !["installing", "starting", "failed"].includes(projectRuntime.status)) return;
+    if (!selectedProjectId) return;
     let disposed = false;
     const refreshRuntime = async () => {
       const snapshot = await getProjectRuntime(selectedProjectId).catch(() => null);
       if (!snapshot || disposed) return;
       setProjectRuntime(snapshot.runtime);
-      if (snapshot.runtime.status === "running") {
+      if (snapshot.runtime.status === "running" && projectRuntime?.status !== "running") {
         const connection = await testProjectConnection(selectedProjectId).catch(() => null);
         if (!disposed && connection) setProjectConnection(connection.result);
       }
     };
     void refreshRuntime();
-    const interval = window.setInterval(() => void refreshRuntime(), 1_000);
+    const interval = window.setInterval(() => void refreshRuntime(), 2_000);
     return () => {
       disposed = true;
       window.clearInterval(interval);
@@ -1191,7 +1246,15 @@ export function App() {
     const response = await saveProjectLoginCredential(prepared.project.id, input);
     setProjectDraft(response.project);
     setSelectedProjectId(response.project.id);
-    setMessage("测试账号已加密保存，运行时会自动注入沙盒。");
+    setRevealProjectLoginSettings(false);
+    if (authBlockDetected) {
+      setMessage("测试账号已加密保存，正在使用新账号恢复自动化测试。");
+      window.setTimeout(() => {
+        void retryWithConfiguredLogin(response.project);
+      }, 0);
+    } else {
+      setMessage("测试账号已加密保存，运行时会自动注入沙盒。");
+    }
   }
 
   async function stopCurrentProject() {
@@ -1276,8 +1339,8 @@ export function App() {
     }
   }
 
-  async function ensureProjectReadyForAutomation() {
-    const candidate = projectDraft ?? projectDetection?.suggestedConfig;
+  async function ensureProjectReadyForAutomation(projectOverride?: ProjectConfig) {
+    const candidate = projectOverride ?? projectDraft ?? projectDetection?.suggestedConfig;
     if (!candidate) throw new Error("没有可运行的项目配置，请重新识别项目。");
     const saved = await saveProject({
       ...candidate,
@@ -1375,12 +1438,12 @@ export function App() {
     }
   }
 
-  async function continueAutomaticPlanning(grantedProfile = permissionProfile) {
+  async function continueAutomaticPlanning(grantedProfile = permissionProfile, projectOverride?: ProjectConfig) {
     if (!planningResult) return;
     setPlanningAutomation({ phase: "preparing-project", detail: "正在启动并连接被测项目。" });
     setMessage("计划已确认，正在自动准备项目。");
     try {
-      const project = await ensureProjectReadyForAutomation();
+      const project = await ensureProjectReadyForAutomation(projectOverride);
       if (!grantedProfile.observe || !grantedProfile.browserControl) {
         setPlanningAutomation({
           phase: "needs-permission",
@@ -1956,6 +2019,7 @@ export function App() {
             connection={projectConnection}
             launchPhase={projectLaunchPhase}
             recoveryAdvice={runtimeRecoveryAdvice}
+            revealLoginSettings={revealProjectLoginSettings}
             onSelect={selectProject}
             onDraftChange={setProjectDraft}
             onRunDiagnosis={diagnoseAndRunCurrentProject}
@@ -2086,10 +2150,15 @@ export function App() {
                       </button>
                     )}
                     {planningAutomation.phase === "blocked" && (
-                      <button type="button" onClick={() => {
-                        setPlanningConfirmed(false);
-                        setPlanningAutomation({ phase: "idle", detail: "" });
-                      }}>修改计划后重试</button>
+                      <div className="row-actions">
+                        <button type="button" onClick={() => void continueAutomaticPlanning()}>
+                          重新检查并继续
+                        </button>
+                        <button type="button" onClick={() => {
+                          setPlanningConfirmed(false);
+                          setPlanningAutomation({ phase: "idle", detail: "" });
+                        }}>修改计划</button>
+                      </div>
                     )}
                   </section>
                 )}
@@ -2470,6 +2539,17 @@ export function App() {
             </>
           )}
 
+          <RunAssistantPanel
+            message={runAssistantMessage}
+            blocked={runIsBlocked}
+            authRequired={authFeedbackRequired}
+            credentialReady={credentialReadyForRetry}
+            busy={planningBusy || isRunning || planningAutomationBusy}
+            onSubmit={submitRunAssistantFeedback}
+            onConfigureCredentials={openProjectLoginSettings}
+            onRetryWithCredentials={retryWithConfiguredLogin}
+          />
+
           <div className="sidebar-footer">
             <span>{runHistory.length} 次历史运行</span>
             <button onClick={() => setRightDrawerOpen(true)} type="button">打开记录</button>
@@ -2576,46 +2656,86 @@ export function App() {
           <section className="timeline-stage">
             <div className="section-title-row">
               <div>
+                <span className="section-kicker">执行记录</span>
                 <h3>Agent 正在做什么</h3>
-                <p>从计划、执行到判断，每一步都留下可回看的证据。</p>
+                <p>按时间顺序查看操作、结果和已保存的证据。</p>
               </div>
-              <button onClick={regeneratePlan} type="button">
+              <button className="timeline-plan-button" onClick={regeneratePlan} type="button">
                 <ListChecks size={15} />
-                生成计划
+                重新生成计划
               </button>
             </div>
             <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
           </section>
 
-          {activeRunId && (
-            <section className="review-control">
-              <h3>人工裁决</h3>
-              <p>runId: <code>{activeRunId}</code> · state: {activeRun?.state ?? "loading"}</p>
-              <label>裁决原因
-                <input aria-label="裁决原因" value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} placeholder="例如：已确认该环境限制可接受" />
-              </label>
-              <button disabled={!reviewReason.trim()} onClick={() => void controlActiveRun("decision-override")} type="button">接受风险并留痕</button>
-            </section>
-          )}
+          <section className={`run-review-grid ${activeRunId ? "" : "single"}`}>
+            {activeRunId && (
+              <section className="review-control run-review-card">
+                <header>
+                  <div>
+                    <span className="section-kicker">需要你确认</span>
+                    <h3>人工裁决</h3>
+                  </div>
+                  <span className="run-state-chip">{activeRun?.state ?? "读取中"}</span>
+                </header>
+                <p className="review-run-id">运行编号 <code>{activeRunId}</code></p>
+                <div className="review-action-row">
+                  <label>
+                    <span>裁决原因</span>
+                    <input
+                      aria-label="裁决原因"
+                      value={reviewReason}
+                      onChange={(event) => setReviewReason(event.target.value)}
+                      placeholder="说明为什么可以接受当前风险"
+                    />
+                  </label>
+                  <button
+                    className="primary"
+                    disabled={!reviewReason.trim()}
+                    onClick={() => void controlActiveRun("decision-override")}
+                    type="button"
+                  >
+                    接受风险并留痕
+                  </button>
+                </div>
+              </section>
+            )}
 
-          <label className="permission-line">
-              <input
-                checked={permissionProfile.browserControl}
-                onChange={(event) =>
-                  setPermissionProfile((current) => ({
-                    ...current,
-                    observe: true,
-                    browserControl: event.target.checked
-                  }))
-                }
-                type="checkbox"
-              />
-              <span>允许本次会话接管指定浏览器窗口执行测试</span>
-              <small>只用于本次运行，可随时取消。</small>
-          </label>
+            <section className="run-permission-card">
+              <header>
+                <div>
+                  <span className="section-kicker">本次运行</span>
+                  <h3>浏览器控制权限</h3>
+                </div>
+              </header>
+              <label className="permission-toggle-row">
+                <input
+                  checked={permissionProfile.browserControl}
+                  onChange={(event) =>
+                    setPermissionProfile((current) => ({
+                      ...current,
+                      observe: true,
+                      browserControl: event.target.checked
+                    }))
+                  }
+                  type="checkbox"
+                />
+                <span className="permission-toggle" aria-hidden="true"><span /></span>
+                <span>
+                  <strong>允许 Agent 操作内置测试画面</strong>
+                  <small>仅对本次运行生效，可随时关闭。</small>
+                </span>
+              </label>
+            </section>
+          </section>
 
           <details className="advanced-section">
-            <summary>更多能力：Discovery、巡检、推送、存储和计划细节</summary>
+            <summary>
+              <span>
+                <strong>高级能力与运行细节</strong>
+                <small>Discovery、巡检、推送、存储和完整计划</small>
+              </span>
+            </summary>
             <div className="advanced-stack">
               <DiscoveryPanel
                 discovery={discovery}

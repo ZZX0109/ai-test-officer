@@ -15,6 +15,7 @@ import { buildScenarioGrayPlan } from "./plan.js";
 import { getScenario } from "./scenarios.js";
 import { readRunBundle } from "./evidenceStore.js";
 import { saveProject, startProject, stopProject, testProjectConnection } from "./projectAdapter.js";
+import { detectProject } from "./projectDetection.js";
 import type { DemoVerificationResult, PermissionProfile } from "./types.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
@@ -255,18 +256,33 @@ async function runExternalProjectSmoke(result: DemoVerificationResult) {
   try {
     await cp(path.join(rootDir, "fixtures", "customer-portal-lite"), tempProjectPath, { recursive: true });
     const now = new Date().toISOString();
+    const detection = await detectProject(tempProjectPath);
+    const detected = detection.suggestedConfig;
+    const manifest = detected.manifest
+      ? {
+        ...detected.manifest,
+        projectId,
+        environmentAllowlist: Array.from(new Set([...detected.manifest.environmentAllowlist, "PORT"]))
+      }
+      : undefined;
     const project = await saveProject({
+      ...detected,
       id: projectId,
       name: "External Customer Portal Lite Smoke",
       projectPath: tempProjectPath,
       allowExternalProjectPath: true,
       installCommand: "",
-      startCommand: "node server.mjs",
+      installCommandSpec: undefined,
       healthCheckUrl: `${baseUrl}/health`,
       frontendUrl: baseUrl,
       backendUrl: `${baseUrl}/health`,
+      processes: detected.processes?.map((processConfig) => ({
+        ...processConfig,
+        healthCheckUrl: `${baseUrl}/health`
+      })),
       login: { method: "none" },
       env: { PORT: String(port) },
+      manifest,
       cleanupCommand: "",
       timeoutMs: 15_000,
       externalSmokeProfile: {

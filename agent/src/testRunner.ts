@@ -67,6 +67,29 @@ export function resolveBrowserHeadlessMode(value = process.env.HEADLESS) {
   return value !== "0";
 }
 
+async function waitForUsablePageDom(page: Page) {
+  // Lightweight executor unit tests use a minimal Page double. Real
+  // Playwright pages always expose waitForFunction.
+  if (typeof page.waitForFunction !== "function") return;
+  await page.waitForFunction(() => {
+    const body = document.body;
+    if (!body) return false;
+    const visibleText = (body.innerText || "").replace(/\s+/g, " ").trim();
+    return visibleText.length > 0 ||
+      Boolean(body.querySelector("a,button,input,textarea,select,[role='button'],[data-testid],canvas,svg"));
+  }, undefined, { timeout: 15_000 });
+}
+
+async function navigateToUsablePage(page: Page, url: string) {
+  await page.goto(url, { waitUntil: "commit", timeout: 15_000 });
+  await waitForUsablePageDom(page);
+}
+
+async function reloadUsablePage(page: Page) {
+  await page.reload({ waitUntil: "commit", timeout: 15_000 });
+  await waitForUsablePageDom(page);
+}
+
 async function ensureReportDirs(runId: string) {
   await mkdir(path.join(reportsDir, "screenshots", runId), { recursive: true });
   await mkdir(path.join(reportsDir, "runs", runId), { recursive: true });
@@ -186,11 +209,7 @@ export async function executeCompiledAction(action: ActionDsl, stepId: string, c
     const destination = new URL(action.path, base);
     if (destination.origin !== base.origin) throw new Error("compiled_plan_cross_origin_navigation");
     if (!destination.search && base.search) destination.search = base.search;
-    // Vite HMR, SSE, analytics and long-polling connections can keep
-    // Playwright's network-idle counter busy forever even though the page is
-    // fully interactive. DOM readiness plus scenario-bound assertions is the
-    // reliable condition for a test target.
-    await page.goto(destination.toString(), { waitUntil: "domcontentloaded", timeout: 15_000 });
+    await navigateToUsablePage(page, destination.toString());
     return;
   }
   if (action.action === "click") {
@@ -546,6 +565,16 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     return { texts, evidence };
   }
 
+  async function isSmokeAnchorVisible() {
+    const expected = scenario.smoke.headingName.trim();
+    if (await page.getByRole("heading", { name: expected, exact: true }).isVisible().catch(() => false)) return true;
+    const title = await page.title().catch(() => "");
+    if (title.includes(expected)) return true;
+    return page.locator("body").evaluate((body, value) =>
+      (body as HTMLElement).innerText.includes(String(value)), expected
+    ).catch(() => false);
+  }
+
   async function evaluateOracle(oracle: ScenarioOracle, stepId: string, pathId = scenario.corePath.pathId) {
     if (oracle.type === "network_query") {
       const passed = network.some(
@@ -591,6 +620,33 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
         }
       }, pathId, stepId);
     }
+    if (oracle.type === "api_schema" && !oracle.locator) {
+      const expectedPath = oracle.networkUrlIncludes ?? "";
+      const matched = network.filter((entry) => entry.url.includes(expectedPath));
+      const successful = matched.find((entry) =>
+        typeof entry.status === "number" && entry.status >= 200 && entry.status < 400
+      );
+      return recordAssertion({
+        name: oracle.name,
+        passed: Boolean(successful),
+        expected: oracle.expected,
+        actual: successful
+          ? `${successful.method} ${successful.url} -> ${successful.status}`
+          : matched.length
+            ? matched.map((entry) => `${entry.method} ${entry.url} -> ${entry.status ?? "failed"}`).join("\n")
+            : `未观察到 ${expectedPath} 的运行时请求`,
+        fact: {
+          kind: "network.url_contains",
+          target: expectedPath,
+          operator: "contains",
+          expected: `${expectedPath} returns 2xx/3xx`,
+          actual: matched.map((entry) => `${entry.url}:${entry.status ?? "failed"}`).join("\n"),
+          severity: "high",
+          evidenceRefs: [],
+          failureClass: matched.length ? "product_bug" : "insufficient_evidence"
+        }
+      }, pathId, stepId);
+    }
 
     const locator =
       oracle.locator ??
@@ -630,7 +686,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   }
 
   async function evaluateCompiledSmokePath(stepId: string) {
-    const visible = await page.getByRole("heading", { name: scenario.smoke.headingName, exact: true }).isVisible().catch(() => false);
+    const visible = await isSmokeAnchorVisible();
     return recordAssertion({
       name: scenario.smoke.assertionName,
       passed: visible,
@@ -650,7 +706,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   }
 
   async function evaluateCompiledRegressionPath(stepId: string, pathId: string, telemetryStart: { network: number; console: number }) {
-    const headingVisible = await page.getByRole("heading", { name: scenario.smoke.headingName, exact: true }).isVisible().catch(() => false);
+    const headingVisible = await isSmokeAnchorVisible();
     const consoleErrors = consoleEvents.slice(telemetryStart.console).filter((entry) => /error|exception|failed/i.test(`${entry.type} ${entry.text}`));
     const networkErrors = network.slice(telemetryStart.network).filter((entry) => typeof entry.status === "number" && entry.status >= 500);
     const passed = headingVisible && consoleErrors.length === 0 && networkErrors.length === 0;
@@ -772,7 +828,11 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       return;
     }
     if (action === "openapi_schema_contract") {
-      await clickButton(core.triggerButtonName ?? core.submitButtonName);
+      if (core.triggerButtonName || core.submitButtonName) {
+        await clickButton(core.triggerButtonName ?? core.submitButtonName);
+      } else {
+        await page.waitForTimeout(Math.min(Math.max(core.waitMs ?? 250, 0), 2_000));
+      }
       return;
     }
     if (action === "role_permission_matrix") {
@@ -951,7 +1011,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       decisionReason: "retry_budget=1",
       evidenceRefs: assertions.filter((item) => !item.passed).map((item) => item.name)
     });
-    await page.reload({ waitUntil: "domcontentloaded", timeout: 15_000 });
+    await reloadUsablePage(page);
     const assertionStart = assertions.length;
     await runCoreAction(core.action);
     await page.waitForTimeout(core.waitMs ?? 700);
@@ -1109,7 +1169,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       decisionReason: "先确认页面基础可用",
       evidenceRefs: []
     });
-    await page.goto(frontendUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+    await navigateToUsablePage(page, frontendUrl);
     await appendAudit({
       type: "agent_action",
       action: "browser_open",
@@ -1132,7 +1192,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       details: `已打开 ${frontendUrl}`
     });
 
-    const titleVisible = await page.getByRole("heading", { name: scenario.smoke.headingName }).isVisible();
+    const titleVisible = await isSmokeAnchorVisible();
     const pageAssertionEvidence = await recordAssertion({
       name: scenario.smoke.assertionName,
       passed: titleVisible,

@@ -734,7 +734,11 @@ async function allocateLoopbackPort() {
 
 async function projectWithSandboxRuntimeUrls(project: ProjectConfig) {
   if (project.manifest?.execution.mode !== "oci") {
-    return { project, containerPortFor: (_url?: string) => undefined };
+    return {
+      project,
+      containerPortFor: (_url?: string) => undefined,
+      portBindings: [] as Array<{ hostPort: number; containerPort: number }>
+    };
   }
   const hostPorts = new Map<number, number>();
   const bridgeUrl = async (url?: string) => {
@@ -760,7 +764,8 @@ async function projectWithSandboxRuntimeUrls(project: ProjectConfig) {
         })))
         : project.processes
     },
-    containerPortFor: (url?: string) => portFromUrl(url)
+    containerPortFor: (url?: string) => portFromUrl(url),
+    portBindings: [...hostPorts.entries()].map(([containerPort, hostPort]) => ({ hostPort, containerPort }))
   };
 }
 
@@ -926,6 +931,7 @@ function spawnManagedProcess(input: {
   command: string | CommandSpec;
   healthCheckUrl?: string;
   containerPort?: number;
+  portBindings?: Array<{ hostPort: number; containerPort: number }>;
   dependencyCache?: Awaited<ReturnType<typeof prepareSandboxDependencyCache>>;
 }) {
   const isLegacy = typeof input.command === "string";
@@ -947,7 +953,11 @@ function spawnManagedProcess(input: {
         command: commandSpecSchema.parse(input.command),
         prepareCommand: input.project.installCommandSpec,
         dependencyCache: input.dependencyCache,
-        portBindings: hostPort && containerPort ? [{ hostPort, containerPort }] : []
+        portBindings: input.portBindings?.length
+          ? input.portBindings
+          : hostPort && containerPort
+            ? [{ hostPort, containerPort }]
+            : []
       });
       const spawned = spawn(invocation.executable, invocation.args, {
         cwd: input.cwd,
@@ -1361,6 +1371,11 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
         command: runtimeProcess.commandSpec ?? runtimeProcess.command,
         healthCheckUrl: runtimeProcess.healthCheckUrl,
         containerPort: sandboxRuntime.containerPortFor(processConfig.healthCheckUrl ?? project.healthCheckUrl),
+        // A single workspace command commonly starts several services (for
+        // example Vite on 8080 and an API on 3000). Publish every discovered
+        // endpoint from that one container; otherwise the UI becomes reachable
+        // while the required backend health check waits forever.
+        portBindings: configuredProcesses.length === 1 ? sandboxRuntime.portBindings : undefined,
         dependencyCache
       })
     };

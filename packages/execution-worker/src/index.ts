@@ -170,7 +170,28 @@ export function buildOciInvocation(input: {
   // target or create an external browser.  The Workbench preview remains the
   // sole visual surface.
   const internalBrowserOnly = "mkdir -p /workspace/.ato-bin; printf '#!/bin/sh\\nexit 0\\n' > /workspace/.ato-bin/xdg-open; chmod 700 /workspace/.ato-bin/xdg-open; export PATH=/workspace/.ato-bin:$PATH";
-  const runtimePathBootstrap = "export PATH=/workspace/.venv/bin:/workspace/.ato-bin:$PATH";
+  const runtimePathBootstrap = [
+    "mkdir -p /tmp/ato-home /tmp/ato-data/database /tmp/ato-data/blob /tmp/ato-data/storage /tmp/ato-config /tmp/ato-cache",
+    "export PATH=/workspace/.venv/bin:/workspace/.ato-bin:$PATH"
+  ].join("; ");
+  // A target can deliberately load a checked-in .env with `override: true`.
+  // In that case container environment variables alone cannot prevent paths
+  // such as /Users/alice/app.db from escaping the sandbox's writable tmpfs.
+  // Rewrite only known mutable-path keys in the private workspace copy. Never
+  // touch the read-only source mount and never print the file contents.
+  const sandboxEnvBootstrap = [
+    "find /workspace -maxdepth 6 -type f \\( -name .env -o -name '.env.*' \\) ! -path '*/node_modules/*' ! -path '*/.git/*' -exec sed -i -E",
+    "-e 's|^[[:space:]]*(export[[:space:]]+)?DATABASE_PATH=.*$|DATABASE_PATH=/tmp/ato-data/database|'",
+    "-e 's|^[[:space:]]*(export[[:space:]]+)?SQLITE_PATH=.*$|SQLITE_PATH=/tmp/ato-data/database/app.sqlite|'",
+    "-e 's|^[[:space:]]*(export[[:space:]]+)?SQLITE_DB_PATH=.*$|SQLITE_DB_PATH=/tmp/ato-data/database/app.sqlite|'",
+    "-e 's|^[[:space:]]*(export[[:space:]]+)?BLOB_STORAGE_PATH=.*$|BLOB_STORAGE_PATH=/tmp/ato-data/blob|'",
+    "-e 's|^[[:space:]]*(export[[:space:]]+)?STORAGE_PATH=.*$|STORAGE_PATH=/tmp/ato-data/storage|'",
+    "-e 's|^[[:space:]]*(export[[:space:]]+)?DATA_DIR=.*$|DATA_DIR=/tmp/ato-data|'",
+    "-e 's|^[[:space:]]*(export[[:space:]]+)?UPLOAD_DIR=.*$|UPLOAD_DIR=/tmp/ato-data/uploads|'",
+    "-e 's|^[[:space:]]*(export[[:space:]]+)?LOG_DIR=.*$|LOG_DIR=/tmp/ato-data/logs|'",
+    "-e 's|^[[:space:]]*(export[[:space:]]+)?CACHE_DIR=.*$|CACHE_DIR=/tmp/ato-cache|'",
+    "{} +"
+  ].join(" ");
   const prepareCommand = input.prepareCommand
     ? [input.prepareCommand.executable, ...input.prepareCommand.args].map(shellQuote).join(" ")
     : "";
@@ -202,6 +223,7 @@ export function buildOciInvocation(input: {
     workspaceBootstrap,
     internalBrowserOnly,
     runtimePathBootstrap,
+    sandboxEnvBootstrap,
     packageManagerBootstrap,
     prepare,
     "exec \"$@\""
@@ -217,7 +239,23 @@ export function buildOciInvocation(input: {
       "--label", "ai-test-officer.managed=true",
       "--label", `ai-test-officer.project-id=${manifest.projectId}`,
       ...portArgs,
-      "--env", "HOME=/tmp",
+      "--env", "HOME=/tmp/ato-home",
+      // Servers that default to 127.0.0.1 are reachable only from inside the
+      // container even when Docker publishes their port. Managed web targets
+      // must bind the container interface; the host side remains restricted
+      // to 127.0.0.1 by the --publish argument above.
+      "--env", "HOST=0.0.0.0",
+      // Source-controlled .env files often contain absolute paths from the
+      // developer machine. The sandbox must redirect mutable state to its
+      // private tmpfs instead of trying to recreate /Users, /home or C:\\.
+      "--env", "XDG_DATA_HOME=/tmp/ato-data",
+      "--env", "XDG_CONFIG_HOME=/tmp/ato-config",
+      "--env", "XDG_CACHE_HOME=/tmp/ato-cache",
+      "--env", "DATABASE_PATH=/tmp/ato-data/database",
+      "--env", "BLOB_STORAGE_PATH=/tmp/ato-data/blob",
+      "--env", "STORAGE_PATH=/tmp/ato-data/storage",
+      "--env", "DATA_DIR=/tmp/ato-data",
+      "--env", "TMPDIR=/tmp",
       "--env", `npm_config_cache=${dependencyCache ? "/sandbox-cache/npm" : "/tmp/npm-cache"}`,
       "--env", `npm_config_store_dir=${dependencyCache ? "/sandbox-cache/pnpm-store" : "/tmp/pnpm-store"}`,
       "--env", "npm_config_prefer_offline=true",

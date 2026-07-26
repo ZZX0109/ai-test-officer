@@ -9,9 +9,52 @@ import { OidcSessionPanel } from "../src/components/OidcSessionPanel";
 import { RunTimeline } from "../src/components/RunTimeline";
 import { buildFileTree, ProjectWizardPanel } from "../src/components/ProjectWizardPanel";
 import { ProjectPanel } from "../src/components/ProjectPanel";
+import { RunAssistantPanel } from "../src/components/RunAssistantPanel";
 import { subscribeRunEvents } from "../src/api";
 
 describe("Workbench interactions", () => {
+  it("collects non-secret run feedback and redirects passwords to encrypted account settings", async () => {
+    const submit = vi.fn();
+    const configure = vi.fn();
+    render(<RunAssistantPanel
+      message="登录解析失败，需要测试账号。"
+      blocked
+      authRequired
+      onSubmit={submit}
+      onConfigureCredentials={configure}
+    />);
+    expect(screen.getByText("登录解析失败，需要测试账号。")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "配置测试账号" }));
+    expect(configure).toHaveBeenCalledTimes(1);
+
+    const feedback = screen.getByLabelText("向 AI 测试助手反馈");
+    await userEvent.type(feedback, "请改为验证公开页面");
+    await userEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+    expect(submit).toHaveBeenCalledWith("请改为验证公开页面");
+
+    await userEvent.type(feedback, "密码: do-not-store-this");
+    await userEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+    expect(screen.getByText(/检测到疑似密码/)).toBeTruthy();
+    expect((feedback as HTMLTextAreaElement).value).toBe("");
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(configure).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers a new run after the encrypted test account is ready", async () => {
+    const retry = vi.fn();
+    render(<RunAssistantPanel
+      message="测试账号已加密保存。"
+      blocked
+      credentialReady
+      onSubmit={() => undefined}
+      onConfigureCredentials={() => undefined}
+      onRetryWithCredentials={retry}
+    />);
+    expect(screen.getByText("账号已就绪")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "使用账号重新测试" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
   it("shows login settings only for detected login projects and exposes one run action", async () => {
     const project = {
       id: "demo",
@@ -77,6 +120,14 @@ describe("Workbench interactions", () => {
       usernameEnv: "E2E_USERNAME",
       passwordEnv: "E2E_PASSWORD"
     });
+
+    view.rerender(<ProjectPanel {...{
+      ...props,
+      detection,
+      revealLoginSettings: true
+    } as never} />);
+    expect(screen.getByText("登录与测试账号（需要登录时配置）")).toBeTruthy();
+    expect((screen.getByText("登录与测试账号（需要登录时配置）").parentElement as HTMLDetailsElement).open).toBe(true);
   });
 
   it("shows recent projects above inline upload controls and the folder tree after selection", async () => {
