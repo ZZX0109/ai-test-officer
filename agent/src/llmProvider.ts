@@ -1,16 +1,46 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Pool } from "pg";
-import { llmCallSchema, type LlmCall } from "@ai-test-officer/contracts";
+import { llmCallSchema, type LlmBudget, type LlmCall } from "@ai-test-officer/contracts";
 import type { CredentialRecord } from "./types.js";
+import { publishLlmLifecycle } from "./llmLifecycle.js";
+import { estimateModelUsageCost } from "./modelPriceCatalog.js";
+import { finalizeLlmBudget, reserveLlmBudget, type LlmBudgetReservation } from "./llmBudgetLedger.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
 export interface LlmCallContext {
-  purpose: "planning" | "judging";
+  purpose: "planning" | "judging" | "triage" | "repairing" | "assistant";
   runId?: string;
   experimentId?: string;
+  modelProfileId?: string;
+  promptTemplateId?: string;
+  promptVersion?: string;
+  actionDslVersion?: string;
+  outputSchemaVersion?: string;
+  graphVersion?: string;
+  scenarioRegistrySha256?: string;
+  projectDigest?: string;
+  routeReason?: string;
+  ruleCapable?: boolean;
+  ruleBypassReason?: string;
+  cachePolicy?: "use" | "bypass";
+}
+
+const LANGCHAIN_ADAPTER_VERSION = "agent-orchestration-0.1.0";
+const PROVIDER_ADAPTER_VERSION = "responses-2.0.0";
+
+function sha256(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function redactSummary(value: string) {
+  return value
+    .replace(/(?:sk|api|key|token)[-_a-z0-9]{8,}/gi, "[REDACTED]")
+    .replace(/authorization\s*:\s*\S+/gi, "authorization:[REDACTED]")
+    .replace(/\s+/g, " ")
+    .slice(0, 1_000);
 }
 
 /**
@@ -42,20 +72,6 @@ export function reserveLlmOutputTokens(input: {
   };
 }
 
-function usageCost(provider: CredentialRecord["provider"], model: string, promptTokens?: number, completionTokens?: number) {
-  // Provider pricing is intentionally explicit. An OpenAI-compatible endpoint
-  // is not necessarily billed at OpenAI rates (for example SophNet), so an
-  // unknown provider must report token usage without inventing a dollar cost.
-  const rates = provider === "anthropic" && model.startsWith("claude-sonnet-4-6")
-    ? { input: 3, output: 15 }
-    : provider === "openai" && model.startsWith("gpt-5.1")
-      ? { input: 1.25, output: 10 }
-      : undefined;
-  return rates && (promptTokens !== undefined || completionTokens !== undefined)
-    ? ((promptTokens ?? 0) * rates.input + (completionTokens ?? 0) * rates.output) / 1_000_000
-    : undefined;
-}
-
 async function persist(call: LlmCall) {
   const directory = path.join(rootDir, "reports", "llm-calls", call.experimentId ?? call.runId ?? "unassigned");
   await mkdir(directory, { recursive: true });
@@ -63,12 +79,64 @@ async function persist(call: LlmCall) {
   if (!process.env.DATABASE_URL) return;
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
   try {
-    await pool.query(
-      "INSERT INTO llm_calls_v1 (id, run_id, experiment_id, purpose, provider, model, request_id, status, duration_ms, usage, error_code, created_at, transport_attempts) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (id) DO NOTHING",
-      [call.id, call.runId ?? null, call.experimentId ?? null, call.purpose, call.provider, call.model, call.requestId ?? null, call.status, call.durationMs, call.usage, call.errorCode ?? null, call.startedAt, JSON.stringify(call.transportAttempts ?? [])]
-    );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "INSERT INTO llm_calls_v1 (id, run_id, experiment_id, purpose, provider, model, request_id, status, duration_ms, usage, error_code, created_at, transport_attempts, invocation_json, completed_at, prompt_sha256, graph_version, model_profile_id, price_catalog_version, final_status_impact) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT (id) DO NOTHING",
+        [call.id, call.runId ?? null, call.experimentId ?? null, call.purpose, call.provider, call.model, call.requestId ?? null, call.status, call.durationMs, call.usage, call.errorCode ?? null, call.startedAt, JSON.stringify(call.transportAttempts ?? []), call, call.completedAt ?? null, call.promptSha256 ?? null, call.graphVersion ?? null, call.modelProfileId ?? null, call.usage.priceCatalogVersion ?? null, call.finalStatusImpact]
+      );
+      await client.query(
+        `INSERT INTO llm_invocations_v1
+         (id,run_id,experiment_id,purpose,provider,requested_model,returned_model,status,prompt_sha256,price_catalog_version,final_status_impact,invocation_json,started_at,completed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          call.id,
+          call.runId ?? null,
+          call.experimentId ?? null,
+          call.purpose,
+          call.provider,
+          call.requestedModel ?? call.model,
+          call.returnedModel ?? null,
+          call.status,
+          call.promptSha256 ?? null,
+          call.usage.priceCatalogVersion ?? null,
+          call.finalStatusImpact,
+          call,
+          call.startedAt,
+          call.completedAt ?? null
+        ]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   } finally {
     await pool.end();
+  }
+}
+
+async function persistCallAndSettleBudget(
+  call: LlmCall,
+  reservation: LlmBudgetReservation | undefined
+) {
+  try {
+    await persist(call);
+  } finally {
+    // A telemetry/database write failure must not leave the entire reserved
+    // budget stranded. The provider work has already happened, so always
+    // settle actual usage even when invocation persistence needs recovery.
+    if (reservation) {
+      await finalizeLlmBudget(reservation, {
+        tokens: call.usage.totalTokens,
+        wallClockMs: call.durationMs,
+        estimatedCostUsd: call.usage.estimatedCostUsd
+      });
+    }
   }
 }
 
@@ -81,13 +149,17 @@ export async function parseResponsesStream(response: Response) {
   let buffer = "";
   let bytesReceived = 0;
   let invalidEvents = 0;
+  let firstTokenAt: string | undefined;
   const eventTypes = new Set<string>();
   const consume = (line: string) => {
     if (!line.startsWith("data: ")) return;
     try {
       const event = JSON.parse(line.slice(6)) as Record<string, any>;
       if (typeof event.type === "string") eventTypes.add(event.type);
-      if (event.type === "response.output_text.delta") text += typeof event.delta === "string" ? event.delta : "";
+      if (event.type === "response.output_text.delta") {
+        if (!firstTokenAt) firstTokenAt = new Date().toISOString();
+        text += typeof event.delta === "string" ? event.delta : "";
+      }
       if (event.type === "response.completed") completed = event.response;
       if (event.type === "response.failed") throw new Error("provider_responses_failed");
       if (event.type === "response.incomplete") throw new Error("provider_responses_incomplete");
@@ -111,7 +183,7 @@ export async function parseResponsesStream(response: Response) {
     throw Object.assign(error, { streamTelemetry: { bytesReceived, eventTypes: [...eventTypes] } });
   }
   await reader.cancel().catch(() => undefined);
-  return { data: { ...completed, output_text: text }, telemetry: { bytesReceived, eventTypes: [...eventTypes] } };
+  return { data: { ...completed, output_text: text }, telemetry: { bytesReceived, eventTypes: [...eventTypes], firstTokenAt } };
 }
 
 async function parseResponsesJson(response: Response) {
@@ -124,7 +196,7 @@ async function parseResponsesJson(response: Response) {
   } catch {
     throw new Error("provider_responses_invalid_json");
   }
-  return { data, telemetry: { bytesReceived, eventTypes: ["json_response"] } };
+  return { data, telemetry: { bytesReceived, eventTypes: ["json_response"], firstTokenAt: undefined as string | undefined } };
 }
 
 type ExecuteLlmCallInput = {
@@ -139,6 +211,9 @@ type ExecuteLlmCallInput = {
   totalTimeoutMs?: number;
   transportPreference?: "auto" | "stream" | "non-stream" | "non-stream-retry";
   jsonSchema?: { name: string; schema: Record<string, unknown> };
+  budget?: LlmBudget;
+  /** Semantic repair belongs to the original logical Planner/Judge call. */
+  countLogicalCall?: boolean;
 };
 
 type ResponsesTransportMode = "stream" | "non-stream";
@@ -177,14 +252,14 @@ async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: nu
     if (!response.ok) throw new Error(`provider_http_${response.status}`);
     const parsed = responsesApi
       ? mode === "stream" ? await parseResponsesStream(response) : await parseResponsesJson(response)
-      : { data: await response.json(), telemetry: { bytesReceived: 0, eventTypes: ["json_response"] } };
+        : { data: await response.json(), telemetry: { bytesReceived: 0, eventTypes: ["json_response"], firstTokenAt: undefined as string | undefined } };
     bytesReceived = parsed.telemetry.bytesReceived;
     eventTypes = parsed.telemetry.eventTypes;
     const data = parsed.data as Record<string, any>;
     requestId ??= data.id;
     return {
       data,
-      telemetry: { attemptStartedAt, durationMs: Date.now() - attemptStarted, requestId, bytesReceived, eventTypes, mode }
+      telemetry: { attemptStartedAt, durationMs: Date.now() - attemptStarted, requestId, bytesReceived, eventTypes, firstTokenAt: parsed.telemetry.firstTokenAt, mode }
     };
   } catch (error) {
     const streamTelemetry = error && typeof error === "object" && "streamTelemetry" in error
@@ -205,8 +280,40 @@ async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: nu
 
 async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text: string; call: LlmCall }> {
   const id = `llm_${randomUUID()}`;
+  const queuedAt = new Date().toISOString();
   const startedAt = new Date().toISOString();
   const started = Date.now();
+  let budgetReservation: LlmBudgetReservation | undefined;
+  if (input.context.runId) {
+    budgetReservation = await reserveLlmBudget({
+      runId: input.context.runId,
+      purpose: input.context.purpose,
+      budget: input.budget,
+      estimatedTokens: Math.ceil(Buffer.byteLength(`${input.system}\n${input.prompt}`, "utf8") / 3) + input.maxTokens,
+      estimatedWallClockMs: input.timeoutMs ?? 30_000,
+      estimatedCostUsd: null,
+      countLogicalCall: input.countLogicalCall
+    });
+  }
+  if (input.context.runId) {
+    publishLlmLifecycle({
+      name: "llm.call.started",
+      runId: input.context.runId,
+      callId: id,
+      at: startedAt,
+      payload: {
+        purpose: input.context.purpose,
+        provider: input.credential.provider,
+        requestedModel: input.credential.model,
+        modelProfileId: input.context.modelProfileId,
+        promptTemplateId: input.context.promptTemplateId,
+        promptVersion: input.context.promptVersion,
+        graphVersion: input.context.graphVersion,
+        routeReason: input.context.routeReason,
+        cachePolicy: input.context.cachePolicy ?? "use"
+      }
+    });
+  }
   const attempts: NonNullable<LlmCall["transportAttempts"]> = [];
   const responsesApi = input.credential.provider === "openai-compatible" && /codex/i.test(input.credential.model);
   const modes: ResponsesTransportMode[] = responsesApi
@@ -240,8 +347,63 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
       const completionTokens = data.usage?.completion_tokens ?? data.usage?.output_tokens;
       const usedFallback = attempts.some((item) => item.mode === "non-stream");
       const streamFailedBeforeFallback = usedFallback && attempts.some((item) => item.mode === "stream" && item.status === "failed");
-      const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: data.model ?? input.credential.model, requestId: result.telemetry.requestId ?? data.id, startedAt, durationMs: Date.now() - started, status: "passed", transportMode: usedFallback ? "non-stream-fallback" : "stream", fallbackReason: streamFailedBeforeFallback ? "stream_incomplete" : undefined, transportAttempts: attempts, usage: { promptTokens, completionTokens, totalTokens: data.usage?.total_tokens ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined), estimatedCostUsd: usageCost(input.credential.provider, data.model ?? input.credential.model, promptTokens, completionTokens) } });
-      await persist(call);
+      const completedAt = new Date().toISOString();
+      const durationMs = Date.now() - started;
+      const pricing = estimateModelUsageCost({
+        provider: input.credential.provider,
+        model: data.model ?? input.credential.model,
+        promptTokens,
+        completionTokens
+      });
+      const call = llmCallSchema.parse({
+        id,
+        ...input.context,
+        provider: input.credential.provider,
+        model: data.model ?? input.credential.model,
+        requestedModel: input.credential.model,
+        returnedModel: data.model ?? input.credential.model,
+        langChainAdapterVersion: LANGCHAIN_ADAPTER_VERSION,
+        providerAdapterVersion: PROVIDER_ADAPTER_VERSION,
+        promptSha256: sha256(`${input.system}\n${input.prompt}`),
+        inputSummarySha256: sha256(input.prompt),
+        redactedInputSummary: redactSummary(input.prompt),
+        requestId: result.telemetry.requestId ?? data.id,
+        queuedAt,
+        startedAt,
+        firstTokenAt: result.telemetry.firstTokenAt,
+        completedAt,
+        durationMs,
+        timing: {
+          queueMs: 0,
+          firstTokenMs: result.telemetry.firstTokenAt ? Math.max(0, Date.parse(result.telemetry.firstTokenAt) - Date.parse(startedAt)) : undefined,
+          generationMs: durationMs,
+          totalMs: durationMs
+        },
+        status: "passed",
+        transportMode: usedFallback ? "non-stream-fallback" : "stream",
+        fallbackReason: streamFailedBeforeFallback ? "stream_incomplete" : undefined,
+        fallbackImpact: "none",
+        finalStatusImpact: "none",
+        transportAttempts: attempts,
+        usage: {
+          promptTokens,
+          completionTokens,
+          totalTokens: data.usage?.total_tokens ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined),
+          estimatedCostUsd: pricing.cost,
+          currency: "USD",
+          priceCatalogVersion: pricing.catalogVersion
+        }
+      });
+      await persistCallAndSettleBudget(call, budgetReservation);
+      if (input.context.runId) {
+        publishLlmLifecycle({
+          name: "llm.call.completed",
+          runId: input.context.runId,
+          callId: id,
+          at: completedAt,
+          payload: { call }
+        });
+      }
       return { text: input.credential.provider === "anthropic"
         ? data.content?.find((item) => item.type === "text")?.text ?? ""
         : responsesApi
@@ -253,19 +415,121 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
       const telemetry = error && typeof error === "object" && "transportTelemetry" in error ? (error as any).transportTelemetry : {};
       const mode = modes[attempt - 1];
       attempts.push({ attempt, mode, status: "failed", startedAt: telemetry.attemptStartedAt ?? new Date().toISOString(), durationMs: telemetry.durationMs ?? 0, requestId: telemetry.requestId, errorCode, bytesReceived: telemetry.bytesReceived ?? 0, eventTypes: telemetry.eventTypes ?? [] });
-      const retriable = responsesApi && input.transportPreference !== "stream" && /provider_http_(429|502|503)|provider_responses_(incomplete|empty|invalid_event|body_missing)|TimeoutError|AbortError|fetch_failed|operation_was_aborted_due_to_timeout/i.test(errorCode);
+      const retriable = responsesApi && input.transportPreference !== "stream" && /provider_http_(408|429|502|503|504)|provider_responses_(incomplete|empty|invalid_event|body_missing)|TimeoutError|AbortError|fetch_failed|operation_was_aborted_due_to_timeout/i.test(errorCode);
       if (!retriable || attempt === maxAttempts) break;
-      await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 250 : 1_000));
+      const baseDelay = attempt === 1 ? 250 : 1_000;
+      if (input.context.runId) {
+        publishLlmLifecycle({
+          name: "llm.call.retried",
+          runId: input.context.runId,
+          callId: id,
+          at: new Date().toISOString(),
+          payload: {
+            attempt,
+            nextAttempt: attempt + 1,
+            mode,
+            errorCode,
+            retryDelayMs: baseDelay
+          }
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, baseDelay + Math.floor(Math.random() * Math.max(25, baseDelay * 0.2))));
     }
   }
   const errorCode = lastError instanceof Error ? lastError.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
   const usedFallback = attempts.some((item) => item.mode === "non-stream");
   const streamFailedBeforeFallback = usedFallback && attempts.some((item) => item.mode === "stream" && item.status === "failed");
-  const call = llmCallSchema.parse({ id, ...input.context, provider: input.credential.provider, model: input.credential.model, startedAt, durationMs: Date.now() - started, status: "failed", transportMode: usedFallback ? "non-stream-fallback" : "stream", fallbackReason: streamFailedBeforeFallback ? "stream_incomplete" : undefined, usage: {}, errorCode, transportAttempts: attempts });
-  await persist(call);
+  const completedAt = new Date().toISOString();
+  const durationMs = Date.now() - started;
+  const failureClass = /provider_http_401/.test(errorCode) ? "authentication"
+    : /provider_http_403/.test(errorCode) ? "authorization"
+      : /model|access/.test(errorCode) ? "model-access"
+        : /budget|token/.test(errorCode) ? "budget"
+          : /timeout|fetch|incomplete|empty|http_(408|429|5)/.test(errorCode) ? "transport"
+            : "provider";
+  const fallbackImpact = input.context.purpose === "planning" ? "path-blocked"
+    : input.context.purpose === "judging" ? "recommendation-unavailable"
+      : input.context.purpose === "triage" || input.context.purpose === "repairing" ? "human-review-required"
+        : "none";
+  const finalStatusImpact = input.context.purpose === "planning" ? "blocked"
+    : input.context.purpose === "judging" ? "advisory-only"
+      : input.context.purpose === "triage" || input.context.purpose === "repairing" ? "forced-review"
+        : "none";
+  const call = llmCallSchema.parse({
+    id,
+    ...input.context,
+    provider: input.credential.provider,
+    model: input.credential.model,
+    requestedModel: input.credential.model,
+    langChainAdapterVersion: LANGCHAIN_ADAPTER_VERSION,
+    providerAdapterVersion: PROVIDER_ADAPTER_VERSION,
+    promptSha256: sha256(`${input.system}\n${input.prompt}`),
+    inputSummarySha256: sha256(input.prompt),
+    redactedInputSummary: redactSummary(input.prompt),
+    queuedAt,
+    startedAt,
+    completedAt,
+    durationMs,
+    timing: { queueMs: 0, generationMs: durationMs, totalMs: durationMs },
+    status: "failed",
+    transportMode: usedFallback ? "non-stream-fallback" : "stream",
+    fallbackReason: streamFailedBeforeFallback ? "stream_incomplete" : undefined,
+    fallbackImpact,
+    finalStatusImpact,
+    usage: { estimatedCostUsd: null, currency: "USD" },
+    errorCode,
+    failureClass,
+    transportAttempts: attempts
+  });
+  await persistCallAndSettleBudget(call, budgetReservation);
+  if (input.context.runId) {
+    publishLlmLifecycle({
+      name: "llm.call.failed",
+      runId: input.context.runId,
+      callId: id,
+      at: completedAt,
+      payload: { call }
+    });
+  }
   throw Object.assign(new Error(errorCode), { llmCall: call });
 }
 
 export async function executeLlmCall(input: ExecuteLlmCallInput) {
   return executeLlmCallAttempt(input);
+}
+
+export async function listLlmCalls(runId: string): Promise<LlmCall[]> {
+  const directory = path.join(rootDir, "reports", "llm-calls", runId);
+  try {
+    const files = (await readdir(directory)).filter((file) => file.endsWith(".json"));
+    const calls = await Promise.all(files.map(async (file) =>
+      llmCallSchema.parse(JSON.parse(await readFile(path.join(directory, file), "utf8")))
+    ));
+    return calls.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  } catch {
+    if (!process.env.DATABASE_URL) return [];
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+    try {
+      let rows: Array<{ invocation_json: unknown }>;
+      try {
+        rows = (await pool.query<{ invocation_json: unknown }>(
+          "SELECT invocation_json FROM llm_invocations_v1 WHERE run_id=$1 ORDER BY started_at ASC",
+          [runId]
+        )).rows;
+      } catch (error) {
+        // During a rolling upgrade the API can start before the migration
+        // reaches this table. Keep historical observability available.
+        if (!(error && typeof error === "object" && "code" in error && error.code === "42P01")) throw error;
+        rows = (await pool.query<{ invocation_json: unknown }>(
+          "SELECT invocation_json FROM llm_calls_v1 WHERE run_id=$1 ORDER BY created_at ASC",
+          [runId]
+        )).rows;
+      }
+      return rows.map((row) => llmCallSchema.parse(row.invocation_json));
+    } catch {
+      return [];
+    } finally {
+      await pool.end();
+    }
+  }
 }

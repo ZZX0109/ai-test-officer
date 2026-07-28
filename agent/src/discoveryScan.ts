@@ -2,6 +2,8 @@ import { chromium } from "playwright";
 import type { DiscoveryScanResult, DiscoveryScanSuggestion, HarnessGapScenarioDraft, SourceReadEnvelope, TargetAppRuntime } from "./types.js";
 import { resolveProjectTarget } from "./projectAdapter.js";
 import { writeScenarioDraft } from "./harnessGapStore.js";
+import { createLlmPlanningAdvice } from "./llmPlanningAdvisor.js";
+import type { PlannedBusinessFlow } from "./planningConversation.js";
 
 const DISCOVERY_NAVIGATION_TIMEOUT_MS = 20_000;
 const DISCOVERY_DOM_READY_TIMEOUT_MS = 8_000;
@@ -63,6 +65,7 @@ function draftScenario(input: {
   const expectedText = typeof selector.text === "string" && selector.text ? selector.text : input.heading;
   const action = input.suggestion.actions[0] ?? "visual_check";
   const buttonDrivenActions = new Set([
+    "visual_check",
     "click_filter",
     "submit_empty_form",
     "fill_and_submit",
@@ -80,6 +83,15 @@ function draftScenario(input: {
     "role_permission_matrix"
   ]);
   const buttonName = buttonDrivenActions.has(action) ? selector.role : undefined;
+  const submitDrivenActions = new Set([
+    "submit_empty_form",
+    "fill_and_submit",
+    "login_as_test_user",
+    "login_invalid_user",
+    "complex_form_validate",
+    "approval_flow_transition",
+    "role_permission_matrix"
+  ]);
   return {
     id: input.suggestion.suggestedScenarioId,
     title: `${input.suggestion.title}（Discovery 草案）`,
@@ -108,7 +120,10 @@ function draftScenario(input: {
       title: input.suggestion.title,
       action,
       triggerButtonName: buttonName,
-      submitButtonName: buttonName,
+      // A navigation/filter control is not also a submit control. Treating it
+      // as both caused the probe and the compiled runner to click the same
+      // button twice, often returning to the original panel.
+      submitButtonName: submitDrivenActions.has(action) ? buttonName : undefined,
       inputLabel: typeof selector.text === "string" ? selector.text : undefined,
       input: input.suggestion.riskKind === "form" ? "Discovery Probe" : undefined,
       targetLocator: locator,
@@ -152,7 +167,119 @@ function suggestionDraft(input: {
     oracles: input.suggestion.oracles,
     evidenceRequirements: input.suggestion.evidenceRequirements,
     missingInfo: [],
+    probeUrl: input.url,
     scenario
+  };
+}
+
+function semanticTerms(value: string) {
+  return value
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}_-]+/u)
+    .filter((term) => term.length >= 2);
+}
+
+async function selectSuggestion(input: {
+  suggestions: DiscoveryScanSuggestion[];
+  project: { id: string; name: string };
+  goal?: string;
+  credentialId?: string;
+}): Promise<Pick<DiscoveryScanResult, "recommendedScenarioId" | "recommendedScenarioIds" | "selectionProvenance">> {
+  if (!input.suggestions.length) return {};
+  const goal = input.goal?.trim() ?? "";
+  const comprehensive = /全面|全量|所有业务|所有功能|完整灰度|full|comprehensive/i.test(goal);
+  if (comprehensive) {
+    // A full scan may be execution-budgeted later, but discovery itself must
+    // never silently drop business flows. Every candidate receives an explicit
+    // executed/excluded/blocked disposition in the parent run.
+    const selected = input.suggestions;
+    return {
+      recommendedScenarioId: selected[0]?.suggestedScenarioId,
+      recommendedScenarioIds: selected.map((suggestion) => suggestion.suggestedScenarioId),
+      selectionProvenance: {
+        mode: "deterministic",
+        reason: `全面灰度模式已登记全部 ${selected.length} 条发现路径；高风险或缺少 oracle 的路径会明确标记为 blocked/excluded，不会被静默省略。`
+      }
+    };
+  }
+  const terms = semanticTerms(goal);
+  const scored = input.suggestions.map((suggestion) => {
+    const text = `${suggestion.title} ${suggestion.riskKind} ${suggestion.capabilityKind ?? ""} ${suggestion.reason} ${suggestion.actions.join(" ")}`.toLowerCase();
+    const termMatches = terms.filter((term) => text.includes(term)).length;
+    const domainBonus =
+      (/登录|权限|login|auth|permission/i.test(goal) && suggestion.riskKind === "auth") ||
+      (/接口|网络|api|network/i.test(goal) && suggestion.riskKind === "api_contract") ||
+      (/表单|创建|输入|form|create|input/i.test(goal) && suggestion.riskKind === "form") ||
+      (/上传|文件|upload|file/i.test(goal) && suggestion.riskKind === "upload") ||
+      (/列表|表格|筛选|排序|table|filter|sort/i.test(goal) && suggestion.riskKind === "table")
+        ? 8
+        : 0;
+    return { suggestion, score: termMatches + domainBonus };
+  }).sort((left, right) => right.score - left.score);
+  const first = scored[0]!;
+  const second = scored[1];
+  const deterministicIsClear = first.score >= 2 && (!second || first.score > second.score);
+  if (deterministicIsClear || !input.credentialId) {
+    const selected = deterministicIsClear
+      ? first.suggestion
+      : input.suggestions.find((suggestion) => suggestion.riskKind === "navigation") ?? first.suggestion;
+    return {
+      recommendedScenarioId: selected.suggestedScenarioId,
+      recommendedScenarioIds: [selected.suggestedScenarioId],
+      selectionProvenance: {
+        mode: "deterministic",
+        reason: deterministicIsClear
+          ? "需求关键词与一个 Discovery 测试点形成唯一高置信度匹配。"
+          : "没有启用 LLM 选择，使用最小只读视觉基线作为安全路径。"
+      }
+    };
+  }
+  const flows: PlannedBusinessFlow[] = input.suggestions.map((suggestion) => ({
+    id: suggestion.id,
+    title: suggestion.title,
+    kind: suggestion.riskKind === "api_contract" ? "api" : "scenario",
+    target: suggestion.suggestedScenarioId,
+    status: "auto-bindable",
+    confidence: "high",
+    reason: suggestion.reason,
+    scenarioId: suggestion.suggestedScenarioId,
+    requiredInformation: []
+  }));
+  const advice = await createLlmPlanningAdvice({
+    project: input.project,
+    goal: goal || "对当前项目进行全面灰度测试",
+    flows,
+    credentialId: input.credentialId
+  });
+  if (advice.status === "passed") {
+    const selectedFlowId = advice.prioritizedFlowIds.find((id) => flows.some((flow) => flow.id === id));
+    const selected = input.suggestions.find((suggestion) => suggestion.id === selectedFlowId);
+    if (selected) {
+      return {
+        recommendedScenarioId: selected.suggestedScenarioId,
+        recommendedScenarioIds: [selected.suggestedScenarioId],
+        selectionProvenance: {
+          mode: "llm-assisted",
+          reason: advice.summary ?? "LLM 在经过 Discovery 验证的候选场景中选择了最符合目标的路径。",
+          llmStatus: advice.status,
+          model: advice.model,
+          callId: advice.callId
+        }
+      };
+    }
+  }
+  const fallback = input.suggestions.find((suggestion) => suggestion.riskKind === "navigation") ?? first.suggestion;
+  return {
+    recommendedScenarioId: fallback.suggestedScenarioId,
+    recommendedScenarioIds: [fallback.suggestedScenarioId],
+    selectionProvenance: {
+      mode: "deterministic-fallback",
+      reason: "LLM 未能返回有效候选，已回退到经过 Discovery 验证的最小视觉基线。",
+      llmStatus: advice.status,
+      model: advice.model,
+      callId: advice.callId,
+      errorCode: advice.errorCode
+    }
   };
 }
 
@@ -191,8 +318,47 @@ function buildSuggestions(input: {
     }],
     evidenceRequirements: ["screenshot", "dom", "network", "console", "trace"]
   });
+  const safeNavigationButtons = input.page.buttons.filter((button) => {
+    const label = button.text.trim();
+    if (!label || label.length > 48) return false;
+    if (/(?:^|\b)(?:send|submit|save|create|delete|remove|publish|reload|new file)(?:\b|$)|登录|注册|提交|保存|创建|删除|发布|重新加载|新建/i.test(label)) return false;
+    return /code|preview|version|setting|terminal|connect|market|skill|tool|execution|backstage|dashboard|report|代码|预览|版本|设置|终端|连接|报告/i.test(label);
+  });
+  for (const button of safeNavigationButtons) {
+    add({
+      title: `${button.text} 面板可访问性`,
+      riskKind: "navigation",
+      reason: `真实页面存在“${button.text}”入口；仅执行页面内导航并验证结果可见，不提交数据。`,
+      capabilityKind: "domain_specific",
+      suggestedScenarioId: `discovered_${scenarioNamespace}_${slug(button.text)}_navigation`,
+      selectors: selectorForSuggestion({ buttonText: button.text, testId: button.testId }),
+      actions: ["visual_check"],
+      oracles: [{
+        id: `discovered_${slug(button.text)}_navigation_dom`,
+        name: `${button.text} 导航后页面仍可交互`,
+        type: "dom_text",
+        locator: "body",
+        expectedTextIncludes: button.text,
+        expected: `点击 ${button.text} 后页面仍保留可验证界面。`
+      }],
+      evidenceRequirements: ["screenshot", "dom", "network", "console", "trace"]
+    });
+  }
   const firstFormInput = input.page.inputs[0];
-  const primaryButton = input.page.buttons.find((button) => /提交|保存|创建|登录|submit|save|create|login/i.test(button.text)) ?? input.page.buttons[0];
+  const primaryButton = input.page.buttons
+    .filter((button) =>
+      /提交|保存|创建|登录|发送|submit|save|create|login|send/i.test(`${button.text} ${button.testId ?? ""} ${button.title ?? ""}`)
+      || button.type === "submit"
+    )
+    .sort((left, right) => {
+      const leftNear = left.nearInputLabel === firstFormInput?.label ? 1 : 0;
+      const rightNear = right.nearInputLabel === firstFormInput?.label ? 1 : 0;
+      if (leftNear !== rightNear) return rightNear - leftNear;
+      const actionPriority = (value: string) => /^(?:send|submit|发送|提交)$/i.test(value) ? 3
+        : /^(?:save|login|保存|登录)$/i.test(value) ? 2
+          : /^(?:create|创建)$/i.test(value) ? 1 : 0;
+      return actionPriority(right.text) - actionPriority(left.text);
+    })[0];
   const fileInput = input.page.inputs.find((item) => item.type === "file");
   if (fileInput?.label) {
     add({
@@ -280,7 +446,7 @@ function buildSuggestions(input: {
       evidenceRequirements: ["network", "dom", "screenshot"]
     });
   }
-  return suggestions.slice(0, 6);
+  return suggestions.slice(0, 12);
 }
 
 export async function runDiscoveryScan(input: {
@@ -288,6 +454,8 @@ export async function runDiscoveryScan(input: {
   projectId?: string;
   target?: TargetAppRuntime;
   sourceContexts?: SourceReadEnvelope[];
+  goal?: string;
+  credentialId?: string;
 }): Promise<DiscoveryScanResult> {
   const target = await resolveProjectTarget(input);
   // For a managed project the runtime-mapped URL is authoritative. A caller
@@ -359,7 +527,7 @@ export async function runDiscoveryScan(input: {
     });
     // Give client-side hydration a short, bounded window to expose headings,
     // controls and test ids without waiting for network idleness.
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(1_200);
     let pageModel: DiscoveryScanResult["page"];
     try {
       pageModel = await page.evaluate(() => ({
@@ -367,7 +535,40 @@ export async function runDiscoveryScan(input: {
       title: document.title,
       headings: Array.from(document.querySelectorAll("h1,h2,h3")).map((element) => element.textContent?.replace(/\s+/g, " ").trim() ?? "").filter(Boolean).slice(0, 12),
       links: Array.from(document.querySelectorAll("a")).map((element) => ({ text: element.textContent?.replace(/\s+/g, " ").trim() ?? "", href: element.href })).filter((item) => item.text || item.href).slice(0, 30),
-      buttons: Array.from(document.querySelectorAll("button,[role='button']")).map((element) => ({ text: element.textContent?.replace(/\s+/g, " ").trim() ?? "", testId: element.getAttribute("data-testid") || undefined, role: element.getAttribute("role") || "button" })).filter((item) => item.text || item.testId).slice(0, 30),
+      buttons: Array.from(document.querySelectorAll("button,[role='button']")).map((element) => {
+        const text = element.textContent?.replace(/\s+/g, " ").trim()
+          || element.getAttribute("aria-label")
+          || element.getAttribute("title")
+          || "";
+        let scope = element.parentElement;
+        let inputDistance = 1;
+        let nearInputLabel: string | undefined;
+        while (scope && inputDistance <= 6) {
+          const input = scope.querySelector("input,textarea,select");
+          if (input) {
+            const id = input.getAttribute("id");
+            const label = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : undefined;
+            nearInputLabel = label?.textContent?.replace(/\s+/g, " ").trim()
+              || input.closest("label")?.textContent?.replace(/\s+/g, " ").trim()
+              || input.getAttribute("aria-label")
+              || input.getAttribute("placeholder")
+              || input.getAttribute("name")
+              || undefined;
+            break;
+          }
+          scope = scope.parentElement;
+          inputDistance += 1;
+        }
+        return {
+          text,
+          testId: element.getAttribute("data-testid") || undefined,
+          role: element.getAttribute("role") || "button",
+          title: element.getAttribute("title") || undefined,
+          type: element.getAttribute("type") || undefined,
+          nearInputLabel,
+          inputDistance: nearInputLabel ? inputDistance : undefined
+        };
+      }).filter((item) => item.text || item.testId).slice(0, 40),
       inputs: Array.from(document.querySelectorAll("input,textarea,select")).map((element) => {
         const id = element.getAttribute("id");
         const label = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : undefined;
@@ -385,6 +586,15 @@ export async function runDiscoveryScan(input: {
       throw new Error(`discovery_page_model_failed:${error instanceof Error ? error.message : String(error)}`);
     }
     const suggestions = buildSuggestions({ page: pageModel, networkEndpoints, openApiOperations, projectId: target.projectId });
+    const selection = await selectSuggestion({
+      suggestions,
+      project: {
+        id: target.projectId ?? input.projectId ?? "discovered-project",
+        name: pageModel.title ?? input.projectId ?? "Discovered Project"
+      },
+      goal: input.goal,
+      credentialId: input.credentialId
+    });
     const heading = pageModel.headings[0] ?? pageModel.title ?? "页面";
     const drafts = await Promise.all(suggestions.map((suggestion) =>
       writeScenarioDraft(suggestionDraft({ suggestion, heading, url, projectId: target.projectId }))
@@ -398,6 +608,7 @@ export async function runDiscoveryScan(input: {
       openApiOperations,
       suggestions,
       drafts,
+      ...selection,
       status: "passed",
       message: navigationWarning
         ? `Discovery Scan 完成：页面已渲染，浏览器生命周期未在等待窗口内结束；已按可见 DOM 发现 ${suggestions.length} 个测试点草案。`

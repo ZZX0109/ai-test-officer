@@ -15,6 +15,7 @@ export const artifactOriginSchema = z.enum([
   "fixture",
   "simulated",
   "user-uploaded",
+  "agent-generated",
   "legacy-unverified"
 ]);
 export type ArtifactOrigin = z.infer<typeof artifactOriginSchema>;
@@ -29,7 +30,10 @@ export const artifactKindV2Schema = z.enum([
   "download",
   "operation-log",
   "report",
-  "attachment"
+  "attachment",
+  "source-patch",
+  "changed-files-archive",
+  "repair-validation-log"
 ]);
 
 export const artifactIntegrityV2Schema = z.object({
@@ -39,6 +43,39 @@ export const artifactIntegrityV2Schema = z.object({
   capturedAt: z.string().datetime(),
   collector: z.object({ name: z.string().min(1), version: z.string().min(1) })
 });
+
+export const evidenceLocatorSchema = z.object({
+  pageUrl: z.string().optional(),
+  viewport: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
+  selector: z.string().optional(),
+  testId: z.string().optional(),
+  role: z.string().optional(),
+  boundingBox: z.object({
+    x: z.number(),
+    y: z.number(),
+    width: z.number().nonnegative(),
+    height: z.number().nonnegative()
+  }).optional(),
+  snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  beforeSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  afterSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  requestId: z.string().optional(),
+  method: z.string().optional(),
+  statusCode: z.number().int().optional(),
+  operationId: z.string().optional(),
+  bodySha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  lineStart: z.number().int().positive().optional(),
+  lineEnd: z.number().int().positive().optional(),
+  sourceLocation: z.string().optional(),
+  executable: z.string().optional(),
+  argsSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  commandConfigSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  exitCode: z.number().int().optional(),
+  dataSnapshotId: z.string().optional(),
+  assertionSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  timeRange: z.object({ from: z.string().datetime(), to: z.string().datetime() }).optional()
+}).default({});
+export type EvidenceLocator = z.infer<typeof evidenceLocatorSchema>;
 
 export const artifactV2Schema = z.object({
   schemaVersion: z.literal("2.0"),
@@ -55,6 +92,7 @@ export const artifactV2Schema = z.object({
   sequence: z.number().int().nonnegative(),
   monotonicOffsetMs: z.number().nonnegative(),
   integrity: artifactIntegrityV2Schema,
+  locator: evidenceLocatorSchema.optional(),
   fixtureManifestSha256: z.string().regex(/^[a-f0-9]{64}$/).optional()
 }).superRefine((artifact, context) => {
   if (artifact.origin === "fixture" && !artifact.fixtureManifestSha256) {
@@ -73,7 +111,9 @@ export const evidenceV2Schema = z.object({
   attempt: z.number().int().positive(),
   capturedAt: z.string().datetime(),
   artifactIds: z.array(z.string().min(1)),
-  summary: z.string().min(1)
+  summary: z.string().min(1),
+  locator: evidenceLocatorSchema.optional(),
+  canonicalSha256: z.string().regex(/^[a-f0-9]{64}$/).optional()
 });
 export type EvidenceV2 = z.infer<typeof evidenceV2Schema>;
 
@@ -160,6 +200,8 @@ export const projectManifestSchema = z.object({
   commands: z.object({
     install: commandSpecSchema.optional(),
     start: commandSpecSchema.optional(),
+    targetedTest: commandSpecSchema.optional(),
+    relatedTest: commandSpecSchema.optional(),
     test: commandSpecSchema.optional(),
     cleanup: commandSpecSchema.optional()
   }),
@@ -169,6 +211,41 @@ export const projectManifestSchema = z.object({
   environmentAllowlist: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/)).default([]),
   network: z.object({ mode: z.enum(["deny", "allow-target", "allowlist"]).default("allow-target"), allowedHosts: z.array(z.string()).default([]) }).default({}),
   fixtures: z.array(z.object({ id: z.string().min(1), path: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/), destructive: z.boolean().default(false) })).default([]),
+  apiOperations: z.array(z.object({
+    operationId: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
+    pathTemplate: z.string().startsWith("/"),
+    baseUrlRef: z.enum(["frontend", "backend"]).default("backend"),
+    allowedStatusCodes: z.array(z.number().int().min(100).max(599)).min(1).default([200]),
+    fixtureRef: z.string().min(1).optional(),
+    destructive: z.boolean().default(false)
+  })).default([]),
+  dataSources: z.array(z.object({
+    id: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+    kind: z.enum(["postgres", "sqlite", "http-snapshot"]),
+    connectionEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+    readOnly: z.boolean().default(true),
+    queryTemplates: z.array(z.object({
+      id: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+      statement: z.string().min(1),
+      parameterNames: z.array(z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/)).default([]),
+      expectation: z.discriminatedUnion("kind", [
+        z.object({ kind: z.literal("non-empty") }),
+        z.object({ kind: z.literal("empty") }),
+        z.object({ kind: z.literal("row-count"), value: z.number().int().nonnegative() }),
+        z.object({ kind: z.literal("scalar-equals"), value: z.union([z.string(), z.number(), z.boolean(), z.null()]) })
+      ])
+    })).default([])
+  })).default([]),
+  backgroundTasks: z.array(z.object({
+    id: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+    statusOperationId: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+    statusField: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_.]*$/).default("status"),
+    terminalStates: z.array(z.string().min(1)).min(1),
+    successStates: z.array(z.string().min(1)).min(1),
+    pollIntervalMs: z.number().int().min(100).max(30_000).default(1_000),
+    timeoutMs: z.number().int().min(1_000).max(300_000).default(60_000)
+  })).default([]),
   capabilities: z.object({ browser: z.boolean().default(true), desktop: z.boolean().default(false), allowedBundleIds: z.array(z.string()).default([]) }).default({}),
   execution: z.object({ mode: z.enum(["oci", "trusted-local"]).default("oci"), image: z.string().min(1).optional(), engine: z.enum(["docker", "podman"]).default("docker") }).default({}),
   budget: resourceBudgetSchema.default({})
@@ -216,6 +293,11 @@ export type ApiError = z.infer<typeof apiErrorSchema>;
 export const machineGateSchema = z.object({
   status: gateStatusSchema,
   reasons: z.array(z.string()).default([]),
+  reasonDetails: z.array(z.object({
+    code: z.string().min(1),
+    summary: z.string().min(1),
+    evidenceRefs: z.array(z.string().min(1)).min(1)
+  })).default([]),
   assertionFailures: z.array(z.string()).default([]),
   evidenceComplete: z.boolean()
 });
@@ -271,12 +353,16 @@ export type JudgeMode = z.infer<typeof judgeModeSchema>;
 
 export const llmBudgetSchema = z.object({
   maxPlannerCalls: z.number().int().min(1).max(2).default(2),
-  maxJudgeCalls: z.number().int().min(1).max(2).default(2),
+  maxJudgeCalls: z.number().int().min(1).max(1).default(1),
+  maxTriageCalls: z.number().int().min(0).max(1).default(1),
+  maxRepairCallsPerRound: z.number().int().min(0).max(2).default(2),
+  maxRepairRounds: z.number().int().min(0).max(2).default(2),
+  maxSemanticRepairAttempts: z.number().int().min(0).max(1).default(1),
   maxTotalTokens: z.number().int().positive().max(100_000).default(12_000),
   plannerMaxOutputTokens: z.number().int().positive().max(8_000).default(2_500),
   judgeMaxOutputTokens: z.number().int().positive().max(8_000).default(2_000),
   requestTimeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
-  totalTimeoutMs: z.number().int().min(1_000).max(300_000).default(90_000),
+  totalTimeoutMs: z.number().int().min(1_000).max(300_000).default(120_000),
   maxEstimatedCostUsd: z.number().positive().optional()
 }).refine((value) => value.requestTimeoutMs <= value.totalTimeoutMs, { message: "requestTimeoutMs must not exceed totalTimeoutMs" });
 export type LlmBudget = z.infer<typeof llmBudgetSchema>;
@@ -294,29 +380,97 @@ export const llmTransportAttemptSchema = z.object({
 });
 export type LlmTransportAttempt = z.infer<typeof llmTransportAttemptSchema>;
 
+export const llmSemanticRepairAttemptSchema = z.object({
+  attempt: z.number().int().min(1).max(1),
+  startedAt: z.string().datetime(),
+  durationMs: z.number().int().nonnegative(),
+  status: z.enum(["passed", "failed"]),
+  validationErrors: z.array(z.string().min(1)).max(50).default([])
+});
+export type LlmSemanticRepairAttempt = z.infer<typeof llmSemanticRepairAttemptSchema>;
+
 export const llmCallSchema = z.object({
+  schemaVersion: z.literal("2.0").default("2.0"),
   id: z.string().min(1),
   runId: z.string().min(1).optional(),
   experimentId: z.string().min(1).optional(),
-  purpose: z.enum(["planning", "judging"]),
+  purpose: z.enum(["planning", "judging", "triage", "repairing", "assistant"]),
   provider: z.enum(["openai-compatible", "openai", "anthropic", "openrouter", "custom"]),
   model: z.string().min(1),
+  requestedModel: z.string().min(1).optional(),
+  returnedModel: z.string().min(1).optional(),
+  modelProfileId: z.string().min(1).optional(),
+  langChainAdapterVersion: z.string().min(1).optional(),
+  providerAdapterVersion: z.string().min(1).optional(),
+  promptTemplateId: z.string().min(1).optional(),
+  promptVersion: z.string().min(1).optional(),
+  promptSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  inputSummarySha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  actionDslVersion: z.string().min(1).optional(),
+  outputSchemaVersion: z.string().min(1).optional(),
+  graphVersion: z.string().min(1).optional(),
+  scenarioRegistrySha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  projectDigest: z.string().min(1).optional(),
+  routeReason: z.string().min(1).optional(),
+  ruleCapable: z.boolean().optional(),
+  ruleBypassReason: z.string().min(1).optional(),
+  cachePolicy: z.enum(["use", "bypass"]).default("use"),
+  cacheHit: z.boolean().default(false),
+  sourceCallId: z.string().min(1).optional(),
   requestId: z.string().min(1).optional(),
+  queuedAt: z.string().datetime().optional(),
   startedAt: z.string().datetime(),
+  firstTokenAt: z.string().datetime().optional(),
+  completedAt: z.string().datetime().optional(),
   durationMs: z.number().int().nonnegative(),
+  timing: z.object({
+    queueMs: z.number().int().nonnegative().optional(),
+    firstTokenMs: z.number().int().nonnegative().optional(),
+    generationMs: z.number().int().nonnegative().optional(),
+    parseMs: z.number().int().nonnegative().optional(),
+    totalMs: z.number().int().nonnegative()
+  }).optional(),
   status: z.enum(["passed", "failed", "blocked"]),
   usage: z.object({
     promptTokens: z.number().int().nonnegative().optional(),
+    cachedPromptTokens: z.number().int().nonnegative().optional(),
     completionTokens: z.number().int().nonnegative().optional(),
+    reasoningTokens: z.number().int().nonnegative().optional(),
     totalTokens: z.number().int().nonnegative().optional(),
-    estimatedCostUsd: z.number().nonnegative().optional()
+    estimatedCostUsd: z.number().nonnegative().nullable().optional(),
+    currency: z.string().min(1).default("USD"),
+    priceCatalogVersion: z.string().min(1).optional()
   }).default({}),
   errorCode: z.string().min(1).optional(),
+  failureClass: z.enum(["transport", "authentication", "authorization", "model-access", "budget", "semantic", "provider", "unknown"]).optional(),
   transportMode: z.enum(["stream", "non-stream-fallback"]).optional(),
   fallbackReason: z.string().min(1).optional(),
-  transportAttempts: z.array(llmTransportAttemptSchema).min(1).max(3).optional()
+  fallbackImpact: z.enum(["none", "plan-source-changed", "recommendation-unavailable", "human-review-required", "path-blocked"]).default("none"),
+  finalStatusImpact: z.enum(["none", "advisory-only", "forced-review", "blocked"]).default("none"),
+  transportAttempts: z.array(llmTransportAttemptSchema).min(1).max(3).optional(),
+  semanticRepairAttempts: z.array(llmSemanticRepairAttemptSchema).max(1).default([]),
+  redactedInputSummary: z.string().max(2_000).optional(),
+  structuredOutput: z.record(z.unknown()).optional(),
+  encryptedOutputRef: z.string().min(1).optional()
 });
 export type LlmCall = z.infer<typeof llmCallSchema>;
+export const llmInvocationSchema = llmCallSchema;
+export type LlmInvocation = LlmCall;
+
+export const modelPriceCatalogSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  version: z.string().min(1),
+  currency: z.string().min(1).default("USD"),
+  effectiveAt: z.string().datetime(),
+  entries: z.array(z.object({
+    provider: z.string().min(1),
+    modelPattern: z.string().min(1),
+    inputPerMillion: z.number().nonnegative(),
+    cachedInputPerMillion: z.number().nonnegative().optional(),
+    outputPerMillion: z.number().nonnegative()
+  }))
+});
+export type ModelPriceCatalog = z.infer<typeof modelPriceCatalogSchema>;
 
 export const planProvenanceSchema = z.object({
   source: z.enum(["deterministic", "llm", "cached-llm", "adaptive-rule-fallback"]),
@@ -370,7 +524,31 @@ export const actionDslSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("select"), selectorRef: z.string().min(1), valueRef: z.string().min(1) }),
   z.object({ action: z.literal("upload"), selectorRef: z.string().min(1), fixtureRef: z.string().min(1) }),
   z.object({ action: z.literal("assert"), oracleId: z.string().min(1) }),
-  z.object({ action: z.literal("wait"), durationMs: z.number().int().min(0).max(45_000) })
+  z.object({ action: z.literal("wait"), durationMs: z.number().int().min(0).max(45_000) }),
+  z.object({
+    action: z.literal("api-request"),
+    operationId: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+    oracleId: z.string().min(1),
+    fixtureRef: z.string().min(1).optional()
+  }),
+  z.object({
+    action: z.literal("data-assert"),
+    dataSourceId: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+    queryTemplateId: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+    oracleId: z.string().min(1),
+    parameterFixtureRef: z.string().min(1).optional()
+  }),
+  z.object({
+    action: z.literal("wait-job"),
+    backgroundTaskId: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+    oracleId: z.string().min(1),
+    timeoutMs: z.number().int().min(1_000).max(300_000).optional()
+  }),
+  z.object({
+    action: z.literal("command-check"),
+    commandId: z.enum(["test", "health"]),
+    oracleId: z.string().min(1)
+  })
 ]);
 export type ActionDsl = z.infer<typeof actionDslSchema>;
 
@@ -386,6 +564,291 @@ export const compiledPlanSchema = z.object({
 });
 export type CompiledPlan = z.infer<typeof compiledPlanSchema>;
 
+export const agentPermissionProfileSchema = z.object({
+  observe: z.boolean().default(true),
+  browserControl: z.boolean().default(true),
+  sourceRead: z.boolean().default(true),
+  sandboxWrite: z.boolean().default(false),
+  sandboxCommand: z.boolean().default(false),
+  networkInstall: z.boolean().default(false),
+  hostApply: z.boolean().default(false),
+  artifactExport: z.boolean().default(false),
+  systemControl: z.boolean().default(false),
+  /** Compatibility-only aliases. New code must use the granular fields. */
+  workspaceControl: z.boolean().default(false),
+  ideTerminalControl: z.boolean().default(false)
+});
+export type AgentPermissionProfile = z.infer<typeof agentPermissionProfileSchema>;
+
+export const agentGraphNodeSchema = z.enum([
+  "intake",
+  "discover",
+  "build-coverage-map",
+  "plan",
+  "compile",
+  "approve-plan",
+  "prepare-sandbox",
+  "approve-capabilities",
+  "execute",
+  "collect-and-gate",
+  "triage-failure",
+  "selective-judge",
+  "repair",
+  "finalize"
+]);
+export type AgentGraphNode = z.infer<typeof agentGraphNodeSchema>;
+
+export const agentInterruptKindSchema = z.enum([
+  "plan-approval",
+  "browser-permission",
+  "credential",
+  "network-install",
+  "dangerous-operation",
+  "repair-apply",
+  "execution-result"
+]);
+export const agentInterruptSchema = z.object({
+  id: z.string().min(1),
+  runId: z.string().min(1),
+  kind: agentInterruptKindSchema,
+  status: z.enum(["pending", "approved", "rejected", "expired"]),
+  title: z.string().min(1),
+  detail: z.string().min(1),
+  requestedCapabilities: z.array(z.string().min(1)).default([]),
+  payload: z.record(z.unknown()).default({}),
+  createdAt: z.string().datetime(),
+  resolvedAt: z.string().datetime().optional()
+});
+export type AgentInterrupt = z.infer<typeof agentInterruptSchema>;
+
+export const agentGraphProjectionSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  runId: z.string().min(1),
+  threadId: z.string().min(1),
+  mode: z.enum(["shadow", "active"]),
+  status: z.enum(["idle", "running", "interrupted", "completed", "failed", "cancelled"]),
+  currentNode: agentGraphNodeSchema.optional(),
+  completedNodes: z.array(agentGraphNodeSchema).default([]),
+  progress: z.number().min(0).max(1),
+  pendingInterrupt: agentInterruptSchema.optional(),
+  lastError: z.object({ code: z.string().min(1), message: z.string().min(1), node: agentGraphNodeSchema.optional() }).optional(),
+  tokenUsage: z.number().int().nonnegative().default(0),
+  repairSessionId: z.string().min(1).optional(),
+  updatedAt: z.string().datetime()
+});
+export type AgentGraphProjection = z.infer<typeof agentGraphProjectionSchema>;
+
+export const repairRiskSchema = z.enum(["low", "medium", "high", "forbidden"]);
+export const repairFileChangeSchema = z.object({
+  path: z.string().min(1),
+  status: z.enum(["added", "modified", "deleted"]),
+  baseSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  patchedSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  additions: z.number().int().nonnegative().default(0),
+  deletions: z.number().int().nonnegative().default(0),
+  risk: repairRiskSchema,
+  riskReasons: z.array(z.string()).default([]),
+  editable: z.boolean().default(true),
+  version: z.number().int().nonnegative().default(0)
+});
+export type RepairFileChange = z.infer<typeof repairFileChangeSchema>;
+
+export const repairValidationSchema = z.object({
+  id: z.string().min(1),
+  repairSessionId: z.string().min(1),
+  status: z.enum(["queued", "running", "passed", "failed", "blocked"]),
+  childRunId: z.string().min(1).optional(),
+  commands: z.array(commandSpecSchema).default([]),
+  targetedPassed: z.boolean().optional(),
+  regressionPassed: z.boolean().optional(),
+  artifactIds: z.array(z.string().min(1)).default([]),
+  summary: z.string().default(""),
+  startedAt: z.string().datetime(),
+  finishedAt: z.string().datetime().optional()
+});
+export type RepairValidation = z.infer<typeof repairValidationSchema>;
+
+export const repairSessionSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  id: z.string().min(1),
+  runId: z.string().min(1),
+  projectId: z.string().min(1),
+  status: z.enum(["draft", "analyzing", "editing", "validating", "ready-for-review", "exported", "applied", "failed", "blocked", "cancelled"]),
+  baseSourceSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  workspaceRoot: z.string().min(1),
+  summary: z.string().default(""),
+  failureClass: z.enum(["product-bug", "test-script", "environment", "evidence", "unknown"]).default("unknown"),
+  files: z.array(repairFileChangeSchema).max(20).default([]),
+  validation: repairValidationSchema.optional(),
+  iteration: z.number().int().min(0).max(2).default(0),
+  maxFiles: z.number().int().positive().max(20).default(20),
+  maxChangedLines: z.number().int().positive().max(2000).default(2000),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type RepairSession = z.infer<typeof repairSessionSchema>;
+
+export const coverageItemSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  id: z.string().min(1),
+  runId: z.string().min(1),
+  flowId: z.string().min(1),
+  module: z.string().min(1),
+  surface: z.enum(["page", "api", "data", "background-task"]),
+  route: z.string().optional(),
+  operationId: z.string().optional(),
+  dataEntity: z.string().optional(),
+  risk: z.enum(["low", "medium", "high", "critical"]),
+  preconditions: z.array(z.string()).default([]),
+  permissions: z.array(z.string()).default([]),
+  testDataRefs: z.array(z.string()).default([]),
+  actionPathIds: z.array(z.string()).default([]),
+  oracleIds: z.array(z.string()).default([]),
+  requiredEvidenceKinds: z.array(artifactKindV2Schema).default([]),
+  /**
+   * A manifest-derived, fully bound plan. This is deliberately stored on the
+   * coverage item rather than reconstructed from LLM text by the worker.
+   * Every URL, data source, query and background task has already been checked
+   * against ProjectManifest before a path child run is created.
+   */
+  structuredPlan: compiledPlanSchema.optional(),
+  disposition: z.enum(["executed", "excluded", "blocked", "pending"]),
+  dispositionReason: z.string().optional(),
+  scenarioId: z.string().optional(),
+  attemptId: z.string().optional(),
+  childRunId: z.string().optional(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type CoverageItem = z.infer<typeof coverageItemSchema>;
+
+export const runKindSchema = z.enum(["parent", "path", "validation"]);
+export type RunKind = z.infer<typeof runKindSchema>;
+
+export const conclusionClaimTypeSchema = z.enum([
+  "assertion",
+  "machine-gate",
+  "judge-finding",
+  "failure-classification",
+  "final-status",
+  "human-override"
+]);
+export const proofStatusSchema = z.enum(["verified", "missing", "invalid", "legacy-unverified"]);
+export const conclusionSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  conclusionId: z.string().min(1),
+  runId: z.string().min(1),
+  scenarioId: z.string().min(1),
+  attemptId: z.string().min(1),
+  claimType: conclusionClaimTypeSchema,
+  status: z.string().min(1),
+  source: z.enum(["deterministic", "llm-advisory", "human"]),
+  assertionIds: z.array(z.string().min(1)).default([]),
+  evidenceRefs: z.array(z.string().min(1)).min(1),
+  proofStatus: proofStatusSchema,
+  createdAt: z.string().datetime(),
+  policyVersion: z.string().min(1),
+  canonicalSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  supersedesConclusionId: z.string().min(1).optional()
+});
+export type Conclusion = z.infer<typeof conclusionSchema>;
+
+export const proofNodeTypeSchema = z.enum(["conclusion", "assertion", "oracle", "evidence", "artifact", "attempt", "step"]);
+export const proofNodeSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  id: z.string().min(1),
+  runId: z.string().min(1),
+  scenarioId: z.string().min(1),
+  attemptId: z.string().min(1),
+  nodeType: proofNodeTypeSchema,
+  payload: z.record(z.unknown()).default({}),
+  canonicalSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  createdAt: z.string().datetime()
+});
+export type ProofNode = z.infer<typeof proofNodeSchema>;
+
+export const proofEdgeSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  id: z.string().min(1),
+  runId: z.string().min(1),
+  scenarioId: z.string().min(1),
+  attemptId: z.string().min(1),
+  fromType: proofNodeTypeSchema,
+  fromId: z.string().min(1),
+  toType: proofNodeTypeSchema,
+  toId: z.string().min(1),
+  relation: z.enum([
+    "supported-by-assertion",
+    "evaluates-oracle",
+    "supported-by-evidence",
+    "materialized-by-artifact",
+    "captured-in-attempt",
+    "produced-by-step",
+    "supersedes"
+  ]),
+  canonicalSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  createdAt: z.string().datetime()
+});
+export type ProofEdge = z.infer<typeof proofEdgeSchema>;
+
+export const runEvidenceManifestSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  runId: z.string().min(1),
+  artifactHashes: z.record(z.string().regex(/^[a-f0-9]{64}$/)),
+  evidenceHashes: z.record(z.string().regex(/^[a-f0-9]{64}$/)),
+  conclusionHashes: z.record(z.string().regex(/^[a-f0-9]{64}$/)),
+  proofNodeHashes: z.record(z.string().regex(/^[a-f0-9]{64}$/)).default({}),
+  proofEdgeHashes: z.record(z.string().regex(/^[a-f0-9]{64}$/)),
+  reportSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  evidenceSetRoot: z.string().regex(/^[a-f0-9]{64}$/),
+  generatedAt: z.string().datetime(),
+  signature: z.object({
+    algorithm: z.enum(["hmac-sha256", "ed25519"]),
+    keyId: z.string().min(1),
+    value: z.string().min(1)
+  }).optional(),
+  integrityStatus: z.enum(["verified", "unsigned", "integrity-invalid"])
+});
+export type RunEvidenceManifest = z.infer<typeof runEvidenceManifestSchema>;
+
+export const llmBudgetLedgerSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  runId: z.string().min(1),
+  budget: llmBudgetSchema,
+  reserved: z.object({
+    plannerCalls: z.number().int().nonnegative(),
+    judgeCalls: z.number().int().nonnegative(),
+    triageCalls: z.number().int().nonnegative(),
+    repairCalls: z.number().int().nonnegative(),
+    tokens: z.number().int().nonnegative(),
+    wallClockMs: z.number().int().nonnegative(),
+    estimatedCostUsd: z.number().nonnegative().nullable()
+  }),
+  consumed: z.object({
+    plannerCalls: z.number().int().nonnegative(),
+    judgeCalls: z.number().int().nonnegative(),
+    triageCalls: z.number().int().nonnegative(),
+    repairCalls: z.number().int().nonnegative(),
+    tokens: z.number().int().nonnegative(),
+    wallClockMs: z.number().int().nonnegative(),
+    estimatedCostUsd: z.number().nonnegative().nullable()
+  }),
+  updatedAt: z.string().datetime()
+});
+export type LlmBudgetLedger = z.infer<typeof llmBudgetLedgerSchema>;
+
+export const repairExportSchema = z.object({
+  id: z.string().min(1),
+  repairSessionId: z.string().min(1),
+  format: z.enum(["patch", "zip"]),
+  artifactId: z.string().min(1),
+  downloadUrl: z.string().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  sizeBytes: z.number().int().nonnegative(),
+  createdAt: z.string().datetime()
+});
+export type RepairExport = z.infer<typeof repairExportSchema>;
+
 // An opaque identifier understood only by the benchmark fixture/worker boundary.
 // Its value deliberately carries no failure class, expected verdict, or evidence hint.
 export const fixtureVariantIdSchema = z.string().regex(/^fxv_[a-f0-9]{16}$/);
@@ -393,6 +856,9 @@ export type FixtureVariantId = z.infer<typeof fixtureVariantIdSchema>;
 
 export const createRunRequestSchema = z.object({
   runId: z.string().min(1).optional(),
+  runKind: runKindSchema.default("parent"),
+  parentRunId: z.string().min(1).optional(),
+  coverageItemId: z.string().min(1).optional(),
   organizationId: z.string().min(1).default("local"),
   projectId: z.string().min(1).optional(),
   actor: z.string().min(1).default("api-user"),
@@ -404,6 +870,8 @@ export const createRunRequestSchema = z.object({
      * fixture (for example todo_lite -> local_demo_app). */
     logicalProjectId: z.string().min(1).optional(),
     scenarioId: z.string().optional(),
+    coverageScenarioIds: z.array(z.string().min(1)).max(500).default([]),
+    coverageMode: z.enum(["targeted", "full"]).default("targeted"),
     requirement: z.string().optional(),
     diff: z.string().optional(),
     plannerMode: plannerModeSchema.default("deterministic"),
@@ -416,13 +884,7 @@ export const createRunRequestSchema = z.object({
     cachePolicy: z.enum(["auto", "bypass"]).default("auto"),
     llmBudget: llmBudgetSchema.default({}),
     fixtureVariantId: fixtureVariantIdSchema.optional(),
-    permissionProfile: z.object({
-      observe: z.boolean().default(true),
-      browserControl: z.boolean().default(true),
-      workspaceControl: z.boolean().default(false),
-      ideTerminalControl: z.boolean().default(false),
-      systemControl: z.boolean().default(false)
-    }).default({}),
+    permissionProfile: agentPermissionProfileSchema.default({}),
     executionMode: z.enum(["oci", "trusted-local"]).default("oci"),
     capabilities: z.array(z.enum(["browser", "desktop"])).default(["browser"])
   })
@@ -437,13 +899,43 @@ export const createRunRequestSchema = z.object({
   if (value.input.experimentId && value.input.cachePolicy !== "bypass") {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["input", "cachePolicy"], message: "Benchmark experiments must bypass plan cache." });
   }
+  if (value.runKind !== "parent" && !value.parentRunId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["parentRunId"], message: "Path and validation runs require parentRunId." });
+  }
+  if (value.runKind === "path" && !value.coverageItemId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["coverageItemId"], message: "Path runs require coverageItemId." });
+  }
 });
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>;
 
 export const runStreamEventSchema = z.object({
   id: z.string(),
   runId: z.string(),
-  type: z.enum(["state", "step", "log", "artifact", "heartbeat"]),
+  type: z.enum([
+    "state",
+    "step",
+    "log",
+    "artifact",
+    "heartbeat",
+    "agent.node.started",
+    "agent.node.completed",
+    "agent.node.failed",
+    "agent.interrupt",
+    "llm.call.started",
+    "llm.call.retried",
+    "llm.call.completed",
+    "llm.call.failed",
+    "proof.created",
+    "proof.verified",
+    "proof.invalid",
+    "conclusion.created",
+    "artifact.committed",
+    "repair.created",
+    "repair.changed",
+    "repair.exported",
+    "validation.started",
+    "validation.completed"
+  ]),
   sequence: z.number().int().nonnegative(),
   createdAt: z.string().datetime(),
   payload: z.record(z.unknown())

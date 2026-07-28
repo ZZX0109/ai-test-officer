@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { runEventStore, SqliteRunEventStore } from "../src/runEventStore.js";
+import { isIdempotentReplay, runEventStore, SqliteRunEventStore } from "../src/runEventStore.js";
 
 export async function testRunEventStore() {
   const suffix = randomUUID();
@@ -18,6 +18,7 @@ export async function testRunEventStore() {
   assert.equal(run.state, "queued");
   const duplicate = await runEventStore.append({ runId, type: "permission_granted", expectedVersion: 3, actor: "tester", idempotencyKey: `permission-${suffix}` });
   assert.equal(duplicate.version, 4);
+  assert.equal(isIdempotentReplay(duplicate), true);
   await assert.rejects(() => runEventStore.append({ runId, type: "run_preparing", expectedVersion: 2, actor: "tester", idempotencyKey: `stale-${suffix}` }), /version_conflict/);
   run = await runEventStore.append({ runId, type: "run_preparing", expectedVersion: 4, actor: "worker", idempotencyKey: `prepare-${suffix}` });
   run = await runEventStore.append({ runId, type: "run_started", expectedVersion: 5, actor: "worker", idempotencyKey: `start-${suffix}` });
@@ -152,6 +153,44 @@ export async function testRunEventStore() {
     assert.equal(recovered?.planProvenance?.fallbackReason, "invalid_dsl");
     assert.equal(recovered?.plannerCall?.id, llmCall.id);
     assert.deepEqual(recovered?.plannerCalls?.map((call) => call.id), [llmCall.id]);
+
+    const idempotencyRunId = `idempotency_replay_${suffix}`;
+    let idempotencyRun = await afterRestart.create({
+      runId: idempotencyRunId,
+      actor: "tester",
+      idempotencyKey: `idempotency-create-${suffix}`
+    });
+    idempotencyRun = await afterRestart.append({
+      runId: idempotencyRunId,
+      type: "plan_generated",
+      expectedVersion: idempotencyRun.version,
+      actor: "planner",
+      idempotencyKey: `idempotency-plan-${suffix}`
+    });
+    const approved = await afterRestart.append({
+      runId: idempotencyRunId,
+      type: "plan_approved",
+      expectedVersion: idempotencyRun.version,
+      actor: "tester",
+      idempotencyKey: `idempotency-approval-${suffix}`
+    });
+    await afterRestart.append({
+      runId: idempotencyRunId,
+      type: "permission_granted",
+      expectedVersion: approved.version,
+      actor: "tester",
+      idempotencyKey: `idempotency-permission-${suffix}`
+    });
+    const replayedApproval = await afterRestart.append({
+      runId: idempotencyRunId,
+      type: "plan_approved",
+      expectedVersion: idempotencyRun.version,
+      actor: "tester",
+      idempotencyKey: `idempotency-approval-${suffix}`
+    });
+    assert.equal(replayedApproval.version, approved.version);
+    assert.equal(replayedApproval.state, approved.state);
+    assert.equal(isIdempotentReplay(replayedApproval), true);
 
     const continued = await afterRestart.append({
       runId: replayRunId,

@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { runDiscoveryScan } from "../src/discoveryScan.js";
-import { approveScenarioDraft, probeScenarioDraft } from "../src/harnessGapStore.js";
+import { approveScenarioDraft, probeScenarioDraft, writeScenarioDraft } from "../src/harnessGapStore.js";
 import { getScenario } from "../src/scenarios.js";
 import { runVisualGrayTest } from "../src/testRunner.js";
 import type { SourceReadEnvelope } from "../src/types.js";
@@ -74,13 +74,24 @@ export async function testDiscoveryScanDrafts() {
         }
       }
     }];
-    const discovery = await runDiscoveryScan({ appUrl: baseUrl, sourceContexts });
+    const discovery = await runDiscoveryScan({ appUrl: baseUrl, sourceContexts, goal: "全面灰度测试" });
     assert.equal(discovery.status, "passed");
     assert.equal(discovery.page.testIds.includes("task-table"), true);
     assert.equal(discovery.openApiOperations[0]?.operationId, "listItems");
     assert.equal(discovery.suggestions[0]?.riskKind, "navigation");
     assert.deepEqual(discovery.suggestions[0]?.actions, ["visual_check"]);
-    assert.equal(discovery.suggestions.some((suggestion) => suggestion.riskKind === "form"), true);
+    assert.equal(discovery.recommendedScenarioId, discovery.suggestions[0]?.suggestedScenarioId);
+    assert.deepEqual(
+      discovery.recommendedScenarioIds,
+      discovery.suggestions.map((suggestion) => suggestion.suggestedScenarioId),
+      "a comprehensive scan must keep every discovered path; budgets limit execution concurrency, not discovery visibility"
+    );
+    assert.equal(discovery.selectionProvenance?.mode, "deterministic");
+    assert.equal(
+      discovery.suggestions.some((suggestion) => suggestion.riskKind === "form"),
+      true,
+      `expected form suggestion for ${JSON.stringify({ inputs: discovery.page.inputs, buttons: discovery.page.buttons })}`
+    );
     assert.equal(
       discovery.suggestions.some((suggestion) => suggestion.riskKind === "table"),
       true,
@@ -152,5 +163,69 @@ export async function testDiscoveryScanAcceptsVisibleStreamingDom() {
     await Promise.all(discovery.drafts.map((draft) =>
       rm(path.join(rootDir, "reports", "harness-gaps", "drafts", `${draft.scenarioId}.json`), { force: true })
     ));
+  });
+}
+
+export async function testDiscoveryProbeExecutesActionBeforeOracle() {
+  await withHttpServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`
+      <!doctype html>
+      <html>
+        <head><title>Action Probe Fixture</title></head>
+        <body>
+          <h1>Action Probe Fixture</h1>
+          <button type="button" onclick="document.querySelector('#result').textContent='面板已打开'">打开面板</button>
+          <div id="result">尚未打开</div>
+        </body>
+      </html>
+    `);
+  }, async (baseUrl) => {
+    const scenarioId = `discovered_action_probe_${Date.now()}`;
+    await writeScenarioDraft({
+      gapId: `discovery_${scenarioId}`,
+      createdAt: new Date().toISOString(),
+      scenarioId,
+      draftReviewStatus: "draft",
+      selectorProbeStatus: "not_run",
+      riskKind: "navigation",
+      probeUrl: baseUrl,
+      scenario: {
+        id: scenarioId,
+        title: "Action probe",
+        planObservation: "discovery_scan -> selector_probe -> oracle_dry_run",
+        smoke: {
+          pathId: "open",
+          stepId: "open",
+          title: "open",
+          headingName: "Action Probe Fixture",
+          assertionName: "visible",
+          expected: "Action Probe Fixture"
+        },
+        corePath: {
+          pathId: "open_panel",
+          stepId: "open_panel",
+          title: "open panel",
+          action: "visual_check",
+          triggerButtonName: "打开面板",
+          targetLocator: "#result",
+          riskReason: "test",
+          oracles: [{
+            id: "panel_opened",
+            name: "panel opened",
+            type: "dom_text",
+            locator: "#result",
+            expectedTextIncludes: "面板已打开",
+            expected: "面板已打开"
+          }]
+        }
+      }
+    });
+    const probed = await probeScenarioDraft(scenarioId);
+    assert.equal(probed?.selectorProbeStatus, "passed");
+    assert.equal(probed?.probeTrace?.actionExecuted, true);
+    assert.equal(probed?.probeTrace?.action, "visual_check");
+    assert.equal(probed?.missingInfo?.length, 0);
+    await rm(path.join(rootDir, "reports", "harness-gaps", "drafts", `${scenarioId}.json`), { force: true });
   });
 }

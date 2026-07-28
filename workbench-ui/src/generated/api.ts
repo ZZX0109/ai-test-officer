@@ -93,6 +93,702 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/runs/{id}/agent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Agent graph projection */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            agent: components["schemas"]["AgentGraphProjection"] & unknown;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/coverage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Coverage disposition */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            coverage: components["schemas"]["CoverageItem"][];
+                            complete: boolean;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/llm-calls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Versioned LLM invocations */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            calls: components["schemas"]["LlmInvocation"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/conclusions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Verified conclusions */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            conclusions: components["schemas"]["Conclusion"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/conclusions/{id}/proof": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query: {
+                    runId: string;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Conclusion proof graph */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            conclusion: components["schemas"]["Conclusion"];
+                            edges: components["schemas"]["ProofEdge"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        message: string;
+                        credentialId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Agent reply */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Model unavailable */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ApiError"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/interrupts/{interruptId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    interruptId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        approved: boolean;
+                        input?: {
+                            [key: string]: unknown;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Resumed graph */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            agent: components["schemas"]["AgentGraphProjection"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/repairs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Repair sessions for a run */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            repairs: components["schemas"]["RepairSession"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        autoAnalyze?: boolean;
+                        credentialId?: string;
+                        summary?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Repair session */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            repair: components["schemas"]["RepairSession"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/repair-sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Repair session */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            repair: components["schemas"]["RepairSession"];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/repair-sessions/{id}/files/{filePath}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    filePath: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Repair workspace file */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            file: {
+                                path: string;
+                                content: string;
+                                version: number;
+                                sha256: string;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    filePath: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        content: string;
+                        version: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description Updated repair workspace file */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            repair: components["schemas"]["RepairSession"];
+                        };
+                    };
+                };
+                /** @description File version conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ApiError"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/repair-sessions/{id}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Validated repair */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            repair: components["schemas"]["RepairSession"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/repair-sessions/{id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        format: "patch" | "zip";
+                    };
+                };
+            };
+            responses: {
+                /** @description Repair export */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            export: components["schemas"]["RepairExport"];
+                            artifact: {
+                                /** @enum {string} */
+                                schemaVersion: "2.0";
+                                id: string;
+                                runId: string;
+                                scenarioId: string;
+                                stepId?: string;
+                                attemptId: string;
+                                attempt: number;
+                                /** @enum {string} */
+                                kind: "screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log";
+                                /** @enum {string} */
+                                origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "agent-generated" | "legacy-unverified";
+                                storageUri: string;
+                                /** @default [] */
+                                replicaUris: string[];
+                                sequence: number;
+                                monotonicOffsetMs: number;
+                                integrity: {
+                                    sha256: string;
+                                    sizeBytes: number;
+                                    mediaType: string;
+                                    /** Format: date-time */
+                                    capturedAt: string;
+                                    collector: {
+                                        name: string;
+                                        version: string;
+                                    };
+                                };
+                                /** @default {} */
+                                locator: {
+                                    pageUrl?: string;
+                                    viewport?: {
+                                        width: number;
+                                        height: number;
+                                    };
+                                    selector?: string;
+                                    testId?: string;
+                                    role?: string;
+                                    boundingBox?: {
+                                        x: number;
+                                        y: number;
+                                        width: number;
+                                        height: number;
+                                    };
+                                    snapshotSha256?: string;
+                                    beforeSha256?: string;
+                                    afterSha256?: string;
+                                    requestId?: string;
+                                    method?: string;
+                                    statusCode?: number;
+                                    operationId?: string;
+                                    bodySha256?: string;
+                                    lineStart?: number;
+                                    lineEnd?: number;
+                                    sourceLocation?: string;
+                                    executable?: string;
+                                    argsSha256?: string;
+                                    commandConfigSha256?: string;
+                                    exitCode?: number;
+                                    dataSnapshotId?: string;
+                                    assertionSha256?: string;
+                                    timeRange?: {
+                                        /** Format: date-time */
+                                        from: string;
+                                        /** Format: date-time */
+                                        to: string;
+                                    };
+                                };
+                                fixtureManifestSha256?: string;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/repair-sessions/{id}/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @enum {boolean} */
+                        confirm: true;
+                        confirmHighRisk?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Applied repair */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            repair: components["schemas"]["RepairSession"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -121,9 +817,9 @@ export interface components {
             attemptId: string;
             attempt: number;
             /** @enum {string} */
-            kind: "screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment";
+            kind: "screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log";
             /** @enum {string} */
-            origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "legacy-unverified";
+            origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "agent-generated" | "legacy-unverified";
             storageUri: string;
             /** @default [] */
             replicaUris: string[];
@@ -138,6 +834,46 @@ export interface components {
                 collector: {
                     name: string;
                     version: string;
+                };
+            };
+            /** @default {} */
+            locator: {
+                pageUrl?: string;
+                viewport?: {
+                    width: number;
+                    height: number;
+                };
+                selector?: string;
+                testId?: string;
+                role?: string;
+                boundingBox?: {
+                    x: number;
+                    y: number;
+                    width: number;
+                    height: number;
+                };
+                snapshotSha256?: string;
+                beforeSha256?: string;
+                afterSha256?: string;
+                requestId?: string;
+                method?: string;
+                statusCode?: number;
+                operationId?: string;
+                bodySha256?: string;
+                lineStart?: number;
+                lineEnd?: number;
+                sourceLocation?: string;
+                executable?: string;
+                argsSha256?: string;
+                commandConfigSha256?: string;
+                exitCode?: number;
+                dataSnapshotId?: string;
+                assertionSha256?: string;
+                timeRange?: {
+                    /** Format: date-time */
+                    from: string;
+                    /** Format: date-time */
+                    to: string;
                 };
             };
             fixtureManifestSha256?: string;
@@ -159,8 +895,145 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        AgentGraphProjection: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            runId: string;
+            threadId: string;
+            /** @enum {string} */
+            mode: "shadow" | "active";
+            /** @enum {string} */
+            status: "idle" | "running" | "interrupted" | "completed" | "failed" | "cancelled";
+            /** @enum {string} */
+            currentNode?: "intake" | "discover" | "build-coverage-map" | "plan" | "compile" | "approve-plan" | "prepare-sandbox" | "approve-capabilities" | "execute" | "collect-and-gate" | "triage-failure" | "selective-judge" | "repair" | "finalize";
+            /** @default [] */
+            completedNodes: ("intake" | "discover" | "build-coverage-map" | "plan" | "compile" | "approve-plan" | "prepare-sandbox" | "approve-capabilities" | "execute" | "collect-and-gate" | "triage-failure" | "selective-judge" | "repair" | "finalize")[];
+            progress: number;
+            pendingInterrupt?: {
+                id: string;
+                runId: string;
+                /** @enum {string} */
+                kind: "plan-approval" | "browser-permission" | "credential" | "network-install" | "dangerous-operation" | "repair-apply" | "execution-result";
+                /** @enum {string} */
+                status: "pending" | "approved" | "rejected" | "expired";
+                title: string;
+                detail: string;
+                /** @default [] */
+                requestedCapabilities: string[];
+                /** @default {} */
+                payload: {
+                    [key: string]: unknown;
+                };
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                resolvedAt?: string;
+            };
+            lastError?: {
+                code: string;
+                message: string;
+                /** @enum {string} */
+                node?: "intake" | "discover" | "build-coverage-map" | "plan" | "compile" | "approve-plan" | "prepare-sandbox" | "approve-capabilities" | "execute" | "collect-and-gate" | "triage-failure" | "selective-judge" | "repair" | "finalize";
+            };
+            /** @default 0 */
+            tokenUsage: number;
+            repairSessionId?: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        RepairSession: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            id: string;
+            runId: string;
+            projectId: string;
+            /** @enum {string} */
+            status: "draft" | "analyzing" | "editing" | "validating" | "ready-for-review" | "exported" | "applied" | "failed" | "blocked" | "cancelled";
+            baseSourceSha256: string;
+            workspaceRoot: string;
+            /** @default  */
+            summary: string;
+            /**
+             * @default unknown
+             * @enum {string}
+             */
+            failureClass: "product-bug" | "test-script" | "environment" | "evidence" | "unknown";
+            /** @default [] */
+            files: {
+                path: string;
+                /** @enum {string} */
+                status: "added" | "modified" | "deleted";
+                baseSha256?: string;
+                patchedSha256?: string;
+                /** @default 0 */
+                additions: number;
+                /** @default 0 */
+                deletions: number;
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default [] */
+                riskReasons: string[];
+                /** @default true */
+                editable: boolean;
+                /** @default 0 */
+                version: number;
+            }[];
+            validation?: {
+                id: string;
+                repairSessionId: string;
+                /** @enum {string} */
+                status: "queued" | "running" | "passed" | "failed" | "blocked";
+                childRunId?: string;
+                /** @default [] */
+                commands: {
+                    executable: string;
+                    /** @default [] */
+                    args: string[];
+                    timeoutMs?: number;
+                }[];
+                targetedPassed?: boolean;
+                regressionPassed?: boolean;
+                /** @default [] */
+                artifactIds: string[];
+                /** @default  */
+                summary: string;
+                /** Format: date-time */
+                startedAt: string;
+                /** Format: date-time */
+                finishedAt?: string;
+            };
+            /** @default 0 */
+            iteration: number;
+            /** @default 20 */
+            maxFiles: number;
+            /** @default 2000 */
+            maxChangedLines: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        RepairExport: {
+            id: string;
+            repairSessionId: string;
+            /** @enum {string} */
+            format: "patch" | "zip";
+            artifactId: string;
+            downloadUrl: string;
+            sha256: string;
+            sizeBytes: number;
+            /** Format: date-time */
+            createdAt: string;
+        };
         CreateRunRequest: {
             runId?: string;
+            /**
+             * @default parent
+             * @enum {string}
+             */
+            runKind: "parent" | "path" | "validation";
+            parentRunId?: string;
+            coverageItemId?: string;
             /** @default local */
             organizationId: string;
             projectId?: string;
@@ -170,7 +1043,15 @@ export interface components {
             input: {
                 /** Format: uri */
                 appUrl?: string;
+                logicalProjectId?: string;
                 scenarioId?: string;
+                /** @default [] */
+                coverageScenarioIds: string[];
+                /**
+                 * @default targeted
+                 * @enum {string}
+                 */
+                coverageMode: "targeted" | "full";
                 requirement?: string;
                 diff?: string;
                 /**
@@ -198,8 +1079,16 @@ export interface components {
                 llmBudget: {
                     /** @default 2 */
                     maxPlannerCalls: number;
-                    /** @default 2 */
+                    /** @default 1 */
                     maxJudgeCalls: number;
+                    /** @default 1 */
+                    maxTriageCalls: number;
+                    /** @default 2 */
+                    maxRepairCallsPerRound: number;
+                    /** @default 2 */
+                    maxRepairRounds: number;
+                    /** @default 1 */
+                    maxSemanticRepairAttempts: number;
                     /** @default 12000 */
                     maxTotalTokens: number;
                     /** @default 2500 */
@@ -208,7 +1097,7 @@ export interface components {
                     judgeMaxOutputTokens: number;
                     /** @default 30000 */
                     requestTimeoutMs: number;
-                    /** @default 90000 */
+                    /** @default 120000 */
                     totalTimeoutMs: number;
                     maxEstimatedCostUsd?: number;
                 };
@@ -219,12 +1108,24 @@ export interface components {
                     observe: boolean;
                     /** @default true */
                     browserControl: boolean;
+                    /** @default true */
+                    sourceRead: boolean;
+                    /** @default false */
+                    sandboxWrite: boolean;
+                    /** @default false */
+                    sandboxCommand: boolean;
+                    /** @default false */
+                    networkInstall: boolean;
+                    /** @default false */
+                    hostApply: boolean;
+                    /** @default false */
+                    artifactExport: boolean;
+                    /** @default false */
+                    systemControl: boolean;
                     /** @default false */
                     workspaceControl: boolean;
                     /** @default false */
                     ideTerminalControl: boolean;
-                    /** @default false */
-                    systemControl: boolean;
                 };
                 /**
                  * @default oci
@@ -238,6 +1139,270 @@ export interface components {
                  */
                 capabilities: ("browser" | "desktop")[];
             };
+        };
+        CoverageItem: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            id: string;
+            runId: string;
+            flowId: string;
+            module: string;
+            /** @enum {string} */
+            surface: "page" | "api" | "data" | "background-task";
+            route?: string;
+            operationId?: string;
+            dataEntity?: string;
+            /** @enum {string} */
+            risk: "low" | "medium" | "high" | "critical";
+            /** @default [] */
+            preconditions: string[];
+            /** @default [] */
+            permissions: string[];
+            /** @default [] */
+            testDataRefs: string[];
+            /** @default [] */
+            actionPathIds: string[];
+            /** @default [] */
+            oracleIds: string[];
+            /** @default [] */
+            requiredEvidenceKinds: ("screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log")[];
+            structuredPlan?: {
+                scenarioId: string;
+                steps: {
+                    id: string;
+                    pathId?: string;
+                    action: {
+                        /** @enum {string} */
+                        action: "navigate";
+                        path: string;
+                    } | {
+                        /** @enum {string} */
+                        action: "click";
+                        selectorRef: string;
+                    } | {
+                        /** @enum {string} */
+                        action: "fill";
+                        selectorRef: string;
+                        valueRef: string;
+                    } | {
+                        /** @enum {string} */
+                        action: "select";
+                        selectorRef: string;
+                        valueRef: string;
+                    } | {
+                        /** @enum {string} */
+                        action: "upload";
+                        selectorRef: string;
+                        fixtureRef: string;
+                    } | {
+                        /** @enum {string} */
+                        action: "assert";
+                        oracleId: string;
+                    } | {
+                        /** @enum {string} */
+                        action: "wait";
+                        durationMs: number;
+                    } | {
+                        /** @enum {string} */
+                        action: "api-request";
+                        operationId: string;
+                        oracleId: string;
+                        fixtureRef?: string;
+                    } | {
+                        /** @enum {string} */
+                        action: "data-assert";
+                        dataSourceId: string;
+                        queryTemplateId: string;
+                        oracleId: string;
+                        parameterFixtureRef?: string;
+                    } | {
+                        /** @enum {string} */
+                        action: "wait-job";
+                        backgroundTaskId: string;
+                        oracleId: string;
+                        timeoutMs?: number;
+                    } | {
+                        /** @enum {string} */
+                        action: "command-check";
+                        /** @enum {string} */
+                        commandId: "test" | "health";
+                        oracleId: string;
+                    };
+                }[];
+                requiredOracleIds: string[];
+                requiredEvidenceKinds: ("screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log")[];
+            };
+            /** @enum {string} */
+            disposition: "executed" | "excluded" | "blocked" | "pending";
+            dispositionReason?: string;
+            scenarioId?: string;
+            attemptId?: string;
+            childRunId?: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        LlmInvocation: {
+            /**
+             * @default 2.0
+             * @enum {string}
+             */
+            schemaVersion: "2.0";
+            id: string;
+            runId?: string;
+            experimentId?: string;
+            /** @enum {string} */
+            purpose: "planning" | "judging" | "triage" | "repairing" | "assistant";
+            /** @enum {string} */
+            provider: "openai-compatible" | "openai" | "anthropic" | "openrouter" | "custom";
+            model: string;
+            requestedModel?: string;
+            returnedModel?: string;
+            modelProfileId?: string;
+            langChainAdapterVersion?: string;
+            providerAdapterVersion?: string;
+            promptTemplateId?: string;
+            promptVersion?: string;
+            promptSha256?: string;
+            inputSummarySha256?: string;
+            actionDslVersion?: string;
+            outputSchemaVersion?: string;
+            graphVersion?: string;
+            scenarioRegistrySha256?: string;
+            projectDigest?: string;
+            routeReason?: string;
+            ruleCapable?: boolean;
+            ruleBypassReason?: string;
+            /**
+             * @default use
+             * @enum {string}
+             */
+            cachePolicy: "use" | "bypass";
+            /** @default false */
+            cacheHit: boolean;
+            sourceCallId?: string;
+            requestId?: string;
+            /** Format: date-time */
+            queuedAt?: string;
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            firstTokenAt?: string;
+            /** Format: date-time */
+            completedAt?: string;
+            durationMs: number;
+            timing?: {
+                queueMs?: number;
+                firstTokenMs?: number;
+                generationMs?: number;
+                parseMs?: number;
+                totalMs: number;
+            };
+            /** @enum {string} */
+            status: "passed" | "failed" | "blocked";
+            /** @default {} */
+            usage: {
+                promptTokens?: number;
+                cachedPromptTokens?: number;
+                completionTokens?: number;
+                reasoningTokens?: number;
+                totalTokens?: number;
+                estimatedCostUsd?: number | null;
+                /** @default USD */
+                currency: string;
+                priceCatalogVersion?: string;
+            };
+            errorCode?: string;
+            /** @enum {string} */
+            failureClass?: "transport" | "authentication" | "authorization" | "model-access" | "budget" | "semantic" | "provider" | "unknown";
+            /** @enum {string} */
+            transportMode?: "stream" | "non-stream-fallback";
+            fallbackReason?: string;
+            /**
+             * @default none
+             * @enum {string}
+             */
+            fallbackImpact: "none" | "plan-source-changed" | "recommendation-unavailable" | "human-review-required" | "path-blocked";
+            /**
+             * @default none
+             * @enum {string}
+             */
+            finalStatusImpact: "none" | "advisory-only" | "forced-review" | "blocked";
+            transportAttempts?: {
+                attempt: number;
+                /** @enum {string} */
+                mode: "stream" | "non-stream";
+                /** @enum {string} */
+                status: "passed" | "failed";
+                /** Format: date-time */
+                startedAt: string;
+                durationMs: number;
+                requestId?: string;
+                errorCode?: string;
+                /** @default 0 */
+                bytesReceived: number;
+                /** @default [] */
+                eventTypes: string[];
+            }[];
+            /** @default [] */
+            semanticRepairAttempts: {
+                attempt: number;
+                /** Format: date-time */
+                startedAt: string;
+                durationMs: number;
+                /** @enum {string} */
+                status: "passed" | "failed";
+                /** @default [] */
+                validationErrors: string[];
+            }[];
+            redactedInputSummary?: string;
+            structuredOutput?: {
+                [key: string]: unknown;
+            };
+            encryptedOutputRef?: string;
+        };
+        Conclusion: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            conclusionId: string;
+            runId: string;
+            scenarioId: string;
+            attemptId: string;
+            /** @enum {string} */
+            claimType: "assertion" | "machine-gate" | "judge-finding" | "failure-classification" | "final-status" | "human-override";
+            status: string;
+            /** @enum {string} */
+            source: "deterministic" | "llm-advisory" | "human";
+            /** @default [] */
+            assertionIds: string[];
+            evidenceRefs: string[];
+            /** @enum {string} */
+            proofStatus: "verified" | "missing" | "invalid" | "legacy-unverified";
+            /** Format: date-time */
+            createdAt: string;
+            policyVersion: string;
+            canonicalSha256?: string;
+            supersedesConclusionId?: string;
+        };
+        ProofEdge: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            id: string;
+            runId: string;
+            scenarioId: string;
+            attemptId: string;
+            /** @enum {string} */
+            fromType: "conclusion" | "assertion" | "oracle" | "evidence" | "artifact" | "attempt" | "step";
+            fromId: string;
+            /** @enum {string} */
+            toType: "conclusion" | "assertion" | "oracle" | "evidence" | "artifact" | "attempt" | "step";
+            toId: string;
+            /** @enum {string} */
+            relation: "supported-by-assertion" | "evaluates-oracle" | "supported-by-evidence" | "materialized-by-artifact" | "captured-in-attempt" | "produced-by-step" | "supersedes";
+            canonicalSha256?: string;
+            /** Format: date-time */
+            createdAt: string;
         };
     };
     responses: never;

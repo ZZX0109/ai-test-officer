@@ -11,7 +11,7 @@ const defaultAllowedOrigins = [
 ];
 
 const rateBuckets = new Map<string, { resetAt: number; count: number }>();
-export type AuthRole = "admin" | "runner" | "reviewer";
+export type AuthRole = "admin" | "runner" | "reviewer" | "maintainer";
 export interface AuthContext { subject: string; organizationId: string; roles: AuthRole[]; claims: JWTPayload }
 const authContexts = new WeakMap<Request, AuthContext>();
 let remoteJwks: ReturnType<typeof createRemoteJWKSet> | undefined;
@@ -107,8 +107,16 @@ function isPublicRoute(req: Request) {
 
 export function basicRateLimit(req: Request, res: Response, next: NextFunction) {
   const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000);
-  const max = Number(process.env.RATE_LIMIT_MAX ?? 240);
-  const key = req.ip || req.socket.remoteAddress || "unknown";
+  // The Workbench refreshes authenticated evidence while a run is executing.
+  // Keep that read-only stream in a separate, higher-capacity bucket so a long
+  // browser run cannot blank the embedded test canvas with a 429.  API writes
+  // and normal reads retain the conservative default budget.
+  const artifactRead = req.method === "GET" && req.path.startsWith("/artifacts/");
+  const max = Number(artifactRead
+    ? (process.env.ARTIFACT_RATE_LIMIT_MAX ?? 1_200)
+    : (process.env.RATE_LIMIT_MAX ?? 240));
+  const client = req.ip || req.socket.remoteAddress || "unknown";
+  const key = `${artifactRead ? "artifact" : "api"}:${client}`;
   const now = Date.now();
   const bucket = rateBuckets.get(key);
   if (!bucket || bucket.resetAt <= now) {
@@ -137,7 +145,7 @@ async function verifyOidc(req: Request) {
   const orgClaim = process.env.OIDC_ORGANIZATION_CLAIM ?? "organization_id";
   const rawRoles = verified.payload[roleClaim];
   const roles = (Array.isArray(rawRoles) ? rawRoles : typeof rawRoles === "string" ? rawRoles.split(/[ ,]/) : [])
-    .filter((role): role is AuthRole => ["admin", "runner", "reviewer"].includes(String(role)));
+    .filter((role): role is AuthRole => ["admin", "runner", "reviewer", "maintainer"].includes(String(role)));
   authContexts.set(req, {
     subject: verified.payload.sub ?? "unknown",
     organizationId: String(verified.payload[orgClaim] ?? ""),
@@ -179,7 +187,7 @@ export async function requireApiToken(req: Request, res: Response, next: NextFun
     // Fail closed and use the common 401 response below.
   }
   if (isDevelopment() && providedToken(req) === expectedToken()) {
-    authContexts.set(req, { subject: "local-dev", organizationId: "local", roles: ["admin", "runner", "reviewer"], claims: {} });
+    authContexts.set(req, { subject: "local-dev", organizationId: "local", roles: ["admin", "runner", "reviewer", "maintainer"], claims: {} });
     next();
     return;
   }

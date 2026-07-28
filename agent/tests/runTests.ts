@@ -1,5 +1,5 @@
 import { testConnectorEnvelope } from "./connector.test.js";
-import { testDiscoveryScanAcceptsVisibleStreamingDom, testDiscoveryScanDrafts } from "./discoveryScan.test.js";
+import { testDiscoveryProbeExecutesActionBeforeOracle, testDiscoveryScanAcceptsVisibleStreamingDom, testDiscoveryScanDrafts } from "./discoveryScan.test.js";
 import { testCiCliErrorReports } from "./ciCliErrorReports.test.js";
 import { testCiContract } from "./ciContract.test.js";
 import { testCiGatePolicy } from "./ciGatePolicy.test.js";
@@ -45,12 +45,25 @@ import { testBenchmarkSummary } from "./benchmarkSummary.test.js";
 import { testLlmProviderResponsesTransport } from "./llmProvider.test.js";
 import { testPlanningConversation } from "./planningConversation.test.js";
 import { testProjectFolderBrowser } from "./projectFolderBrowser.test.js";
+import { testRepairWorkspace } from "./repairWorkspace.test.js";
+import { testProofGraph } from "./proofGraph.test.js";
+import { testLlmLifecycle } from "./llmLifecycle.test.js";
+import { testStructuredActionExecutors } from "./structuredActionExecutors.test.js";
+import { testLlmBudgetLedger } from "./llmBudgetLedger.test.js";
+import { testAgentGraphMode } from "./agentGraphMode.test.js";
 
 async function main() {
   await testConnectorEnvelope();
   await testProjectDetectionWizard();
   await testProjectFolderBrowser();
+  await testRepairWorkspace();
+  await testProofGraph();
+  testLlmLifecycle();
+  await testLlmBudgetLedger();
+  testAgentGraphMode();
+  await testStructuredActionExecutors();
   await testDiscoveryScanDrafts();
+  await testDiscoveryProbeExecutesActionBeforeOracle();
   await testDiscoveryScanAcceptsVisibleStreamingDom();
   await testGovernanceSecurityBot();
   testCiContract();

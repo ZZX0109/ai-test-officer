@@ -1,4 +1,4 @@
-import type { ArtifactV2, CommandSpec, CompiledPlan, GateStatus, HumanDecision, JudgeRecommendation, LlmBudget, LlmCall, MachineGate, PlanProvenance, ProjectManifest, ResourceBudget, RunOutcomeSummaryV2 } from "@ai-test-officer/contracts";
+import type { ArtifactV2, CommandSpec, CompiledPlan, Conclusion, CoverageItem, EvidenceLocator, GateStatus, HumanDecision, JudgeRecommendation, LlmBudget, LlmCall, MachineGate, PlanProvenance, ProjectManifest, ProofEdge, ProofNode, ResourceBudget, RunEvidenceManifest, RunOutcomeSummaryV2 } from "@ai-test-officer/contracts";
 
 export type ProviderKind = "openai-compatible" | "openai" | "anthropic" | "openrouter" | "custom";
 
@@ -115,6 +115,24 @@ export interface ProjectLoginConfig {
   loginUrl?: string;
 }
 
+export interface ProjectApiCredentialRequirement {
+  envName: string;
+  providerHint?: string;
+  baseUrlEnv?: string;
+  modelEnv?: string;
+  exposure: "server" | "browser";
+  signals: string[];
+}
+
+export interface ProjectApiCredentialBinding {
+  envName: string;
+  credentialId: string;
+  source: "test-system" | "dedicated";
+  baseUrlEnv?: string;
+  modelEnv?: string;
+  configuredAt: string;
+}
+
 export interface ProjectProcessConfig {
   name: string;
   command: string;
@@ -140,6 +158,8 @@ export interface ProjectConfig {
   testCommandSpec?: CommandSpec;
   allowedOrigins?: string[];
   login?: ProjectLoginConfig;
+  apiCredentialRequirements?: ProjectApiCredentialRequirement[];
+  apiCredentialBindings?: ProjectApiCredentialBinding[];
   env?: Record<string, string>;
   cleanupCommand?: string;
   cleanupCommandSpec?: CommandSpec;
@@ -180,6 +200,10 @@ export interface ProjectDetectionResult {
     signals: string[];
     usernameEnv?: string;
     passwordEnv?: string;
+  };
+  apiCredentialCapability?: {
+    detected: boolean;
+    requirements: ProjectApiCredentialRequirement[];
   };
   suggestedConfig: ProjectConfig;
   ports: Array<{
@@ -246,6 +270,17 @@ export interface ProjectHealthCheckResult {
     ok: boolean;
     method: ProjectLoginConfig["method"];
     credentialId?: string;
+    missingEnv: string[];
+  };
+  apiCredential: {
+    ok: boolean;
+    requirements: Array<{
+      envName: string;
+      configured: boolean;
+      credentialId?: string;
+      source?: ProjectApiCredentialBinding["source"];
+      exposure: ProjectApiCredentialRequirement["exposure"];
+    }>;
     missingEnv: string[];
   };
   frontend?: { ok: boolean; status?: number; url?: string; error?: string };
@@ -458,6 +493,12 @@ export type ScenarioCapabilityKind =
 export interface PermissionProfile {
   observe: boolean;
   browserControl: boolean;
+  sourceRead?: boolean;
+  sandboxWrite?: boolean;
+  sandboxCommand?: boolean;
+  networkInstall?: boolean;
+  hostApply?: boolean;
+  artifactExport?: boolean;
   workspaceControl: boolean;
   ideTerminalControl: boolean;
   systemControl: boolean;
@@ -547,7 +588,15 @@ export interface DiscoveryScanResult {
     title?: string;
     headings: string[];
     links: Array<{ text: string; href: string }>;
-    buttons: Array<{ text: string; testId?: string; role?: string }>;
+    buttons: Array<{
+      text: string;
+      testId?: string;
+      role?: string;
+      title?: string;
+      type?: string;
+      nearInputLabel?: string;
+      inputDistance?: number;
+    }>;
     inputs: Array<{ label?: string; name?: string; type?: string; testId?: string }>;
     forms: Array<{ action?: string; method?: string; inputCount: number }>;
     testIds: string[];
@@ -556,6 +605,16 @@ export interface DiscoveryScanResult {
   openApiOperations: Array<{ method: string; path: string; operationId?: string; summary?: string }>;
   suggestions: DiscoveryScanSuggestion[];
   drafts: HarnessGapScenarioDraft[];
+  recommendedScenarioId?: string;
+  recommendedScenarioIds?: string[];
+  selectionProvenance?: {
+    mode: "deterministic" | "llm-assisted" | "deterministic-fallback";
+    reason: string;
+    llmStatus?: "not_configured" | "passed" | "failed";
+    model?: string;
+    callId?: string;
+    errorCode?: string;
+  };
   status: "passed" | "partial" | "failed";
   message: string;
 }
@@ -650,6 +709,11 @@ export interface VisualRunResult {
   artifactIntegrityReportFile?: string;
   artifactIntegrity?: ArtifactIntegrityReport;
   evidenceQuality?: EvidenceQualityReport;
+  coverageItems?: CoverageItem[];
+  conclusions?: Conclusion[];
+  proofNodes?: ProofNode[];
+  proofEdges?: ProofEdge[];
+  evidenceManifest?: RunEvidenceManifest;
 }
 
 export interface AssertionEvidenceQuality {
@@ -705,6 +769,7 @@ export interface EvidenceItem {
   stepId?: string;
   url?: string;
   file?: string;
+  locator?: EvidenceLocator;
   payload: Record<string, unknown>;
 }
 
@@ -892,6 +957,11 @@ export interface RunBundle {
   failureAttributions?: FailureAttribution[];
   runtimeStatus?: ProjectRuntimeStatus;
   artifactIntegrity?: ArtifactIntegrityReport;
+  coverageItems?: CoverageItem[];
+  conclusions?: Conclusion[];
+  proofNodes?: ProofNode[];
+  proofEdges?: ProofEdge[];
+  evidenceManifest?: RunEvidenceManifest;
   judgeReport: LayeredJudgeReport;
 }
 
@@ -952,6 +1022,28 @@ export interface HarnessGapScenarioDraft {
   oracles?: Array<Record<string, unknown>>;
   evidenceRequirements?: string[];
   missingInfo?: string[];
+  probeTrace?: {
+    navigationUrl?: string;
+    action?: string;
+    actionExecuted: boolean;
+    actionError?: string;
+    observedHeadings: string[];
+    observedButtons: string[];
+    observedTestIds: string[];
+    responseUrls: string[];
+    postActionUrl?: string;
+  };
+  repairAttempts?: Array<{
+    attempt: number;
+    strategy: "deterministic" | "llm-assisted";
+    status: "repaired" | "not-repairable" | "failed";
+    changedFields: string[];
+    reason: string;
+    at: string;
+    model?: string;
+    callId?: string;
+  }>;
+  probeUrl?: string;
   scenarioFile?: string;
   installedFile?: string;
   scenario: Record<string, unknown>;
@@ -1113,9 +1205,9 @@ export interface ProjectGrant {
   id: string;
   projectId: string;
   subject: string;
-  role: "viewer" | "runner" | "project_admin" | "operator" | "admin";
+  role: "viewer" | "runner" | "maintainer" | "project_admin" | "operator" | "admin";
   tokenKind: "dev" | "deploy" | "project_admin" | "artifact_read";
-  scopes: Array<"read_project" | "run_tests" | "read_artifacts" | "manage_project" | "manage_credentials" | "admin">;
+  scopes: Array<"read_project" | "run_tests" | "read_artifacts" | "edit_sandbox" | "export_source" | "apply_source" | "manage_project" | "manage_credentials" | "admin">;
   createdAt: string;
   expiresAt?: string;
   lastUsedAt?: string;

@@ -7,7 +7,7 @@ export interface ScenarioCompiledPlanStep {
 }
 
 export interface ScenarioCompiledPlanContract {
-  routePath: string;
+  routePath?: string;
   requiredSteps: ScenarioCompiledPlanStep[];
   requiredEvidenceKinds: CompiledPlan["requiredEvidenceKinds"];
   allowOptionalWait?: boolean;
@@ -24,7 +24,7 @@ export function assertCompiledPlanSemanticContract(compiledPlan: CompiledPlan, s
   const parsed = compiledPlanSchema.parse(compiledPlan);
   const contract = scenario.compiledPlanContract;
   if (!contract) throw new Error(`compiled_plan_contract_missing:${scenario.id}`);
-  if (parsed.steps[0]?.action.action !== "navigate" || parsed.steps[0].action.path !== contract.routePath) {
+  if (contract.routePath && (parsed.steps[0]?.action.action !== "navigate" || parsed.steps[0].action.path !== contract.routePath)) {
     throw new Error(`compiled_plan_route_mismatch:${scenario.id}:${contract.routePath}`);
   }
   const observable = parsed.steps
@@ -46,4 +46,22 @@ export function assertCompiledPlanSemanticContract(compiledPlan: CompiledPlan, s
 
 export function compiledPlanSemanticSignature(steps: ScenarioCompiledPlanStep[]) {
   return steps.filter((step) => step.action.action !== "wait").map(actionKey);
+}
+
+export function compileTrustedScenarioPlan(scenario: ExecutableScenario) {
+  const contract = scenario.compiledPlanContract;
+  if (!contract) throw new Error(`compiled_plan_contract_missing:${scenario.id}`);
+  const plan = compiledPlanSchema.parse({
+    scenarioId: scenario.id,
+    steps: contract.requiredSteps.map((step, index) => ({
+      id: `${scenario.id}_trusted_${index + 1}`,
+      pathId: step.pathId,
+      action: step.action
+    })),
+    requiredOracleIds: Array.from(new Set(
+      contract.requiredSteps.flatMap((step) => step.action.action === "assert" ? [step.action.oracleId] : [])
+    )),
+    requiredEvidenceKinds: contract.requiredEvidenceKinds
+  });
+  return assertCompiledPlanSemanticContract(plan, scenario);
 }

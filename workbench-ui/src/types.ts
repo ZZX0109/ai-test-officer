@@ -37,6 +37,12 @@ export interface GrayPlan {
 export interface PermissionProfile {
   observe: boolean;
   browserControl: boolean;
+  sourceRead?: boolean;
+  sandboxWrite?: boolean;
+  sandboxCommand?: boolean;
+  networkInstall?: boolean;
+  hostApply?: boolean;
+  artifactExport?: boolean;
   workspaceControl: boolean;
   ideTerminalControl: boolean;
   systemControl: boolean;
@@ -49,6 +55,73 @@ export interface RunProjection {
   gateStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
   finalStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
   humanDecision?: { status: string; reason: string; newLabel?: string };
+}
+
+export interface LlmInvocation {
+  id: string;
+  purpose: "planning" | "judging" | "triage" | "repairing" | "assistant";
+  provider: string;
+  model: string;
+  requestedModel?: string;
+  returnedModel?: string;
+  promptVersion?: string;
+  graphVersion?: string;
+  routeReason?: string;
+  startedAt: string;
+  completedAt?: string;
+  durationMs: number;
+  status: "passed" | "failed" | "blocked";
+  errorCode?: string;
+  failureClass?: string;
+  transportMode?: string;
+  fallbackReason?: string;
+  fallbackImpact?: string;
+  finalStatusImpact?: string;
+  usage: {
+    promptTokens?: number;
+    cachedPromptTokens?: number;
+    completionTokens?: number;
+    reasoningTokens?: number;
+    totalTokens?: number;
+    estimatedCostUsd?: number | null;
+    currency?: string;
+    priceCatalogVersion?: string;
+  };
+  transportAttempts?: Array<{ attempt: number; mode: string; status: string; durationMs: number; errorCode?: string }>;
+  semanticRepairAttempts?: Array<{ attempt: number; status: string; durationMs: number; validationErrors: string[] }>;
+}
+
+export interface Conclusion {
+  conclusionId: string;
+  runId: string;
+  scenarioId: string;
+  attemptId: string;
+  claimType: string;
+  status: string;
+  source: "deterministic" | "llm-advisory" | "human";
+  assertionIds: string[];
+  evidenceRefs: string[];
+  proofStatus: "verified" | "missing" | "invalid" | "legacy-unverified";
+  policyVersion: string;
+}
+
+export interface ProofEdge {
+  id: string;
+  fromType: string;
+  fromId: string;
+  toType: string;
+  toId: string;
+  relation: string;
+}
+
+export interface CoverageItem {
+  id: string;
+  flowId: string;
+  module: string;
+  surface: string;
+  risk: string;
+  disposition: "executed" | "excluded" | "blocked" | "pending";
+  dispositionReason?: string;
 }
 
 export interface RunResult {
@@ -76,7 +149,7 @@ export interface RunResult {
     attemptId: string;
     attempt: number;
     kind: string;
-    origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "legacy-unverified";
+    origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "legacy-unverified" | "agent-generated";
     storageUri: string;
     replicaUris: string[];
     integrity: { sha256: string; sizeBytes: number; mediaType: string; capturedAt: string; collector: { name: string; version: string } };
@@ -112,6 +185,19 @@ export interface RunResult {
     type: string;
     title: string;
     file?: string;
+    locator?: {
+      pageUrl?: string;
+      selector?: string;
+      testId?: string;
+      requestId?: string;
+      method?: string;
+      statusCode?: number;
+      lineStart?: number;
+      lineEnd?: number;
+      sourceLocation?: string;
+      exitCode?: number;
+      snapshotSha256?: string;
+    };
     payload: Record<string, unknown>;
   }>;
   loopEvents: Array<{
@@ -150,6 +236,12 @@ export interface RunResult {
     evidenceRefs: string[];
   };
   failureAttributions: FailureAttribution[];
+  executionError?: {
+    code: "action_binding_failure" | "browser_runtime_failure" | "environment_failure" | "execution_failure";
+    stepId?: string;
+    message: string;
+    failureClass: "test_script_issue" | "environment_issue" | "unknown";
+  };
   runtimeStatus?: ProjectRuntimeStatus;
   judgeReport: LayeredJudgeReport;
   reportFile: string;
@@ -158,6 +250,14 @@ export interface RunResult {
   runBundleFile: string;
   artifactIntegrityReportFile?: string;
   artifactIntegrity?: ArtifactIntegrityReport;
+  coverageItems?: CoverageItem[];
+  conclusions?: Conclusion[];
+  proofEdges?: ProofEdge[];
+  evidenceManifest?: {
+    evidenceSetRoot: string;
+    integrityStatus: "verified" | "unsigned" | "integrity-invalid";
+    generatedAt: string;
+  };
 }
 
 export interface RunBundle {
@@ -171,6 +271,9 @@ export interface RunBundle {
   failureAttributions?: FailureAttribution[];
   runtimeStatus?: ProjectRuntimeStatus;
   artifactIntegrity?: ArtifactIntegrityReport;
+  coverageItems?: CoverageItem[];
+  conclusions?: Conclusion[];
+  proofEdges?: ProofEdge[];
 }
 
 export interface LiveRunState {
@@ -221,7 +324,7 @@ export interface PlannedBusinessFlow {
   title: string;
   kind: "page" | "component" | "api" | "scenario";
   target: string;
-  status: "executable" | "needs-input" | "coverage-gap";
+  status: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
   confidence: "high" | "medium" | "low";
   reason: string;
   scenarioId?: string;
@@ -237,6 +340,7 @@ export interface PlanningConversationResult {
   coverage: {
     discovered: number;
     executable: number;
+    autoBindable: number;
     needsInput: number;
     gaps: number;
     confidence: "high" | "medium" | "low";
@@ -284,6 +388,28 @@ export interface HarnessGapScenarioDraft {
   oracles?: Array<Record<string, unknown>>;
   evidenceRequirements?: string[];
   missingInfo?: string[];
+  probeTrace?: {
+    navigationUrl?: string;
+    action?: string;
+    actionExecuted: boolean;
+    actionError?: string;
+    observedHeadings: string[];
+    observedButtons: string[];
+    observedTestIds: string[];
+    responseUrls: string[];
+    postActionUrl?: string;
+  };
+  repairAttempts?: Array<{
+    attempt: number;
+    strategy: "deterministic" | "llm-assisted";
+    status: "repaired" | "not-repairable" | "failed";
+    changedFields: string[];
+    reason: string;
+    at: string;
+    model?: string;
+    callId?: string;
+  }>;
+  probeUrl?: string;
   scenarioFile?: string;
   installedFile?: string;
   scenario: Record<string, unknown>;
@@ -541,6 +667,22 @@ export interface ProjectConfig {
     credentialId?: string;
     loginUrl?: string;
   };
+  apiCredentialRequirements?: Array<{
+    envName: string;
+    providerHint?: string;
+    baseUrlEnv?: string;
+    modelEnv?: string;
+    exposure: "server" | "browser";
+    signals: string[];
+  }>;
+  apiCredentialBindings?: Array<{
+    envName: string;
+    credentialId: string;
+    source: "test-system" | "dedicated";
+    baseUrlEnv?: string;
+    modelEnv?: string;
+    configuredAt: string;
+  }>;
   env?: Record<string, string>;
   cleanupCommand?: string;
   manifest?: {
@@ -637,6 +779,10 @@ export interface ProjectDetectionResult {
     usernameEnv?: string;
     passwordEnv?: string;
   };
+  apiCredentialCapability?: {
+    detected: boolean;
+    requirements: NonNullable<ProjectConfig["apiCredentialRequirements"]>;
+  };
   suggestedConfig: ProjectConfig;
   ports: Array<{
     port: number;
@@ -680,6 +826,17 @@ export interface ProjectHealthCheckResult {
     ok: boolean;
     method: "none" | "form" | "storage_state" | "env";
     credentialId?: string;
+    missingEnv: string[];
+  };
+  apiCredential: {
+    ok: boolean;
+    requirements: Array<{
+      envName: string;
+      configured: boolean;
+      credentialId?: string;
+      source?: "test-system" | "dedicated";
+      exposure: "server" | "browser";
+    }>;
     missingEnv: string[];
   };
   frontend?: { ok: boolean; status?: number; url: string; error?: string };
@@ -858,7 +1015,15 @@ export interface DiscoveryScanResult {
     title?: string;
     headings: string[];
     links: Array<{ text: string; href: string }>;
-    buttons: Array<{ text: string; testId?: string; role?: string }>;
+    buttons: Array<{
+      text: string;
+      testId?: string;
+      role?: string;
+      title?: string;
+      type?: string;
+      nearInputLabel?: string;
+      inputDistance?: number;
+    }>;
     inputs: Array<{ label?: string; name?: string; type?: string; testId?: string }>;
     forms: Array<{ action?: string; method?: string; inputCount: number }>;
     testIds: string[];
@@ -867,6 +1032,16 @@ export interface DiscoveryScanResult {
   openApiOperations: Array<{ method: string; path: string; operationId?: string; summary?: string }>;
   suggestions: DiscoveryScanSuggestion[];
   drafts: HarnessGapScenarioDraft[];
+  recommendedScenarioId?: string;
+  recommendedScenarioIds?: string[];
+  selectionProvenance?: {
+    mode: "deterministic" | "llm-assisted" | "deterministic-fallback";
+    reason: string;
+    llmStatus?: "not_configured" | "passed" | "failed";
+    model?: string;
+    callId?: string;
+    errorCode?: string;
+  };
   status: "passed" | "partial" | "failed";
   message: string;
 }
@@ -1053,12 +1228,115 @@ export interface ProjectGrant {
   id: string;
   projectId: string;
   subject: string;
-  role: "viewer" | "runner" | "project_admin" | "operator" | "admin";
+  role: "viewer" | "runner" | "maintainer" | "project_admin" | "operator" | "admin";
   tokenKind: "dev" | "deploy" | "project_admin" | "artifact_read";
-  scopes: Array<"read_project" | "run_tests" | "read_artifacts" | "manage_project" | "manage_credentials" | "admin">;
+  scopes: Array<"read_project" | "run_tests" | "read_artifacts" | "edit_sandbox" | "export_source" | "apply_source" | "manage_project" | "manage_credentials" | "admin">;
   createdAt: string;
   expiresAt?: string;
   lastUsedAt?: string;
+}
+
+export type AgentGraphNode =
+  | "intake"
+  | "discover"
+  | "build-coverage-map"
+  | "plan"
+  | "compile"
+  | "approve-plan"
+  | "prepare-sandbox"
+  | "approve-capabilities"
+  | "execute"
+  | "collect-and-gate"
+  | "triage-failure"
+  | "selective-judge"
+  | "repair"
+  | "finalize";
+
+export interface AgentInterrupt {
+  id: string;
+  runId: string;
+  kind: "plan-approval" | "browser-permission" | "credential" | "network-install" | "dangerous-operation" | "repair-apply" | "execution-result";
+  status: "pending" | "approved" | "rejected" | "expired";
+  title: string;
+  detail: string;
+  requestedCapabilities: string[];
+  payload: Record<string, unknown>;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface AgentGraphProjection {
+  schemaVersion: "1.0";
+  runId: string;
+  threadId: string;
+  mode: "shadow" | "active";
+  status: "idle" | "running" | "interrupted" | "completed" | "failed" | "cancelled";
+  currentNode?: AgentGraphNode;
+  completedNodes: AgentGraphNode[];
+  progress: number;
+  pendingInterrupt?: AgentInterrupt;
+  lastError?: { code: string; message: string; node?: AgentGraphNode };
+  tokenUsage: number;
+  repairSessionId?: string;
+  updatedAt: string;
+}
+
+export interface RepairFileChange {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  baseSha256?: string;
+  patchedSha256?: string;
+  additions: number;
+  deletions: number;
+  risk: "low" | "medium" | "high" | "forbidden";
+  riskReasons: string[];
+  editable: boolean;
+  version: number;
+}
+
+export interface RepairValidation {
+  id: string;
+  repairSessionId: string;
+  status: "queued" | "running" | "passed" | "failed" | "blocked";
+  childRunId?: string;
+  commands: Array<{ executable: string; args: string[]; cwd?: string; timeoutMs?: number }>;
+  targetedPassed?: boolean;
+  regressionPassed?: boolean;
+  artifactIds: string[];
+  summary: string;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export interface RepairSession {
+  schemaVersion: "1.0";
+  id: string;
+  runId: string;
+  projectId: string;
+  status: "draft" | "analyzing" | "editing" | "validating" | "ready-for-review" | "exported" | "applied" | "failed" | "blocked" | "cancelled";
+  baseSourceSha256: string;
+  workspaceRoot: string;
+  summary: string;
+  failureClass: "product-bug" | "test-script" | "environment" | "evidence" | "unknown";
+  files: RepairFileChange[];
+  validation?: RepairValidation;
+  iteration: number;
+  maxFiles: number;
+  maxChangedLines: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepairFileContent {
+  path: string;
+  original: string;
+  content: string;
+  baseSha256?: string;
+  patchedSha256?: string;
+  version: number;
+  risk: RepairFileChange["risk"];
+  riskReasons: string[];
+  editable: boolean;
 }
 
 export interface SecuritySummary {

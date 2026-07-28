@@ -1,6 +1,7 @@
 import type {
   BotDelivery,
   AuditStoreStatus,
+  AgentGraphProjection,
   BenchmarkSummary,
   CommitCheckResult,
   ConnectorContext,
@@ -11,6 +12,7 @@ import type {
   HarnessGapScenarioDraft,
   IntakeAnalysis,
   LiveRunState,
+  LlmInvocation,
   PatrolJob,
   PatrolRunResult,
   PermissionProfile,
@@ -25,11 +27,16 @@ import type {
   ProjectRuntimeStatus,
   RuntimeRecoveryAdvice,
   RequirementAcceptanceResult,
+  RepairFileContent,
+  RepairSession,
   RunBundle,
   RunBundleDownloadManifest,
   RunHistoryEntry,
   RunProjection,
   RunResult,
+  Conclusion,
+  ProofEdge,
+  CoverageItem,
   ScenarioSummary,
   SecuritySummary,
   DiscoveryScanResult,
@@ -52,6 +59,132 @@ export const AGENT_TOKEN = viteEnv.VITE_AGENT_TOKEN ?? (viteEnv.DEV ? "dev-local
 
 export function getBenchmarkSummary() {
   return request<BenchmarkSummary>("/api/benchmark/summary");
+}
+
+export function getRunAgent(runId: string) {
+  return request<{ agent: AgentGraphProjection | null }>(`/v1/runs/${encodeURIComponent(runId)}/agent`);
+}
+
+export function getRunCoverage(runId: string) {
+  return request<{
+    coverage: CoverageItem[];
+    disposition: { executed: number; excluded: number; blocked: number; pending: number };
+    complete: boolean;
+  }>(`/v1/runs/${encodeURIComponent(runId)}/coverage`);
+}
+
+export function getRunLlmCalls(runId: string) {
+  return request<{
+    calls: LlmInvocation[];
+    budgetLedger: {
+      budget: { maxTotalTokens: number; totalTimeoutMs: number; maxJudgeCalls: number };
+      reserved: { tokens: number; wallClockMs: number };
+      consumed: { plannerCalls: number; judgeCalls: number; triageCalls: number; repairCalls: number; tokens: number; wallClockMs: number; estimatedCostUsd: number | null };
+    };
+    summary: { count: number; totalTokens: number; cost: number | "unknown"; retries: number; failures: number };
+  }>(`/v1/runs/${encodeURIComponent(runId)}/llm-calls`);
+}
+
+export function getRunConclusions(runId: string) {
+  return request<{
+    conclusions: Conclusion[];
+    manifest: { evidenceSetRoot: string; integrityStatus: string; generatedAt: string } | null;
+    integrity: { valid: boolean; errors: string[] };
+  }>(`/v1/runs/${encodeURIComponent(runId)}/conclusions`);
+}
+
+export function getConclusionProof(runId: string, conclusionId: string) {
+  return request<{
+    conclusion: Conclusion;
+    edges: ProofEdge[];
+    evidence: RunResult["evidence"];
+    artifacts: NonNullable<RunResult["artifactsV2"]>;
+    attempts: NonNullable<RunResult["attempts"]>;
+    steps: RunResult["steps"];
+  }>(`/v1/conclusions/${encodeURIComponent(conclusionId)}/proof?runId=${encodeURIComponent(runId)}`);
+}
+
+export function sendRunAgentMessage(runId: string, payload: { message: string; credentialId?: string }) {
+  return request<{
+    assistant: {
+      reply: string;
+      suggestedAction: "none" | "resume-interrupt" | "create-repair" | "open-evidence";
+      requiresConfirmation: boolean;
+    };
+    call: { id: string; provider: string; model: string; status: string; durationMs: number };
+  }>(`/v1/runs/${encodeURIComponent(runId)}/messages`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function resumeRunAgentInterrupt(
+  runId: string,
+  interruptId: string,
+  payload: { approved: boolean; input?: Record<string, unknown> }
+) {
+  return request<{ agent: AgentGraphProjection }>(
+    `/v1/runs/${encodeURIComponent(runId)}/interrupts/${encodeURIComponent(interruptId)}/resume`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+export function listRunRepairs(runId: string) {
+  return request<{ repairs: RepairSession[] }>(`/v1/runs/${encodeURIComponent(runId)}/repairs`);
+}
+
+export function createRunRepair(
+  runId: string,
+  payload: { autoAnalyze?: boolean; credentialId?: string; summary?: string } = {}
+) {
+  return request<{ repair: RepairSession }>(`/v1/runs/${encodeURIComponent(runId)}/repairs`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getRepairSession(id: string) {
+  return request<{ repair: RepairSession }>(`/v1/repair-sessions/${encodeURIComponent(id)}`);
+}
+
+export function getRepairFile(id: string, filePath: string) {
+  return request<{ file: RepairFileContent }>(
+    `/v1/repair-sessions/${encodeURIComponent(id)}/files/${filePath.split("/").map(encodeURIComponent).join("/")}`
+  );
+}
+
+export function updateRepairFile(
+  id: string,
+  filePath: string,
+  payload: { content: string; expectedVersion: number }
+) {
+  return request<{ repair: RepairSession }>(
+    `/v1/repair-sessions/${encodeURIComponent(id)}/files/${filePath.split("/").map(encodeURIComponent).join("/")}`,
+    { method: "PUT", body: JSON.stringify(payload) }
+  );
+}
+
+export function validateRepair(id: string) {
+  return request<{ repair: RepairSession }>(`/v1/repair-sessions/${encodeURIComponent(id)}/validate`, {
+    method: "POST",
+    body: "{}"
+  });
+}
+
+export function exportRepair(id: string, format: "patch" | "zip") {
+  return request<{
+    export: { id: string; format: "patch" | "zip"; downloadUrl: string; sha256: string; sizeBytes: number };
+  }>(`/v1/repair-sessions/${encodeURIComponent(id)}/export`, {
+    method: "POST",
+    body: JSON.stringify({ format })
+  });
+}
+
+export function applyRepair(id: string, confirmHighRisk = false) {
+  return request<{ repair: RepairSession }>(`/v1/repair-sessions/${encodeURIComponent(id)}/apply`, {
+    method: "POST",
+    body: JSON.stringify({ confirm: true, confirmHighRisk })
+  });
 }
 
 interface RunTargetPayload {
@@ -211,6 +344,44 @@ export function continuePlanningConversation(payload: {
   });
 }
 
+export function chatWithTestAssistant(payload: {
+  projectId: string;
+  message: string;
+  credentialId?: string;
+  history: Array<{ role: "user" | "assistant"; content: string }>;
+  context: {
+    runId?: string;
+    runState?: string;
+    finalStatus?: string;
+    summary?: string;
+    evidenceCount?: number;
+    currentStep?: string;
+    latestLog?: string;
+    failedAssertions: Array<{ name: string; expected: string; actual: string }>;
+    planning?: { discovered: number; executable: number; autoBindable: number; confirmed: boolean };
+  };
+}) {
+  return request<{
+    assistant: {
+      reply: string;
+      intent: "status-question" | "failure-question" | "plan-change" | "execution-control" | "general";
+      suggestedAction: "none" | "revise-plan" | "start-run" | "pause-run" | "resume-run" | "cancel-run" | "open-evidence";
+      requiresConfirmation: boolean;
+    };
+    call: {
+      id: string;
+      model: string;
+      provider: string;
+      status: string;
+      durationMs?: number;
+      usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+    };
+  }>("/api/assistant/chat", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function analyzeConnectedContext(payload: {
   requirementPath?: string;
   requirementUrl?: string;
@@ -322,7 +493,7 @@ export function createVisualRun(
   appUrl: string | undefined,
   permissionProfile: PermissionProfile,
   scenarioId: string | undefined,
-  context: RunTargetPayload & { requirement?: string; diff?: string }
+  context: RunTargetPayload & { requirement?: string; diff?: string; coverageScenarioIds?: string[] }
 ) {
   const idempotencyKey = crypto.randomUUID();
   return request<{ run: RunProjection }>("/v1/runs", {
@@ -332,9 +503,12 @@ export function createVisualRun(
       projectId: context.projectId,
       actor: "workbench-user",
       idempotencyKey,
+      runKind: "parent",
       input: {
         appUrl,
         scenarioId,
+        coverageScenarioIds: context.coverageScenarioIds ?? (scenarioId ? [scenarioId] : []),
+        coverageMode: (context.coverageScenarioIds?.length ?? 0) > 1 ? "full" : "targeted",
         requirement: context.requirement,
         diff: context.diff,
         permissionProfile,
@@ -578,9 +752,10 @@ export function listScenarioDrafts() {
   return request<{ drafts: HarnessGapScenarioDraft[] }>("/api/scenario-drafts");
 }
 
-export function probeScenarioDraft(id: string) {
+export function probeScenarioDraft(id: string, credentialId?: string) {
   return request<{ draft: HarnessGapScenarioDraft }>(`/api/scenario-drafts/${id}/probe`, {
-    method: "POST"
+    method: "POST",
+    body: JSON.stringify(credentialId ? { credentialId } : {})
   });
 }
 
@@ -644,6 +819,29 @@ export function saveProjectLoginCredential(id: string, payload: {
     project: ProjectConfig;
     credential: { id: string; projectId: string; usernameMasked: string; updatedAt: string };
   }>(`/api/projects/${id}/login-credential`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function bindProjectApiCredential(id: string, payload: {
+  envName: string;
+  credentialId: string;
+  source: "test-system" | "dedicated";
+  baseUrlEnv?: string;
+  modelEnv?: string;
+}) {
+  return request<{
+    project: ProjectConfig;
+    binding: NonNullable<ProjectConfig["apiCredentialBindings"]>[number];
+    credential: {
+      id: string;
+      name: string;
+      provider: string;
+      model: string;
+      apiKeyMasked: string;
+    };
+  }>(`/api/projects/${id}/api-credential-binding`, {
     method: "POST",
     body: JSON.stringify(payload)
   });
@@ -753,7 +951,11 @@ export function deleteProjectGrant(projectId: string, grantId: string) {
   return request<{ deleted: boolean }>(`/api/projects/${projectId}/grants/${grantId}`, { method: "DELETE" });
 }
 
-export function runDiscoveryScan(payload: RunTargetPayload & { sourceContexts?: unknown[] }) {
+export function runDiscoveryScan(payload: RunTargetPayload & {
+  sourceContexts?: unknown[];
+  goal?: string;
+  credentialId?: string;
+}) {
   return request<{ discovery: DiscoveryScanResult }>("/api/discovery/scan", {
     method: "POST",
     body: JSON.stringify(payload)
@@ -796,7 +998,10 @@ export function getRunBundle(runId: string) {
 }
 
 export function getRunEvidence(runId: string) {
-  return request<{ evidence: RunResult["evidence"] }>(`/api/runs/${runId}/evidence`);
+  return request<{
+    evidence: RunResult["evidence"];
+    loopEvents: RunResult["loopEvents"];
+  }>(`/api/runs/${runId}/evidence`);
 }
 
 export function createRunBundleDownload(runId: string, payload?: { maxInlineBytes?: number }) {

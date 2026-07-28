@@ -4,7 +4,7 @@ import { getScenario, hasScenario } from "./scenarios.js";
 import type { LlmPlanningAdvice } from "./llmPlanningAdvisor.js";
 
 export type PlanningPhase = "clarifying" | "draft-ready";
-export type BusinessFlowStatus = "executable" | "needs-input" | "coverage-gap";
+export type BusinessFlowStatus = "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
 
 export interface PlanningMessage {
   id: string;
@@ -34,6 +34,7 @@ export interface PlanningConversationResult {
   coverage: {
     discovered: number;
     executable: number;
+    autoBindable: number;
     needsInput: number;
     gaps: number;
     confidence: "high" | "medium" | "low";
@@ -75,6 +76,7 @@ function buildFlows(input: {
   comprehensive: boolean;
 }): PlannedBusinessFlow[] {
   const flows: PlannedBusinessFlow[] = [];
+  const supportsBrowserDiscovery = input.project.manifest?.capabilities.browser !== false;
   for (const candidate of input.analysis.scenarioCandidates.filter((item) => item.source !== "patrol" && item.mappedScenarioId)) {
     const scenario = candidate.mappedScenarioId && hasScenario(candidate.mappedScenarioId)
       ? getScenario(candidate.mappedScenarioId)
@@ -142,16 +144,24 @@ function buildFlows(input: {
           : `${node.label} 接口流程`,
       kind,
       target: node.label,
-      status: "coverage-gap",
+      status: supportsBrowserDiscovery ? "auto-bindable" : "coverage-gap",
       confidence: node.confidence,
       reason: kind === "page"
-        ? `代码扫描发现页面入口 ${node.label}，但尚未绑定经过验证的浏览器操作和业务断言。`
+        ? supportsBrowserDiscovery
+          ? `代码扫描发现页面入口 ${node.label}；确认计划后会在内置浏览器中自动发现控件、绑定动作并验证断言。`
+          : `代码扫描发现页面入口 ${node.label}，但当前项目未开放浏览器 Discovery。`
         : kind === "component"
-          ? `代码扫描发现业务界面组件 ${node.label}，但尚未通过页面 Discovery 确认它的入口和完整操作路径。`
-        : `代码扫描发现接口 ${node.label}，但尚未绑定输入数据、预期状态和页面结果。`,
-      requiredInformation: kind === "page" || kind === "component"
-        ? ["需要通过页面 Discovery 绑定元素、路径和验收结果"]
-        : ["需要确认请求前置条件、测试数据和预期响应"]
+          ? supportsBrowserDiscovery
+            ? `代码扫描发现业务界面组件 ${node.label}；系统会先用页面 Discovery 绑定真实入口，候选冲突时再由 LLM 排定路径。`
+            : `代码扫描发现业务界面组件 ${node.label}，但当前项目未开放浏览器 Discovery。`
+          : supportsBrowserDiscovery
+            ? `代码扫描发现接口 ${node.label}；系统会结合运行时 Network 与页面结果生成受控接口场景。`
+            : `代码扫描发现接口 ${node.label}，但尚未绑定输入数据、预期状态和页面结果。`,
+      requiredInformation: supportsBrowserDiscovery
+        ? []
+        : kind === "page" || kind === "component"
+          ? ["需要开放浏览器 Discovery 或手工提供页面入口和验收结果"]
+          : ["需要确认请求前置条件、测试数据和预期响应"]
     });
   }
   return flows.slice(0, 200);
@@ -159,7 +169,8 @@ function buildFlows(input: {
 
 function buildPlan(project: ProjectConfig, flows: PlannedBusinessFlow[], comprehensive: boolean): GrayPlan {
   const executable = flows.filter((flow) => flow.status === "executable");
-  const gaps = flows.filter((flow) => flow.status !== "executable");
+  const autoBindable = flows.filter((flow) => flow.status === "auto-bindable");
+  const gaps = flows.filter((flow) => flow.status === "coverage-gap" || flow.status === "needs-input");
   return {
     sessionName: `${project.name} · ${comprehensive ? "全面灰度测试" : "需求定向测试"}`,
     risks: [
@@ -168,6 +179,12 @@ function buildPlan(project: ProjectConfig, flows: PlannedBusinessFlow[], compreh
         level: "high" as const,
         title: flow.title,
         evidence: `需要运行 ${flow.target} 并采集截图、DOM、Network 与 Trace。`
+      })),
+      ...autoBindable.slice(0, 20).map((flow) => ({
+        id: `bind_${flow.id}`,
+        level: "medium" as const,
+        title: `${flow.title} 等待自动绑定`,
+        evidence: "确认计划后由内置浏览器 Discovery 绑定真实元素、动作和 oracle；规则无法唯一判断时才调用 LLM。"
       })),
       ...gaps.slice(0, 20).map((flow) => ({
         id: `gap_${flow.id}`,
@@ -189,7 +206,9 @@ function buildPlan(project: ProjectConfig, flows: PlannedBusinessFlow[], compreh
           retry: 0,
           steps: flow.status === "executable"
             ? ["打开目标功能", "执行核心业务操作", "验证业务结果", "采集运行证据"]
-            : ["补充测试前置条件", "绑定页面或接口动作", "定义业务断言", "人工确认后再执行"]
+            : flow.status === "auto-bindable"
+              ? ["在沙盒内打开真实页面", "自动发现并绑定元素或接口", "编译受控动作与业务断言", "执行并采集 Artifact v2"]
+              : ["补充测试前置条件", "绑定页面或接口动作", "定义业务断言", "人工确认后再执行"]
         }))
       }
     ]
@@ -226,13 +245,14 @@ export function buildPlanningConversation(input: {
     blockingQuestions.push(question);
   }
   const executable = flows.filter((flow) => flow.status === "executable").length;
+  const autoBindable = flows.filter((flow) => flow.status === "auto-bindable").length;
   const needsInput = flows.filter((flow) => flow.status === "needs-input").length;
   const gaps = flows.filter((flow) => flow.status === "coverage-gap").length;
   const phase: PlanningPhase = blockingQuestions.length ? "clarifying" : "draft-ready";
   const scope = comprehensive ? "comprehensive" as const : "targeted" as const;
   const reply = phase === "clarifying"
-    ? `我扫描了 ${input.project.name}，识别到 ${flows.length} 条业务或技术流程，其中 ${executable} 条已有可执行场景、${gaps} 条需要补齐自动化。开始制定最终计划前还需要确认 ${clarificationQuestions.length} 个问题。`
-    : `测试计划已生成：共识别 ${flows.length} 条流程，${executable} 条可以直接执行，${gaps} 条会明确列为覆盖缺口，不会被误报为已经测试。${clarificationQuestions.length ? "仍有可选信息可以补充，但不影响确认计划。" : ""}`;
+    ? `我扫描了 ${input.project.name}，识别到 ${flows.length} 条业务或技术流程，其中 ${executable} 条已有可执行场景、${autoBindable} 条可由内置浏览器自动绑定、${gaps} 条仍需补充。开始制定最终计划前还需要确认 ${clarificationQuestions.length} 个问题。`
+    : `测试计划已生成：共识别 ${flows.length} 条流程，${executable} 条可以直接执行，${autoBindable} 条会在确认后进入页面 Discovery 和受控场景绑定；只有经过真实页面探测仍无法形成动作与断言的项目才会转为覆盖缺口。当前已有 ${gaps} 条明确缺口。${clarificationQuestions.length ? "仍有可选信息可以补充，但不影响确认计划。" : ""}`;
   return {
     id: `planning_${Date.now()}`,
     phase,
@@ -242,9 +262,10 @@ export function buildPlanningConversation(input: {
     coverage: {
       discovered: flows.length,
       executable,
+      autoBindable,
       needsInput,
       gaps,
-      confidence: flows.length && gaps === 0 ? "high" : flows.length ? "medium" : "low",
+      confidence: flows.length && gaps === 0 && autoBindable === 0 ? "high" : flows.length ? "medium" : "low",
       scope
     },
     plan: buildPlan(input.project, flows, comprehensive),

@@ -80,13 +80,16 @@ function buildPlanJudge(input: JudgeInput): JudgeResult {
 
   const hasDiffSignal = Boolean(input.diff?.trim());
   const hasRequirementSignal = Boolean(input.requirement?.trim());
-  if (!hasDiffSignal || !hasRequirementSignal) {
+  const changeScopedRequirement = /代码变更|本次变更|本次修改|提交|合并请求|pull request|\bpr\b|\bdiff\b/i.test(input.requirement ?? "");
+  if (!hasRequirementSignal || (changeScopedRequirement && !hasDiffSignal)) {
     findings.push({
       id: "plan_context_missing",
       severity: "medium",
       failureClass: "insufficient_evidence",
       title: "计划上下文不完整",
-      reasoning: "缺少 diff 或需求文本时，Plan Judge 只能基于 fixture plan 判断覆盖，不能声称完整覆盖真实变更。",
+      reasoning: !hasRequirementSignal
+        ? "缺少需求文本时，Plan Judge 无法判断已执行路径是否覆盖用户目标。"
+        : "需求明确针对代码变更，但没有提供 diff；Plan Judge 不能声称已覆盖真实变更。",
       evidenceRefs: evidenceByType(input.evidence, "permission")
     });
   }

@@ -3,7 +3,14 @@ import express from "express";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { commandSpecSchema, llmCallSchema, planProvenanceSchema, projectManifestSchema } from "@ai-test-officer/contracts";
+import {
+  agentInterruptSchema,
+  agentPermissionProfileSchema,
+  commandSpecSchema,
+  llmCallSchema,
+  planProvenanceSchema,
+  projectManifestSchema
+} from "@ai-test-officer/contracts";
 import {
   createCredential,
   decrypt,
@@ -41,7 +48,14 @@ import {
   securitySummary
 } from "./security.js";
 import { testCredentialConnection } from "./testConnection.js";
-import { executeLlmCall } from "./llmProvider.js";
+import { executeLlmCall, listLlmCalls } from "./llmProvider.js";
+import { readLlmBudgetLedger } from "./llmBudgetLedger.js";
+import { subscribeLlmLifecycle } from "./llmLifecycle.js";
+import {
+  appendHumanOverrideConclusion,
+  readProofArtifacts,
+  verifyEvidenceManifest
+} from "./proofGraph.js";
 import { runVisualGrayTest } from "./testRunner.js";
 import { getScenario, hasScenario, listExecutableScenarios, listScenarios } from "./scenarios.js";
 import { buildDeliveryFromRun, listBotDeliveries } from "./botNotifier.js";
@@ -75,6 +89,7 @@ import { requireRunnableTarget, runnableTargetShape, targetRuntimeSchema } from 
 import {
   getProject,
   getProjectRuntimeStatus,
+  getProjectRuntimeStatusWithRecovery,
   recordProjectRuntimeStatus,
   listProjects,
   saveProject,
@@ -88,6 +103,7 @@ import { detectProject, detectProjectManifest, diagnoseProject } from "./project
 import { createRuntimeRecoveryAdvice } from "./runtimeStartupAdvisor.js";
 import { saveProjectLoginSecret } from "./projectLoginStore.js";
 import { runDiscoveryScan } from "./discoveryScan.js";
+import { readCoverageItems } from "./coverageStore.js";
 import { createProjectGrant, deleteProjectGrant, hasProjectScope, listProjectGrants } from "./projectAccess.js";
 import {
   auditStoreStatus,
@@ -98,7 +114,7 @@ import {
 import { listStorageArchives, runStorageRetention, storageStatus } from "./storageGovernance.js";
 import type { ProjectConfig, SourceReadEnvelope } from "./types.js";
 import { loadProjectManifest, manifestToProjectConfig } from "./projectManifest.js";
-import { runEventStore } from "./runEventStore.js";
+import { isIdempotentReplay, runEventStore } from "./runEventStore.js";
 import type { RunEventType } from "@ai-test-officer/contracts";
 import { createRunRequestSchema } from "@ai-test-officer/contracts";
 import { buildCodeImpactGraph, changedFilesFromDiff } from "./codeImpactGraph.js";
@@ -108,6 +124,23 @@ import { createLlmPlanningAdvice } from "./llmPlanningAdvisor.js";
 import { enqueueRun, executeQueuedRun, interruptRun } from "./runOrchestrator.js";
 import { buildBenchmarkCatalog, trustedBenchmarkRuntimeMetrics } from "./benchmarkSummary.js";
 import { chooseNativeProjectFolder, listProjectDirectory } from "./projectFolderBrowser.js";
+import {
+  agentOrchestrationMode,
+  getAgentGraphProjection,
+  resumeAgentGraph,
+  startAgentGraphInBackground
+} from "./agentGraphService.js";
+import {
+  applyRepairSession,
+  createRepairSession,
+  exportRepairSession,
+  listRepairSessions,
+  readRepairFile,
+  readRepairSession,
+  validateRepairSession,
+  writeRepairFile
+} from "./repairWorkspace.js";
+import { proposeCodeRepair } from "./llmCodeRepair.js";
 
 const app = express();
 const projectStartTasks = new Map<string, Promise<Awaited<ReturnType<typeof startProject>>>>();
@@ -154,6 +187,21 @@ async function refreshExternalProjectLaunchContract(id: string) {
     manifest
   });
 }
+
+// Saving a detected project and launching its sandbox are separate durable
+// operations. A file-system watcher / hot reload can observe the old registry
+// between them, so retry the one safe failure that proves no process was ever
+// started. This only refreshes the detected manifest and retries the existing
+// allowlisted start contract; it never edits target source or runs LLM output.
+async function startProjectWithFreshConfig(id: string) {
+  await refreshExternalProjectLaunchContract(id);
+  let runtime = await startProject(id);
+  if (runtime.failureReason !== "config_missing") return runtime;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  await refreshExternalProjectLaunchContract(id);
+  runtime = await startProject(id);
+  return runtime;
+}
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
 
@@ -162,7 +210,9 @@ function assertOrganizationAccess(req: express.Request, organizationId: unknown)
   if (!isOrganizationAuthorized(context, organizationId)) throw new Error("organization_forbidden");
 }
 
-async function assertProjectAccess(req: express.Request, projectId: unknown, scope: "run_tests" | "read_artifacts") {
+type ProjectScope = Parameters<typeof hasProjectScope>[0]["scope"];
+
+async function assertProjectAccess(req: express.Request, projectId: unknown, scope: ProjectScope) {
   if (!projectId) return;
   const context = authContext(req);
   if (!context) throw new Error("project_forbidden");
@@ -238,6 +288,11 @@ app.use("/api/projects/grants", requireRole(["admin"]));
 app.post("/v1/runs", requireRole(["admin", "runner"]));
 for (const action of ["plan-approval", "permissions", "pause", "resume", "cancel"]) app.post(`/v1/runs/:id/${action}`, requireRole(["admin", "runner"]));
 app.post("/v1/runs/:id/decision-override", requireRole(["admin", "reviewer"]));
+app.post("/v1/runs/:id/repairs", requireRole(["admin", "maintainer"]));
+app.put("/v1/repair-sessions/:id/files/*", requireRole(["admin", "maintainer"]));
+app.post("/v1/repair-sessions/:id/validate", requireRole(["admin", "maintainer"]));
+app.post("/v1/repair-sessions/:id/export", requireRole(["admin", "maintainer"]));
+app.post("/v1/repair-sessions/:id/apply", requireRole(["admin", "maintainer"]));
 
 const credentialSchema = z.object({
   name: z.string().min(1),
@@ -452,7 +507,8 @@ app.get("/api/scenario-drafts", async (_req, res, next) => {
 
 app.post("/api/scenario-drafts/:id/probe", async (req, res, next) => {
   try {
-    const draft = await probeScenarioDraft(req.params.id);
+    const credentialId = typeof req.body?.credentialId === "string" ? req.body.credentialId : undefined;
+    const draft = await probeScenarioDraft(req.params.id, credentialId);
     if (!draft) {
       res.status(404).json({ error: "Scenario draft not found" });
       return;
@@ -496,13 +552,7 @@ const connectorContextSchema = z.object({
   strictInput: z.boolean().default(false)
 });
 
-const permissionProfileSchema = z.object({
-  observe: z.boolean(),
-  browserControl: z.boolean(),
-  workspaceControl: z.boolean(),
-  ideTerminalControl: z.boolean(),
-  systemControl: z.boolean()
-});
+const permissionProfileSchema = agentPermissionProfileSchema;
 
 const runControlSchema = z.object({
   expectedVersion: z.number().int().nonnegative(),
@@ -520,8 +570,20 @@ app.post("/v1/runs", async (req, res, next) => {
       runId: body.runId,
       actor: body.actor,
       idempotencyKey: body.idempotencyKey,
-      payload: { ...body.input, projectId: body.projectId, organizationId: body.organizationId }
+      payload: {
+        ...body.input,
+        projectId: body.projectId,
+        organizationId: body.organizationId,
+        runKind: body.runKind,
+        parentRunId: body.parentRunId,
+        coverageItemId: body.coverageItemId
+      }
     });
+    if (agentOrchestrationMode(body.projectId) === "active") {
+      startAgentGraphInBackground(created);
+      res.status(201).json({ run: created });
+      return;
+    }
     let planPayload: Record<string, unknown> = {};
     if (created.state === "planning") {
       const sourceContexts: SourceReadEnvelope[] = [];
@@ -643,6 +705,7 @@ app.post("/v1/runs", async (req, res, next) => {
         payload: planPayload
       })
       : created;
+    startAgentGraphInBackground(run);
     res.status(201).json({ run });
   } catch (error) { next(error); }
 });
@@ -682,8 +745,26 @@ for (const [action, eventType] of Object.entries(controlEvents)) {
         z.object({ status: z.enum(["approved", "blocked", "accepted-risk"]), reason: z.string().min(1), originalDecision: z.string().optional(), newLabel: z.string().optional() }).parse(body.payload);
       }
       const run = await runEventStore.append({ runId: req.params.id, type: eventType, ...body, payload: body.payload ?? {} });
-      if (eventType === "permission_granted" || eventType === "run_resumed") await enqueueRun(run.id, run.version);
-      if (eventType === "run_paused" || eventType === "run_cancelled") interruptRun(run.id);
+      const replayed = isIdempotentReplay(run);
+      if (!replayed && eventType === "decision_overridden" && run.resultRunId) {
+        await appendHumanOverrideConclusion({
+          resultRunId: run.resultRunId,
+          actor: body.actor,
+          reason: String(body.payload?.reason ?? ""),
+          status: String(body.payload?.status ?? "approved")
+        });
+      }
+      const graphMode = agentOrchestrationMode(
+        typeof run.input.projectId === "string" ? run.input.projectId : undefined
+      );
+      if (!replayed && eventType === "plan_approved" && graphMode === "active") {
+        await resumeAgentGraph(run.id, { approved: true, actor: body.actor });
+      }
+      if (!replayed && eventType === "permission_granted" && graphMode === "active") {
+        await resumeAgentGraph(run.id, { approved: true, actor: body.actor });
+      }
+      if (!replayed && (eventType === "permission_granted" || eventType === "run_resumed")) await enqueueRun(run.id, run.version);
+      if (!replayed && (eventType === "run_paused" || eventType === "run_cancelled")) interruptRun(run.id);
       res.json({ run });
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("run_version_conflict:")) {
@@ -727,6 +808,360 @@ app.get("/v1/runs/:id/report", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.get("/v1/runs/:id/agent", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    const agent = await getAgentGraphProjection(run.id);
+    res.json({ agent: agent ?? null });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/coverage", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    const resultRunId = run.resultRunId ?? run.id;
+    const proof = await readProofArtifacts(resultRunId);
+    const durableCoverage = proof.coverageItems.length
+      ? proof.coverageItems
+      : await readCoverageItems(run.id);
+    const disposition = {
+      executed: durableCoverage.filter((item) => item.disposition === "executed").length,
+      excluded: durableCoverage.filter((item) => item.disposition === "excluded").length,
+      blocked: durableCoverage.filter((item) => item.disposition === "blocked").length,
+      pending: durableCoverage.filter((item) => item.disposition === "pending").length
+    };
+    res.json({
+      coverage: durableCoverage,
+      disposition,
+      complete: durableCoverage.length > 0 && disposition.pending === 0
+    });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/llm-calls", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    const calls = await listLlmCalls(run.id);
+    const ledger = await readLlmBudgetLedger(run.id);
+    const knownCosts = calls.map((call) => call.usage.estimatedCostUsd).filter((value): value is number => typeof value === "number");
+    res.json({
+      calls,
+      budgetLedger: ledger,
+      summary: {
+        count: calls.length,
+        totalTokens: calls.reduce((sum, call) => sum + (call.usage.totalTokens ?? 0), 0),
+        cost: knownCosts.length === calls.length ? knownCosts.reduce((sum, value) => sum + value, 0) : "unknown",
+        retries: calls.reduce((sum, call) => sum + Math.max(0, (call.transportAttempts?.length ?? 1) - 1), 0),
+        failures: calls.filter((call) => call.status !== "passed").length
+      }
+    });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/conclusions", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    const resultRunId = run.resultRunId ?? run.id;
+    const proof = await readProofArtifacts(resultRunId);
+    let integrity = { valid: false, errors: ["manifest_missing"] };
+    if (proof.manifest) {
+      try {
+        integrity = verifyEvidenceManifest(await readRunBundle(resultRunId), proof.manifest);
+      } catch {
+        integrity = { valid: false, errors: ["manifest_verification_failed"] };
+      }
+    }
+    res.json({
+      conclusions: integrity.valid
+        ? proof.conclusions
+        : proof.conclusions.map((item) => ({ ...item, proofStatus: "invalid" })),
+      manifest: proof.manifest ? { ...proof.manifest, integrityStatus: integrity.valid ? proof.manifest.integrityStatus : "integrity-invalid" } : null,
+      integrity
+    });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/conclusions/:id/proof", async (req, res, next) => {
+  try {
+    const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
+    if (!runId) return void res.status(400).json({ error: "run_id_required" });
+    const run = await runEventStore.get(runId);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    const resultRunId = run.resultRunId ?? run.id;
+    const bundle = await readRunBundle(resultRunId);
+    const proof = await readProofArtifacts(resultRunId);
+    const conclusion = proof.conclusions.find((item) => item.conclusionId === req.params.id);
+    if (!conclusion) return void res.status(404).json({ error: "conclusion_not_found" });
+    const nodeIds = new Set<string>([conclusion.conclusionId]);
+    const edges = proof.proofEdges.filter((edge) => {
+      if (!nodeIds.has(edge.fromId)) return false;
+      nodeIds.add(edge.toId);
+      return true;
+    });
+    for (let pass = 0; pass < 6; pass += 1) {
+      for (const edge of proof.proofEdges) {
+        if (nodeIds.has(edge.fromId)) nodeIds.add(edge.toId);
+      }
+    }
+    const selectedEdges = proof.proofEdges.filter((edge) => nodeIds.has(edge.fromId) && nodeIds.has(edge.toId));
+    res.json({
+      conclusion,
+      edges: selectedEdges.length ? selectedEdges : edges,
+      evidence: bundle.evidence.filter((item) => nodeIds.has(item.id)),
+      artifacts: (bundle.artifactsV2 ?? []).filter((item) => nodeIds.has(item.id)),
+      attempts: (bundle.attempts ?? []).filter((item) => nodeIds.has(item.id)),
+      steps: bundle.result.steps.filter((item) => nodeIds.has(item.stepId)),
+      manifest: proof.manifest ?? null
+    });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/runs/:id/messages", async (req, res, next) => {
+  try {
+    const body = z.object({
+      message: z.string().trim().min(1).max(4_000),
+      credentialId: z.string().optional()
+    }).parse(req.body);
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    const project = typeof run.input.projectId === "string" ? await getProject(run.input.projectId) : undefined;
+    const publicCredentials = await listCredentials();
+    const selectedPublic = body.credentialId
+      ? publicCredentials.find((item) => item.id === body.credentialId)
+      : publicCredentials.find((item) => item.isDefault && !/api\.poe\.com/i.test(item.baseUrl))
+        ?? publicCredentials.find((item) => !/api\.poe\.com/i.test(item.baseUrl));
+    if (!selectedPublic) return void res.status(409).json({ error: "assistant_model_not_configured" });
+    const credential = await getCredential(selectedPublic.id);
+    if (!credential) return void res.status(409).json({ error: "assistant_model_not_configured" });
+    const graph = await getAgentGraphProjection(run.id);
+    const replySchema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["reply", "suggestedAction", "requiresConfirmation"],
+      properties: {
+        reply: { type: "string", minLength: 1, maxLength: 1_200 },
+        suggestedAction: { type: "string", enum: ["none", "resume-interrupt", "create-repair", "open-evidence"] },
+        requiresConfirmation: { type: "boolean" }
+      }
+    } as const;
+    const llm = await executeLlmCall({
+      credential,
+      apiKey: await decrypt(credential.apiKeyEncrypted),
+      system: [
+        "You are the assistant for an evidence-driven automated testing run.",
+        "Use only the supplied durable run facts. Never claim pass from scheduling completion.",
+        "Explain blockers and the next safe action in concise Chinese.",
+        "Do not invent evidence, credentials, commands or test results.",
+        "Return only the requested JSON."
+      ].join(" "),
+      prompt: JSON.stringify({
+        userMessage: body.message,
+        project: project ? { id: project.id, name: project.name } : undefined,
+        run: {
+          id: run.id,
+          state: run.state,
+          finalStatus: run.gateStatus,
+          machineGate: run.machineGate,
+          judgeRecommendation: run.judgeRecommendation,
+          scenarioId: run.selectedScenarioId
+        },
+        graph
+      }),
+      maxTokens: 700,
+      timeoutMs: 20_000,
+      totalTimeoutMs: 30_000,
+      transportPreference: "non-stream-retry",
+      jsonSchema: { name: "agent_thread_reply", schema: replySchema },
+      context: {
+        purpose: "assistant",
+        runId: run.id,
+        modelProfileId: credential.id,
+        promptTemplateId: "run-assistant",
+        promptVersion: "assistant-v1",
+        outputSchemaVersion: "agent-thread-reply-v1",
+        graphVersion: "agent-graph-v1",
+        routeReason: "user-requested-run-explanation",
+        ruleCapable: false,
+        cachePolicy: "bypass"
+      }
+    });
+    const assistant = z.object({
+      reply: z.string().min(1).max(1_200),
+      suggestedAction: z.enum(["none", "resume-interrupt", "create-repair", "open-evidence"]),
+      requiresConfirmation: z.boolean()
+    }).strict().parse(JSON.parse(llm.text));
+    res.json({
+      assistant,
+      call: {
+        id: llm.call.id,
+        provider: llm.call.provider,
+        model: llm.call.model,
+        status: llm.call.status,
+        durationMs: llm.call.durationMs,
+        usage: llm.call.usage
+      }
+    });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/runs/:id/interrupts/:interruptId/resume", async (req, res, next) => {
+  try {
+    const body = z.object({
+      approved: z.boolean(),
+      input: z.record(z.unknown()).default({})
+    }).parse(req.body);
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "run_tests");
+    const projection = await getAgentGraphProjection(run.id);
+    const interrupt = projection?.pendingInterrupt;
+    if (!interrupt || interrupt.id !== req.params.interruptId) {
+      return void res.status(409).json({ error: "agent_interrupt_conflict" });
+    }
+    agentInterruptSchema.parse(interrupt);
+    const agent = await resumeAgentGraph(run.id, { approved: body.approved, ...body.input });
+    res.json({ agent });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/repairs", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    res.json({ repairs: await listRepairSessions(run.id) });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/runs/:id/repairs", async (req, res, next) => {
+  try {
+    const body = z.object({
+      autoAnalyze: z.boolean().default(true),
+      credentialId: z.string().optional(),
+      summary: z.string().max(2_000).optional()
+    }).parse(req.body ?? {});
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "edit_sandbox");
+    if (typeof run.input.projectId !== "string") return void res.status(409).json({ error: "run_project_missing" });
+    const project = await getProject(run.input.projectId);
+    if (!project) return void res.status(404).json({ error: "project_not_found" });
+    let repair = await createRepairSession({
+      runId: run.id,
+      project,
+      summary: body.summary,
+      failureClass: run.machineGate?.status === "fail" ? "product-bug" : "unknown"
+    });
+    if (body.autoAnalyze) {
+      repair = await proposeCodeRepair({ sessionId: repair.id, run, project, credentialId: body.credentialId });
+    }
+    res.status(201).json({ repair });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/repair-sessions/:id", async (req, res, next) => {
+  try {
+    const repair = await readRepairSession(req.params.id);
+    if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
+    const run = await runEventStore.get(repair.runId);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, repair.projectId, "read_artifacts");
+    res.json({ repair });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/repair-sessions/:id/files/*", async (req, res, next) => {
+  try {
+    const repair = await readRepairSession(req.params.id);
+    if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
+    const run = await runEventStore.get(repair.runId);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, repair.projectId, "read_artifacts");
+    const requestedPath = (req.params as Record<string, string>)["0"] ?? "";
+    res.json({ file: await readRepairFile(repair.id, requestedPath) });
+  } catch (error) { next(error); }
+});
+
+app.put("/v1/repair-sessions/:id/files/*", async (req, res, next) => {
+  try {
+    const body = z.object({
+      content: z.string().max(1024 * 1024),
+      expectedVersion: z.number().int().nonnegative()
+    }).parse(req.body);
+    const repair = await readRepairSession(req.params.id);
+    if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
+    const run = await runEventStore.get(repair.runId);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, repair.projectId, "edit_sandbox");
+    const requestedPath = (req.params as Record<string, string>)["0"] ?? "";
+    res.json({ repair: await writeRepairFile({ id: repair.id, path: requestedPath, ...body }) });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/repair-sessions/:id/validate", async (req, res, next) => {
+  try {
+    const repair = await readRepairSession(req.params.id);
+    if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
+    const run = await runEventStore.get(repair.runId);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, repair.projectId, "edit_sandbox");
+    const project = await getProject(repair.projectId);
+    if (!project) return void res.status(404).json({ error: "project_not_found" });
+    res.json({ repair: await validateRepairSession(repair.id, project) });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/repair-sessions/:id/export", async (req, res, next) => {
+  try {
+    const body = z.object({ format: z.enum(["patch", "zip"]) }).parse(req.body);
+    const repair = await readRepairSession(req.params.id);
+    if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
+    const run = await runEventStore.get(repair.runId);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, repair.projectId, "export_source");
+    res.json(await exportRepairSession(repair.id, body.format));
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/repair-sessions/:id/apply", async (req, res, next) => {
+  try {
+    const body = z.object({ confirm: z.literal(true), confirmHighRisk: z.boolean().default(false) }).parse(req.body);
+    const repair = await readRepairSession(req.params.id);
+    if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
+    const run = await runEventStore.get(repair.runId);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, repair.projectId, "apply_source");
+    const project = await getProject(repair.projectId);
+    if (!project) return void res.status(404).json({ error: "project_not_found" });
+    res.json({ repair: await applyRepairSession(repair.id, project, { confirmHighRisk: body.confirmHighRisk }) });
+  } catch (error) { next(error); }
+});
+
 app.get("/v1/runs/:id/stream", async (req, res, next) => {
   try {
     const run = await runEventStore.get(req.params.id);
@@ -738,17 +1173,90 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
     let sentVersion = Number(req.header("last-event-id") ?? 0);
+    let sentAgentUpdatedAt = "";
+    const sentRepairUpdates = new Map<string, string>();
+    const sentLlmCalls = new Map<string, string>();
+    let sentEvidenceRoot = "";
+    const unsubscribeLlm = subscribeLlmLifecycle(req.params.id, (event) => {
+      res.write(`event: ${event.name}\ndata: ${JSON.stringify({
+        callId: event.callId,
+        at: event.at,
+        ...event.payload
+      })}\n\n`);
+    });
     const send = async () => {
       const events = await runEventStore.events(req.params.id);
       for (const event of events.filter((item) => item.version > sentVersion)) {
         res.write(`id: ${event.version}\nevent: state\ndata: ${JSON.stringify(event)}\n\n`);
         sentVersion = event.version;
       }
+      const agent = await getAgentGraphProjection(req.params.id);
+      if (agent && agent.updatedAt !== sentAgentUpdatedAt) {
+        const eventName = agent.pendingInterrupt
+          ? "agent.interrupt"
+          : agent.status === "failed"
+            ? "agent.node.failed"
+            : agent.status === "completed"
+              ? "agent.node.completed"
+              : "agent.node.started";
+        res.write(`event: ${eventName}\ndata: ${JSON.stringify(agent)}\n\n`);
+        sentAgentUpdatedAt = agent.updatedAt;
+      }
+      const repairs = await listRepairSessions(req.params.id);
+      for (const repair of repairs) {
+        if (sentRepairUpdates.get(repair.id) === repair.updatedAt) continue;
+        const eventName = repair.validation?.status === "running"
+          ? "validation.started"
+          : repair.validation && ["passed", "failed", "blocked"].includes(repair.validation.status)
+            ? "validation.completed"
+            : repair.status === "exported"
+              ? "repair.exported"
+              : sentRepairUpdates.has(repair.id)
+                ? "repair.changed"
+                : "repair.created";
+        res.write(`event: ${eventName}\ndata: ${JSON.stringify(repair)}\n\n`);
+        sentRepairUpdates.set(repair.id, repair.updatedAt);
+      }
+      for (const call of await listLlmCalls(req.params.id)) {
+        const fingerprint = `${call.status}:${call.completedAt ?? call.startedAt}:${call.transportAttempts?.length ?? 0}`;
+        if (sentLlmCalls.get(call.id) === fingerprint) continue;
+        const eventName = call.status === "passed" ? "llm.call.completed" : "llm.call.failed";
+        res.write(`event: ${eventName}\ndata: ${JSON.stringify(call)}\n\n`);
+        for (const attempt of (call.transportAttempts ?? []).slice(1)) {
+          res.write(`event: llm.call.retried\ndata: ${JSON.stringify({ callId: call.id, attempt })}\n\n`);
+        }
+        sentLlmCalls.set(call.id, fingerprint);
+      }
+      const currentRun = await runEventStore.get(req.params.id);
+      const proof = await readProofArtifacts(currentRun?.resultRunId ?? req.params.id);
+      if (proof.manifest && proof.manifest.evidenceSetRoot !== sentEvidenceRoot) {
+        const resultRunId = currentRun?.resultRunId ?? req.params.id;
+        const bundle = await readRunBundle(resultRunId);
+        for (const artifact of bundle.result?.artifactsV2 ?? []) {
+          res.write(`event: artifact.committed\ndata: ${JSON.stringify({
+            runId: resultRunId,
+            artifactId: artifact.id,
+            attemptId: artifact.attemptId,
+            stepId: artifact.stepId,
+            kind: artifact.kind,
+            origin: artifact.origin,
+            integrity: artifact.integrity
+          })}\n\n`);
+        }
+        res.write(`event: proof.${proof.manifest.integrityStatus === "integrity-invalid" ? "invalid" : "verified"}\ndata: ${JSON.stringify(proof.manifest)}\n\n`);
+        for (const conclusion of proof.conclusions) {
+          res.write(`event: conclusion.created\ndata: ${JSON.stringify(conclusion)}\n\n`);
+        }
+        sentEvidenceRoot = proof.manifest.evidenceSetRoot;
+      }
       res.write(`event: heartbeat\ndata: ${JSON.stringify({ runId: req.params.id, at: new Date().toISOString() })}\n\n`);
     };
     await send();
     const timer = setInterval(() => void send().catch(() => undefined), 1_000);
-    req.once("close", () => clearInterval(timer));
+    req.once("close", () => {
+      clearInterval(timer);
+      unsubscribeLlm();
+    });
   } catch (error) { next(error); }
 });
 
@@ -789,6 +1297,22 @@ const projectSchema = z.object({
       loginUrl: z.string().url().optional()
     })
     .optional(),
+  apiCredentialRequirements: z.array(z.object({
+    envName: z.string().regex(/^[A-Z_][A-Z0-9_]*$/),
+    providerHint: z.string().max(80).optional(),
+    baseUrlEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+    modelEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+    exposure: z.enum(["server", "browser"]),
+    signals: z.array(z.string().max(500)).max(20)
+  })).max(20).optional(),
+  apiCredentialBindings: z.array(z.object({
+    envName: z.string().regex(/^[A-Z_][A-Z0-9_]*$/),
+    credentialId: z.string().min(1),
+    source: z.enum(["test-system", "dedicated"]),
+    baseUrlEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+    modelEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+    configuredAt: z.string().datetime()
+  })).max(20).optional(),
   env: z.record(z.string()).optional(),
   cleanupCommand: z.string().optional(),
   cleanupCommandSpec: commandSpecSchema.optional(),
@@ -1002,6 +1526,69 @@ app.post("/api/projects/:id/login-credential", requireRole(["admin", "runner"]),
   }
 });
 
+app.post("/api/projects/:id/api-credential-binding", requireRole(["admin", "runner"]), async (req, res, next) => {
+  try {
+    const body = z.object({
+      envName: z.string().regex(/^[A-Z_][A-Z0-9_]*$/),
+      credentialId: z.string().min(1),
+      source: z.enum(["test-system", "dedicated"]),
+      baseUrlEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+      modelEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional()
+    }).parse(req.body);
+    const current = await getProject(req.params.id);
+    if (!current) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const requirement = current.apiCredentialRequirements?.find((item) => item.envName === body.envName);
+    if (!requirement) {
+      res.status(400).json({ error: `Project does not declare API credential requirement ${body.envName}.` });
+      return;
+    }
+    const credential = await getCredential(body.credentialId);
+    if (!credential) {
+      res.status(404).json({ error: "Credential not found" });
+      return;
+    }
+    const binding = {
+      envName: body.envName,
+      credentialId: body.credentialId,
+      source: body.source,
+      baseUrlEnv: body.baseUrlEnv ?? requirement.baseUrlEnv,
+      modelEnv: body.modelEnv ?? requirement.modelEnv,
+      configuredAt: new Date().toISOString()
+    };
+    const apiCredentialBindings = [
+      ...(current.apiCredentialBindings ?? []).filter((item) => item.envName !== body.envName),
+      binding
+    ];
+    const environmentAllowlist = Array.from(new Set([
+      ...(current.manifest?.environmentAllowlist ?? []),
+      binding.envName,
+      binding.baseUrlEnv,
+      binding.modelEnv
+    ].filter((value): value is string => Boolean(value))));
+    const project = await saveProject({
+      ...current,
+      apiCredentialBindings,
+      manifest: current.manifest ? { ...current.manifest, environmentAllowlist } : undefined
+    });
+    res.status(201).json({
+      project,
+      binding,
+      credential: {
+        id: credential.id,
+        name: credential.name,
+        provider: credential.provider,
+        model: credential.model,
+        apiKeyMasked: credential.apiKeyMasked
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.patch("/api/projects/:id", async (req, res, next) => {
   try {
     const current = await getProject(req.params.id);
@@ -1016,8 +1603,12 @@ app.patch("/api/projects/:id", async (req, res, next) => {
   }
 });
 
-app.get("/api/projects/:id/runtime", (req, res) => {
-  res.json({ runtime: getProjectRuntimeStatus(req.params.id) });
+app.get("/api/projects/:id/runtime", async (req, res, next) => {
+  try {
+    res.json({ runtime: await getProjectRuntimeStatusWithRecovery(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/projects/:id/target-contract", async (req, res, next) => {
@@ -1067,9 +1658,19 @@ app.post("/api/projects/:id/grants", requireRole(["admin"]), async (req, res, ne
   try {
     const body = z.object({
       subject: z.string().min(1),
-      role: z.enum(["viewer", "runner", "project_admin", "operator", "admin"]),
+      role: z.enum(["viewer", "runner", "maintainer", "project_admin", "operator", "admin"]),
       expiresAt: z.string().optional(),
-      scopes: z.array(z.enum(["read_project", "run_tests", "read_artifacts", "manage_project", "manage_credentials", "admin"])).optional()
+      scopes: z.array(z.enum([
+        "read_project",
+        "run_tests",
+        "read_artifacts",
+        "edit_sandbox",
+        "export_source",
+        "apply_source",
+        "manage_project",
+        "manage_credentials",
+        "admin"
+      ])).optional()
     }).parse(req.body);
     res.status(201).json({ grant: await createProjectGrant({ ...body, projectId: req.params.id }) });
   } catch (error) {
@@ -1087,8 +1688,7 @@ app.delete("/api/projects/:id/grants/:grantId", requireRole(["admin"]), async (r
 
 app.post("/api/projects/:id/start", async (req, res, next) => {
   try {
-    await refreshExternalProjectLaunchContract(req.params.id);
-    res.json({ runtime: await startProject(req.params.id) });
+    res.json({ runtime: await startProjectWithFreshConfig(req.params.id) });
   } catch (error) {
     next(error);
   }
@@ -1116,8 +1716,7 @@ app.post("/api/projects/:id/start-async", (req, res, next) => {
         message: "Start task accepted; preparing the project runtime.",
         failureReason: "none"
       });
-      const task = refreshExternalProjectLaunchContract(req.params.id)
-        .then(() => startProject(req.params.id))
+      const task = startProjectWithFreshConfig(req.params.id)
         .then((status) => {
           if (!["installing", "starting", "running"].includes(status.status)) recordProjectRuntimeStatus(status);
           return status;
@@ -1291,6 +1890,109 @@ app.post("/api/planning/conversation", async (req, res, next) => {
   }
 });
 
+app.post("/api/assistant/chat", async (req, res, next) => {
+  try {
+    const body = z.object({
+      projectId: z.string().min(1),
+      message: z.string().trim().min(1).max(4_000),
+      credentialId: z.string().optional(),
+      history: z.array(z.object({
+        role: z.enum(["user", "assistant"]),
+        content: z.string().max(4_000)
+      })).max(12).default([]),
+      context: z.object({
+        runId: z.string().optional(),
+        runState: z.string().optional(),
+        finalStatus: z.string().optional(),
+        summary: z.string().max(2_000).optional(),
+        evidenceCount: z.number().int().nonnegative().optional(),
+        currentStep: z.string().max(500).optional(),
+        latestLog: z.string().max(1_000).optional(),
+        failedAssertions: z.array(z.object({
+          name: z.string().max(300),
+          expected: z.string().max(800),
+          actual: z.string().max(800)
+        })).max(8).default([]),
+        planning: z.object({
+          discovered: z.number().int().nonnegative(),
+          executable: z.number().int().nonnegative(),
+          autoBindable: z.number().int().nonnegative(),
+          confirmed: z.boolean()
+        }).optional()
+      }).default({ failedAssertions: [] })
+    }).parse(req.body);
+    const project = await getProject(body.projectId);
+    if (!project) return void res.status(404).json({ error: "project_not_found" });
+    const publicCredentials = await listCredentials();
+    const selectedPublic = body.credentialId
+      ? publicCredentials.find((item) => item.id === body.credentialId)
+      : publicCredentials.find((item) => item.isDefault && !/api\.poe\.com/i.test(item.baseUrl))
+        ?? publicCredentials.find((item) => !/api\.poe\.com/i.test(item.baseUrl));
+    if (!selectedPublic || /api\.poe\.com/i.test(selectedPublic.baseUrl)) {
+      return void res.status(409).json({ error: "assistant_model_not_configured" });
+    }
+    const credential = await getCredential(selectedPublic.id);
+    if (!credential) return void res.status(409).json({ error: "assistant_model_not_configured" });
+    const responseSchema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["reply", "intent", "suggestedAction", "requiresConfirmation"],
+      properties: {
+        reply: { type: "string", minLength: 1, maxLength: 1_200 },
+        intent: { type: "string", enum: ["status-question", "failure-question", "plan-change", "execution-control", "general"] },
+        suggestedAction: { type: "string", enum: ["none", "revise-plan", "start-run", "pause-run", "resume-run", "cancel-run", "open-evidence"] },
+        requiresConfirmation: { type: "boolean" }
+      }
+    } as const;
+    const system = [
+      "You are the conversational assistant inside an evidence-driven browser testing product.",
+      "Answer the user's question directly in concise Chinese using only the supplied run and planning facts.",
+      "Never claim a test passed merely because scheduling completed.",
+      "Never invent screenshots, evidence, failures, credentials, actions, or API results.",
+      "You may suggest an action but must require confirmation for starting, pausing, resuming, cancelling, or revising a plan.",
+      "Return only the requested JSON object."
+    ].join(" ");
+    const prompt = JSON.stringify({
+      project: { id: project.id, name: project.name },
+      userMessage: body.message,
+      recentConversation: body.history,
+      currentFacts: body.context
+    });
+    const apiKey = await decrypt(credential.apiKeyEncrypted);
+    const llm = await executeLlmCall({
+      credential,
+      apiKey,
+      system,
+      prompt,
+      maxTokens: 700,
+      timeoutMs: 20_000,
+      totalTimeoutMs: 30_000,
+      transportPreference: "non-stream-retry",
+      jsonSchema: { name: "test_assistant_reply", schema: responseSchema },
+      context: { purpose: "planning" }
+    });
+    const parsed = z.object({
+      reply: z.string().min(1).max(1_200),
+      intent: z.enum(["status-question", "failure-question", "plan-change", "execution-control", "general"]),
+      suggestedAction: z.enum(["none", "revise-plan", "start-run", "pause-run", "resume-run", "cancel-run", "open-evidence"]),
+      requiresConfirmation: z.boolean()
+    }).strict().parse(JSON.parse(llm.text));
+    res.json({
+      assistant: parsed,
+      call: {
+        id: llm.call.id,
+        model: llm.call.model,
+        provider: llm.call.provider,
+        status: llm.call.status,
+        durationMs: llm.call.durationMs,
+        usage: llm.call.usage
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/generate-plan", async (req, res, next) => {
   try {
     const body = z
@@ -1411,7 +2113,9 @@ app.post("/api/discovery/scan", async (req, res, next) => {
     const body = z
       .object({
         ...runnableTargetShape,
-        sourceContexts: z.array(z.any()).optional()
+        sourceContexts: z.array(z.any()).optional(),
+        goal: z.string().trim().max(20_000).optional(),
+        credentialId: z.string().optional()
       })
       .superRefine(requireRunnableTarget)
       .parse(req.body);
@@ -1666,7 +2370,14 @@ app.get("/api/runs/:runId", async (req, res, next) => {
 app.get("/api/runs/:runId/evidence", async (req, res, next) => {
   try {
     const evidence = readEvidenceFromAuditStore(req.params.runId);
-    res.json({ evidence: evidence.length ? evidence : await readEvidence(req.params.runId) });
+    // Loop events are written throughout browser execution, while the final
+    // run bundle is only committed after judging. Returning both lets the
+    // Workbench render truthful, per-step live logs instead of guessing from
+    // coarse control-plane state transitions.
+    res.json({
+      evidence: evidence.length ? evidence : await readEvidence(req.params.runId),
+      loopEvents: await readLoopEvents(req.params.runId)
+    });
   } catch (error) {
     next(error);
   }
@@ -1843,6 +2554,24 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   }
   if (error instanceof Error && error.message === "project_forbidden") {
     res.status(403).json({ error: "project_forbidden" });
+    return;
+  }
+  if (error instanceof Error && (
+    error.message === "repair_host_apply_disabled"
+    || error.message === "repair_high_risk_confirmation_required"
+    || error.message === "repair_validation_required"
+    || error.message === "source_changed"
+    || error.message.startsWith("repair_version_conflict:")
+  )) {
+    res.status(409).json({ error: redactText(error.message) });
+    return;
+  }
+  if (error instanceof Error && (
+    error.message === "repair_path_escape"
+    || error.message === "repair_path_forbidden"
+    || error.message === "repair_contains_forbidden_change"
+  )) {
+    res.status(403).json({ error: redactText(error.message) });
     return;
   }
   const safeError = error instanceof Error

@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@ai-test-officer/contracts": "0.2.0",
+    "@ai-test-officer/agent-orchestration": "0.1.0",
     "@ai-test-officer/desktop-runtime": "0.2.0",
     "@ai-test-officer/execution-worker": "0.2.0",
     "@ai-test-officer/playwright-runtime": "0.2.0",
@@ -41,6 +42,7 @@
     "pg": "^8.22.0",
     "playwright": "^1.45.3",
     "typescript": "^5.9.3",
+    "fflate": "^0.8.2",
     "zod": "^3.23.8"
   },
   "devDependencies": {

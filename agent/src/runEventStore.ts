@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Pool } from "pg";
-import { runEventSchema, transitionRunState, type CompiledPlan, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunOutcomeSummaryV2, type RunState } from "@ai-test-officer/contracts";
+import { runEventSchema, transitionRunState, type CompiledPlan, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunKind, type RunOutcomeSummaryV2, type RunState } from "@ai-test-officer/contracts";
 import type { GrayPlan, ImpactAnalysis } from "./types.js";
 
 export interface RunProjection {
@@ -13,6 +13,9 @@ export interface RunProjection {
   createdAt: string;
   updatedAt: string;
   input: Record<string, unknown>;
+  runKind: RunKind;
+  parentRunId?: string;
+  coverageItemId?: string;
   gateStatus?: GateStatus;
   machineGate?: MachineGate;
   judgeRecommendation?: JudgeRecommendation;
@@ -46,9 +49,29 @@ export interface RunEventStore {
   events(runId: string): Promise<RunEvent[]>;
 }
 
+const idempotentReplayProjections = new WeakSet<RunProjection>();
+
+function markIdempotentReplay(projection: RunProjection | undefined) {
+  if (projection) idempotentReplayProjections.add(projection);
+  return projection;
+}
+
+export function isIdempotentReplay(projection: RunProjection) {
+  return idempotentReplayProjections.has(projection);
+}
+
+function replayThroughEvent(events: readonly RunEvent[], event: RunEvent) {
+  return markIdempotentReplay(replayRunEvents(events.filter((candidate) => candidate.version <= event.version)));
+}
+
 function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
   const state = transitionRunState(current.state, event.type);
   const projection: RunProjection = { ...current, state, version: event.version, updatedAt: event.createdAt };
+  if (event.type === "run_created") {
+    projection.runKind = event.payload.runKind === "path" || event.payload.runKind === "validation" ? event.payload.runKind : "parent";
+    projection.parentRunId = typeof event.payload.parentRunId === "string" ? event.payload.parentRunId : undefined;
+    projection.coverageItemId = typeof event.payload.coverageItemId === "string" ? event.payload.coverageItemId : undefined;
+  }
   if (event.payload.machineGate) projection.machineGate = event.payload.machineGate as MachineGate;
   if (event.payload.judgeRecommendation) projection.judgeRecommendation = event.payload.judgeRecommendation as JudgeRecommendation;
   if (event.payload.outcomeSummary) projection.outcomeSummary = event.payload.outcomeSummary as RunOutcomeSummaryV2;
@@ -111,7 +134,8 @@ export function replayRunEvents(events: readonly RunEvent[]): RunProjection | un
     version: 0,
     createdAt: first.createdAt,
     updatedAt: first.createdAt,
-    input: { ...first.payload }
+    input: { ...first.payload },
+    runKind: "parent"
   };
   for (const event of events) {
     if (event.runId !== first.runId) throw new Error(`run_event_log_invalid:${first.runId}:mixed_run_ids`);
@@ -165,7 +189,7 @@ export class SqliteRunEventStore implements RunEventStore {
     if (duplicate?.run_id) return (await this.get(duplicate.run_id))!;
     const runId = input.runId ?? `run_${randomUUID()}`;
     const createdAt = new Date().toISOString();
-    const initial: RunProjection = { id: runId, state: "draft", version: 0, createdAt, updatedAt: createdAt, input: input.payload ?? {} };
+    const initial: RunProjection = { id: runId, state: "draft", version: 0, createdAt, updatedAt: createdAt, input: input.payload ?? {}, runKind: "parent" };
     const event = makeEvent({ runId, type: "run_created", version: 1, actor: input.actor, idempotencyKey: input.idempotencyKey, payload: input.payload });
     const projection = applyEvent(initial, event);
     this.database.exec("BEGIN IMMEDIATE");
@@ -181,8 +205,11 @@ export class SqliteRunEventStore implements RunEventStore {
   }
 
   async append(input: AppendRunEventInput) {
-    const duplicate = this.database.prepare("SELECT run_id FROM run_control_events WHERE idempotency_key = ?").get(input.idempotencyKey) as { run_id?: string } | undefined;
-    if (duplicate?.run_id) return (await this.get(duplicate.run_id))!;
+    const duplicate = this.database.prepare("SELECT run_id, event_json FROM run_control_events WHERE idempotency_key = ?").get(input.idempotencyKey) as { run_id?: string; event_json?: string } | undefined;
+    if (duplicate?.run_id && duplicate.event_json) {
+      const event = runEventSchema.parse(JSON.parse(duplicate.event_json));
+      return replayThroughEvent(await this.events(duplicate.run_id), event)!;
+    }
     const current = await this.get(input.runId);
     if (!current) throw new Error("run_not_found");
     if (current.version !== input.expectedVersion) throw new Error(`run_version_conflict:${current.version}`);
@@ -247,13 +274,16 @@ export class PostgresRunEventStore implements RunEventStore {
     const runId = input.runId ?? `run_${randomUUID()}`;
     const createdAt = new Date().toISOString();
     const event = makeEvent({ runId, type: "run_created", version: 1, actor: input.actor, idempotencyKey: input.idempotencyKey, payload: input.payload });
-    const projection = applyEvent({ id: runId, state: "draft", version: 0, createdAt, updatedAt: createdAt, input: input.payload ?? {} }, event);
+    const projection = applyEvent({ id: runId, state: "draft", version: 0, createdAt, updatedAt: createdAt, input: input.payload ?? {}, runKind: "parent" }, event);
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
       await client.query("INSERT INTO run_control_events VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [event.id, runId, event.type, 1, event.createdAt, event.actor, event.idempotencyKey, event]);
       await client.query("INSERT INTO run_projections VALUES ($1,$2,$3,$4,$5,$6)", [runId, projection.state, projection.version, projection.createdAt, projection.updatedAt, projection]);
-      await client.query("INSERT INTO runs_v1 (id, organization_id, project_id, state, version, input, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING", [runId, String(projection.input.organizationId ?? "local"), projection.input.projectId ?? null, projection.state, projection.version, projection.input, projection.createdAt, projection.updatedAt]);
+      await client.query(
+        "INSERT INTO runs_v1 (id, organization_id, project_id, state, version, input, run_kind, parent_run_id, coverage_item_id, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id) DO NOTHING",
+        [runId, String(projection.input.organizationId ?? "local"), projection.input.projectId ?? null, projection.state, projection.version, projection.input, projection.runKind, projection.parentRunId ?? null, projection.coverageItemId ?? null, projection.createdAt, projection.updatedAt]
+      );
       await client.query("INSERT INTO run_events_v1 (id, run_id, payload, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING", [event.id, runId, event, event.createdAt]);
       await client.query("COMMIT");
       return projection;
@@ -264,8 +294,12 @@ export class PostgresRunEventStore implements RunEventStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const duplicate = await client.query("SELECT run_id FROM run_control_events WHERE idempotency_key=$1", [input.idempotencyKey]);
-      if (duplicate.rowCount) { await client.query("ROLLBACK"); return (await this.get(String(duplicate.rows[0].run_id)))!; }
+      const duplicate = await client.query("SELECT run_id, event_json FROM run_control_events WHERE idempotency_key=$1", [input.idempotencyKey]);
+      if (duplicate.rowCount) {
+        await client.query("ROLLBACK");
+        const event = runEventSchema.parse(duplicate.rows[0].event_json);
+        return replayThroughEvent(await this.events(String(duplicate.rows[0].run_id)), event)!;
+      }
       const row = await client.query("SELECT run_id FROM run_projections WHERE run_id=$1 FOR UPDATE", [input.runId]);
       if (!row.rowCount) throw new Error("run_not_found");
       const eventRows = await client.query("SELECT event_json FROM run_control_events WHERE run_id=$1 ORDER BY version", [input.runId]);

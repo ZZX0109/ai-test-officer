@@ -36,6 +36,12 @@ import { BudgetTracker } from "@ai-test-officer/execution-worker";
 import { classifyRetry } from "./retryPolicy.js";
 import { mirrorArtifactsToConfiguredStore } from "./artifactObjectStore.js";
 import { getProjectLoginSecret } from "./projectLoginStore.js";
+import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
+import {
+  executeStructuredAction,
+  type StructuredAction,
+  type StructuredActionResult
+} from "./structuredActionExecutors.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
@@ -148,11 +154,16 @@ export function assertCompiledPlanBinding(compiledPlan: CompiledPlan, scenario: 
   const oracleIds = new Set(scenario.corePath.oracles.map((oracle) => oracle.id));
   const allowedPathIds = new Set([scenario.smoke.pathId, scenario.corePath.pathId, ...(scenario.regressionPath ? [scenario.regressionPath.stepId] : [])]);
   const fixtureRefs = new Set(scenario.corePath.action === "file_upload_validate" ? ["scenarioFixture"] : []);
-  const capturableKinds = new Set(["screenshot", "dom", "network", "console", "trace", "video"]);
+  const capturableKinds = new Set(["screenshot", "dom", "network", "console", "trace", "video", "operation-log"]);
   for (const kind of parsed.requiredEvidenceKinds) {
     if (!capturableKinds.has(kind)) throw new Error(`compiled_plan_unsupported_evidence_kind:${kind}`);
   }
-  if (parsed.steps[0]?.action.action !== "navigate") throw new Error("compiled_plan_must_start_with_navigate");
+  const containsBrowserAction = parsed.steps.some((step) =>
+    ["navigate", "click", "fill", "select", "upload", "assert", "wait"].includes(step.action.action)
+  );
+  if (containsBrowserAction && parsed.steps[0]?.action.action !== "navigate") {
+    throw new Error("compiled_plan_browser_path_must_start_with_navigate");
+  }
   const asserted = new Set<string>();
   for (const step of parsed.steps) {
     if (step.pathId && !allowedPathIds.has(step.pathId)) throw new Error(`compiled_plan_unknown_path:${step.pathId}`);
@@ -199,6 +210,7 @@ export interface CompiledActionExecutionContext {
   targetFrontendUrl: string;
   evaluateOracle: (oracle: ScenarioOracle, stepId: string) => Promise<unknown>;
   resolveFixture: (fixtureRef: string) => Promise<string>;
+  executeStructured?: (action: StructuredAction, stepId: string) => Promise<StructuredActionResult>;
 }
 
 /** Execute one already-bound DSL action without accepting raw selectors, URLs, values, or commands. */
@@ -240,7 +252,12 @@ export async function executeCompiledAction(action: ActionDsl, stepId: string, c
     await context.evaluateOracle(oracle, stepId);
     return;
   }
-  await page.waitForTimeout(action.durationMs);
+  if (action.action === "wait") {
+    await page.waitForTimeout(action.durationMs);
+    return;
+  }
+  if (!context.executeStructured) throw new Error(`compiled_plan_structured_action_executor_missing:${action.action}`);
+  return context.executeStructured(action, stepId);
 }
 
 /** Bind an opaque benchmark fixture to either a managed local target or a container target. */
@@ -305,8 +322,12 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const recordVideo = envFlag("RECORD_VIDEO") || compiledPlan?.requiredEvidenceKinds.includes("video") === true;
   // Evidence degradation is selected by an opaque evaluator-owned variant. The
   // semantic failure class is intentionally absent from the Agent-visible input.
-  const recordTrace = (envFlag("TRACE") || compiledPlan?.requiredEvidenceKinds.includes("trace") === true)
-    && input.fixtureVariantId !== "fxv_a6d2c904f7b138e5"
+  // A browser attempt without a Trace cannot explain navigation, timing,
+  // popup or network failures after the fact. Product runs therefore always
+  // capture one complete attempt Trace. The two evaluator-owned variants
+  // intentionally remove it so the evidence Gate can prove that degradation
+  // is blocked rather than silently accepted.
+  const recordTrace = input.fixtureVariantId !== "fxv_a6d2c904f7b138e5"
     && input.fixtureVariantId !== "fxv_c8b3e157d0a624f9";
   const configuredProject = input.projectId ? await getProject(input.projectId) : undefined;
   const projectLoginSecret = configuredProject?.login?.credentialId?.startsWith("login_")
@@ -432,7 +453,16 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
         clock: attemptClock,
         collectorVersion: "0.2.0"
       });
-      artifactsV2.push(artifact);
+      const locatedArtifact: ArtifactV2 = {
+        ...artifact,
+        locator: {
+          timeRange: {
+            from: attempts[activeAttempt - 1]?.startedAt ?? startedAt,
+            to: artifact.integrity.capturedAt
+          }
+        }
+      };
+      artifactsV2.push(locatedArtifact);
       budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
       attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
       await appendEvidence(id, {
@@ -468,6 +498,11 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     evidenceWrites.push(appendEvidence(id, {
       type: "console",
       title: `Console ${item.type}`,
+      locator: {
+        pageUrl: page.url(),
+        lineStart: consoleEvents.length,
+        lineEnd: consoleEvents.length
+      },
       payload: item
     }));
   });
@@ -488,10 +523,17 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     };
     if (network.length < 1_000) network.push(item);
     if (evidenceWrites.length < 500) {
+      const requestId = `request_${createHash("sha256").update(`${item.method}:${item.url}:${request.timing().startTime}`).digest("hex").slice(0, 20)}`;
       evidenceWrites.push(appendEvidence(id, {
         type: "network",
         title: `Network ${item.method} ${item.status}`,
         url: item.url,
+        locator: {
+          requestId,
+          method: item.method,
+          pageUrl: page.url(),
+          statusCode: item.status
+        },
         payload: { ...item, resourceType }
       }));
     }
@@ -504,6 +546,11 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
         type: "network",
         title: `Network failed ${item.method}`,
         url: item.url,
+        locator: {
+          requestId: `request_${createHash("sha256").update(`${item.method}:${item.url}:failed`).digest("hex").slice(0, 20)}`,
+          method: item.method,
+          pageUrl: page.url()
+        },
         payload: { ...item, resourceType: request.resourceType() }
       }));
     }
@@ -523,7 +570,15 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       storageUri: url,
       clock: attemptClock
     });
-    artifactsV2.push(artifact);
+    const viewport = page.viewportSize();
+    const locatedArtifact: ArtifactV2 = {
+      ...artifact,
+      locator: {
+        pageUrl: page.url(),
+        viewport: viewport ?? undefined
+      }
+    };
+    artifactsV2.push(locatedArtifact);
     budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
     attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
     await appendEvidence(id, {
@@ -532,6 +587,10 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       stepId,
       file: url,
       artifactIds: [artifact.id],
+      locator: {
+        pageUrl: page.url(),
+        viewport: viewport ?? undefined
+      },
       payload: { file: url }
     });
     return url;
@@ -560,6 +619,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       title,
       pathId,
       stepId,
+      locator: { pageUrl: page.url(), selector: locator },
       payload: { locator, texts }
     });
     return { texts, evidence };
@@ -1086,71 +1146,200 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       evidenceRefs: []
     });
     let regressionTelemetryStart: { network: number; console: number } | undefined;
+    const failedPathIds = new Set<string>();
     for (const [stepIndex, step] of compiledPlan.steps.entries()) {
+      if (step.pathId && failedPathIds.has(step.pathId)) {
+        steps.push({
+          stepId: step.id,
+          title: `跳过依赖步骤：${step.action.action}`,
+          status: "warning",
+          action: "dependency_skipped",
+          details: `同一路径 ${step.pathId} 的前置动作已经失败；该依赖步骤未执行，其他独立路径继续。`
+        });
+        await appendLoopEvent(id, {
+          loopType: "failure_recovery_loop",
+          iteration: steps.length,
+          status: "stopped",
+          title: `Skipped dependent step ${step.id}`,
+          action: "skip_failed_path_dependency",
+          observation: `path=${step.pathId}`,
+          decision: "继续执行其他独立路径",
+          decisionReason: "fail_fast=false; dependency_scope=path",
+          evidenceRefs: []
+        });
+        continue;
+      }
       activeCompiledStepId = step.id;
-      assertWithinRunBudget();
-      budgetTracker.consume({ steps: 1 });
-      const assertionStart = assertions.length;
-      const fixturePath = path.join(runDir, "invoice-fixture.txt");
-      if (scenario.regressionPath && step.pathId === scenario.regressionPath.stepId && !regressionTelemetryStart) {
-        regressionTelemetryStart = { network: network.length, console: consoleEvents.length };
-      }
-      await executeCompiledAction(step.action, step.id, {
-        page,
-        scenario,
-        targetFrontendUrl: frontendUrl,
-        evaluateOracle: (oracle, stepId) => evaluateOracle(oracle, stepId, step.pathId ?? scenario.corePath.pathId),
-        resolveFixture: async (fixtureRef) => {
-          if (fixtureRef !== "scenarioFixture" || scenario.corePath.action !== "file_upload_validate") {
-            throw new Error(`compiled_plan_unknown_fixture:${fixtureRef}`);
+      try {
+        assertWithinRunBudget();
+        budgetTracker.consume({ steps: 1 });
+        const assertionStart = assertions.length;
+        const fixturePath = path.join(runDir, "invoice-fixture.txt");
+        if (scenario.regressionPath && step.pathId === scenario.regressionPath.stepId && !regressionTelemetryStart) {
+          regressionTelemetryStart = { network: network.length, console: consoleEvents.length };
+        }
+        const structuredResult = await executeCompiledAction(step.action, step.id, {
+          page,
+          scenario,
+          targetFrontendUrl: frontendUrl,
+          evaluateOracle: (oracle, stepId) => evaluateOracle(oracle, stepId, step.pathId ?? scenario.corePath.pathId),
+          resolveFixture: async (fixtureRef) => {
+            if (fixtureRef !== "scenarioFixture" || scenario.corePath.action !== "file_upload_validate") {
+              throw new Error(`compiled_plan_unknown_fixture:${fixtureRef}`);
+            }
+            await writeFile(fixturePath, "AI Test Officer scenario fixture.\n");
+            return fixturePath;
+          },
+          executeStructured: async (action) => {
+            if (!configuredProject?.manifest) throw new Error("structured_action_project_manifest_missing");
+            return executeStructuredAction({
+              action,
+              manifest: configuredProject.manifest,
+              project: configuredProject,
+              target: targetRuntime,
+              signal: input.signal
+            });
           }
-          await writeFile(fixturePath, "AI Test Officer scenario fixture.\n");
-          return fixturePath;
+        });
+        if (step.pathId === scenario.smoke.pathId && step.action.action === "navigate") {
+          await evaluateCompiledSmokePath(step.id);
         }
-      });
-      if (step.pathId === scenario.smoke.pathId && step.action.action === "navigate") {
-        await evaluateCompiledSmokePath(step.id);
-      }
-      if (scenario.regressionPath && step.pathId === scenario.regressionPath.stepId
-        && !compiledPlan.steps.slice(stepIndex + 1).some((candidate) => candidate.pathId === step.pathId)) {
-        await evaluateCompiledRegressionPath(step.id, step.pathId, regressionTelemetryStart ?? { network: network.length, console: consoleEvents.length });
-      }
-      const operationEvidence = await appendEvidence(id, {
-        type: "operation",
-        title: `Compiled action ${step.action.action}`,
-        pathId: step.pathId ?? scenario.corePath.pathId,
-        stepId: step.id,
-        payload: {
+        if (scenario.regressionPath && step.pathId === scenario.regressionPath.stepId
+          && !compiledPlan.steps.slice(stepIndex + 1).some((candidate) => candidate.pathId === step.pathId)) {
+          await evaluateCompiledRegressionPath(step.id, step.pathId, regressionTelemetryStart ?? { network: network.length, console: consoleEvents.length });
+        }
+        let operationEvidence: EvidenceItem;
+        if (structuredResult) {
+          const finalPath = path.join(runDir, `${step.id}.operation.json`);
+          const temporaryPath = `${finalPath}.partial`;
+          await writeFile(temporaryPath, JSON.stringify({
+            action: step.action,
+            result: structuredResult
+          }, null, 2));
+          const artifact = await commitCapturedFile({
+            temporaryPath,
+            finalPath,
+            id: `${id}_operation_${activeAttempt}_${step.id}`,
+            identity: attemptIdentity(),
+            stepId: step.id,
+            kind: "operation-log",
+            mediaType: "application/json",
+            storageUri: artifactUrl(finalPath),
+            clock: attemptClock,
+            collectorVersion: "0.2.0"
+          });
+          const locatedArtifact: ArtifactV2 = {
+            ...artifact,
+            locator: structuredResult.locator
+          };
+          artifactsV2.push(locatedArtifact);
+          budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
+          attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
+          operationEvidence = await appendEvidence(id, {
+            type: "operation",
+            title: `Structured action ${step.action.action}`,
+            pathId: step.pathId ?? scenario.corePath.pathId,
+            stepId: step.id,
+            file: artifact.storageUri,
+            artifactIds: [artifact.id],
+            locator: structuredResult.locator,
+            payload: {
+              action: step.action.action,
+              ...structuredResult.payload
+            }
+          });
+          const oracleId = "oracleId" in step.action ? step.action.oracleId : step.action.action;
+          await recordAssertion({
+            name: `${oracleId}: ${step.action.action}`,
+            passed: structuredResult.passed,
+            expected: "Declared manifest operation and oracle succeed.",
+            actual: structuredResult.summary,
+            fact: {
+              kind: "state.equals",
+              target: oracleId,
+              operator: "equals",
+              expected: "passed",
+              actual: structuredResult.passed ? "passed" : "failed",
+              severity: "high",
+              evidenceRefs: [operationEvidence.id],
+              failureClass: structuredResult.passed ? undefined : "product_bug"
+            }
+          }, step.pathId ?? scenario.corePath.pathId, step.id);
+        } else {
+          operationEvidence = await appendEvidence(id, {
+            type: "operation",
+            title: `Compiled action ${step.action.action}`,
+            pathId: step.pathId ?? scenario.corePath.pathId,
+            stepId: step.id,
+            payload: {
+              action: step.action.action,
+              ...(step.action.action === "click" || step.action.action === "fill" || step.action.action === "select" || step.action.action === "upload"
+                ? { selectorRef: step.action.selectorRef }
+                : {}),
+              ...(step.action.action === "assert" ? { oracleId: step.action.oracleId } : {})
+            }
+          });
+        }
+        const stepScreenshot = await screenshot(step.id);
+        const newAssertions = assertions.slice(assertionStart);
+        const passed = newAssertions.every((assertion) => assertion.passed);
+        steps.push({
+          stepId: step.id,
+          title: `LLM plan: ${step.action.action}`,
+          status: passed ? "passed" : "failed",
           action: step.action.action,
-          ...(step.action.action === "click" || step.action.action === "fill" || step.action.action === "select" || step.action.action === "upload"
-            ? { selectorRef: step.action.selectorRef }
-            : {}),
-          ...(step.action.action === "assert" ? { oracleId: step.action.oracleId } : {})
-        }
-      });
-      const stepScreenshot = await screenshot(step.id);
-      const newAssertions = assertions.slice(assertionStart);
-      const passed = newAssertions.every((assertion) => assertion.passed);
-      steps.push({
-        stepId: step.id,
-        title: `LLM plan: ${step.action.action}`,
-        status: passed ? "passed" : "failed",
-        action: step.action.action,
-        screenshot: stepScreenshot,
-        details: passed ? "受控 Action DSL 步骤执行完成。" : "步骤绑定的确定性 oracle 未通过。"
-      });
-      await appendLoopEvent(id, {
-        loopType: "gray_execution_loop",
-        iteration: steps.length,
-        status: passed ? "passed" : "failed",
-        title: `Compiled step ${step.id}`,
-        action: step.action.action,
-        observation: passed ? "动作完成且绑定断言通过" : "绑定断言失败",
-        decision: "继续执行下一条已编译动作",
-        decisionReason: "fail_fast=false，保留完整计划证据",
-        evidenceRefs: [operationEvidence.id]
-      });
-      activeCompiledStepId = undefined;
+          screenshot: stepScreenshot,
+          details: passed ? "受控 Action DSL 步骤执行完成。" : "步骤绑定的确定性 oracle 未通过。"
+        });
+        await appendLoopEvent(id, {
+          loopType: "gray_execution_loop",
+          iteration: steps.length,
+          status: passed ? "passed" : "failed",
+          title: `Compiled step ${step.id}`,
+          action: step.action.action,
+          observation: passed ? "动作完成且绑定断言通过" : "绑定断言失败",
+          decision: "继续执行下一条已编译动作",
+          decisionReason: "fail_fast=false，保留完整计划证据",
+          evidenceRefs: [operationEvidence.id]
+        });
+      } catch (error) {
+        const classified = classifyExecutionError(error, step.id);
+        executionError ??= classified;
+        if (step.pathId) failedPathIds.add(step.pathId);
+        const errorEvidence = await appendEvidence(id, {
+          type: "operation",
+          title: `Compiled action ${step.action.action} failed`,
+          pathId: step.pathId ?? scenario.corePath.pathId,
+          stepId: step.id,
+          payload: {
+            action: step.action.action,
+            code: classified.code,
+            failureClass: classified.failureClass,
+            message: classified.message
+          }
+        });
+        steps.push({
+          stepId: step.id,
+          title: `动作失败：${step.action.action}`,
+          status: "failed",
+          action: step.action.action,
+          screenshot: await screenshot(step.id).catch(() => undefined),
+          details: `${classified.code}: ${classified.message}`
+        });
+        await appendLoopEvent(id, {
+          loopType: "failure_recovery_loop",
+          iteration: steps.length,
+          status: "failed",
+          title: `Compiled step ${step.id} failed`,
+          action: "persist_failure_and_continue",
+          observation: classified.code,
+          decision: "跳过同路径依赖步骤，继续其他独立路径",
+          decisionReason: classified.failureClass,
+          evidenceRefs: [errorEvidence.id]
+        });
+      } finally {
+        activeCompiledStepId = undefined;
+      }
     }
   }
 
@@ -1275,7 +1464,14 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
           clock: attemptClock,
           collectorVersion: "0.2.0"
         });
-        artifactsV2.push(artifact);
+        const locatedArtifact: ArtifactV2 = {
+          ...artifact,
+          locator: {
+            pageUrl: page.url(),
+            snapshotSha256: artifact.integrity.sha256
+          }
+        };
+        artifactsV2.push(locatedArtifact);
         budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
         attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
         await appendEvidence(id, {
@@ -1283,6 +1479,10 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
           title: "Full DOM snapshot",
           file: artifact.storageUri,
           artifactIds: [artifact.id],
+          locator: {
+            pageUrl: page.url(),
+            snapshotSha256: artifact.integrity.sha256
+          },
           payload: { file: artifact.storageUri, html: html.slice(0, 60_000), truncated: html.length > 60_000 }
         });
       } catch {
@@ -1378,7 +1578,16 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       clock: attemptClock,
       collectorVersion: "0.2.0"
     });
-    artifactsV2.push(artifact);
+    const locatedArtifact: ArtifactV2 = {
+      ...artifact,
+      locator: {
+        timeRange: {
+          from: attempts[activeAttempt - 1]?.startedAt ?? startedAt,
+          to: artifact.integrity.capturedAt
+        }
+      }
+    };
+    artifactsV2.push(locatedArtifact);
     budgetTracker.consume({ artifactBytes: artifact.integrity.sizeBytes });
     attempts[activeAttempt - 1]?.artifactIds.push(artifact.id);
     await appendEvidence(id, {
@@ -1395,13 +1604,28 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     finishedAt
   };
   const latestEvidence: EvidenceItem[] = await readEvidence(id);
-  const requiredKinds = (compiledPlan?.requiredEvidenceKinds
+  const declaredRequiredKinds = (compiledPlan?.requiredEvidenceKinds
     ?? input.executablePlan?.steps.find((step) => step.scenarioId === scenario.id)?.evidenceRequirements
     ?? ["screenshot", "dom", "network", "console"])
     .filter((kind) => ["screenshot", "dom", "network", "console", "trace", "video"].includes(kind)) as ArtifactV2["kind"][];
+  const requiredKinds = Array.from(new Set<ArtifactV2["kind"]>([
+    ...declaredRequiredKinds,
+    "trace"
+  ]));
   const mirroredArtifacts = await mirrorArtifactsToConfiguredStore(artifactsV2, reportsDir);
   artifactsV2.splice(0, artifactsV2.length, ...mirroredArtifacts);
   const evidenceQuality = buildEvidenceQualityReport({ assertions, evidence: latestEvidence, artifacts: artifactsV2 });
+  // Materialize the proof bundle on the Evidence records themselves. The
+  // quality evaluator already chose same-attempt artifacts of the required
+  // kinds; copying those immutable IDs onto Evidence makes the proof chain
+  // explicit instead of relying on a report-time proximity heuristic.
+  for (const quality of evidenceQuality.assertions) {
+    for (const evidenceRef of quality.evidenceRefs) {
+      const evidence = latestEvidence.find((item) => item.id === evidenceRef);
+      if (!evidence) continue;
+      evidence.artifactIds = Array.from(new Set([...(evidence.artifactIds ?? []), ...quality.artifactIds]));
+    }
+  }
   const artifactGate = assessArtifactGate({ artifacts: artifactsV2, requiredKinds });
   const partialResult = {
     assertions,
@@ -1528,6 +1752,18 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const machineGate: MachineGate = {
     status: machineGateStatus,
     reasons: [...artifactGate.reasons, ...(executionError ? [`execution_error:${executionError.code}:${executionError.stepId ?? "unknown"}`] : []), ...qualityReasons, ...uncoveredRequirementRisks],
+    reasonDetails: [
+      ...artifactGate.reasons,
+      ...(executionError ? [`execution_error:${executionError.code}:${executionError.stepId ?? "unknown"}`] : []),
+      ...qualityReasons,
+      ...uncoveredRequirementRisks
+    ].map((reason) => ({
+      code: reason.split(":")[0] || "machine_gate_reason",
+      summary: reason,
+      evidenceRefs: machineGateEvidenceRefs.length
+        ? machineGateEvidenceRefs
+        : latestEvidence.slice(-5).map((item) => item.id)
+    })).filter((item) => item.evidenceRefs.length > 0),
     assertionFailures: assertions.filter((item) => !item.passed).map((item) => item.name),
     evidenceComplete: artifactGate.status === "pass" && !executionError && qualityReasons.length === 0 && uncoveredRequirementRisks.length === 0
   };
@@ -1642,6 +1878,33 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     reportFile: artifactUrl(path.join(runDir, "report.json")),
     runBundleFile: artifactUrl(path.join(runDir, "run_bundle.json"))
   };
+  const proofGraph = buildProofGraph(result);
+  result.coverageItems = proofGraph.coverageItems;
+  result.conclusions = proofGraph.conclusions;
+  result.proofNodes = proofGraph.proofNodes;
+  result.proofEdges = proofGraph.proofEdges;
+  if (proofGraph.errors.length > 0 && result.finalStatus === "pass") {
+    result.machineGate = {
+      ...(result.machineGate ?? machineGate),
+      status: "needs-human-review",
+      evidenceComplete: false,
+      reasons: [
+        ...new Set([
+          ...(result.machineGate?.reasons ?? machineGate.reasons),
+          ...proofGraph.errors.map((error) => `proof_invalid:${error}`)
+        ])
+      ]
+    };
+    result.finalStatus = "needs-human-review";
+    result.gateStatus = "needs-human-review";
+    result.outcomeSummary = runOutcomeSummaryV2Schema.parse({
+      ...(result.outcomeSummary ?? outcomeSummary),
+      evidenceGrounded: false,
+      gateEligible: false,
+      machineGate: result.machineGate,
+      finalStatus: "needs-human-review"
+    });
+  }
   const readableReports = await writeReadableReports({
     runDir,
     artifactBaseUrl: `/artifacts/runs/${id}`,
@@ -1672,8 +1935,10 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     impactAnalysis: input.impactAnalysis,
     executablePlan: input.executablePlan
   };
-  const bundleFile = await writeRunBundle(bundle);
-  result.runBundleFile = bundleFile;
+  bundle.coverageItems = result.coverageItems;
+  bundle.conclusions = result.conclusions;
+  bundle.proofNodes = result.proofNodes;
+  bundle.proofEdges = result.proofEdges;
   const artifactIntegrity = await writeArtifactIntegrityReport({
     result,
     reportsDir,
@@ -1681,12 +1946,15 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   });
   result.artifactIntegrity = artifactIntegrity;
   bundle.artifactIntegrity = artifactIntegrity;
+  const evidenceManifest = await writeProofArtifacts(bundle);
+  result.evidenceManifest = evidenceManifest;
+  bundle.evidenceManifest = evidenceManifest;
   await writeReadableReports({
     runDir,
     artifactBaseUrl: `/artifacts/runs/${id}`,
     result
   });
   await writeFile(path.join(runDir, "report.json"), JSON.stringify(result, null, 2));
-  await writeRunBundle(bundle);
+  result.runBundleFile = await writeRunBundle(bundle);
   return result;
 }

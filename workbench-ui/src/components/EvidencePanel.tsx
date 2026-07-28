@@ -12,6 +12,7 @@ import { ArtifactIntegrityPanel } from "./ArtifactIntegrityPanel";
 import { JudgePanel } from "./JudgePanel";
 import { ReportLinks } from "./ReportLinks";
 import { RunTimeline } from "./RunTimeline";
+import { TrustTracePanel } from "./TrustTracePanel";
 
 interface EvidencePanelProps {
   result?: RunResult | null;
@@ -99,6 +100,8 @@ export function EvidencePanel({
           {result?.judgeReport.policyVersion && <p>Policy: {result.judgeReport.policyVersion}</p>}
           {result?.judgeReport.llmError && <p>Fallback reason: {result.judgeReport.llmError}</p>}
         </section>
+
+        <TrustTracePanel runId={result?.id ?? liveRun?.runId} />
 
         <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
 

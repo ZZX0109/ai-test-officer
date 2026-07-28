@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -22,6 +22,12 @@ function ensureAcceptanceSecrets() {
       generated.push(name);
     }
   }
+  if (!process.env.RUN_EVIDENCE_ED25519_PRIVATE_KEY || !process.env.RUN_EVIDENCE_ED25519_PUBLIC_KEY) {
+    const keys = generateKeyPairSync("ed25519");
+    process.env.RUN_EVIDENCE_ED25519_PRIVATE_KEY = keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    process.env.RUN_EVIDENCE_ED25519_PUBLIC_KEY = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+    generated.push("RUN_EVIDENCE_ED25519_PRIVATE_KEY", "RUN_EVIDENCE_ED25519_PUBLIC_KEY");
+  }
   if (!process.env.KEYCLOAK_ADMIN) {
     process.env.KEYCLOAK_ADMIN = "acceptance-admin";
     generated.push("KEYCLOAK_ADMIN");
@@ -32,7 +38,7 @@ const generatedAcceptanceSecrets = ensureAcceptanceSecrets();
 
 function redact(value) {
   let result = String(value ?? "");
-  for (const name of ["POSTGRES_PASSWORD", "REDIS_PASSWORD", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "KEYCLOAK_ADMIN_PASSWORD", "INTERNAL_WORKER_TOKEN"]) {
+  for (const name of ["POSTGRES_PASSWORD", "REDIS_PASSWORD", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "KEYCLOAK_ADMIN_PASSWORD", "INTERNAL_WORKER_TOKEN", "RUN_EVIDENCE_ED25519_PRIVATE_KEY", "RUN_EVIDENCE_ED25519_PUBLIC_KEY"]) {
     const secret = process.env[name];
     if (secret) result = result.split(secret).join("[REDACTED]");
   }
@@ -104,10 +110,31 @@ try {
   const terminalStates = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   async function api(pathname, options = {}) {
-    const response = await fetch(`http://localhost:14317${pathname}`, { headers, ...options });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(`acceptance_api_${response.status}:${pathname}`);
-    return payload;
+    let lastError;
+    // Restart/reconnect checks intentionally create short periods in which the
+    // socket can be reset even though the API container remains healthy.
+    // Every acceptance mutation carries an idempotency key, so retrying a
+    // transport failure cannot duplicate state.
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      try {
+        const response = await fetch(`http://localhost:14317${pathname}`, {
+          headers,
+          ...options,
+          signal: AbortSignal.timeout(5_000)
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (response.ok) return payload;
+        if (![502, 503, 504].includes(response.status)) {
+          throw new Error(`acceptance_api_${response.status}:${pathname}`);
+        }
+        lastError = new Error(`acceptance_api_${response.status}:${pathname}`);
+      } catch (error) {
+        if (error instanceof Error && /^acceptance_api_(?!50[234])/.test(error.message)) throw error;
+        lastError = error;
+      }
+      if (attempt < 6) await sleep(250 * attempt);
+    }
+    throw new Error(`acceptance_api_transport_exhausted:${pathname}:${lastError instanceof Error ? lastError.message : "unknown"}`);
   }
   function newPayload(suffix) {
     return { organizationId: "benchmark", actor: "acceptance-runner", idempotencyKey: `acceptance:${suffix}:${Date.now()}`, input: { appUrl: "http://customer-portal-lite:7103", scenarioId: "generic_table_sort_filter_pagination", plannerMode: "deterministic", judgeMode: "deterministic", executionMode: "oci", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false } } };

@@ -65,10 +65,32 @@ export function DiscoveryPanel({ discovery, drafts, onScan, onProbeDraft, onAppr
           <article key={draft.scenarioId} className={draft.draftReviewStatus === "approved" ? "ready" : "pending"}>
             <header>
               <strong>{draft.scenarioId}</strong>
-              <span>{draft.draftReviewStatus ?? "draft"} · probe={draft.selectorProbeStatus ?? "not_run"}</span>
+              <span>
+                {draft.draftReviewStatus === "approved"
+                  ? "已验证可执行"
+                  : draft.selectorProbeStatus === "passed"
+                    ? "页面绑定已通过"
+                    : draft.selectorProbeStatus === "failed"
+                      ? "等待修复"
+                      : "等待页面探测"}
+              </span>
             </header>
             <p>风险：{draft.riskKind ?? "unknown"} · 证据：{draft.evidenceRequirements?.join(", ") || "待补充"}</p>
-            {draft.missingInfo?.length ? <code>missing={draft.missingInfo.join(", ")}</code> : null}
+            {draft.probeTrace ? (
+              <p>
+                真实动作：{draft.probeTrace.actionExecuted ? "已执行" : "未执行"} ·
+                页面元素：{draft.probeTrace.observedButtons.length} 个按钮 / {draft.probeTrace.observedTestIds.length} 个 test-id ·
+                网络请求：{draft.probeTrace.responseUrls.length}
+              </p>
+            ) : null}
+            {draft.repairAttempts?.length ? (
+              <p>
+                自动修复：{draft.repairAttempts.map((attempt) =>
+                  `${attempt.strategy === "llm-assisted" ? "AI" : "规则"}${attempt.status === "repaired" ? "已修复" : "未能安全修复"}`
+                ).join("、")}
+              </p>
+            ) : null}
+            {draft.missingInfo?.length ? <code>仍需处理：{draft.missingInfo.join(", ")}</code> : null}
             {draft.scenarioFile ? (
               <AuthenticatedArtifactLink artifactUrl={draft.scenarioFile}>
                 打开草案

@@ -9,6 +9,30 @@
 
 ![AI Test Officer 当前版 Workbench：项目接入、测试规划、沙盒执行与证据裁决](docs/assets/ai-test-officer-workbench-v2.png)
 
+## 当前工程状态（2026-07-28）
+
+当前版本已经完成 LangGraph 编排、多路径执行、Artifact v2、证明图、选择性
+LLM、OCI 沙盒和修复工作区的主体实现，处于 **Active Graph 发布验收阶段**。
+这里区分“工程验证通过”和“已经证明模型泛化增益”，不使用一个
+`completed` 状态概括所有结果。
+
+| 验证项 | 当前结果 |
+| --- | --- |
+| 全 workspace 单元/合同/组件测试 | 通过 |
+| TypeScript typecheck 与生产构建 | 通过 |
+| Todo / Order 浏览器可信度专项 | 各 3 次通过，并验证单路径失败隔离 |
+| compiled-plan smoke 与 Demo 证据链 | 通过 |
+| PostgreSQL / Redis / MinIO / Keycloak / API / worker Compose 验收 | 14/14 通过 |
+| Production `npm audit --omit=dev` | 0 个已知漏洞 |
+| Secret scan 与运行产物隔离 | 通过 |
+| 100 次 Shadow Graph 对照 | 待完成 |
+| 5 个异构真实项目 Active Graph 验收 | 待完成 |
+| evaluator 隔离的新密封盲测 | 待完成 |
+
+因此，本仓库当前可以作为可复现的开发与验收基线，但在最后三项完成前，不宣称
+“全场景无人值守发布”或“LLM 泛化增益已经证明”。运行报告保存在被 Git 忽略的
+`reports/` 中，README 只记录可复现的验证口径。
+
 ## 这个项目解决什么问题
 
 传统自动化测试通常要求测试人员提前维护脚本、选择器和固定用例；通用 AI Agent 又容易出现“计划写得很好，但没有真实执行”“存在截图文件，所以错误地判定通过”等可信度问题。
@@ -30,16 +54,23 @@ AI Test Officer 将这两类能力组合成一条受控链路：
 
 ```mermaid
 flowchart LR
-    A["选择本地项目"] --> B["自动识别技术栈与运行方式"]
-    B --> C["OCI 沙盒准备与项目启动"]
-    C --> D["自然语言描述测试目标"]
-    D --> E["规则扫描 + 选择性 LLM 规划"]
-    E --> F["用户确认计划与权限"]
-    F --> G["Playwright 浏览器执行"]
-    G --> H["Artifact v2 证据采集"]
+    A["项目接入与自然语言目标"] --> B["LangGraph Discovery<br/>Coverage Map"]
+    B --> C["Parent Run<br/>拆分 Path Child Runs"]
+    C --> D["规则优先 + 选择性 LLM 规划"]
+    D --> E["Action DSL 编译与审批"]
+    E --> F["OCI 沙盒与能力授权"]
+    F --> G1["Browser Executor"]
+    F --> G2["API Executor"]
+    F --> G3["Data / Job / Command Executor"]
+    G1 --> H["Artifact v2 + Proof Graph"]
+    G2 --> H
+    G3 --> H
     H --> I["确定性 Machine Gate"]
-    I --> J["选择性 LLM Judge"]
-    J --> K["人工复核与最终裁决"]
+    I --> J["Triage + 选择性 LLM Judge"]
+    J --> K{"需要修复？"}
+    K -->|是| L["沙盒修复 + Validation Child Run"]
+    K -->|否| M["人工复核与最终裁决"]
+    L --> M
 ```
 
 Workbench 将“项目接入、测试规划、执行现场、证据复核、Judge 和人工裁决”放在同一页面。被测页面显示在中央内置浏览器区域，项目不会主动打开外部浏览器窗口。
@@ -118,7 +149,28 @@ Workbench 将“项目接入、测试规划、执行现场、证据复核、Judg
 
 Planner 输出必须通过 Action DSL、capability、selector、route、oracle、evidence 和预算编译。不能执行的自然语言步骤不会直接进入浏览器队列。
 
-### 5. 真实浏览器执行
+### 5. 全面扫描、多路径 Run 与多执行器
+
+“全面扫描”不会只截取前 8 条候选路径。Discovery 会为每条发现结果生成稳定的
+`CoverageItem`，并让它最终处于以下状态之一：
+
+```text
+executed | excluded | blocked | pending
+```
+
+- 一个全面测试对应一个 parent run，每条独立路径对应一个 path child run。
+- 单路径失败不会停止其他独立路径；父 Run 等待全部 CoverageItem 有明确处置后再聚合 Gate。
+- `browser-action` 由 Playwright 执行。
+- `api-request` 只能调用 manifest 或 OpenAPI 中允许的 operation，不能接受模型任意 URL。
+- `data-assert` 只能使用 manifest 声明的数据源与查询模板，不能接受模型原始 SQL。
+- `wait-job` 使用有界轮询、终态列表、超时和恢复 token。
+- `command-check` 只允许结构化、白名单命令并保存 stdout/stderr 证据。
+- 所有路径都必须绑定前置条件、真实 route/selector/API、oracle 和必需 Evidence。
+
+父 Run 只有在核心路径已执行、明确排除或有可证明的阻塞原因后才能结束；未覆盖路径
+不会静默消失，也不能被汇总成 `pass`。
+
+### 6. 真实浏览器执行
 
 浏览器 Runtime 支持：
 
@@ -134,7 +186,7 @@ Planner 输出必须通过 Action DSL、capability、selector、route、oracle�
 
 即使步骤失败，系统也会先尽力提交 Trace、DOM、截图和失败 Evidence，再写终态，避免“失败后什么证据都没有”。
 
-### 6. Artifact v2 证据链
+### 7. Artifact v2 证据链
 
 正式 Artifact 包含：
 
@@ -163,7 +215,7 @@ Planner 输出必须通过 Action DSL、capability、selector、route、oracle�
 
 Artifact 使用“临时写入 → 摘要/大小校验 → 原子提交 → 元数据登记”的流程。报告只引用已提交 Artifact ID，不以一个看似存在的本地路径作为通过依据。
 
-### 7. 可信裁决语义
+### 8. 可信裁决语义
 
 每次运行不会只显示一个 `completed`，而是拆分为：
 
@@ -198,7 +250,7 @@ pass | fail | blocked | needs-human-review
 - LLM 超时、非法 JSON 或无效 Evidence ID 只记为模型失败，不覆盖机器事实。
 - `test-command` 是覆盖基线，没有浏览器运行证据时不能作为正式通过。
 
-### 8. 选择性 LLM Planner / Judge
+### 9. 选择性 LLM Planner / Judge
 
 系统支持 OpenAI-compatible provider。当前适配包含：
 
@@ -220,16 +272,99 @@ Judge 默认只在以下情况调用 LLM：
 
 证据完整且机器断言明确时，确定性 Judge 直接给出结论，不为“显得更 AI”而额外调用模型。
 
+#### 模型调用透明度
+
+每次 Planner、Judge、Triage、Repair 和助手对话都会生成版本化
+`LlmInvocation`。Workbench 的“模型调用”面板和
+`GET /v1/runs/:id/llm-calls` 会展示：
+
+- 请求模型与 provider 实际返回模型、模型 profile；
+- Prompt 模板 ID、版本和 SHA-256，Action DSL、输出 schema、图与场景目录版本；
+- 调用目的、路由原因、规则是否本可处理以及为什么调用模型；
+- 排队、首 Token、生成、解析和总延迟；
+- 输入、缓存输入、输出、reasoning 和总 Token；
+- 价格目录版本与估算成本；未知价格明确显示 `unknown`，不会伪装成 0；
+- transport retry、semantic repair、cache、fallback、失败分类及其对 `finalStatus` 的实际影响。
+
+Prompt 和凭据不会明文进入报告。系统只持久化脱敏摘要、输入摘要哈希、
+模板哈希和结构化解析结果。网络/429/5xx 最多进行三次有界传输；
+JSON、DSL 或 Evidence 引用错误只允许一次受限语义修复，两类重试分开统计。
+
+默认单 Run 模型预算为：Planner 2 次、Judge 1 次、Triage 1 次、Repair
+每轮 2 次且最多 2 轮，单次请求 30 秒、总模型墙钟 120 秒。预算耗尽后
+确定性路径继续执行，必须依赖语义推理的路径进入人工复核。
+
+生产记录分别写入 `llm_invocations_v1` 和 `llm_budget_ledger_v1`。每次逻辑调用
+开始前原子预留调用次数、Token、墙钟和可用成本，完成后再结算实际使用量，避免
+多个节点并发突破 Run 预算。模型价格来自版本化 `ModelPriceCatalog`；历史运行
+保留当时的价格目录版本，不会因之后调价而被回写。
+
+#### 结论证明链与防篡改
+
+正式结论不再只引用“某个文件路径”，而是建立不可变证明图：
+
+```text
+Conclusion → Assertion/Oracle → Evidence → Artifact → Attempt → Step
+```
+
+`machineGate` 的每条理由、Judge finding 和 `finalStatus` 都必须有真实
+Evidence 引用。截图保存 URL、viewport、selector/testId 和可选高亮区域；
+DOM 保存 snapshot hash 和相关节点；网络证据保存 request ID、方法、状态和
+operation ID；日志保存时间及行号范围；命令保存脱敏参数、cwd、exit code 与
+stdout/stderr Artifact；Trace/Video 使用同一 attempt 时钟。
+
+跨 run、跨 scenario、跨 attempt、未提交、`simulated` 或
+`legacy-unverified` Artifact 都不能满足正式证明。每个 Run 生成
+`RunEvidenceManifest`，包含 Artifact、Evidence、Conclusion、ProofEdge
+和报告哈希，以及 `evidenceSetRoot`。生产环境使用
+Ed25519 签名，密钥通过 `RUN_EVIDENCE_ED25519_PRIVATE_KEY`、
+`RUN_EVIDENCE_ED25519_PUBLIC_KEY` 和 `RUN_EVIDENCE_SIGNING_KEY_ID`
+注入，也可由部署层替换为 KMS 签名器。读取时重新校验，篡改后报告变为
+`integrity-invalid`，不得显示 `pass`。
+
+相关接口：
+
+```http
+GET /v1/runs/:id/coverage
+GET /v1/runs/:id/llm-calls
+GET /v1/runs/:id/conclusions
+GET /v1/conclusions/:id/proof?runId=:runId
+```
+
+SSE 会实时推送 `llm.call.*`、`artifact.committed`、`proof.*` 和
+`conclusion.created`，因此 Workbench 可以在调用发生时显示成本、重试与影响，
+并从最终状态逐级打开到具体截图区域、DOM 变化、请求或日志行。
+
+### 10. 可恢复 Agent 编排与沙盒修复
+
+LangGraph 管理 `intake → discover → coverage → plan → compile → approval → sandbox → execute → gate → triage → repair → finalize` 的执行游标、人工中断和恢复；LangChain 负责结构化模型输出、工具 schema、预算和脱敏。两者不会替换 Playwright、BullMQ、Artifact v2 或确定性 Gate。
+
+- `thread_id` 固定为 `runId`，生产 checkpoint 保存在 PostgreSQL 的独立 `langgraph` schema。
+- PostgreSQL Run Event 仍是业务状态唯一事实源；checkpoint 无权直接写 `finalStatus`。
+- `POST /v1/runs` 只负责认证、幂等创建、写入事件并启动 Graph，不在路由内同步跑完整 Planner。
+- allowlist 项目可使用 `active` Graph 作为正式调度权威；默认仍为 `shadow`，直至 100 次对照验收完成。
+- Graph `execute` 节点通过 BullMQ 投递 path child run，worker 结果以持久化事件恢复同一 thread。
+- 节点幂等键包含 `runId + node + attempt + inputHash`，避免恢复后重复调用模型、入队或提交 Artifact。
+- LLM 不可用时，规则路径继续执行；不能可靠推理的路径进入人工复核。
+- 每个需要计划、浏览器、凭据、网络或源码操作的暂停点，都以可恢复 interrupt 显示在 Workbench。
+
+测试失败后，maintainer 可以创建修复会话。系统保留不可变 `/source`，只修改隔离的 `/workspace/project` 副本，并按“复现 → 定位 → 生成补丁 → 安全扫描 → 定向测试 → 完整回归 → 导出”的顺序执行。原失败 run 保持不变，验证结果写入关联 child run。
+
+Workbench 的修复工作区包括变更文件树、Monaco 双栏 Diff、Evidence 引用、验证结果和风险说明。默认只允许重新验证、下载 patch 或变更 ZIP；应用到原项目必须显式开启 `REPAIR_HOST_APPLY_ENABLED`，并再次校验原文件 SHA-256。认证、支付、数据库迁移、CI 和基础设施变更始终需要单独确认。
+
 ## 系统架构
 
 ```mermaid
 flowchart TB
     UI["Workbench UI<br/>React + Vite"] --> API["Agent API<br/>Express / OIDC / SSE"]
+    API --> GRAPH["LangGraph<br/>可恢复编排与 Interrupt"]
+    GRAPH --> CHAIN["LangChain<br/>结构化模型、工具与预算"]
     API --> STORE["Run Event Store<br/>PostgreSQL"]
-    API --> QUEUE["Execution Queue<br/>Redis + BullMQ"]
+    GRAPH --> QUEUE["Execution Queue<br/>Redis + BullMQ"]
     QUEUE --> WORKER["Execution Worker"]
     WORKER --> OCI["Rootless OCI Sandbox<br/>Docker / Podman"]
     OCI --> TARGET["Target Project"]
+    OCI --> REPAIR["可写修复副本<br/>Diff + Validation Child Run"]
     WORKER --> PW["Playwright Runtime"]
     PW --> ART["Artifact Store<br/>S3 / MinIO"]
     API --> PLAN["Impact Graph + Planner"]
@@ -260,6 +395,20 @@ GET  /v1/runs/:id/events
 GET  /v1/runs/:id/artifacts
 GET  /v1/runs/:id/report
 GET  /v1/runs/:id/stream
+GET  /v1/runs/:id/agent
+GET  /v1/runs/:id/coverage
+GET  /v1/runs/:id/llm-calls
+GET  /v1/runs/:id/conclusions
+GET  /v1/conclusions/:id/proof
+POST /v1/runs/:id/messages
+POST /v1/runs/:id/interrupts/:interruptId/resume
+POST /v1/runs/:id/repairs
+GET  /v1/repair-sessions/:id
+GET  /v1/repair-sessions/:id/files/*
+PUT  /v1/repair-sessions/:id/files/*
+POST /v1/repair-sessions/:id/validate
+POST /v1/repair-sessions/:id/export
+POST /v1/repair-sessions/:id/apply
 ```
 
 SSE 和轮询都按 `runId` 工作，不依赖全局 latest-run。
@@ -271,6 +420,7 @@ ai-test-officer/
 ├── agent/                         Agent API、状态机、Planner、Judge、项目适配
 ├── packages/
 │   ├── contracts/                 Zod 契约和版本化协议
+│   ├── agent-orchestration/        LangGraph 状态图与 LangChain 模型边界
 │   ├── execution-worker/          OCI 调度、预算、取消和缓存
 │   ├── playwright-runtime/        浏览器执行和 Artifact 采集
 │   └── desktop-runtime/           桌面适配器接口（非当前发布重点）
@@ -377,7 +527,9 @@ npm run build                    # 生产构建
 npm run demo:verify              # Demo 证据链验证
 npm run test:unified-run         # /v1/runs 完整运行闭环
 npm run test:credibility-browser # 浏览器可信度专项
+npm --workspace @ai-test-officer/agent run test:compiled-plan
 npm run acceptance:production    # 完整生产 Compose 验收
+npm run acceptance:lock:verify   # 验收项目完整 commit SHA 锁定校验
 npm run contracts:generate       # OpenAPI 和 Workbench 类型生成
 
 npm run benchmark:run
@@ -461,6 +613,11 @@ npm run acceptance:production
 
 验收覆盖 OIDC、组织隔离、幂等创建、任务入队、active-attempt 唯一性、lease、暂停/恢复/取消、服务重启、Artifact 提交和失败回滚。Docker 不可用时结果是 `blocked`，不会回退 SQLite 后声称生产通过。
 
+截至 2026-07-28，本地完整 Compose 验收为 **14/14 通过**，还额外覆盖重复权限
+事件、worker 重启、过期 lease 接管、Redis 重连、MinIO 不可用回滚，以及
+PostgreSQL/API/worker 重启恢复。验收报告位于本地 `reports/production-acceptance/`
+并默认忽略，不将环境凭据或运行日志提交到 Git。
+
 ## 环境变量
 
 | 变量 | 说明 |
@@ -476,6 +633,13 @@ npm run acceptance:production
 | `OIDC_JWKS_URL` | JWT key endpoint |
 | `ARTIFACT_S3_BUCKET` | Artifact bucket |
 | `ARTIFACT_S3_ENDPOINT` | S3/MinIO endpoint |
+| `AGENT_ORCHESTRATION_MODE` | `shadow`（默认）或 `active` |
+| `LANGGRAPH_POSTGRES_SCHEMA` | LangGraph checkpoint schema，默认 `langgraph` |
+| `REPAIR_SANDBOX_ENABLED` | 是否允许创建隔离修复会话 |
+| `REPAIR_HOST_APPLY_ENABLED` | 是否允许显式应用回宿主源码，生产默认关闭 |
+| `RUN_EVIDENCE_ED25519_PRIVATE_KEY` | RunEvidenceManifest Ed25519 私钥（Secret 注入） |
+| `RUN_EVIDENCE_ED25519_PUBLIC_KEY` | RunEvidenceManifest 校验公钥 |
+| `RUN_EVIDENCE_SIGNING_KEY_ID` | 签名密钥版本/轮换标识 |
 | `BENCHMARK_SOPHNET_CREDENTIAL_ID` | Benchmark 使用的加密凭据 ID |
 | `BENCHMARK_EXPERIMENT_ID` | 不可变实验 ID |
 | `BENCHMARK_LABELS_ROOT` | 仅 evaluator 可读取的标签目录 |
@@ -503,6 +667,10 @@ npm run acceptance:production
 - 内置浏览器是 Workbench 的可视化表面；Playwright 执行仍发生在隔离 BrowserContext 中。
 - macOS 桌面 helper 不是当前 Web 测试发布门槛；没有签名和系统权限时 desktop capability 为 `blocked`。
 - LLM 建议不能替代确定性断言、证据完整性和人工发布责任。
+- 当前默认仍为 Shadow Graph；完成 100 次状态对照、5 个异构真实项目 Active
+  验收和 evaluator 隔离盲测后，才会把 Active Graph 设为默认。
+- 自动修复默认只修改沙盒副本。应用到原项目需要 maintainer 明确确认，且必须通过
+  原文件 SHA-256 并发变化检查。
 
 ## 参与开发
 

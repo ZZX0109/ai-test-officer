@@ -1,7 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { chromium, type Page } from "playwright";
 import type { HarnessGap, HarnessGapScenarioDraft } from "./types.js";
 import { scenarioExecutabilityIssues } from "./scenarios.js";
+import { createLlmScenarioBindingRepair } from "./llmScenarioRepair.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const gapDir = path.join(rootDir, "reports", "harness-gaps");
@@ -284,13 +286,365 @@ export async function listScenarioDrafts() {
   }
 }
 
-export async function probeScenarioDraft(id: string) {
+type DraftProbeTrace = NonNullable<HarnessGapScenarioDraft["probeTrace"]>;
+
+interface DraftProbeResult {
+  issues: string[];
+  trace: DraftProbeTrace;
+}
+
+function normalizedLabel(value: string) {
+  return value.toLowerCase().replace(/[\s_\-:：/]+/g, "");
+}
+
+function closestObservedButton(expected: string, observed: string[]) {
+  const normalizedExpected = normalizedLabel(expected);
+  const matches = observed.filter((candidate) => {
+    const normalizedCandidate = normalizedLabel(candidate);
+    return normalizedCandidate === normalizedExpected
+      || normalizedCandidate.includes(normalizedExpected)
+      || normalizedExpected.includes(normalizedCandidate);
+  });
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+async function visiblePageModel(page: Page) {
+  return page.evaluate(() => ({
+    headings: Array.from(document.querySelectorAll("h1,h2,h3,[role='heading']"))
+      .map((node) => (node.textContent ?? "").trim())
+      .filter(Boolean)
+      .slice(0, 20),
+    buttons: Array.from(document.querySelectorAll("button,[role='button']"))
+      .map((node) => (node.textContent ?? node.getAttribute("aria-label") ?? "").trim())
+      .filter(Boolean)
+      .slice(0, 40),
+    testIds: Array.from(document.querySelectorAll("[data-testid]"))
+      .map((node) => node.getAttribute("data-testid") ?? "")
+      .filter(Boolean)
+      .slice(0, 80)
+  })).catch(() => ({ headings: [] as string[], buttons: [] as string[], testIds: [] as string[] }));
+}
+
+async function runSafeProbeAction(
+  page: Page,
+  core: Record<string, unknown>,
+  action: string
+): Promise<{ page: Page; executed: boolean; error?: string }> {
+  const clickButton = async (name: unknown) => {
+    if (typeof name !== "string" || !name.trim()) throw new Error("missing button binding");
+    const button = page.getByRole("button", { name, exact: true });
+    if (await button.count() === 0) throw new Error(`button not found: ${name}`);
+    const popupPromise = page.context().waitForEvent("page", { timeout: 1_250 }).catch(() => undefined);
+    await button.first().click({ timeout: 5_000 });
+    const popup = await popupPromise;
+    const activePage = popup ?? page;
+    await activePage.waitForLoadState("domcontentloaded", { timeout: 4_000 }).catch(() => undefined);
+    await activePage.waitForTimeout(250);
+    return activePage;
+  };
+  try {
+    let activePage = page;
+    switch (action) {
+      case "visual_check":
+      case "click_filter":
+      case "require_permission":
+      case "change_task_status":
+      case "edit_task_title":
+      case "simulate_error_and_retry":
+        if (core.triggerButtonName) activePage = await clickButton(core.triggerButtonName);
+        else await page.waitForTimeout(250);
+        return { page: activePage, executed: true };
+      case "search_keyword":
+      case "expect_empty_state":
+      case "fill_and_submit": {
+        if (typeof core.inputLabel !== "string") throw new Error("missing input binding");
+        const input = page.getByLabel(core.inputLabel, { exact: true });
+        const target = await input.count() ? input : page.getByPlaceholder(core.inputLabel, { exact: true });
+        await target.first().fill(typeof core.input === "string" ? core.input : "Discovery Probe");
+        activePage = await clickButton(core.submitButtonName);
+        return { page: activePage, executed: true };
+      }
+      case "submit_empty_form":
+      case "complex_form_validate":
+        activePage = await clickButton(core.submitButtonName);
+        return { page: activePage, executed: true };
+      case "table_sort_filter_paginate":
+        if (core.triggerButtonName) activePage = await clickButton(core.triggerButtonName);
+        if (typeof core.selectLabel === "string" && typeof core.selectValue === "string") {
+          await activePage.getByLabel(core.selectLabel, { exact: true }).selectOption(core.selectValue);
+        }
+        if (typeof core.inputLabel === "string") {
+          await activePage.getByLabel(core.inputLabel, { exact: true }).fill(
+            typeof core.input === "string" ? core.input : "Discovery Probe"
+          );
+        }
+        if (core.submitButtonName && core.submitButtonName !== core.triggerButtonName) {
+          activePage = await clickButton(core.submitButtonName);
+        }
+        return { page: activePage, executed: true };
+      case "openapi_schema_contract":
+        if (core.triggerButtonName || core.submitButtonName) {
+          activePage = await clickButton(core.triggerButtonName ?? core.submitButtonName);
+        } else {
+          await page.reload({ waitUntil: "domcontentloaded", timeout: 8_000 }).catch(() => undefined);
+          await page.waitForTimeout(Math.min(Math.max(Number(core.waitMs) || 500, 250), 2_000));
+        }
+        return { page: activePage, executed: true };
+      default:
+        return {
+          page,
+          executed: false,
+          error: `probe.action_not_safe:${action || "missing"}`
+        };
+    }
+  } catch (error) {
+    return {
+      page,
+      executed: false,
+      error: `probe.action_failed:${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+}
+
+async function probeDraftPage(draft: HarnessGapScenarioDraft): Promise<DraftProbeResult> {
+  const emptyTrace: DraftProbeTrace = {
+    navigationUrl: draft.probeUrl,
+    actionExecuted: false,
+    observedHeadings: [],
+    observedButtons: [],
+    observedTestIds: [],
+    responseUrls: []
+  };
+  if (!draft.probeUrl) return { issues: [], trace: emptyTrace };
+  const scenario = draft.scenario;
+  const smoke = scenario.smoke && typeof scenario.smoke === "object"
+    ? scenario.smoke as Record<string, unknown>
+    : {};
+  const core = corePathOf(scenario);
+  const runtimeIssues: string[] = [];
+  const responses: string[] = [];
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  try {
+    browser = await chromium.launch({ headless: process.env.HEADLESS !== "0" });
+    const context = await browser.newContext();
+    let page = await context.newPage();
+    context.on("response", (response) => responses.push(response.url()));
+    await page.goto(draft.probeUrl, { waitUntil: "commit", timeout: 20_000 });
+    await page.waitForFunction(() => Boolean(document.body?.innerText?.trim() || document.body?.querySelector("button,input,textarea,select,[data-testid]")), undefined, { timeout: 8_000 });
+    const before = await visiblePageModel(page);
+    emptyTrace.observedHeadings = before.headings;
+    emptyTrace.observedButtons = before.buttons;
+    emptyTrace.observedTestIds = before.testIds;
+
+    const heading = typeof smoke.headingName === "string" ? smoke.headingName.trim() : "";
+    if (heading) {
+      const bodyText = await page.locator("body").innerText().catch(() => "");
+      if (!bodyText.includes(heading)) runtimeIssues.push(`probe.heading_missing:${heading}`);
+    }
+
+    const action = typeof core.action === "string" ? core.action : "";
+    emptyTrace.action = action;
+    const buttonNames = Array.from(new Set([
+      core.triggerButtonName,
+      core.submitButtonName
+    ].filter((value): value is string => typeof value === "string" && Boolean(value.trim()))));
+    for (const buttonName of buttonNames) {
+      if (await page.getByRole("button", { name: buttonName, exact: true }).count() === 0) {
+        runtimeIssues.push(`probe.button_missing:${buttonName}`);
+      }
+    }
+
+    const inputLabel = typeof core.inputLabel === "string" ? core.inputLabel.trim() : "";
+    const actionRequiresInput = new Set([
+      "form_submit",
+      "complex_form_validate",
+      "search_validate",
+      "file_upload_validate"
+    ]).has(action);
+    if (inputLabel && actionRequiresInput) {
+      const labelled = await page.getByLabel(inputLabel, { exact: true }).count();
+      const placeholder = await page.getByPlaceholder(inputLabel, { exact: true }).count();
+      if (labelled === 0 && placeholder === 0) runtimeIssues.push(`probe.input_missing:${inputLabel}`);
+    }
+
+    // Oracle checks describe post-action state. The old probe evaluated them
+    // before performing the action, which made valid generated scenarios look
+    // like coverage gaps. Only execute after all action preconditions exist.
+    if (!runtimeIssues.some((issue) =>
+      issue.startsWith("probe.button_missing:") || issue.startsWith("probe.input_missing:")
+    )) {
+      const actionResult = await runSafeProbeAction(page, core, action);
+      page = actionResult.page;
+      emptyTrace.actionExecuted = actionResult.executed;
+      emptyTrace.actionError = actionResult.error;
+      emptyTrace.postActionUrl = page.url();
+      if (actionResult.error) runtimeIssues.push(actionResult.error);
+    }
+    const after = await visiblePageModel(page);
+    emptyTrace.observedHeadings = Array.from(new Set([...before.headings, ...after.headings]));
+    emptyTrace.observedButtons = Array.from(new Set([...before.buttons, ...after.buttons]));
+    emptyTrace.observedTestIds = Array.from(new Set([...before.testIds, ...after.testIds]));
+
+    const oracles = Array.isArray(core.oracles) ? core.oracles as Array<Record<string, unknown>> : [];
+    if (emptyTrace.actionExecuted) for (const oracle of oracles) {
+      const oracleLocator = typeof oracle.locator === "string" ? oracle.locator.trim() : "";
+      if (oracleLocator && await page.locator(oracleLocator).count() === 0) {
+        runtimeIssues.push(`probe.oracle_locator_missing:${oracleLocator}`);
+      }
+      const expectedText = typeof oracle.expectedTextIncludes === "string" ? oracle.expectedTextIncludes.trim() : "";
+      if (oracleLocator && expectedText) {
+        const oracleText = await page.locator(oracleLocator).allTextContents().catch(() => []);
+        if (!oracleText.some((text) => text.includes(expectedText))) {
+          runtimeIssues.push(`probe.oracle_text_missing:${expectedText}`);
+        }
+      }
+      const networkFragment = typeof oracle.networkUrlIncludes === "string" ? oracle.networkUrlIncludes.trim() : "";
+      if (networkFragment && !responses.some((url) => url.includes(networkFragment))) {
+        runtimeIssues.push(`probe.network_missing:${networkFragment}`);
+      }
+    }
+  } catch (error) {
+    runtimeIssues.push(`probe.page_unavailable:${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    await browser?.close().catch(() => undefined);
+  }
+  emptyTrace.responseUrls = Array.from(new Set(responses)).slice(0, 100);
+  return { issues: Array.from(new Set(runtimeIssues)), trace: emptyTrace };
+}
+
+function repairDiscoveryDraft(
+  draft: HarnessGapScenarioDraft,
+  probe: DraftProbeResult
+): { draft: HarnessGapScenarioDraft; changedFields: string[]; reason: string } {
+  if (!draft.gapId.startsWith("discovery_")) {
+    return { draft, changedFields: [], reason: "Only Discovery-generated drafts are eligible for automatic binding repair." };
+  }
+  const scenario = structuredClone(draft.scenario);
+  const smoke = scenario.smoke && typeof scenario.smoke === "object"
+    ? scenario.smoke as Record<string, unknown>
+    : {};
+  const core = corePathOf(scenario);
+  const changedFields: string[] = [];
+  const observedHeading = probe.trace.observedHeadings.find(Boolean);
+
+  if (probe.issues.some((issue) => issue.startsWith("probe.heading_missing:")) && observedHeading) {
+    smoke.headingName = observedHeading;
+    smoke.expected = `${draft.probeUrl ?? "页面"} 可访问并出现 ${observedHeading}`;
+    scenario.smoke = smoke;
+    changedFields.push("smoke.headingName", "smoke.expected");
+  }
+
+  for (const field of ["triggerButtonName", "submitButtonName"] as const) {
+    const expected = typeof core[field] === "string" ? String(core[field]) : "";
+    if (!expected || !probe.issues.includes(`probe.button_missing:${expected}`)) continue;
+    const replacement = closestObservedButton(expected, probe.trace.observedButtons);
+    if (replacement && replacement !== expected) {
+      core[field] = replacement;
+      changedFields.push(`corePath.${field}`);
+    }
+  }
+
+  const action = typeof core.action === "string" ? core.action : "";
+  const genericVisualOracleFailed = action === "visual_check" && probe.issues.some((issue) =>
+    issue.startsWith("probe.oracle_") || issue.startsWith("probe.selector_missing:")
+  );
+  if (genericVisualOracleFailed && observedHeading) {
+    core.targetLocator = "body";
+    core.expectedTextIncludes = observedHeading;
+    const oracles = Array.isArray(core.oracles) ? core.oracles as Array<Record<string, unknown>> : [];
+    for (const oracle of oracles) {
+      if (oracle.type === "dom_text") {
+        oracle.locator = "body";
+        oracle.expectedTextIncludes = observedHeading;
+        oracle.expected = `动作执行后页面仍包含可验证标题 ${observedHeading}`;
+      }
+    }
+    changedFields.push("corePath.targetLocator", "corePath.oracles");
+  }
+  scenario.corePath = core;
+  const reason = changedFields.length
+    ? `Bound ${changedFields.join(", ")} from the real page probe.`
+    : "The probe did not expose a unique safe binding; human review is still required.";
+  return {
+    draft: {
+      ...draft,
+      scenario,
+      missingInfo: (draft.missingInfo ?? []).filter((item) => !item.startsWith("probe."))
+    },
+    changedFields: Array.from(new Set(changedFields)),
+    reason
+  };
+}
+
+export async function probeScenarioDraft(id: string, credentialId?: string) {
   const draft = await readDraft(id);
   if (!draft) return undefined;
+  const stableMissingInfo = (draft.missingInfo ?? []).filter((item) => !item.startsWith("probe."));
+  let probe = stableMissingInfo.length
+    ? {
+        issues: [] as string[],
+        trace: {
+          navigationUrl: draft.probeUrl,
+          actionExecuted: false,
+          observedHeadings: [],
+          observedButtons: [],
+          observedTestIds: [],
+          responseUrls: []
+        } satisfies DraftProbeTrace
+      }
+    : await probeDraftPage(draft);
+  let workingDraft = draft;
+  let repairAttempts = draft.repairAttempts ?? [];
+  if (probe.issues.length && stableMissingInfo.length === 0) {
+    const repaired = repairDiscoveryDraft(draft, probe);
+    repairAttempts = [...repairAttempts, {
+      attempt: repairAttempts.length + 1,
+      strategy: "deterministic" as const,
+      status: repaired.changedFields.length ? "repaired" as const : "not-repairable" as const,
+      changedFields: repaired.changedFields,
+      reason: repaired.reason,
+      at: new Date().toISOString()
+    }];
+    if (repaired.changedFields.length) {
+      workingDraft = repaired.draft;
+      probe = await probeDraftPage(workingDraft);
+    }
+  }
+  if (probe.issues.length && stableMissingInfo.length === 0 && credentialId && draft.gapId.startsWith("discovery_")) {
+    const llmRepair = await createLlmScenarioBindingRepair({
+      draft: {
+        ...workingDraft,
+        missingInfo: probe.issues,
+        probeTrace: probe.trace
+      },
+      credentialId
+    });
+    repairAttempts = [...repairAttempts, {
+      attempt: repairAttempts.length + 1,
+      strategy: "llm-assisted",
+      status: llmRepair.status === "passed" ? "repaired" : llmRepair.status === "failed" ? "failed" : "not-repairable",
+      changedFields: llmRepair.changedFields,
+      reason: llmRepair.reason,
+      at: new Date().toISOString(),
+      model: llmRepair.model,
+      callId: llmRepair.callId
+    }];
+    if (llmRepair.status === "passed" && llmRepair.scenario) {
+      workingDraft = {
+        ...workingDraft,
+        scenario: llmRepair.scenario,
+        missingInfo: []
+      };
+      probe = await probeDraftPage(workingDraft);
+    }
+  }
+  const missingInfo = Array.from(new Set([...stableMissingInfo, ...probe.issues]));
   const probed = enrichDraft({
-    ...draft,
-    selectorProbeStatus: draft.missingInfo?.length ? "failed" : "passed",
-    missingInfo: draft.missingInfo ?? []
+    ...workingDraft,
+    selectorProbeStatus: missingInfo.length ? "failed" : "passed",
+    missingInfo,
+    probeTrace: probe.trace,
+    repairAttempts
   });
   return writeDraft(probed);
 }

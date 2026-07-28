@@ -401,7 +401,11 @@ export function ProjectPanel({
           </div> : null}
           {status?.status === "running" && status.pid ? <button className="text-button" type="button" onClick={onStop}>停止项目</button> : null}
           {status?.status === "running" && !status.pid ? (
-            <p className="runtime-adopted-note">检测到项目已经在本机运行。测试官已连接该地址，但不会停止不属于本次启动的进程。</p>
+            <p className="runtime-adopted-note">
+              {sandboxMode === "oci"
+                ? "项目已在系统沙盒中运行。测试官会使用沙盒分配的地址，关闭页面不会中断运行。"
+                : "检测到项目已经在本机运行。测试官已连接该地址，但不会停止不属于本次启动的进程。"}
+            </p>
           ) : null}
           <details className="wizard-details">
             <summary><Info size={14} /> 查看运行详情</summary>

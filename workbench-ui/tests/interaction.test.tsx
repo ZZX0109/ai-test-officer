@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConnectorPanel } from "../src/components/ConnectorPanel";
 import { PatrolPanel } from "../src/components/PatrolPanel";
@@ -10,9 +10,73 @@ import { RunTimeline } from "../src/components/RunTimeline";
 import { buildFileTree, ProjectWizardPanel } from "../src/components/ProjectWizardPanel";
 import { ProjectPanel } from "../src/components/ProjectPanel";
 import { RunAssistantPanel } from "../src/components/RunAssistantPanel";
-import { subscribeRunEvents } from "../src/api";
+import { chatWithTestAssistant, subscribeRunEvents } from "../src/api";
+
+vi.mock("@monaco-editor/react", () => ({
+  DiffEditor: ({ original, modified }: { original: string; modified: string }) => (
+    <div aria-label="代码差异">
+      <pre>{original}</pre>
+      <pre>{modified}</pre>
+    </div>
+  )
+}));
+
+import { RepairWorkspace } from "../src/components/RepairWorkspace";
 
 describe("Workbench interactions", () => {
+  it("reviews a sandbox diff, validates it and keeps host apply disabled by default", async () => {
+    const loadFile = vi.fn().mockResolvedValue({
+      path: "src/app.ts",
+      original: "export const value = 1;",
+      content: "export const value = 2;",
+      version: 1,
+      risk: "low",
+      riskReasons: [],
+      editable: true
+    });
+    const validate = vi.fn().mockResolvedValue({});
+    const apply = vi.fn().mockResolvedValue({});
+    render(<RepairWorkspace
+      session={{
+        schemaVersion: "1.0",
+        id: "repair-1",
+        runId: "run-1",
+        projectId: "project-1",
+        status: "editing",
+        baseSourceSha256: "a".repeat(64),
+        workspaceRoot: "/sandbox/project",
+        summary: "修复一个断言失败",
+        failureClass: "product-bug",
+        files: [{
+          path: "src/app.ts",
+          status: "modified",
+          additions: 1,
+          deletions: 1,
+          risk: "low",
+          riskReasons: [],
+          editable: true,
+          version: 1
+        }],
+        iteration: 1,
+        maxFiles: 20,
+        maxChangedLines: 2000,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }}
+      onLoadFile={loadFile}
+      onSaveFile={vi.fn()}
+      onValidate={validate}
+      onExport={vi.fn()}
+      onApply={apply}
+      onClose={vi.fn()}
+    />);
+    expect(await screen.findByLabelText("代码差异")).toBeTruthy();
+    expect(screen.getAllByText("src/app.ts").length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "重新验证" }));
+    expect(validate).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("button", { name: "应用到原项目" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(apply).not.toHaveBeenCalled();
+  });
   it("collects non-secret run feedback and redirects passwords to encrypted account settings", async () => {
     const submit = vi.fn();
     const configure = vi.fn();
@@ -53,6 +117,53 @@ describe("Workbench interactions", () => {
     expect(screen.getByText("账号已就绪")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "使用账号重新测试" }));
     expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps failed-path repair actionable without asking the user for technical details", async () => {
+    const repair = vi.fn();
+    const editPlan = vi.fn();
+    const view = render(<RunAssistantPanel
+      message="3 条失败链路已保留，其他测试继续执行。"
+      blocked
+      autoRepairAvailable
+      onAutoRepair={repair}
+      onEditPlan={editPlan}
+      onSubmit={() => undefined}
+      onConfigureCredentials={() => undefined}
+    />);
+    const panel = within(view.container);
+    expect(panel.getByText("可自动处理")).toBeTruthy();
+    expect(panel.queryByLabelText("向 AI 测试助手反馈")).toBeNull();
+    await userEvent.click(panel.getByRole("button", { name: "分析并修复失败链路" }));
+    expect(repair).toHaveBeenCalledTimes(1);
+    await userEvent.click(panel.getByRole("button", { name: "修改测试范围" }));
+    expect(editPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("proactively offers current or dedicated API credentials without accepting secrets in chat", async () => {
+    const bind = vi.fn();
+    const openSettings = vi.fn();
+    render(<RunAssistantPanel
+      message="检测到被测项目需要 OPENAI_API_KEY。"
+      apiCredentialRequired
+      apiCredentialEnvNames={["OPENAI_API_KEY"]}
+      credentials={[
+        { id: "cred-default", name: "测试官默认模型", provider: "openai-compatible", baseUrl: "https://example.test/v1", apiKeyMasked: "****", model: "model-a", tags: [], isDefault: true },
+        { id: "cred-project", name: "项目专用", provider: "openai-compatible", baseUrl: "https://project.test/v1", apiKeyMasked: "****", model: "model-b", tags: [], isDefault: false }
+      ]}
+      defaultCredentialId="cred-default"
+      onSubmit={() => undefined}
+      onConfigureCredentials={() => undefined}
+      onBindApiCredential={bind}
+      onOpenApiSettings={openSettings}
+    />);
+    await userEvent.click(screen.getByRole("button", { name: "沿用当前测试模型凭据" }));
+    expect(bind).toHaveBeenCalledWith("cred-default", "test-system");
+    await userEvent.selectOptions(screen.getByLabelText("选择项目专用 API Key"), "cred-project");
+    await userEvent.click(screen.getByRole("button", { name: "使用单独凭据" }));
+    expect(bind).toHaveBeenCalledWith("cred-project", "dedicated");
+    await userEvent.click(screen.getByRole("button", { name: "添加新的 API Key" }));
+    expect(openSettings).toHaveBeenCalledTimes(1);
   });
 
   it("shows login settings only for detected login projects and exposes one run action", async () => {
@@ -300,10 +411,19 @@ describe("Workbench interactions", () => {
       title: "Artifact integrity verified",
       status: "passed",
       observedAt: new Date().toISOString(),
-      observation: "artifact-1 linked to attempt-1"
+      timestamp: new Date().toISOString(),
+      observation: "artifact-1 linked to attempt-1",
+      action: "verify_artifact_integrity",
+      evidenceRefs: ["artifact-1"]
     } as never]} />);
     expect(screen.getByText("Artifact integrity verified")).toBeTruthy();
     expect(screen.getByText("artifact-1 linked to attempt-1")).toBeTruthy();
+    const details = screen.getByText("Artifact integrity verified").closest("details");
+    expect(details?.open).toBe(false);
+    fireEvent.click(screen.getByText("Artifact integrity verified"));
+    expect(details?.open).toBe(true);
+    expect(screen.getByText("verify_artifact_integrity")).toBeTruthy();
+    expect(screen.getByText("artifact-1")).toBeTruthy();
   });
 
   it("reconnects a run-scoped SSE stream from the last event ID", async () => {
@@ -321,5 +441,42 @@ describe("Workbench interactions", () => {
     unsubscribe();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+
+  it("sends run questions to the conversational assistant without regenerating a plan", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      assistant: {
+        reply: "当前运行已完成，证据完整。",
+        intent: "status-question",
+        suggestedAction: "none",
+        requiresConfirmation: false
+      },
+      call: {
+        id: "call-1",
+        model: "gpt-5.1-codex",
+        provider: "openai-compatible",
+        status: "passed",
+        durationMs: 1200,
+        usage: { totalTokens: 88 }
+      }
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const response = await chatWithTestAssistant({
+      projectId: "psyexpgen_2",
+      message: "测试情况如何？",
+      credentialId: "cred-sophnet",
+      history: [],
+      context: {
+        runState: "completed",
+        finalStatus: "pass",
+        evidenceCount: 18,
+        failedAssertions: []
+      }
+    });
+    expect(response.assistant.intent).toBe("status-question");
+    expect(response.assistant.reply).toContain("证据完整");
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/api/assistant/chat");
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("/api/planning/conversation");
+    vi.unstubAllGlobals();
   });
 });

@@ -18,7 +18,14 @@ export async function testProjectDetectionWizard() {
   try {
     const vite = await makeFixture("ai-test-officer-vite-", {
       "package.json": JSON.stringify({ scripts: { dev: "vite" }, dependencies: { vite: "^5.0.0" } }),
-      "package-lock.json": "{}"
+      "package-lock.json": "{}",
+      "openapi.json": JSON.stringify({
+        openapi: "3.1.0",
+        paths: {
+          "/api/tasks": { get: { operationId: "listTasks", responses: { "200": {} } } },
+          "/api/tasks/{id}": { delete: { operationId: "deleteTask", responses: { "204": {} } } }
+        }
+      })
     });
     fixtures.push(vite);
     const viteDetection = await detectProject(vite);
@@ -31,6 +38,10 @@ export async function testProjectDetectionWizard() {
     assert.equal(viteDetection.suggestedConfig.manifest?.execution.mode, "oci");
     assert.equal(viteDetection.suggestedConfig.manifest?.execution.image, "node:22-bookworm-slim");
     assert.equal(viteDetection.suggestedConfig.manifest?.workspaceRoot, ".");
+    assert.deepEqual(
+      viteDetection.suggestedConfig.manifest?.apiOperations.map((item) => [item.operationId, item.destructive]),
+      [["listTasks", false], ["deleteTask", true]]
+    );
     assert.equal(viteDetection.plainLanguageFixes.some((fix) => /npm install|项目路径/.test(fix)), true);
 
     const viteCustomPort = await makeFixture("ai-test-officer-vite-port-", {
@@ -150,6 +161,32 @@ export async function testProjectDetectionWizard() {
     assert.equal(dataOnlySupabaseDetection.loginCapability?.detected, false);
     assert.equal(dataOnlySupabaseDetection.loginCapability?.signals.includes("dependency:@supabase/supabase-js"), true);
 
+    const apiBackedApp = await makeFixture("ai-test-officer-api-credential-", {
+      "package.json": JSON.stringify({
+        scripts: { dev: "vite" },
+        dependencies: { vite: "^5.0.0" }
+      }),
+      ".env.example": "OPENAI_API_KEY=\nOPENAI_BASE_URL=https://api.example.test/v1\n",
+      "src/server.ts": "const key = process.env.OPENAI_API_KEY; export { key };",
+      "src/client.ts": "const key = import.meta.env.VITE_DEMO_API_KEY; export { key };"
+    });
+    fixtures.push(apiBackedApp);
+    const apiCredentialDetection = await detectProject(apiBackedApp);
+    assert.equal(apiCredentialDetection.apiCredentialCapability?.detected, true);
+    assert.deepEqual(
+      apiCredentialDetection.apiCredentialCapability?.requirements.map((item) => item.envName).sort(),
+      ["OPENAI_API_KEY", "VITE_DEMO_API_KEY"]
+    );
+    assert.equal(
+      apiCredentialDetection.apiCredentialCapability?.requirements.find((item) => item.envName === "VITE_DEMO_API_KEY")?.exposure,
+      "browser"
+    );
+    assert.equal(
+      apiCredentialDetection.suggestedConfig.manifest?.environmentAllowlist.includes("OPENAI_API_KEY"),
+      true
+    );
+    assert.deepEqual(apiCredentialDetection.suggestedConfig.apiCredentialBindings, []);
+
     const express = await makeFixture("ai-test-officer-express-", {
       "package.json": JSON.stringify({ scripts: { dev: "node server.js" }, dependencies: { express: "^4.0.0" } })
     });
@@ -178,6 +215,13 @@ export async function testProjectDetectionWizard() {
           relativePath: "browser-selected-vite/vite.config.ts",
           content: "export default { server: {\n  port: 5448,\n} };"
         },
+        {
+          relativePath: "browser-selected-vite/openapi.json",
+          content: JSON.stringify({
+            openapi: "3.1.0",
+            paths: { "/api/health": { get: { operationId: "health", responses: { "200": {} } } } }
+          })
+        },
         { relativePath: "browser-selected-vite/src/pages/login.tsx", content: "export const Login = () => null;" },
         { relativePath: "browser-selected-vite/package-lock.json" }
       ]
@@ -189,6 +233,7 @@ export async function testProjectDetectionWizard() {
     assert.equal(browserManifestDetection.suggestedConfig.installCommand, "npm ci");
     assert.equal(browserManifestDetection.suggestedConfig.frontendUrl, "http://127.0.0.1:5448");
     assert.equal(browserManifestDetection.suggestedConfig.manifest?.execution.mode, "oci");
+    assert.equal(browserManifestDetection.suggestedConfig.manifest?.apiOperations[0]?.operationId, "health");
     assert.equal(browserManifestDetection.loginCapability?.detected, true);
     assert.equal(browserManifestDetection.warnings.some((warning) => warning.includes("完整路径")), true);
 

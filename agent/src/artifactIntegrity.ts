@@ -99,9 +99,17 @@ function collectPayloadArtifactUris(value: unknown, references: Map<string, Arti
 function collectArtifactReferences(result: VisualRunResult) {
   const references = new Map<string, ArtifactReference>();
   for (const artifact of result.artifactsV2 ?? []) {
+    const integrityKind: ArtifactReference["kind"] = (
+      artifact.kind === "operation-log"
+      || artifact.kind === "download"
+      || artifact.kind === "attachment"
+      || artifact.kind === "source-patch"
+      || artifact.kind === "changed-files-archive"
+      || artifact.kind === "repair-validation-log"
+    ) ? "unknown" : artifact.kind;
     addReference(references, {
       artifactUri: artifact.storageUri,
-      kind: artifact.kind === "operation-log" || artifact.kind === "download" || artifact.kind === "attachment" ? "unknown" : artifact.kind,
+      kind: integrityKind,
       expectedSha256: artifact.integrity.sha256,
       expectedSizeBytes: artifact.integrity.sizeBytes,
       origin: artifact.origin

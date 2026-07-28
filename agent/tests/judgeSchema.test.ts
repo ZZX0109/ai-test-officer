@@ -39,6 +39,10 @@ export function testJudgeSchema() {
   };
   const report = buildLayeredJudgeReport({ requirement: "接口失败要展示错误态", diff: "/api/tasks", result, evidence });
   assert.equal(report.releaseJudge.findings.every((finding) => finding.evidenceRefs.length > 0), true);
+  const projectWide = buildLayeredJudgeReport({ requirement: "对上传项目进行全面灰度测试", diff: "", result, evidence });
+  assert.equal(projectWide.planJudge.findings.some((finding) => finding.id === "plan_context_missing"), false);
+  const changeScoped = buildLayeredJudgeReport({ requirement: "验证本次代码变更和提交", diff: "", result, evidence });
+  assert.equal(changeScoped.planJudge.findings.some((finding) => finding.id === "plan_context_missing"), true);
   const attributions = buildFailureAttributions({
     assertions: result.assertions,
     steps: result.steps,

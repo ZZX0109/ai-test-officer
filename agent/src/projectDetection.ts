@@ -88,6 +88,70 @@ async function detectLoginCapability(projectPath: string, dependencies: Record<s
   };
 }
 
+function apiCredentialRequirement(envName: string, signal: string) {
+  const normalized = envName.toUpperCase();
+  const browserPrefix = /^(?:VITE|NEXT_PUBLIC|PUBLIC)_/.test(normalized);
+  const keyStem = normalized.replace(/_API_KEY$|_TOKEN$|_KEY$/, "");
+  const providerHint = keyStem
+    .replace(/^(?:VITE|NEXT_PUBLIC|PUBLIC)_/, "")
+    .replaceAll("_", " ")
+    .toLowerCase();
+  return {
+    envName: normalized,
+    providerHint: providerHint || undefined,
+    baseUrlEnv: `${keyStem}_BASE_URL`,
+    modelEnv: `${keyStem}_MODEL`,
+    exposure: browserPrefix ? "browser" as const : "server" as const,
+    signals: [signal]
+  };
+}
+
+function apiCredentialNames(source: string) {
+  const names = new Set<string>();
+  const expressions = [
+    /(?:process\.env\.|import\.meta\.env\.)([A-Z_][A-Z0-9_]*)/g,
+    /(?:os\.getenv\(\s*|os\.environ(?:\.get)?\(\s*|os\.environ\[\s*)["']([A-Z_][A-Z0-9_]*)["']/g,
+    /^\s*([A-Z_][A-Z0-9_]*)\s*=/gm
+  ];
+  for (const expression of expressions) {
+    for (const match of source.matchAll(expression)) {
+      const name = match[1]?.toUpperCase();
+      if (name && /(?:^|_)(?:API_KEY|ACCESS_TOKEN)$/.test(name)) names.add(name);
+    }
+  }
+  return [...names];
+}
+
+async function detectApiCredentialCapability(projectPath: string) {
+  const ignored = new Set(["node_modules", "dist", "build", ".git", ".next", "coverage", ".venv", "venv"]);
+  const pending = [{ directory: projectPath, depth: 0 }];
+  const requirements = new Map<string, ReturnType<typeof apiCredentialRequirement>>();
+  let scanned = 0;
+  while (pending.length && scanned < 700) {
+    const current = pending.shift()!;
+    const entries = await readdir(current.directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (scanned++ >= 700) break;
+      if (ignored.has(entry.name) || /^\.env$|^\.env\.(?!example|sample|template)/i.test(entry.name)) continue;
+      const entryPath = path.join(current.directory, entry.name);
+      const relative = path.relative(projectPath, entryPath).replaceAll("\\", "/");
+      if (entry.isDirectory() && current.depth < 5) {
+        pending.push({ directory: entryPath, depth: current.depth + 1 });
+        continue;
+      }
+      if (!entry.isFile() || !/\.(?:[cm]?[jt]sx?|vue|svelte|py|env|example|sample|template|md|toml|ya?ml)$/i.test(entry.name)) continue;
+      const source = (await readFile(entryPath, "utf8").catch(() => "")).slice(0, 250_000);
+      for (const envName of apiCredentialNames(source)) {
+        const signal = `env:${relative}:${envName}`;
+        const existing = requirements.get(envName);
+        if (existing) existing.signals = Array.from(new Set([...existing.signals, signal])).slice(0, 8);
+        else requirements.set(envName, apiCredentialRequirement(envName, signal));
+      }
+    }
+  }
+  return { detected: requirements.size > 0, requirements: [...requirements.values()] };
+}
+
 async function detectPythonStack(projectPath: string) {
   const candidates = [
     path.join(projectPath, "requirements.txt"),
@@ -574,6 +638,9 @@ function sandboxManifest(input: {
     environmentAllowlist: ["NODE_ENV", "FRONTEND_PORT", "BACKEND_PORT"],
     network: { mode: "allow-target", allowedHosts: ["127.0.0.1", "localhost"] },
     fixtures: [],
+    apiOperations: [],
+    dataSources: [],
+    backgroundTasks: [],
     capabilities: { browser: true, desktop: false, allowedBundleIds: [] },
     execution: { mode: "oci", image: input.image ?? sandboxImage(input.stack, input.nodeEngine), engine: "docker" },
     budget: {
@@ -592,6 +659,76 @@ function sandboxManifest(input: {
   };
 }
 
+type ManifestApiOperation = ProjectManifest["apiOperations"][number];
+
+function openApiOperations(document: unknown): ManifestApiOperation[] {
+  if (!document || typeof document !== "object") return [];
+  const paths = (document as { paths?: unknown }).paths;
+  if (!paths || typeof paths !== "object") return [];
+  const methods = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
+  const operations: ManifestApiOperation[] = [];
+  for (const [pathTemplate, pathItem] of Object.entries(paths as Record<string, unknown>)) {
+    if (!pathTemplate.startsWith("/") || !pathItem || typeof pathItem !== "object") continue;
+    for (const [rawMethod, operationValue] of Object.entries(pathItem as Record<string, unknown>)) {
+      const method = rawMethod.toLowerCase();
+      if (!methods.has(method) || !operationValue || typeof operationValue !== "object") continue;
+      const operation = operationValue as Record<string, unknown>;
+      const generatedId = `${method}_${pathTemplate}`
+        .replace(/[^a-zA-Z0-9_.:-]+/g, "_")
+        .replace(/^_+|_+$/g, "");
+      const declaredId = typeof operation.operationId === "string" ? operation.operationId : generatedId;
+      const operationId = declaredId.replace(/[^a-zA-Z0-9_.:-]+/g, "_");
+      if (!operationId) continue;
+      const responseCodes = operation.responses && typeof operation.responses === "object"
+        ? Object.keys(operation.responses as Record<string, unknown>)
+            .filter((code) => /^[1-5]\d\d$/.test(code))
+            .map(Number)
+        : [];
+      operations.push({
+        operationId,
+        method: method.toUpperCase() as ManifestApiOperation["method"],
+        pathTemplate,
+        baseUrlRef: "backend",
+        allowedStatusCodes: responseCodes.length ? responseCodes : [200],
+        destructive: method === "delete"
+      });
+    }
+  }
+  return Array.from(new Map(operations.map((operation) => [operation.operationId, operation])).values());
+}
+
+async function detectFilesystemOpenApi(projectPath: string) {
+  const candidates = [
+    "openapi.json",
+    "swagger.json",
+    "docs/openapi.json",
+    "api/openapi.json",
+    "backend/openapi.json"
+  ];
+  const collected: ManifestApiOperation[] = [];
+  for (const relative of candidates) {
+    try {
+      collected.push(...openApiOperations(JSON.parse(await readFile(path.join(projectPath, relative), "utf8"))));
+    } catch {
+      // Invalid or absent specifications are not executable contracts.
+    }
+  }
+  return Array.from(new Map(collected.map((operation) => [operation.operationId, operation])).values());
+}
+
+function detectUploadedOpenApi(files: Array<{ relativePath: string; content?: string }>) {
+  const collected: ManifestApiOperation[] = [];
+  for (const file of files) {
+    if (!/(^|\/)(openapi|swagger)\.json$/i.test(file.relativePath) || !file.content) continue;
+    try {
+      collected.push(...openApiOperations(JSON.parse(file.content)));
+    } catch {
+      // The project remains usable, but malformed OpenAPI is not allow-listed.
+    }
+  }
+  return Array.from(new Map(collected.map((operation) => [operation.operationId, operation])).values());
+}
+
 export async function detectProject(projectPathInput: string): Promise<ProjectDetectionResult> {
   const projectPath = resolveProjectPath(projectPathInput);
   const projectExists = await exists(projectPath);
@@ -607,6 +744,9 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
   const loginCapability = projectExists
     ? await detectLoginCapability(projectPath, deps)
     : { detected: false, confidence: "none" as const, signals: [], usernameEnv: undefined, passwordEnv: undefined };
+  const apiCredentialCapability = projectExists
+    ? await detectApiCredentialCapability(projectPath)
+    : { detected: false, requirements: [] };
   const detectedStack: ProjectDetectionResult["detectedStack"] = [];
   if (pkg) detectedStack.push("node");
   if (deps.react) detectedStack.push("react");
@@ -734,6 +874,18 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
   const projectId = projectIdFromPath(projectPath);
   const installCommandSpec = commandSpec(projectExists && installCommand ? installCommand : undefined);
   const processSpecs = processes.map((process) => ({ ...process, commandSpec: commandSpec(process.command) }));
+  const detectedApiOperations = projectExists ? await detectFilesystemOpenApi(projectPath) : [];
+  const detectedManifest = sandboxManifest({
+    projectId,
+    stack: detectedStack,
+    nodeEngine: nodeEngineFromPackage(pkg),
+    image: ecosystemLaunch?.image,
+    commandAllowlist: ecosystemLaunch?.allowlist,
+    install: installCommandSpec,
+    start: processSpecs[0]?.commandSpec ?? commandSpec(devCommand),
+    frontendPort,
+    backendPort
+  });
   const suggestedConfig: ProjectConfig = {
     id: projectId,
     name: path.basename(projectPath).replace(/[-_]+/g, " "),
@@ -752,18 +904,21 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
       usernameEnv: loginCapability.usernameEnv ?? "E2E_USERNAME",
       passwordEnv: loginCapability.passwordEnv ?? "E2E_PASSWORD"
     } : { method: "none" },
+    apiCredentialRequirements: apiCredentialCapability.requirements,
+    apiCredentialBindings: [],
     env: {},
-    manifest: sandboxManifest({
-      projectId,
-      stack: detectedStack,
-      nodeEngine: nodeEngineFromPackage(pkg),
-      image: ecosystemLaunch?.image,
-      commandAllowlist: ecosystemLaunch?.allowlist,
-      install: installCommandSpec,
-      start: processSpecs[0]?.commandSpec ?? commandSpec(devCommand),
-      frontendPort,
-      backendPort
-    }),
+    manifest: {
+      ...detectedManifest,
+      apiOperations: detectedApiOperations,
+      environmentAllowlist: Array.from(new Set([
+        ...detectedManifest.environmentAllowlist,
+        ...apiCredentialCapability.requirements.flatMap((item) => [
+          item.envName,
+          item.baseUrlEnv,
+          item.modelEnv
+        ].filter((value): value is string => Boolean(value)))
+      ]))
+    },
     timeoutMs: 30_000,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -782,7 +937,10 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
   ].filter((value): value is string => Boolean(value));
   const warnings = [
     projectExists ? undefined : "项目路径不存在。",
-    !pkg && !ecosystemLaunch ? "没有识别到受支持的项目入口或依赖清单。" : undefined
+    !pkg && !ecosystemLaunch ? "没有识别到受支持的项目入口或依赖清单。" : undefined,
+    apiCredentialCapability.detected
+      ? `检测到项目需要 API 凭据：${apiCredentialCapability.requirements.map((item) => item.envName).join(", ")}。启动前需要明确选择凭据。`
+      : undefined
   ].filter((item): item is string => Boolean(item));
   const plainLanguageFixes = [
     projectExists ? "项目路径可以访问。" : "请确认项目文件夹路径是否正确，或者在 Finder 中复制完整路径。",
@@ -801,6 +959,7 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
     detectedStack,
     packageManagers,
     loginCapability,
+    apiCredentialCapability,
     suggestedConfig,
     ports,
     healthCandidates,
@@ -842,6 +1001,19 @@ export async function detectProjectManifest(input: {
   const dependencyNames = depsOf(pkg);
   const scripts = scriptsOf(pkg);
   const textFiles = input.files.map((file) => file.content ?? "").join("\n");
+  const manifestApiRequirements = new Map<string, ReturnType<typeof apiCredentialRequirement>>();
+  for (const file of input.files) {
+    for (const envName of apiCredentialNames((file.content ?? "").slice(0, 250_000))) {
+      const signal = `env:${file.relativePath}:${envName}`;
+      const existing = manifestApiRequirements.get(envName);
+      if (existing) existing.signals = Array.from(new Set([...existing.signals, signal])).slice(0, 8);
+      else manifestApiRequirements.set(envName, apiCredentialRequirement(envName, signal));
+    }
+  }
+  const apiCredentialCapability = {
+    detected: manifestApiRequirements.size > 0,
+    requirements: [...manifestApiRequirements.values()]
+  };
   const detectedStack: ProjectDetectionResult["detectedStack"] = [];
   if (packageEntry) detectedStack.push("node");
   if (dependencyNames.react) detectedStack.push("react");
@@ -879,6 +1051,7 @@ export async function detectProjectManifest(input: {
     : baseDevCommand;
   const now = new Date().toISOString();
   const projectId = projectIdFromPath(normalizedRoot);
+  const detectedApiOperations = detectUploadedOpenApi(input.files);
   const installCommandSpec = commandSpec(resolvedInstallCommand);
   const startCommandSpec = commandSpec(devCommand);
   const suggestedConfig: ProjectConfig = {
@@ -894,16 +1067,32 @@ export async function detectProjectManifest(input: {
     frontendUrl,
     backendUrl,
     login: { method: "none" },
+    apiCredentialRequirements: apiCredentialCapability.requirements,
+    apiCredentialBindings: [],
     env: {},
-    manifest: sandboxManifest({
-      projectId,
-      stack: detectedStack,
-      nodeEngine: nodeEngineFromPackage(pkg),
-      install: installCommandSpec,
-      start: startCommandSpec,
-      frontendPort,
-      backendPort
-    }),
+    manifest: (() => {
+      const manifest = sandboxManifest({
+        projectId,
+        stack: detectedStack,
+        nodeEngine: nodeEngineFromPackage(pkg),
+        install: installCommandSpec,
+        start: startCommandSpec,
+        frontendPort,
+        backendPort
+      });
+      return {
+        ...manifest,
+        apiOperations: detectedApiOperations,
+        environmentAllowlist: Array.from(new Set([
+          ...manifest.environmentAllowlist,
+          ...apiCredentialCapability.requirements.flatMap((item) => [
+            item.envName,
+            item.baseUrlEnv,
+            item.modelEnv
+          ].filter((value): value is string => Boolean(value)))
+        ]))
+      };
+    })(),
     timeoutMs: 30_000,
     createdAt: now,
     updatedAt: now
@@ -956,6 +1145,7 @@ export async function detectProjectManifest(input: {
       usernameEnv,
       passwordEnv
     },
+    apiCredentialCapability,
     suggestedConfig,
     ports,
     healthCandidates: [backendUrl, frontendUrl].filter((value): value is string => Boolean(value)),
@@ -1015,6 +1205,15 @@ export async function diagnoseProject(id: string): Promise<ProjectDiagnosis> {
       status: "failed",
       reason: "unknown",
       credential: { ok: false, method: project.login?.method ?? "none", missingEnv: [] },
+      apiCredential: {
+        ok: false,
+        requirements: (project.apiCredentialRequirements ?? []).map((item) => ({
+          envName: item.envName,
+          configured: false,
+          exposure: item.exposure
+        })),
+        missingEnv: (project.apiCredentialRequirements ?? []).map((item) => item.envName)
+      },
       checkedAt: new Date().toISOString(),
       durationMs: 0,
       message: error instanceof Error ? error.message : "项目诊断失败。"
@@ -1039,11 +1238,15 @@ export async function diagnoseProject(id: string): Promise<ProjectDiagnosis> {
     }),
     diagnosisStage({
       stage: "credential",
-      passed: connection.credential.ok,
-      reason: connection.credential.ok ? "credential_ok" : "credential_missing",
-      humanMessage: connection.credential.ok ? "测试账号配置可用。" : `缺少测试账号环境变量：${connection.credential.missingEnv.join(", ") || "未配置"}`,
-      suggestedCommands: connection.credential.missingEnv.map((name) => `export ${name}=...`),
-      missingEnv: connection.credential.missingEnv
+      passed: connection.credential.ok && connection.apiCredential.ok,
+      reason: connection.credential.ok && connection.apiCredential.ok ? "credential_ok" : "credential_missing",
+      humanMessage: !connection.credential.ok
+        ? `缺少测试账号环境变量：${connection.credential.missingEnv.join(", ") || "未配置"}`
+        : !connection.apiCredential.ok
+          ? `项目需要 API 凭据：${connection.apiCredential.missingEnv.join(", ")}。请在 AI 测试助手中选择安全凭据。`
+          : "测试账号和项目 API 凭据均可用。",
+      suggestedCommands: [],
+      missingEnv: [...connection.credential.missingEnv, ...connection.apiCredential.missingEnv]
     }),
     diagnosisStage({
       stage: "frontend",

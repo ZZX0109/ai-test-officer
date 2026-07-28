@@ -18,6 +18,7 @@ import { redactRecord, redactText } from "./redaction.js";
 import { commandSpecSchema, projectManifestSchema, type CommandSpec } from "@ai-test-officer/contracts";
 import { buildOciInvocation, classifyRuntimeFailure } from "@ai-test-officer/execution-worker";
 import { getProjectLoginSecret } from "./projectLoginStore.js";
+import { decrypt, getCredential } from "./credentialStore.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const projectDir = path.join(rootDir, "data", "projects");
@@ -32,6 +33,7 @@ type RunningProject = {
 };
 const runningProjects = new Map<string, RunningProject>();
 const projectStartPromises = new Map<string, Promise<ProjectRuntimeStatus>>();
+const sandboxRecoveryPromises = new Map<string, Promise<void>>();
 const recoveredSandboxMonitors = new Set<string>();
 const processLogs = new WeakMap<ChildProcess, { stdout: string; stderr: string }>();
 const ociProcesses = new WeakMap<ChildProcess, { engine: "docker" | "podman"; containerName: string }>();
@@ -514,6 +516,56 @@ export function getProjectRuntimeStatus(id: string): ProjectRuntimeStatus {
   };
 }
 
+/** Rehydrates OCI runtime state after an Agent hot reload or service restart.
+ * The container is the durable execution process; the in-memory map is only a
+ * cache and must never make a healthy sandbox appear idle. */
+export async function getProjectRuntimeStatusWithRecovery(id: string): Promise<ProjectRuntimeStatus> {
+  const cached = getProjectRuntimeStatus(id);
+  if (cached.status !== "idle") {
+    // Saving a project and submitting an async start can overlap during an
+    // Agent hot reload. In that narrow window an earlier lookup may record
+    // config_missing even though the registry file has since been committed.
+    // Do not leave the Workbench stuck on that stale terminal state: re-read
+    // the registry and return the project to a retryable idle state.
+    if (cached.status === "failed" && cached.failureReason === "config_missing" && await getProject(id)) {
+      runningProjects.delete(id);
+      return {
+        projectId: id,
+        status: "idle",
+        phase: "idle",
+        progressPercent: 0,
+        updatedAt: now(),
+        failureReason: "none",
+        message: "项目配置已刷新，可以重新启动。"
+      };
+    }
+    return cached;
+  }
+  const project = await getProject(id);
+  if (!project || project.manifest?.execution.mode !== "oci") return cached;
+  // Runtime polling is on the UI's hot path. Docker/Podman can take several
+  // seconds to answer while starting or recovering, so never make the page
+  // wait for a container inspection. A single background recovery updates the
+  // in-memory state for the next poll instead.
+  if (!sandboxRecoveryPromises.has(id)) {
+    const recovery = inspectRunningSandbox(project)
+      .then((recovered) => {
+        if (!recovered) return;
+        runningProjects.set(id, recovered.running);
+        if (recovered.running.status.status !== "running") {
+          monitorRecoveredSandbox(id, recovered.runtimeProject);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => sandboxRecoveryPromises.delete(id));
+    sandboxRecoveryPromises.set(id, recovery);
+  }
+  return {
+    ...cached,
+    message: "正在后台检查沙盒运行状态。"
+  };
+}
+
 export function recordProjectRuntimeStatus(status: ProjectRuntimeStatus) {
   runningProjects.set(status.projectId, { status: { ...status, updatedAt: now() } });
 }
@@ -601,34 +653,80 @@ function credentialCheck(login: ProjectLoginConfig | undefined, projectSecretRes
   };
 }
 
-async function withProjectLoginSecret(project: ProjectConfig) {
+function apiCredentialCheck(
+  project: ProjectConfig,
+  resolvedCredentialIds: Set<string>
+): ProjectHealthCheckResult["apiCredential"] {
+  const requirements = project.apiCredentialRequirements ?? [];
+  const bindings = new Map((project.apiCredentialBindings ?? []).map((binding) => [binding.envName, binding]));
+  const status = requirements.map((requirement) => {
+    const binding = bindings.get(requirement.envName);
+    return {
+      envName: requirement.envName,
+      configured: Boolean(binding && resolvedCredentialIds.has(binding.credentialId)),
+      credentialId: binding?.credentialId,
+      source: binding?.source,
+      exposure: requirement.exposure
+    };
+  });
+  return {
+    ok: status.every((item) => item.configured),
+    requirements: status,
+    missingEnv: status.filter((item) => !item.configured).map((item) => item.envName)
+  };
+}
+
+async function withProjectSecrets(project: ProjectConfig) {
   const login = project.login;
-  if (!login?.credentialId?.startsWith("login_")) return { project, secretResolved: false };
-  const secret = await getProjectLoginSecret(login.credentialId);
-  if (!secret || secret.projectId !== project.id || !login.usernameEnv || !login.passwordEnv) {
-    return { project, secretResolved: false };
+  let runtimeProject = project;
+  let loginSecretResolved = false;
+  if (login?.credentialId?.startsWith("login_")) {
+    const secret = await getProjectLoginSecret(login.credentialId);
+    if (secret && secret.projectId === project.id && login.usernameEnv && login.passwordEnv) {
+      runtimeProject = {
+        ...runtimeProject,
+        env: {
+          ...(runtimeProject.env ?? {}),
+          [login.usernameEnv]: secret.username,
+          [login.passwordEnv]: secret.password
+        }
+      };
+      loginSecretResolved = true;
+    }
+  }
+  const resolvedCredentialIds = new Set<string>();
+  for (const binding of project.apiCredentialBindings ?? []) {
+    const credential = await getCredential(binding.credentialId);
+    if (!credential) continue;
+    const apiKey = await decrypt(credential.apiKeyEncrypted).catch(() => undefined);
+    if (!apiKey) continue;
+    runtimeProject = {
+      ...runtimeProject,
+      env: {
+        ...(runtimeProject.env ?? {}),
+        [binding.envName]: apiKey,
+        ...(binding.baseUrlEnv ? { [binding.baseUrlEnv]: credential.baseUrl } : {}),
+        ...(binding.modelEnv ? { [binding.modelEnv]: credential.model } : {})
+      }
+    };
+    resolvedCredentialIds.add(binding.credentialId);
   }
   return {
-    project: {
-      ...project,
-      env: {
-        ...(project.env ?? {}),
-        [login.usernameEnv]: secret.username,
-        [login.passwordEnv]: secret.password
-      }
-    },
-    secretResolved: true
+    project: runtimeProject,
+    loginSecretResolved,
+    resolvedCredentialIds
   };
 }
 
 export async function testProjectConnection(project: ProjectConfig): Promise<ProjectHealthCheckResult> {
   const startedAt = Date.now();
-  const hydrated = await withProjectLoginSecret(projectWithActiveRuntime(project));
+  const hydrated = await withProjectSecrets(projectWithActiveRuntime(project));
   const runtimeProject = hydrated.project;
   const resolvedPath = safeProjectPath(runtimeProject);
   const timeoutMs = runtimeProject.timeoutMs ?? 20_000;
   const pathOk = await exists(resolvedPath);
-  const credential = credentialCheck(runtimeProject.login, hydrated.secretResolved);
+  const credential = credentialCheck(runtimeProject.login, hydrated.loginSecretResolved);
+  const apiCredential = apiCredentialCheck(runtimeProject, hydrated.resolvedCredentialIds);
   const [frontend, backend, health, processHealth] = await Promise.all([
     checkUrl(runtimeProject.frontendUrl, Math.min(timeoutMs, 5_000)),
     checkUrl(runtimeProject.backendUrl, Math.min(timeoutMs, 5_000)),
@@ -647,7 +745,7 @@ export async function testProjectConnection(project: ProjectConfig): Promise<Pro
         };
       }))
   ]);
-  const reason = healthReason({ pathOk, credentialOk: credential.ok, frontend, backend, health, processHealth });
+  const reason = healthReason({ pathOk, credentialOk: credential.ok && apiCredential.ok, frontend, backend, health, processHealth });
   const ok = reason === "none";
   return {
     projectId: project.id,
@@ -655,6 +753,7 @@ export async function testProjectConnection(project: ProjectConfig): Promise<Pro
     status: ok ? "passed" : "failed",
     reason,
     credential,
+    apiCredential,
     frontend,
     backend,
     health,
@@ -991,7 +1090,18 @@ function spawnManagedProcess(input: {
       });
     })();
   const logs = { stdout: "", stderr: "" };
-  const append = (current: string, chunk: unknown) => redactText(`${current}${String(chunk)}`).slice(-50 * 1024 * 1024);
+  const sensitiveEnvNames = new Set([
+    ...(input.project.apiCredentialRequirements ?? []).map((item) => item.envName),
+    input.project.login?.passwordEnv
+  ].filter((value): value is string => Boolean(value)));
+  const secretValues = Object.entries(input.project.env ?? {})
+    .filter(([name, value]) => sensitiveEnvNames.has(name) && value.length >= 6 && value !== "[REDACTED]")
+    .map(([, value]) => value);
+  const append = (current: string, chunk: unknown) => {
+    let safe = redactText(`${current}${String(chunk)}`);
+    for (const secret of secretValues) safe = safe.replaceAll(secret, "[REDACTED]");
+    return safe.slice(-50 * 1024 * 1024);
+  };
   child.stdout?.on("data", (chunk) => { logs.stdout = append(logs.stdout, chunk); });
   child.stderr?.on("data", (chunk) => { logs.stderr = append(logs.stderr, chunk); });
   processLogs.set(child, logs);
@@ -1188,7 +1298,7 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
   if (!storedProject) {
     return { projectId: id, status: "failed", failureReason: "config_missing", message: "Project config not found." };
   }
-  const hydrated = await withProjectLoginSecret(storedProject);
+  const hydrated = await withProjectSecrets(storedProject);
   const project = hydrated.project;
   if (
     process.env.NODE_ENV !== "test"
@@ -1241,8 +1351,9 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
   if (!(await exists(cwd))) {
     return { projectId: id, status: "failed", failureReason: "project_path_missing", message: `Project path not found: ${project.projectPath}` };
   }
-  const credential = credentialCheck(project.login, hydrated.secretResolved);
-  if (!credential.ok) {
+  const credential = credentialCheck(project.login, hydrated.loginSecretResolved);
+  const apiCredential = apiCredentialCheck(project, hydrated.resolvedCredentialIds);
+  if (!credential.ok || !apiCredential.ok) {
     return {
       projectId: id,
       status: "failed",
@@ -1250,7 +1361,7 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
       frontendUrl: project.frontendUrl,
       backendUrl: project.backendUrl,
       healthCheckUrl: project.healthCheckUrl,
-      message: `Project credential is missing: ${credential.missingEnv.join(", ")}.`
+      message: `Project credential is missing: ${[...credential.missingEnv, ...apiCredential.missingEnv].join(", ")}.`
     };
   }
   const recoveredSandbox = await inspectRunningSandbox(project);
@@ -1585,6 +1696,15 @@ export async function resolveProjectTarget(input: { projectId?: string; appUrl?:
   if (input.projectId) {
     const project = await getProject(input.projectId);
     if (project) {
+      if (project.manifest?.execution.mode === "oci" && !runningProjects.has(project.id)) {
+        const recovered = await inspectRunningSandbox(project);
+        if (recovered) {
+          runningProjects.set(project.id, recovered.running);
+          if (recovered.running.status.status !== "running") {
+            monitorRecoveredSandbox(project.id, recovered.runtimeProject);
+          }
+        }
+      }
       // A managed runtime owns its externally reachable endpoint. The URL
       // supplied by a client or persisted plan may still contain the container
       // port (for example 8080) while OCI has published it on an ephemeral host

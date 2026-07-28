@@ -162,7 +162,7 @@ export function buildImpactAnalysis(context: ConnectorContext, suppliedGraph?: C
       riskDrivers: [...relevantSignals.map((signal) => signal.id), ...(graphReasons.length ? ["code_graph"] : [])],
       sourceContextIds: sourceIds(context, /diff|requirement|bug|issue|jira|openapi|pull request|pr/i)
     };
-  }).sort((left, right) => (right.score ?? 0) - (left.score ?? 0)).slice(0, 8);
+  }).sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
   const affectedComponents = buildAffectedComponents(context);
   const affectedApis = buildAffectedApis(context);
   const affectedPages = buildAffectedPages(context);

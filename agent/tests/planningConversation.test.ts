@@ -33,10 +33,26 @@ export function testPlanningConversation() {
   const first = buildPlanningConversation({ project, message: requirement, history: [], graph, analysis });
   assert.equal(first.coverage.scope, "comprehensive");
   assert.equal(first.businessFlows.length, 3);
-  assert.equal(first.coverage.gaps, 3);
+  assert.equal(first.coverage.autoBindable, 3);
+  assert.equal(first.coverage.gaps, 0);
   assert.equal(first.phase, "draft-ready");
   assert.match(first.clarificationQuestions[0] ?? "", /测试账号|未登录/);
-  assert.ok(first.businessFlows.every((flow) => flow.status === "coverage-gap"));
+  assert.ok(first.businessFlows.every((flow) => flow.status === "auto-bindable"));
+  assert.match(first.plan.levels[0]?.paths[0]?.steps.join("\n") ?? "", /自动发现并绑定/);
+
+  const noBrowserProject: ProjectConfig = {
+    ...project,
+    id: "external_planning_project_no_browser",
+    manifest: {
+      schemaVersion: "1.0",
+      workspaceRoot: ".",
+      capabilities: { browser: false }
+    } as ProjectConfig["manifest"]
+  };
+  const noBrowser = buildPlanningConversation({ project: noBrowserProject, message: requirement, history: [], graph, analysis });
+  assert.equal(noBrowser.coverage.autoBindable, 0);
+  assert.equal(noBrowser.coverage.gaps, 3);
+  assert.ok(noBrowser.businessFlows.every((flow) => flow.status === "coverage-gap"));
 
   const destructive = buildPlanningConversation({
     project,

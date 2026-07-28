@@ -69,7 +69,11 @@ assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "llm-without-
 assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "cached-benchmark", projectId: "demo", input: { experimentId: "exp", repetition: 1, cachePolicy: "auto" } }));
 const budgetedRun = createRunRequestSchema.parse({ idempotencyKey: "budgeted", projectId: "demo", input: {} });
 assert.equal(budgetedRun.input.llmBudget.maxPlannerCalls, 2);
-assert.equal(budgetedRun.input.llmBudget.maxJudgeCalls, 2);
+assert.equal(budgetedRun.input.llmBudget.maxJudgeCalls, 1);
+assert.equal(budgetedRun.input.llmBudget.maxTriageCalls, 1);
+assert.equal(budgetedRun.input.llmBudget.maxRepairCallsPerRound, 2);
+assert.equal(budgetedRun.input.llmBudget.maxSemanticRepairAttempts, 1);
+assert.equal(budgetedRun.input.llmBudget.totalTimeoutMs, 120_000);
 assert.equal(budgetedRun.input.llmBudget.maxTotalTokens, 12_000);
 assert.equal(budgetedRun.input.llmBudget.requestTimeoutMs, 30_000);
 assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "bad-budget", projectId: "demo", input: { llmBudget: { maxPlannerCalls: 3 } } }));
@@ -85,6 +89,33 @@ assert.deepEqual(actionDslSchema.parse({ action: "select", selectorRef: "selectL
   action: "select", selectorRef: "selectLabel", valueRef: "selectValue"
 });
 assert.throws(() => actionDslSchema.parse({ action: "select", selectorRef: "selectLabel" }));
+assert.deepEqual(actionDslSchema.parse({ action: "api-request", operationId: "listOrders", oracleId: "orders-200" }), {
+  action: "api-request", operationId: "listOrders", oracleId: "orders-200"
+});
+assert.throws(() => actionDslSchema.parse({ action: "api-request", operationId: "https://attacker.invalid", oracleId: "unsafe" }));
+const structuredManifest = projectManifestSchema.parse({
+  schemaVersion: "1.0",
+  projectId: "structured",
+  workspaceRoot: ".",
+  commands: {},
+  commandAllowlist: ["node"],
+  apiOperations: [{ operationId: "listOrders", method: "GET", pathTemplate: "/api/orders", allowedStatusCodes: [200] }],
+  dataSources: [{
+    id: "db",
+    kind: "sqlite",
+    connectionEnv: "TEST_DB",
+    readOnly: true,
+    queryTemplates: [{ id: "orders", statement: "SELECT id FROM orders", expectation: { kind: "non-empty" } }]
+  }],
+  backgroundTasks: [{
+    id: "report",
+    statusOperationId: "listOrders",
+    terminalStates: ["completed"],
+    successStates: ["completed"]
+  }],
+  execution: { mode: "oci", image: "node:22-bookworm-slim" }
+});
+assert.equal(structuredManifest.backgroundTasks[0]?.statusField, "status");
 const failedProductSummary = runOutcomeSummaryV2Schema.parse({
   schemaVersion: "2.0", schedulingCompleted: true, executionStarted: true, executionSucceeded: true,
   requirementCovered: true, requirementPassed: false, artifactIntegrityVerified: true, evidenceGrounded: true,

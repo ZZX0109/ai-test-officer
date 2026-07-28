@@ -103,7 +103,10 @@
               "download",
               "operation-log",
               "report",
-              "attachment"
+              "attachment",
+              "source-patch",
+              "changed-files-archive",
+              "repair-validation-log"
             ]
           },
           "origin": {
@@ -113,6 +116,7 @@
               "fixture",
               "simulated",
               "user-uploaded",
+              "agent-generated",
               "legacy-unverified"
             ]
           },
@@ -180,6 +184,147 @@
               "capturedAt",
               "collector"
             ]
+          },
+          "locator": {
+            "type": "object",
+            "properties": {
+              "pageUrl": {
+                "type": "string"
+              },
+              "viewport": {
+                "type": "object",
+                "properties": {
+                  "width": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": true
+                  },
+                  "height": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": true
+                  }
+                },
+                "required": [
+                  "width",
+                  "height"
+                ]
+              },
+              "selector": {
+                "type": "string"
+              },
+              "testId": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "boundingBox": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "height": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "x",
+                  "y",
+                  "width",
+                  "height"
+                ]
+              },
+              "snapshotSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "beforeSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "afterSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "requestId": {
+                "type": "string"
+              },
+              "method": {
+                "type": "string"
+              },
+              "statusCode": {
+                "type": "integer"
+              },
+              "operationId": {
+                "type": "string"
+              },
+              "bodySha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "lineStart": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": true
+              },
+              "lineEnd": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": true
+              },
+              "sourceLocation": {
+                "type": "string"
+              },
+              "executable": {
+                "type": "string"
+              },
+              "argsSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "commandConfigSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "exitCode": {
+                "type": "integer"
+              },
+              "dataSnapshotId": {
+                "type": "string"
+              },
+              "assertionSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "timeRange": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "to": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "from",
+                  "to"
+                ]
+              }
+            },
+            "default": {}
           },
           "fixtureManifestSha256": {
             "type": "string",
@@ -276,10 +421,553 @@
           "idempotencyKey"
         ]
       },
+      "AgentGraphProjection": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "threadId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "shadow",
+              "active"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "running",
+              "interrupted",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "currentNode": {
+            "type": "string",
+            "enum": [
+              "intake",
+              "discover",
+              "build-coverage-map",
+              "plan",
+              "compile",
+              "approve-plan",
+              "prepare-sandbox",
+              "approve-capabilities",
+              "execute",
+              "collect-and-gate",
+              "triage-failure",
+              "selective-judge",
+              "repair",
+              "finalize"
+            ]
+          },
+          "completedNodes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "intake",
+                "discover",
+                "build-coverage-map",
+                "plan",
+                "compile",
+                "approve-plan",
+                "prepare-sandbox",
+                "approve-capabilities",
+                "execute",
+                "collect-and-gate",
+                "triage-failure",
+                "selective-judge",
+                "repair",
+                "finalize"
+              ]
+            },
+            "default": []
+          },
+          "progress": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "pendingInterrupt": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "plan-approval",
+                  "browser-permission",
+                  "credential",
+                  "network-install",
+                  "dangerous-operation",
+                  "repair-apply",
+                  "execution-result"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "approved",
+                  "rejected",
+                  "expired"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 1
+              },
+              "requestedCapabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "default": []
+              },
+              "payload": {
+                "type": "object",
+                "additionalProperties": {
+                  "nullable": true
+                },
+                "default": {}
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "resolvedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "id",
+              "runId",
+              "kind",
+              "status",
+              "title",
+              "detail",
+              "createdAt"
+            ]
+          },
+          "lastError": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "node": {
+                "type": "string",
+                "enum": [
+                  "intake",
+                  "discover",
+                  "build-coverage-map",
+                  "plan",
+                  "compile",
+                  "approve-plan",
+                  "prepare-sandbox",
+                  "approve-capabilities",
+                  "execute",
+                  "collect-and-gate",
+                  "triage-failure",
+                  "selective-judge",
+                  "repair",
+                  "finalize"
+                ]
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          },
+          "tokenUsage": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "repairSessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "runId",
+          "threadId",
+          "mode",
+          "status",
+          "progress",
+          "updatedAt"
+        ]
+      },
+      "RepairSession": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "projectId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "analyzing",
+              "editing",
+              "validating",
+              "ready-for-review",
+              "exported",
+              "applied",
+              "failed",
+              "blocked",
+              "cancelled"
+            ]
+          },
+          "baseSourceSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "workspaceRoot": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "default": ""
+          },
+          "failureClass": {
+            "type": "string",
+            "enum": [
+              "product-bug",
+              "test-script",
+              "environment",
+              "evidence",
+              "unknown"
+            ],
+            "default": "unknown"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "added",
+                    "modified",
+                    "deleted"
+                  ]
+                },
+                "baseSha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "patchedSha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "additions": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0
+                },
+                "deletions": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0
+                },
+                "risk": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "forbidden"
+                  ]
+                },
+                "riskReasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "editable": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0
+                }
+              },
+              "required": [
+                "path",
+                "status",
+                "risk"
+              ]
+            },
+            "maxItems": 20,
+            "default": []
+          },
+          "validation": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "repairSessionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "running",
+                  "passed",
+                  "failed",
+                  "blocked"
+                ]
+              },
+              "childRunId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "commands": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "executable": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9._/+:-]+$"
+                    },
+                    "args": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 4096
+                      },
+                      "maxItems": 128,
+                      "default": []
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "maximum": 1200000
+                    }
+                  },
+                  "required": [
+                    "executable"
+                  ]
+                },
+                "default": []
+              },
+              "targetedPassed": {
+                "type": "boolean"
+              },
+              "regressionPassed": {
+                "type": "boolean"
+              },
+              "artifactIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "default": []
+              },
+              "summary": {
+                "type": "string",
+                "default": ""
+              },
+              "startedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "finishedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "id",
+              "repairSessionId",
+              "status",
+              "startedAt"
+            ]
+          },
+          "iteration": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2,
+            "default": 0
+          },
+          "maxFiles": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true,
+            "maximum": 20,
+            "default": 20
+          },
+          "maxChangedLines": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true,
+            "maximum": 2000,
+            "default": 2000
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "id",
+          "runId",
+          "projectId",
+          "status",
+          "baseSourceSha256",
+          "workspaceRoot",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "RepairExport": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repairSessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "patch",
+              "zip"
+            ]
+          },
+          "artifactId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "downloadUrl": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "repairSessionId",
+          "format",
+          "artifactId",
+          "downloadUrl",
+          "sha256",
+          "sizeBytes",
+          "createdAt"
+        ]
+      },
       "CreateRunRequest": {
         "type": "object",
         "properties": {
           "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runKind": {
+            "type": "string",
+            "enum": [
+              "parent",
+              "path",
+              "validation"
+            ],
+            "default": "parent"
+          },
+          "parentRunId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "coverageItemId": {
             "type": "string",
             "minLength": 1
           },
@@ -308,8 +996,29 @@
                 "type": "string",
                 "format": "uri"
               },
+              "logicalProjectId": {
+                "type": "string",
+                "minLength": 1
+              },
               "scenarioId": {
                 "type": "string"
+              },
+              "coverageScenarioIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "maxItems": 500,
+                "default": []
+              },
+              "coverageMode": {
+                "type": "string",
+                "enum": [
+                  "targeted",
+                  "full"
+                ],
+                "default": "targeted"
               },
               "requirement": {
                 "type": "string"
@@ -377,8 +1086,32 @@
                   "maxJudgeCalls": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 1,
+                    "default": 1
+                  },
+                  "maxTriageCalls": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "default": 1
+                  },
+                  "maxRepairCallsPerRound": {
+                    "type": "integer",
+                    "minimum": 0,
                     "maximum": 2,
                     "default": 2
+                  },
+                  "maxRepairRounds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2,
+                    "default": 2
+                  },
+                  "maxSemanticRepairAttempts": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "default": 1
                   },
                   "maxTotalTokens": {
                     "type": "integer",
@@ -411,7 +1144,7 @@
                     "type": "integer",
                     "minimum": 1000,
                     "maximum": 300000,
-                    "default": 90000
+                    "default": 120000
                   },
                   "maxEstimatedCostUsd": {
                     "type": "number",
@@ -436,15 +1169,39 @@
                     "type": "boolean",
                     "default": true
                   },
+                  "sourceRead": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "sandboxWrite": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "sandboxCommand": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "networkInstall": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "hostApply": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "artifactExport": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "systemControl": {
+                    "type": "boolean",
+                    "default": false
+                  },
                   "workspaceControl": {
                     "type": "boolean",
                     "default": false
                   },
                   "ideTerminalControl": {
-                    "type": "boolean",
-                    "default": false
-                  },
-                  "systemControl": {
                     "type": "boolean",
                     "default": false
                   }
@@ -478,6 +1235,1105 @@
         "required": [
           "idempotencyKey",
           "input"
+        ]
+      },
+      "CoverageItem": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "flowId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "module": {
+            "type": "string",
+            "minLength": 1
+          },
+          "surface": {
+            "type": "string",
+            "enum": [
+              "page",
+              "api",
+              "data",
+              "background-task"
+            ]
+          },
+          "route": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "dataEntity": {
+            "type": "string"
+          },
+          "risk": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "preconditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "testDataRefs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "actionPathIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "oracleIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "requiredEvidenceKinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "screenshot",
+                "dom",
+                "network",
+                "console",
+                "trace",
+                "video",
+                "download",
+                "operation-log",
+                "report",
+                "attachment",
+                "source-patch",
+                "changed-files-archive",
+                "repair-validation-log"
+              ]
+            },
+            "default": []
+          },
+          "structuredPlan": {
+            "type": "object",
+            "properties": {
+              "scenarioId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "pathId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "action": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "navigate"
+                              ]
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "path"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "click"
+                              ]
+                            },
+                            "selectorRef": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "selectorRef"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "fill"
+                              ]
+                            },
+                            "selectorRef": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "valueRef": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "selectorRef",
+                            "valueRef"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "select"
+                              ]
+                            },
+                            "selectorRef": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "valueRef": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "selectorRef",
+                            "valueRef"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "upload"
+                              ]
+                            },
+                            "selectorRef": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "fixtureRef": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "selectorRef",
+                            "fixtureRef"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "assert"
+                              ]
+                            },
+                            "oracleId": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "oracleId"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "wait"
+                              ]
+                            },
+                            "durationMs": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 45000
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "durationMs"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "api-request"
+                              ]
+                            },
+                            "operationId": {
+                              "type": "string",
+                              "pattern": "^[a-zA-Z0-9_.:-]+$"
+                            },
+                            "oracleId": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "fixtureRef": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "operationId",
+                            "oracleId"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "data-assert"
+                              ]
+                            },
+                            "dataSourceId": {
+                              "type": "string",
+                              "pattern": "^[a-zA-Z0-9_.:-]+$"
+                            },
+                            "queryTemplateId": {
+                              "type": "string",
+                              "pattern": "^[a-zA-Z0-9_.:-]+$"
+                            },
+                            "oracleId": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "parameterFixtureRef": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "dataSourceId",
+                            "queryTemplateId",
+                            "oracleId"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "wait-job"
+                              ]
+                            },
+                            "backgroundTaskId": {
+                              "type": "string",
+                              "pattern": "^[a-zA-Z0-9_.:-]+$"
+                            },
+                            "oracleId": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "timeoutMs": {
+                              "type": "integer",
+                              "minimum": 1000,
+                              "maximum": 300000
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "backgroundTaskId",
+                            "oracleId"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "command-check"
+                              ]
+                            },
+                            "commandId": {
+                              "type": "string",
+                              "enum": [
+                                "test",
+                                "health"
+                              ]
+                            },
+                            "oracleId": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "commandId",
+                            "oracleId"
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "action"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 50
+              },
+              "requiredOracleIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1
+              },
+              "requiredEvidenceKinds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "screenshot",
+                    "dom",
+                    "network",
+                    "console",
+                    "trace",
+                    "video",
+                    "download",
+                    "operation-log",
+                    "report",
+                    "attachment",
+                    "source-patch",
+                    "changed-files-archive",
+                    "repair-validation-log"
+                  ]
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "scenarioId",
+              "steps",
+              "requiredOracleIds",
+              "requiredEvidenceKinds"
+            ]
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "executed",
+              "excluded",
+              "blocked",
+              "pending"
+            ]
+          },
+          "dispositionReason": {
+            "type": "string"
+          },
+          "scenarioId": {
+            "type": "string"
+          },
+          "attemptId": {
+            "type": "string"
+          },
+          "childRunId": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "id",
+          "runId",
+          "flowId",
+          "module",
+          "surface",
+          "risk",
+          "disposition",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "LlmInvocation": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "2.0"
+            ],
+            "default": "2.0"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "experimentId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "planning",
+              "judging",
+              "triage",
+              "repairing",
+              "assistant"
+            ]
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "openai-compatible",
+              "openai",
+              "anthropic",
+              "openrouter",
+              "custom"
+            ]
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requestedModel": {
+            "type": "string",
+            "minLength": 1
+          },
+          "returnedModel": {
+            "type": "string",
+            "minLength": 1
+          },
+          "modelProfileId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "langChainAdapterVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "providerAdapterVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "promptTemplateId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "promptVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "promptSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "inputSummarySha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "actionDslVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "outputSchemaVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "graphVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scenarioRegistrySha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "projectDigest": {
+            "type": "string",
+            "minLength": 1
+          },
+          "routeReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ruleCapable": {
+            "type": "boolean"
+          },
+          "ruleBypassReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cachePolicy": {
+            "type": "string",
+            "enum": [
+              "use",
+              "bypass"
+            ],
+            "default": "use"
+          },
+          "cacheHit": {
+            "type": "boolean",
+            "default": false
+          },
+          "sourceCallId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requestId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "queuedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "firstTokenAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "timing": {
+            "type": "object",
+            "properties": {
+              "queueMs": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "firstTokenMs": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "generationMs": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "parseMs": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "totalMs": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "totalMs"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed",
+              "blocked"
+            ]
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "promptTokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cachedPromptTokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "completionTokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reasoningTokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "totalTokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "estimatedCostUsd": {
+                "type": "number",
+                "nullable": true,
+                "minimum": 0
+              },
+              "currency": {
+                "type": "string",
+                "minLength": 1,
+                "default": "USD"
+              },
+              "priceCatalogVersion": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "default": {}
+          },
+          "errorCode": {
+            "type": "string",
+            "minLength": 1
+          },
+          "failureClass": {
+            "type": "string",
+            "enum": [
+              "transport",
+              "authentication",
+              "authorization",
+              "model-access",
+              "budget",
+              "semantic",
+              "provider",
+              "unknown"
+            ]
+          },
+          "transportMode": {
+            "type": "string",
+            "enum": [
+              "stream",
+              "non-stream-fallback"
+            ]
+          },
+          "fallbackReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fallbackImpact": {
+            "type": "string",
+            "enum": [
+              "none",
+              "plan-source-changed",
+              "recommendation-unavailable",
+              "human-review-required",
+              "path-blocked"
+            ],
+            "default": "none"
+          },
+          "finalStatusImpact": {
+            "type": "string",
+            "enum": [
+              "none",
+              "advisory-only",
+              "forced-review",
+              "blocked"
+            ],
+            "default": "none"
+          },
+          "transportAttempts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "stream",
+                    "non-stream"
+                  ]
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "passed",
+                    "failed"
+                  ]
+                },
+                "startedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "durationMs": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "requestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "errorCode": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "bytesReceived": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0
+                },
+                "eventTypes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "maxItems": 64,
+                  "default": []
+                }
+              },
+              "required": [
+                "attempt",
+                "mode",
+                "status",
+                "startedAt",
+                "durationMs"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 3
+          },
+          "semanticRepairAttempts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1
+                },
+                "startedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "durationMs": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "passed",
+                    "failed"
+                  ]
+                },
+                "validationErrors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "maxItems": 50,
+                  "default": []
+                }
+              },
+              "required": [
+                "attempt",
+                "startedAt",
+                "durationMs",
+                "status"
+              ]
+            },
+            "maxItems": 1,
+            "default": []
+          },
+          "redactedInputSummary": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "structuredOutput": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            }
+          },
+          "encryptedOutputRef": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "purpose",
+          "provider",
+          "model",
+          "startedAt",
+          "durationMs",
+          "status"
+        ]
+      },
+      "Conclusion": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "conclusionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scenarioId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "claimType": {
+            "type": "string",
+            "enum": [
+              "assertion",
+              "machine-gate",
+              "judge-finding",
+              "failure-classification",
+              "final-status",
+              "human-override"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "llm-advisory",
+              "human"
+            ]
+          },
+          "assertionIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default": []
+          },
+          "evidenceRefs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "proofStatus": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "missing",
+              "invalid",
+              "legacy-unverified"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "policyVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "canonicalSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "supersedesConclusionId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "conclusionId",
+          "runId",
+          "scenarioId",
+          "attemptId",
+          "claimType",
+          "status",
+          "source",
+          "evidenceRefs",
+          "proofStatus",
+          "createdAt",
+          "policyVersion"
+        ]
+      },
+      "ProofEdge": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scenarioId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fromType": {
+            "type": "string",
+            "enum": [
+              "conclusion",
+              "assertion",
+              "oracle",
+              "evidence",
+              "artifact",
+              "attempt",
+              "step"
+            ]
+          },
+          "fromId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "toType": {
+            "type": "string",
+            "enum": [
+              "conclusion",
+              "assertion",
+              "oracle",
+              "evidence",
+              "artifact",
+              "attempt",
+              "step"
+            ]
+          },
+          "toId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "relation": {
+            "type": "string",
+            "enum": [
+              "supported-by-assertion",
+              "evaluates-oracle",
+              "supported-by-evidence",
+              "materialized-by-artifact",
+              "captured-in-attempt",
+              "produced-by-step",
+              "supersedes"
+            ]
+          },
+          "canonicalSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "id",
+          "runId",
+          "scenarioId",
+          "attemptId",
+          "fromType",
+          "fromId",
+          "toType",
+          "toId",
+          "relation",
+          "createdAt"
         ]
       }
     },
@@ -553,6 +2409,1021 @@
                   },
                   "required": [
                     "run"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/agent": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent graph projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "agent": {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/AgentGraphProjection"
+                        },
+                        {
+                          "nullable": true
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "agent"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/coverage": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Coverage disposition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "coverage": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CoverageItem"
+                      }
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "coverage",
+                    "complete"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/llm-calls": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versioned LLM invocations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "calls": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/LlmInvocation"
+                      }
+                    }
+                  },
+                  "required": [
+                    "calls"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/conclusions": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified conclusions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "conclusions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Conclusion"
+                      }
+                    }
+                  },
+                  "required": [
+                    "conclusions"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/conclusions/{id}/proof": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "runId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conclusion proof graph",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "conclusion": {
+                      "$ref": "#/components/schemas/Conclusion"
+                    },
+                    "edges": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ProofEdge"
+                      }
+                    }
+                  },
+                  "required": [
+                    "conclusion",
+                    "edges"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/messages": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "credentialId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "message"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Agent reply"
+          },
+          "409": {
+            "description": "Model unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/interrupts/{interruptId}/resume": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "interruptId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "approved": {
+                    "type": "boolean"
+                  },
+                  "input": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "nullable": true
+                    }
+                  }
+                },
+                "required": [
+                  "approved"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resumed graph",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "agent": {
+                      "$ref": "#/components/schemas/AgentGraphProjection"
+                    }
+                  },
+                  "required": [
+                    "agent"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/repairs": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "autoAnalyze": {
+                    "type": "boolean"
+                  },
+                  "credentialId": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Repair session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repair": {
+                      "$ref": "#/components/schemas/RepairSession"
+                    }
+                  },
+                  "required": [
+                    "repair"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repair sessions for a run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repairs": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RepairSession"
+                      }
+                    }
+                  },
+                  "required": [
+                    "repairs"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repair-sessions/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repair session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repair": {
+                      "$ref": "#/components/schemas/RepairSession"
+                    }
+                  },
+                  "required": [
+                    "repair"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repair-sessions/{id}/files/{filePath}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "required": true,
+            "name": "filePath",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repair workspace file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "file": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "content": {
+                          "type": "string"
+                        },
+                        "version": {
+                          "type": "integer"
+                        },
+                        "sha256": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "content",
+                        "version",
+                        "sha256"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "file"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "required": true,
+            "name": "filePath",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "content",
+                  "version"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated repair workspace file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repair": {
+                      "$ref": "#/components/schemas/RepairSession"
+                    }
+                  },
+                  "required": [
+                    "repair"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "File version conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repair-sessions/{id}/validate": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validated repair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repair": {
+                      "$ref": "#/components/schemas/RepairSession"
+                    }
+                  },
+                  "required": [
+                    "repair"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repair-sessions/{id}/export": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "patch",
+                      "zip"
+                    ]
+                  }
+                },
+                "required": [
+                  "format"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Repair export",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "export": {
+                      "$ref": "#/components/schemas/RepairExport"
+                    },
+                    "artifact": {
+                      "type": "object",
+                      "properties": {
+                        "schemaVersion": {
+                          "type": "string",
+                          "enum": [
+                            "2.0"
+                          ]
+                        },
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "scenarioId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "stepId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attempt": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "screenshot",
+                            "dom",
+                            "network",
+                            "console",
+                            "trace",
+                            "video",
+                            "download",
+                            "operation-log",
+                            "report",
+                            "attachment",
+                            "source-patch",
+                            "changed-files-archive",
+                            "repair-validation-log"
+                          ]
+                        },
+                        "origin": {
+                          "type": "string",
+                          "enum": [
+                            "runtime-captured",
+                            "fixture",
+                            "simulated",
+                            "user-uploaded",
+                            "agent-generated",
+                            "legacy-unverified"
+                          ]
+                        },
+                        "storageUri": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "replicaUris": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "default": []
+                        },
+                        "sequence": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "monotonicOffsetMs": {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        "integrity": {
+                          "type": "object",
+                          "properties": {
+                            "sha256": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "sizeBytes": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "mediaType": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "capturedAt": {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            "collector": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "version": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "version"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "sha256",
+                            "sizeBytes",
+                            "mediaType",
+                            "capturedAt",
+                            "collector"
+                          ]
+                        },
+                        "locator": {
+                          "type": "object",
+                          "properties": {
+                            "pageUrl": {
+                              "type": "string"
+                            },
+                            "viewport": {
+                              "type": "object",
+                              "properties": {
+                                "width": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                },
+                                "height": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "exclusiveMinimum": true
+                                }
+                              },
+                              "required": [
+                                "width",
+                                "height"
+                              ]
+                            },
+                            "selector": {
+                              "type": "string"
+                            },
+                            "testId": {
+                              "type": "string"
+                            },
+                            "role": {
+                              "type": "string"
+                            },
+                            "boundingBox": {
+                              "type": "object",
+                              "properties": {
+                                "x": {
+                                  "type": "number"
+                                },
+                                "y": {
+                                  "type": "number"
+                                },
+                                "width": {
+                                  "type": "number",
+                                  "minimum": 0
+                                },
+                                "height": {
+                                  "type": "number",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "x",
+                                "y",
+                                "width",
+                                "height"
+                              ]
+                            },
+                            "snapshotSha256": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "beforeSha256": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "afterSha256": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "requestId": {
+                              "type": "string"
+                            },
+                            "method": {
+                              "type": "string"
+                            },
+                            "statusCode": {
+                              "type": "integer"
+                            },
+                            "operationId": {
+                              "type": "string"
+                            },
+                            "bodySha256": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "lineStart": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "lineEnd": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "exclusiveMinimum": true
+                            },
+                            "sourceLocation": {
+                              "type": "string"
+                            },
+                            "executable": {
+                              "type": "string"
+                            },
+                            "argsSha256": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "commandConfigSha256": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "exitCode": {
+                              "type": "integer"
+                            },
+                            "dataSnapshotId": {
+                              "type": "string"
+                            },
+                            "assertionSha256": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "timeRange": {
+                              "type": "object",
+                              "properties": {
+                                "from": {
+                                  "type": "string",
+                                  "format": "date-time"
+                                },
+                                "to": {
+                                  "type": "string",
+                                  "format": "date-time"
+                                }
+                              },
+                              "required": [
+                                "from",
+                                "to"
+                              ]
+                            }
+                          },
+                          "default": {}
+                        },
+                        "fixtureManifestSha256": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      },
+                      "required": [
+                        "schemaVersion",
+                        "id",
+                        "runId",
+                        "scenarioId",
+                        "attemptId",
+                        "attempt",
+                        "kind",
+                        "origin",
+                        "storageUri",
+                        "sequence",
+                        "monotonicOffsetMs",
+                        "integrity"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "export",
+                    "artifact"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repair-sessions/{id}/apply": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "confirm": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  },
+                  "confirmHighRisk": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "confirm"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Applied repair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repair": {
+                      "$ref": "#/components/schemas/RepairSession"
+                    }
+                  },
+                  "required": [
+                    "repair"
                   ]
                 }
               }

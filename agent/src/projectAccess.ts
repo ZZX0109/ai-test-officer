@@ -31,6 +31,7 @@ async function writeGrants(grants: ProjectGrant[]) {
 function scopesForRole(role: ProjectGrant["role"]): ProjectGrant["scopes"] {
   if (role === "viewer") return ["read_project", "read_artifacts"];
   if (role === "runner") return ["read_project", "run_tests", "read_artifacts"];
+  if (role === "maintainer") return ["read_project", "run_tests", "read_artifacts", "edit_sandbox", "export_source", "apply_source"];
   if (role === "project_admin") return ["read_project", "run_tests", "read_artifacts", "manage_project"];
   if (role === "operator") return ["read_project", "run_tests", "read_artifacts", "manage_project", "manage_credentials"];
   return ["read_project", "run_tests", "read_artifacts", "manage_project", "manage_credentials", "admin"];
