@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import type { EvidenceItem, RunBundle, RunRequest, RunStepEvidence, VisualRunResult } from "./types.js";
 import { compiledPlanSchema, resolveFinalStatus, runOutcomeSummaryV2Schema, type ActionDsl, type ArtifactV2, type CompiledPlan, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
 import {
@@ -9,7 +9,8 @@ import {
   PlaywrightAttemptTrace,
   bindAttemptTelemetry,
   captureScreenshotAtomic,
-  commitCapturedFile
+  commitCapturedFile,
+  createPlaywrightRuntimeSession
 } from "@ai-test-officer/playwright-runtime";
 import { appendAudit } from "./auditLog.js";
 import { requireBrowserControl } from "./permissionGate.js";
@@ -424,11 +425,15 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     permissionRef: permissionEvidence.id
   });
 
-  const browser = await chromium.launch({ headless });
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 820 },
-    ...(recordVideo ? { recordVideo: { dir: path.join(reportsDir, "videos") } } : {})
+  const browserSession = await createPlaywrightRuntimeSession({
+    headless,
+    signal: input.signal,
+    contextOptions: {
+      viewport: { width: 1280, height: 820 },
+      ...(recordVideo ? { recordVideo: { dir: path.join(reportsDir, "videos") } } : {})
+    }
   });
+  const { context, page } = browserSession;
   let attemptTrace: PlaywrightAttemptTrace | undefined;
   const startAttemptTrace = async () => {
     if (!recordTrace) return;
@@ -476,8 +481,10 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       attemptTrace = undefined;
     }
   };
-  await startAttemptTrace();
-  const page = await context.newPage();
+  await startAttemptTrace().catch(async (error) => {
+    await browserSession.close();
+    throw error;
+  });
   page.setDefaultTimeout(Number(process.env.PLAYWRIGHT_ACTION_TIMEOUT_MS ?? 30_000));
   const pageVideo = page.video();
   const unbindTelemetry = bindAttemptTelemetry({
@@ -1490,7 +1497,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       }
       await finishAttemptTrace().catch(() => undefined);
       unbindTelemetry();
-      await context.close();
+      await browserSession.closeContext();
       if (recordVideo && pageVideo) {
         try {
           const videoPath = await pageVideo.path();
@@ -1522,7 +1529,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
           // Video is optional; screenshots and trace remain authoritative evidence.
         }
       }
-      await browser.close();
+      await browserSession.closeBrowser();
     } finally {
       if (configuredProject && shouldAutoStopProjectRuntime({ projectWasStartedByRunner, keepProjectRunning: input.keepProjectRunning, runtimeStatus })) {
         const stopped = await stopProject(configuredProject.id);

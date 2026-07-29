@@ -3,8 +3,19 @@ import { createServer } from "node:http";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { chromium } from "playwright";
-import { AttemptClock, bindAttemptTelemetry, PlaywrightAttemptTrace } from "../src/index.js";
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type BrowserType,
+  type Page
+} from "playwright";
+import {
+  AttemptClock,
+  bindAttemptTelemetry,
+  createPlaywrightRuntimeSession,
+  PlaywrightAttemptTrace
+} from "../src/index.js";
 
 const clock = new AttemptClock();
 const first = clock.next();
@@ -49,5 +60,57 @@ try {
 } finally {
   server.close();
   await rm(directory, { recursive: true, force: true });
+}
+
+{
+  let contextCloseCount = 0;
+  let browserCloseCount = 0;
+  const page = {} as Page;
+  const context = {
+    newPage: async () => page,
+    close: async () => { contextCloseCount += 1; }
+  } as unknown as BrowserContext;
+  const browser = {
+    newContext: async () => context,
+    close: async () => { browserCloseCount += 1; }
+  } as unknown as Browser;
+  const launcher = {
+    launch: async () => browser
+  } as unknown as Pick<BrowserType, "launch">;
+  const session = await createPlaywrightRuntimeSession({ headless: true, launcher });
+  await Promise.all([session.close(), session.close(), session.closeContext()]);
+  assert.equal(contextCloseCount, 1);
+  assert.equal(browserCloseCount, 1);
+}
+
+{
+  let contextCloseCount = 0;
+  let browserCloseCount = 0;
+  const context = {
+    newPage: async () => { throw new Error("page_start_failed"); },
+    close: async () => { contextCloseCount += 1; }
+  } as unknown as BrowserContext;
+  const browser = {
+    newContext: async () => context,
+    close: async () => { browserCloseCount += 1; }
+  } as unknown as Browser;
+  const launcher = {
+    launch: async () => browser
+  } as unknown as Pick<BrowserType, "launch">;
+  await assert.rejects(
+    () => createPlaywrightRuntimeSession({ headless: true, launcher }),
+    /page_start_failed/
+  );
+  assert.equal(contextCloseCount, 1);
+  assert.equal(browserCloseCount, 1);
+}
+
+{
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () => createPlaywrightRuntimeSession({ headless: true, signal: controller.signal }),
+    /cancelled_before_launch/
+  );
 }
 console.log("playwright runtime tests passed");
