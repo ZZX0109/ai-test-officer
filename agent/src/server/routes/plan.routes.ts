@@ -17,7 +17,8 @@ const generatePlanRequestSchema = z.object({
   projectId: z.string().optional(),
   requirement: z.string().min(1),
   diff: z.string().default(""),
-  credentialId: z.string().optional()
+  credentialId: z.string().optional(),
+  plannerMode: z.enum(["adaptive", "rules"]).default("adaptive")
 }).strict();
 
 const refinePlanRequestSchema = z.object({

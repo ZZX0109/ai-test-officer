@@ -393,7 +393,7 @@ export function getGrayPlan() {
 }
 
 export function generatePlan(
-  payload: { projectId: string; requirement: string; diff: string; credentialId?: string },
+  payload: { projectId: string; requirement: string; diff: string; credentialId?: string; plannerMode?: "adaptive" | "rules" },
   options?: { signal?: AbortSignal }
 ) {
   return request<{

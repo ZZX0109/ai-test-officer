@@ -54,9 +54,15 @@
     "reports:retention:apply": "node scripts/reports-retention.mjs --apply",
     "reports:retention:archive": "node scripts/reports-retention.mjs --apply --archive",
     "reports:retention:archive-local": "node scripts/reports-retention.mjs --apply --archive --prune-local-stores",
+    "lint": "eslint \"agent/src/**/*.ts\" \"packages/*/src/**/*.ts\" \"workbench-ui/src/**/*.{ts,tsx}\" \"app-under-test/src/**/*.{ts,tsx}\"",
+    "quality:contracts": "node scripts/quality-contract.mjs",
+    "test:workbench-e2e": "node scripts/workbench-e2e.mjs",
+    "quality": "npm run lint && npm run quality:contracts && npm run typecheck && npm test",
     "clean": "rm -rf agent/dist app-under-test/dist workbench-ui/dist"
   },
   "devDependencies": {
-    "typescript": "^5.8.3"
+    "eslint": "^9.39.5",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.65.0"
   }
 }

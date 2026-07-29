@@ -64,15 +64,24 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install chromium
+      - run: npm run lint
+      - run: npm run quality:contracts
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Start local services
+        run: npm run dev:background
+      - run: npm run health:check
+      - run: npm run test:workbench-e2e
       - run: npm run test:unified-run
       - name: Run CI gate contract
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_SHA: ${{ env.TARGET_SHA }}
         run: npm run commit-check
+      - name: Stop local services
+        if: always()
+        run: npm run stop:dev
       - name: Verify clean reproducible worktree
         run: test -z "$(git status --porcelain)"
       - uses: actions/upload-artifact@v4

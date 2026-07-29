@@ -7,6 +7,7 @@ export interface GeneratePlanInput {
   requirement: string;
   diff: string;
   credentialId?: string;
+  plannerMode?: "adaptive" | "rules";
 }
 
 export interface RefinePlanInput {

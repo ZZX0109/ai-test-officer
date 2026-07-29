@@ -27,6 +27,7 @@ interface GeneratePlanInput {
   impactAnalysis?: ImpactAnalysis;
   llmBudget?: LlmBudget;
   browserControlAllowed?: boolean;
+  plannerMode?: "adaptive" | "rules";
 }
 
 const llmPlanResponseSchema = z.object({
@@ -348,16 +349,25 @@ export function compileLlmPlanCandidate(
 export async function generatePlan(input: GeneratePlanInput) {
   const budget = llmBudgetSchema.parse(input.llmBudget ?? {});
   const llmStarted = Date.now();
-  const credential = await resolveCredential(input.credentialId);
+  const credential = input.plannerMode === "rules" ? undefined : await resolveCredential(input.credentialId);
   if (!credential) {
     if (input.requireLlm) throw new Error("llm_not_configured");
     const scenario = matchScenariosForContext(input)[0]?.scenario;
     return {
-      source: "fallback",
-      message: scenario
-        ? `未配置 API Key，已按场景 ${scenario.id} 生成显式灰度 plan。`
-        : "未配置 API Key，已回退固定显式灰度 plan。",
-      plan: scenario ? buildScenarioGrayPlan(scenario) : fixedGrayPlan
+      source: input.plannerMode === "rules" ? "rules" : "fallback",
+      message: input.plannerMode === "rules"
+        ? scenario
+          ? `已按确定性场景 ${scenario.id} 生成显式灰度 plan。`
+          : "已按确定性规则生成显式灰度 plan。"
+        : scenario
+          ? `未配置 API Key，已按场景 ${scenario.id} 生成显式灰度 plan。`
+          : "未配置 API Key，已回退固定显式灰度 plan。",
+      plan: scenario ? buildScenarioGrayPlan(scenario) : fixedGrayPlan,
+      provenance: {
+        source: "deterministic" as const,
+        promptVersion: "rules-v1",
+        compilationStatus: "validated" as const
+      }
     };
   }
 

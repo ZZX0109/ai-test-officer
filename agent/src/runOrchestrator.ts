@@ -217,7 +217,7 @@ async function aggregateParentCoverageRun(runId: string) {
   const current = await runEventStore.get(runId);
   if (current?.state === "running") {
     await appendSystemRunEvent(runId, "evidence_collecting", { childRunIds, aggregate: true });
-    resumeAgentGraphInBackground(runId, { execution: { childRunIds, aggregate: true } });
+    void resumeAgentGraphInBackground(runId, { execution: { childRunIds, aggregate: true } }).catch(() => undefined);
   }
   return runEventStore.get(runId);
 }
@@ -258,12 +258,12 @@ async function scheduleParentAggregation(runId: string) {
           finalStatus: "blocked",
           error: error instanceof Error ? error.message : "parent_aggregation_failed"
         });
-        resumeAgentGraphInBackground(runId, {
+        void resumeAgentGraphInBackground(runId, {
           execution: {
             finalStatus: "blocked",
             error: error instanceof Error ? error.message : "parent_aggregation_failed"
           }
-        });
+        }).catch(() => undefined);
       }
     }
   };
@@ -297,9 +297,9 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
           childRunIds: dispatch.childRunIds,
           aggregate: true
         });
-        resumeAgentGraphInBackground(runId, {
+        void resumeAgentGraphInBackground(runId, {
           execution: { childRunIds: dispatch.childRunIds, aggregate: true }
-        });
+        }).catch(() => undefined);
         return runEventStore.get(runId);
       }
     }
@@ -318,12 +318,12 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
         });
         await appendSystemRunEvent(runId, "evidence_collecting", { resultRunId: result.id });
         if (graphOwnsFinalization) {
-          resumeAgentGraphInBackground(runId, {
+          void resumeAgentGraphInBackground(runId, {
             execution: {
               resultRunId: result.id,
               executionSucceeded: result.outcomeSummary?.executionSucceeded === true
             }
-          });
+          }).catch(() => undefined);
           return runEventStore.get(runId);
         }
         const machineGate = machineGateFromResult(result);
@@ -359,7 +359,7 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
           requestedScenarioId,
           projectedScenarioId: projection.selectedScenarioId
         });
-        resumeAgentGraphInBackground(runId, { execution: { finalStatus: "blocked", error: "scenario_handoff_missing" } });
+        void resumeAgentGraphInBackground(runId, { execution: { finalStatus: "blocked", error: "scenario_handoff_missing" } }).catch(() => undefined);
         return runEventStore.get(runId);
       }
       const terminal = await appendSystemRunEvent(runId, "run_blocked", {
@@ -373,7 +373,7 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
     if (!queuedRequest.scenarioId) {
       if (graphOwnsFinalization) {
         await appendSystemRunEvent(runId, "evidence_collecting", { error: "scenario_handoff_missing" });
-        resumeAgentGraphInBackground(runId, { execution: { finalStatus: "blocked", error: "scenario_handoff_missing" } });
+        void resumeAgentGraphInBackground(runId, { execution: { finalStatus: "blocked", error: "scenario_handoff_missing" } }).catch(() => undefined);
         return runEventStore.get(runId);
       }
       const terminal = await appendSystemRunEvent(runId, "run_blocked", { finalStatus: "blocked", error: "scenario_handoff_missing" });
@@ -383,12 +383,12 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
     await persistExecutionResult(runId, result);
     await appendSystemRunEvent(runId, "evidence_collecting", { resultRunId: result.id });
     if (graphOwnsFinalization) {
-      resumeAgentGraphInBackground(runId, {
+      void resumeAgentGraphInBackground(runId, {
         execution: {
           resultRunId: result.id,
           executionSucceeded: true
         }
-      });
+      }).catch(() => undefined);
       return runEventStore.get(runId);
     }
     const machineGate = machineGateFromResult(result);
@@ -415,7 +415,7 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
       if (latest?.state === "running") {
         await appendSystemRunEvent(runId, "evidence_collecting", { error: message, finalStatus });
       }
-      resumeAgentGraphInBackground(runId, { execution: { finalStatus, error: message } });
+      void resumeAgentGraphInBackground(runId, { execution: { finalStatus, error: message } }).catch(() => undefined);
       return runEventStore.get(runId);
     }
     const terminal = await appendSystemRunEvent(runId, blocked ? "run_blocked" : "run_failed", {
