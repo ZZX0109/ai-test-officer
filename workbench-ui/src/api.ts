@@ -294,7 +294,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
         signal: requestSignal
       });
       if (response.ok || ![500, 502, 503, 504].includes(response.status) || attempt === maxAttempts) break;
-    } catch {
+    } catch (error) {
+      if (options?.signal?.aborted) throw error;
       if (attempt === maxAttempts) {
         throw new Error("AI 测试服务正在启动或暂时不可用，请稍候。");
       }
@@ -391,10 +392,25 @@ export function getGrayPlan() {
   return request<GrayPlan>("/api/gray-plan");
 }
 
-export function generatePlan(payload: { requirement: string; diff: string; credentialId?: string }) {
-  return request<{ source: string; message: string; plan: GrayPlan }>("/api/generate-plan", {
+export function generatePlan(
+  payload: { projectId: string; requirement: string; diff: string; credentialId?: string },
+  options?: { signal?: AbortSignal }
+) {
+  return request<{
+    source: string;
+    message: string;
+    plan: GrayPlan;
+    scenarioId?: string;
+    provenance?: {
+      source: string;
+      promptVersion?: string;
+      model?: string;
+      compilationStatus?: "validated" | "rejected" | "not-required";
+    };
+  }>("/api/generate-plan", {
     method: "POST",
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal: options?.signal
   });
 }
 

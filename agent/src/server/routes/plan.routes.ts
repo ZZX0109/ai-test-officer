@@ -16,7 +16,7 @@ type AuthorizeProject = (
 const generatePlanRequestSchema = z.object({
   projectId: z.string().optional(),
   requirement: z.string().min(1),
-  diff: z.string().min(1),
+  diff: z.string().default(""),
   credentialId: z.string().optional()
 }).strict();
 

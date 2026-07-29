@@ -287,6 +287,7 @@ export function App() {
   const analyzedBlockedRuns = useRef(new Set<string>());
   const surfacedAssistantNotices = useRef(new Set<string>());
   const hydratedAgentThreads = useRef(new Set<string>());
+  const generationRequestRef = useRef<{ id: string; projectId: string; controller: AbortController } | null>(null);
   const [flowDeleteReadyId, setFlowDeleteReadyId] = useState<string | null>(null);
   const flowDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
@@ -1626,6 +1627,8 @@ export function App() {
   }
 
   function selectProject(projectId: string) {
+    generationRequestRef.current?.controller.abort();
+    generationRequestRef.current = null;
     // A project picker is configuration-only. Do not let an already-running
     // runtime auto-mount an iframe and reflow the centre test canvas.
     setPreviewSessionProjectId("");
@@ -2307,6 +2310,8 @@ export function App() {
     // in the centre embedded browser.
     setRunPreviewModalOpen(false);
     setPlanningAutomation({ phase: "starting-run", detail: "正在创建运行并自动完成计划审批。", scenarioId: selectedScenarioId });
+    const operationProjectId = targetOverride?.projectId ?? (selectedProjectId || projectDraft?.id || "");
+    const workspaceRequestId = beginWorkspaceOperation("executing", operationProjectId);
     setIsRunning(true);
     try {
       const created = await createVisualRun(targetOverride?.appUrl ?? previewUrl, grantedProfile, selectedScenarioId, {
@@ -2326,6 +2331,12 @@ export function App() {
       setMessage("计划已确认，AI 正在自动执行测试。");
       const report = await waitForRunReport(created.run.id);
       setResult(report);
+      dispatchWorkspace({
+        type: "run-completed",
+        requestId: workspaceRequestId,
+        projectId: operationProjectId,
+        report
+      });
       setPlanningAutomation({ phase: "ready", detail: report.summary, scenarioId: selectedScenarioId });
       setMessage(report.summary);
       const finalStatus = report.finalStatus ?? report.gateStatus
@@ -2338,6 +2349,12 @@ export function App() {
       };
     } catch (error) {
       const detail = userFacingAutomationError(error instanceof Error ? error.message : "自动化测试启动失败");
+      dispatchWorkspace({
+        type: "operation-failed",
+        requestId: workspaceRequestId,
+        projectId: operationProjectId,
+        error: detail
+      });
       if (!targetOverride?.batchMode) {
         setPlanningAutomation({ phase: "blocked", detail, scenarioId: selectedScenarioId });
         setMessage(detail);
@@ -2817,18 +2834,54 @@ export function App() {
       setMessage("生成计划前，请先填写需求。");
       return;
     }
+    const projectId = selectedProjectId || projectDraft?.id;
+    if (!projectId || !workspaceSelectors.canGenerate(workspaceState)) return;
+    generationRequestRef.current?.controller.abort();
+    const controller = new AbortController();
+    const requestId = beginWorkspaceOperation("generating", projectId);
+    generationRequestRef.current = { id: requestId, projectId, controller };
+    const timeout = window.setTimeout(() => controller.abort("plan_generation_timeout"), 45_000);
     setMessage("正在生成测试计划。");
     try {
       const response = await generatePlan({
+        projectId,
         requirement: requirementText,
         diff: diffText,
         credentialId: defaultCredential?.id
-      });
+      }, { signal: controller.signal });
+      if (generationRequestRef.current?.id !== requestId) return;
       setPlan(response.plan);
       setMessage(response.message);
+      dispatchWorkspace({
+        type: "plan-generated",
+        requestId,
+        projectId,
+        plan: response.plan,
+        receipt: {
+          source: response.source,
+          generatedAt: new Date().toISOString(),
+          model: response.provenance?.model,
+          ruleVersion: response.provenance?.promptVersion,
+          validationStatus: response.provenance?.compilationStatus === "validated" ? "validated" : "unverified"
+        }
+      });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "生成计划失败");
+      if (controller.signal.aborted) {
+        dispatchWorkspace({ type: "operation-cancelled", requestId, projectId });
+        setMessage(controller.signal.reason === "plan_generation_timeout" ? "生成计划超时，可以重试。" : "已取消生成计划。");
+      } else {
+        const detail = error instanceof Error ? error.message : "生成计划失败";
+        dispatchWorkspace({ type: "operation-failed", requestId, projectId, error: detail });
+        setMessage(detail);
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (generationRequestRef.current?.id === requestId) generationRequestRef.current = null;
     }
+  }
+
+  function cancelPlanGeneration() {
+    generationRequestRef.current?.controller.abort("user_cancelled");
   }
 
   async function runPatrolOnce() {
@@ -3987,9 +4040,14 @@ export function App() {
                 <h3>Agent 正在做什么</h3>
                 <p>按时间顺序查看操作、结果和已保存的证据。</p>
               </div>
-              <button className="timeline-plan-button" onClick={regeneratePlan} type="button">
-                <ListChecks size={15} />
-                重新生成计划
+              <button
+                className="timeline-plan-button"
+                disabled={!workspaceSelectors.canGenerate(workspaceState) && workspaceState.phase !== "generating"}
+                onClick={workspaceState.phase === "generating" ? cancelPlanGeneration : regeneratePlan}
+                type="button"
+              >
+                {workspaceState.phase === "generating" ? <X size={15} /> : <ListChecks size={15} />}
+                {workspaceState.phase === "generating" ? "取消生成" : workspaceState.phase === "failed" ? "重试生成计划" : "重新生成计划"}
               </button>
               {activeRunId && ["fail", "blocked", "needs-human-review"].includes(String(latestDecision)) ? (
                 <button className="timeline-plan-button" disabled={repairBusy} onClick={() => void openCodeRepairWorkspace()} type="button">
@@ -3998,6 +4056,15 @@ export function App() {
                 </button>
               ) : null}
             </div>
+            {workspaceState.generation ? (
+              <p className="muted">
+                计划来源：{workspaceState.generation.source}
+                {workspaceState.generation.model ? ` · 模型：${workspaceState.generation.model}` : ""}
+                {` · ${workspaceState.generation.validationStatus === "validated" ? "已校验" : "待校验"}`}
+                {` · ${new Date(workspaceState.generation.generatedAt).toLocaleTimeString()}`}
+              </p>
+            ) : null}
+            {workspaceState.error ? <p className="error-text" role="alert">{workspaceState.error}</p> : null}
             <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
           </section>
 

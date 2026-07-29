@@ -12,7 +12,7 @@ import { ProjectPanel } from "../src/components/ProjectPanel";
 import { RunAssistantPanel } from "../src/components/RunAssistantPanel";
 import { KnowledgeBasis } from "../src/components/KnowledgeBasis";
 import { AssistantReasoningSummary } from "../src/components/AssistantReasoningSummary";
-import { chatWithTestAssistant, subscribeRunEvents } from "../src/api";
+import { chatWithTestAssistant, generatePlan, subscribeRunEvents } from "../src/api";
 
 vi.mock("@monaco-editor/react", () => ({
   DiffEditor: ({ original, modified }: { original: string; modified: string }) => (
@@ -26,6 +26,38 @@ vi.mock("@monaco-editor/react", () => ({
 import { RepairWorkspace } from "../src/components/RepairWorkspace";
 
 describe("Workbench interactions", () => {
+  it("generates a plan through the real project-scoped API contract", async () => {
+    const responsePlan = {
+      sessionName: "Generated plan",
+      risks: [],
+      levels: []
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      source: "llm",
+      message: "generated",
+      plan: responsePlan,
+      provenance: {
+        source: "llm",
+        model: "gpt-test",
+        promptVersion: "planner-v2",
+        compilationStatus: "validated"
+      }
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const response = await generatePlan({
+      projectId: "project-1",
+      requirement: "验证登录",
+      diff: "",
+      credentialId: "credential-1"
+    }, { signal: controller.signal });
+    expect(response.plan).toEqual(responsePlan);
+    expect(response.provenance?.compilationStatus).toBe("validated");
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toMatchObject({ projectId: "project-1", requirement: "验证登录" });
+    expect(init.signal).toBe(controller.signal);
+  });
+
   it("reviews a sandbox diff, validates it and keeps host apply disabled by default", async () => {
     const loadFile = vi.fn().mockResolvedValue({
       path: "src/app.ts",
