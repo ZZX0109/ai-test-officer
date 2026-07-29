@@ -32,7 +32,6 @@ import { readAuditLog } from "./auditLog.js";
 import { readEvidence, readLatestRunId, readRunBundle } from "./evidenceStore.js";
 import { readLatestLoopEvents, readLoopEvents } from "./loopEventStore.js";
 import { listRunHistory } from "./runHistory.js";
-import { proposePlanRefinement } from "./planRefinement.js";
 import { captureDesktopScreenshot, desktopCaptureStatus } from "./desktopCaptureAdapter.js";
 import { checkEnvironment } from "./environmentCheck.js";
 import {
@@ -50,6 +49,14 @@ import {
 import { errorHandler } from "./server/middleware/errorHandler.js";
 import { metaRouter } from "./server/routes/meta.routes.js";
 import { knowledgeRouter } from "./server/routes/knowledge.routes.js";
+import { planRouter } from "./server/routes/plan.routes.js";
+import { projectMemberRouter } from "./server/routes/projectMember.routes.js";
+import {
+  executableTestPlanSchema,
+  grayPlanSchema,
+  impactAnalysisSchema,
+  sourceReadEnvelopeSchema
+} from "./server/schemas/execution.schemas.js";
 import { testCredentialConnection } from "./testConnection.js";
 import { executeLlmCall, listLlmCalls } from "./llmProvider.js";
 import { readLlmBudgetLedger } from "./llmBudgetLedger.js";
@@ -126,10 +133,8 @@ import { runDiscoveryScan } from "./discoveryScan.js";
 import { readCoverageItems } from "./coverageStore.js";
 import {
   createProjectGrant,
-  deleteProjectGrant,
   hasProjectScope,
   listAccessibleProjectIds,
-  listProjectGrants,
   projectAccessDecision,
   projectScopeForOperation
 } from "./projectAccess.js";
@@ -394,6 +399,7 @@ app.get("/artifacts/*", requireArtifactAccess, (req, res, next) => {
 });
 app.use(requireApiToken);
 app.use(knowledgeRouter());
+app.use(planRouter(assertProjectAccess));
 app.use("/api/credentials", requireRole(["admin"]));
 app.use("/api/projects/grants", requireRole(["admin"]));
 app.post("/v1/runs", requireRole(["admin", "runner"]));
@@ -1806,6 +1812,7 @@ app.use("/api/projects/:id", async (req, _res, next) => {
     next(error);
   }
 });
+app.use("/api/projects/:id/grants", projectMemberRouter());
 
 app.post("/api/projects/:id/login-credential", requireRole(["admin", "runner"]), async (req, res, next) => {
   try {
@@ -1964,35 +1971,6 @@ app.post("/api/projects/:id/diagnose", async (req, res, next) => {
   try {
     await refreshExternalProjectLaunchContract(req.params.id);
     res.json({ diagnosis: await diagnoseProject(req.params.id) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get("/api/projects/:id/grants", async (req, res, next) => {
-  try {
-    res.json({ grants: await listProjectGrants(req.params.id) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/api/projects/:id/grants", async (req, res, next) => {
-  try {
-    const body = z.object({
-      subject: z.string().min(1),
-      role: z.enum(["owner", "editor", "viewer"]),
-      expiresAt: z.string().optional(),
-    }).parse(req.body);
-    res.status(201).json({ grant: await createProjectGrant({ ...body, projectId: req.params.id }) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.delete("/api/projects/:id/grants/:grantId", async (req, res, next) => {
-  try {
-    res.json({ deleted: await deleteProjectGrant(req.params.id, req.params.grantId) });
   } catch (error) {
     next(error);
   }
@@ -2397,23 +2375,6 @@ app.post("/api/assistant/chat", async (req, res, next) => {
   }
 });
 
-app.post("/api/generate-plan", async (req, res, next) => {
-  try {
-    const body = z
-      .object({
-        projectId: z.string().optional(),
-        requirement: z.string().min(1),
-        diff: z.string().min(1),
-        credentialId: z.string().optional()
-      })
-      .parse(req.body);
-    await assertProjectAccess(req, body.projectId, "run_tests");
-    res.json(await generatePlan(body));
-  } catch (error) {
-    next(error);
-  }
-});
-
 app.post("/api/commit-check/run", async (req, res, next) => {
   try {
     const body = connectorContextSchema
@@ -2471,21 +2432,6 @@ app.get("/api/requirement-acceptances", async (_req, res, next) => {
   }
 });
 
-app.post("/api/refine-plan", async (req, res, next) => {
-  try {
-    const body = z
-      .object({
-        currentPlan: z.any(),
-        feedback: z.string().min(1),
-        failedAssertionNames: z.array(z.string()).default([])
-      })
-      .parse(req.body);
-    res.json(proposePlanRefinement(body));
-  } catch (error) {
-    next(error);
-  }
-});
-
 app.post("/api/run-visual-test", requireInternalWorkerIdentity, async (req, res, next) => {
   try {
     res.setHeader("Deprecation", "true");
@@ -2501,10 +2447,10 @@ app.post("/api/run-visual-test", requireInternalWorkerIdentity, async (req, res,
         requirement: z.string().optional(),
         diff: z.string().optional(),
         bugTicket: z.string().optional(),
-        plan: z.any().optional(),
-        sourceContexts: z.array(z.any()).optional(),
-        impactAnalysis: z.any().optional(),
-        executablePlan: z.any().optional(),
+        plan: grayPlanSchema.optional(),
+        sourceContexts: z.array(sourceReadEnvelopeSchema).optional(),
+        impactAnalysis: impactAnalysisSchema.optional(),
+        executablePlan: executableTestPlanSchema.optional(),
         permissionProfile: permissionProfileSchema
       })
       .superRefine(requireRunnableTarget)
@@ -2521,7 +2467,7 @@ app.post("/api/discovery/scan", async (req, res, next) => {
     const body = z
       .object({
         ...runnableTargetShape,
-        sourceContexts: z.array(z.any()).optional(),
+        sourceContexts: z.array(sourceReadEnvelopeSchema).optional(),
         goal: z.string().trim().max(20_000).optional(),
         credentialId: z.string().optional()
       })
@@ -2640,7 +2586,7 @@ app.post("/api/patrol/run-now", async (req, res, next) => {
         credentialId: z.string().optional(),
         requirement: z.string().optional(),
         diff: z.string().optional(),
-        plan: z.any().optional(),
+        plan: grayPlanSchema.optional(),
         notify: z.array(z.string()).default(["oncall"]),
         permissionProfile: permissionProfileSchema
       })

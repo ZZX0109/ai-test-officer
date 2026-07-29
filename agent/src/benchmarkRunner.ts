@@ -2,10 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { commandSpecSchema } from "@ai-test-officer/contracts";
+import { commandSpecSchema, type ArtifactV2, type LlmCall, type PlanProvenance } from "@ai-test-officer/contracts";
 import type { BenchmarkRunRecord, BenchmarkVerdict } from "./benchmark.js";
 import { getProject, toTargetProjectConfig } from "./projectAdapter.js";
 import { redactText } from "./redaction.js";
+import type { VisualRunResult } from "./types.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const apiUrl = (process.env.AGENT_URL ?? "http://127.0.0.1:4317").replace(/\/$/, "");
@@ -17,6 +18,12 @@ type Model = { id: string; credentialIdEnv: string; provider: string; model: str
 type ExecutionMapping = { logicalProjectId: string; executionProjectId: string; targetUrl?: string; targetKind?: string };
 type FixtureVariantBinding = { fixtureVariantId: string; logicalProjectId: string; executionProjectId: string };
 const terminalRunStates = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
+
+type BenchmarkAgentReport = VisualRunResult & {
+  planProvenance?: PlanProvenance;
+  plannerCall?: LlmCall;
+  plannerCalls?: LlmCall[];
+};
 
 const scenarioByBenchmarkId: Record<string, string> = {
   "todo-create-valid": "task_create_success",
@@ -161,21 +168,22 @@ export function assessPlannerOutcome(plannerMode: "deterministic" | "llm", prove
 }
 
 /** Keep scheduling, execution, coverage and formal-gate facts separate in every lane. */
-export function deriveBenchmarkExecutionSignals(report: Record<string, any>, artifacts: Array<Record<string, any>>) {
-  const riskCoverage = Array.isArray(report.riskCoverageMatrix) ? report.riskCoverageMatrix : [];
-  const requirementCovered = riskCoverage.length > 0 && riskCoverage.every((risk: any) => risk?.covered === true);
-  const requirementPassed = requirementCovered && riskCoverage.every((risk: any) => risk?.passed === true);
+export function deriveBenchmarkExecutionSignals(report: BenchmarkAgentReport, artifacts: ArtifactV2[]) {
+  const riskCoverage = report.riskCoverageMatrix;
+  const requirementCovered = riskCoverage.length > 0 && riskCoverage.every((risk) => risk.covered === true);
+  const requirementPassed = requirementCovered && riskCoverage.every((risk) => risk.passed === true);
   const hasRuntimeArtifacts = artifacts.some((artifact) => artifact.origin === "runtime-captured");
   const hasExecutedAssertion = Array.isArray(report.assertions) && report.assertions.length > 0;
-  const metadataIntegrityVerified = Boolean(report.artifactIntegrity?.items?.length)
-    && report.artifactIntegrity.items.every((item: any) => item.status === "present" || item.status === "self_reference");
+  const integrityItems = report.artifactIntegrity?.items ?? [];
+  const metadataIntegrityVerified = integrityItems.length > 0
+    && integrityItems.every((item) => item.status === "present" || item.status === "self_reference");
   const artifactsAreFormal = artifacts.length > 0
     && artifacts.every((artifact) => (artifact.origin === "runtime-captured" || artifact.origin === "fixture")
       && artifact.integrity?.sha256
       && artifact.integrity?.sizeBytes !== undefined);
   const evidenceGrounded = Array.isArray(report.evidenceQuality?.assertions)
     && report.evidenceQuality.assertions.length > 0
-    && report.evidenceQuality.assertions.every((item: any) => item.status === "grounded")
+    && report.evidenceQuality.assertions.every((item) => item.status === "grounded")
     && report.evidenceQuality?.summary?.crossAttemptViolations === 0;
   const artifactIntegrityVerified = metadataIntegrityVerified && artifactsAreFormal;
   const executionStarted = Boolean(report.attempts?.length || hasRuntimeArtifacts);
@@ -334,13 +342,14 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
     run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}`)).run;
   }
   const projection = run;
-  const report = (await request<{ report: Record<string, any> }>(`/v1/runs/${run.id}/report`)).report;
-  const artifacts = (await request<{ artifacts: Array<Record<string, any>> }>(`/v1/runs/${run.id}/artifacts`)).artifacts;
+  const report = (await request<{ report: BenchmarkAgentReport }>(`/v1/runs/${run.id}/report`)).report;
+  const artifacts = (await request<{ artifacts: ArtifactV2[] }>(`/v1/runs/${run.id}/artifacts`)).artifacts;
   const judgeCall = report.judgeReport?.llmCall;
   const judgeCalls = Array.isArray(report.judgeReport?.llmCalls) && report.judgeReport.llmCalls.length ? report.judgeReport.llmCalls : judgeCall ? [judgeCall] : [];
   const plannerCall = report.plannerCall;
   const plannerCalls = Array.isArray(report.plannerCalls) && report.plannerCalls.length ? report.plannerCalls : plannerCall ? [plannerCall] : [];
-  const usageItems = [...plannerCalls.map((call: any) => call.usage), ...judgeCalls.map((call: any) => call.usage)].filter(Boolean) as Array<Record<string, number | undefined>>;
+  const usageItems = [...plannerCalls.map((call) => call.usage), ...judgeCalls.map((call) => call.usage)]
+    .filter((usage): usage is LlmCall["usage"] => Boolean(usage));
   const usage = usageItems.length ? {
     promptTokens: usageItems.reduce((sum, item) => sum + (item.promptTokens ?? 0), 0),
     completionTokens: usageItems.reduce((sum, item) => sum + (item.completionTokens ?? 0), 0),
@@ -356,8 +365,8 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const modelRecommendation = report.judgeReport?.modelRecommendation;
   const judgeRoutedToLlm = report.judgeRouting?.route === "llm";
   const llmVerdict = judgeRoutedToLlm ? verdict(modelRecommendation?.verdict) : deterministicVerdict;
-  const deterministicEvidenceRefs = report.judgeReport?.releaseJudge?.findings?.flatMap((finding: any) => finding.evidenceRefs ?? [])
-    ?? report.evidence?.filter((item: any) => item.type === "assertion").map((item: any) => item.id)
+  const deterministicEvidenceRefs = report.judgeReport?.releaseJudge?.findings?.flatMap((finding) => finding.evidenceRefs ?? [])
+    ?? report.evidence?.filter((item) => item.type === "assertion").map((item) => item.id)
     ?? [];
   const durationMs = Date.now() - new Date(startedAt).getTime();
   const plannerOutcome = assessPlannerOutcome(plannerMode, report.planProvenance);
@@ -370,11 +379,11 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
     executedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId,
     selectedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId, failedStepId: report.executionError?.stepId, executionErrorCode: report.executionError?.code, finalStatus: finalStatus(run.gateStatus),
     planProvenance: report.planProvenance,
-    attempts: (report.attempts ?? []).map((attempt: any) => ({ id: attempt.id, runId: attempt.runId, scenarioId: attempt.scenarioId, attempt: attempt.attempt, status: attempt.status })),
-    llmCalls: [...plannerCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "planning" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage, transportMode: call.transportMode, fallbackReason: call.fallbackReason, transportAttempts: call.transportAttempts })), ...judgeCalls.map((call: any) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "judging" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage, transportMode: call.transportMode, fallbackReason: call.fallbackReason, transportAttempts: call.transportAttempts }))],
+    attempts: (report.attempts ?? []).map((attempt) => ({ id: attempt.id, runId: attempt.runId, scenarioId: attempt.scenarioId, attempt: attempt.attempt, status: attempt.status })),
+    llmCalls: [...plannerCalls.map((call) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "planning" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage, transportMode: call.transportMode, fallbackReason: call.fallbackReason, transportAttempts: call.transportAttempts })), ...judgeCalls.map((call) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "judging" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage, transportMode: call.transportMode, fallbackReason: call.fallbackReason, transportAttempts: call.transportAttempts }))],
     deterministic: { verdict: deterministicVerdict, evidenceRefs: deterministicEvidenceRefs, status: "passed", durationMs },
     llm: plannerMode === "llm" || judgeMode === "adaptive" ? { verdict: llmVerdict, evidenceRefs: judgeRoutedToLlm ? modelRecommendation?.evidenceRefs ?? [] : deterministicEvidenceRefs, failureClass: judgeRoutedToLlm ? modelRecommendation?.failureClass : report.failureAttributions?.[0]?.failureClass, status: llmFailed ? "failed" : "passed", fallback: judgeRoutedToLlm && report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
-    evidence: (report.evidence ?? []).map((item: any) => ({ id: item.id, type: item.type })), attribution: { failureClass: report.failureAttributions?.[0]?.failureClass, suspectFiles: report.failureAttributions?.flatMap((entry: any) => entry.topSuspects?.map((suspect: any) => suspect.filePath) ?? []) ?? [], evidenceRefs: report.failureAttributions?.flatMap((entry: any) => entry.evidenceRefs ?? []) ?? [] },
+    evidence: (report.evidence ?? []).map((item) => ({ id: item.id, type: item.type })), attribution: { failureClass: report.failureAttributions?.[0]?.failureClass, suspectFiles: report.failureAttributions?.flatMap((entry) => entry.topSuspects?.map((suspect) => suspect.filePath) ?? []) ?? [], evidenceRefs: report.failureAttributions?.flatMap((entry) => entry.evidenceRefs ?? []) ?? [] },
     executionOrigin: "agent-run", gateEligible: execution.gateEligible, artifactIntegrityVerified: execution.artifactIntegrityVerified, evidenceGrounded: execution.evidenceGrounded, evidenceQuality: report.evidenceQuality ? { groundedPassedRate: report.evidenceQuality.summary.groundedPassedRate, runtimeArtifactRate: report.evidenceQuality.summary.runtimeArtifactRate, crossAttemptViolations: report.evidenceQuality.summary.crossAttemptViolations } : undefined, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified", runId: artifact.runId, scenarioId: artifact.scenarioId, stepId: artifact.stepId, attemptId: artifact.attemptId, attempt: artifact.attempt, capturedAt: artifact.integrity.capturedAt, sizeBytes: artifact.integrity.sizeBytes, mediaType: artifact.integrity.mediaType, storageUri: artifact.storageUri }))
   };
 }
@@ -442,13 +451,13 @@ export async function runBenchmarkExperiment() {
   const hardBlocked = llmEnabled && (!runnableModels.length || (check.failures.length > 0 && !allowPartialModels));
   const manifest = { experimentId, createdAt: new Date().toISOString(), split: requestedSplit, suites: [...(includeDevelopment ? ["core"] : []), ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : []), ...(includeHoldout ? ["holdout"] : [])], caseCount: cases.length, caseIds: cases.map((item) => item.id), plannedRuns, requestedPlannedRuns, repetitions, promptVersion: config.promptVersion, lanes: requestedLanes, llmEnabled, models: runnableModels.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), unavailableModels: requestedModels.filter((model) => !check.credentials.has(model.id)).map((model) => ({ id: model.id, provider: model.provider, model: model.model })), developmentGate, status: hardBlocked ? "blocked" : "running", blockers: check.failures, partial: check.failures.length > 0 };
   const existingManifestFile = path.join(directory, "manifest.json");
-  let existingManifest: any;
-  try { existingManifest = JSON.parse(await readFile(existingManifestFile, "utf8")); } catch { /* first run */ }
+  let existingManifest: Partial<typeof manifest> | undefined;
+  try { existingManifest = JSON.parse(await readFile(existingManifestFile, "utf8")) as Partial<typeof manifest>; } catch { /* first run */ }
   if (existingManifest) {
     if (process.env.BENCHMARK_RESUME !== "1") throw new Error(`benchmark_experiment_already_exists:${experimentId}`);
     const sameDefinition = existingManifest.plannedRuns === manifest.plannedRuns
       && existingManifest.promptVersion === manifest.promptVersion
-      && JSON.stringify(existingManifest.models?.map((item: any) => item.id) ?? []) === JSON.stringify(manifest.models.map((item) => item.id))
+      && JSON.stringify(existingManifest.models?.map((item) => item.id) ?? []) === JSON.stringify(manifest.models.map((item) => item.id))
       && (existingManifest.caseIds ? JSON.stringify(existingManifest.caseIds) === JSON.stringify(manifest.caseIds) : existingManifest.caseCount === manifest.caseCount);
     if (!sameDefinition) throw new Error(`benchmark_resume_definition_mismatch:${experimentId}`);
   }

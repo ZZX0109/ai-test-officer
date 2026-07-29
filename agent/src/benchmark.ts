@@ -108,7 +108,7 @@ export interface BenchmarkRunRecord {
   artifactsV2?: Array<{
     id: string;
     type: string;
-    origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "legacy-unverified";
+    origin: "runtime-captured" | "fixture" | "simulated" | "user-uploaded" | "agent-generated" | "legacy-unverified";
     sha256: string;
     integrityStatus: "verified" | "missing" | "mismatch";
     runId?: string;
@@ -286,7 +286,7 @@ export interface JudgeLaneRecord {
   failureClass?: string;
   status: "passed" | "not_configured" | "failed";
   fallback?: boolean;
-  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number; estimatedCostUsd?: number };
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number; estimatedCostUsd?: number | null };
   durationMs?: number;
 }
 

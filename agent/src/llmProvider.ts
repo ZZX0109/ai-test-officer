@@ -35,6 +35,30 @@ export interface LlmCallContext {
 const LANGCHAIN_ADAPTER_VERSION = "agent-orchestration-0.1.0";
 const PROVIDER_ADAPTER_VERSION = "responses-2.0.0";
 
+interface ProviderResponseData {
+  id?: string;
+  model?: string;
+  output_text?: string;
+  usage?: {
+    prompt_tokens?: number;
+    input_tokens?: number;
+    completion_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+  content?: Array<{ type?: string; text?: string }>;
+  output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+  choices?: Array<{ message?: { content?: string } }>;
+}
+
+interface TransportTelemetry {
+  attemptStartedAt?: string;
+  durationMs?: number;
+  requestId?: string;
+  bytesReceived?: number;
+  eventTypes?: string[];
+}
+
 function sha256(value: string) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -148,7 +172,7 @@ async function persistCallAndSettleBudget(
 }
 
 export async function parseResponsesStream(response: Response) {
-  let completed: Record<string, any> | undefined;
+  let completed: ProviderResponseData | undefined;
   let text = "";
   const reader = response.body?.getReader();
   if (!reader) throw new Error("provider_responses_body_missing");
@@ -161,7 +185,11 @@ export async function parseResponsesStream(response: Response) {
   const consume = (line: string) => {
     if (!line.startsWith("data: ")) return;
     try {
-      const event = JSON.parse(line.slice(6)) as Record<string, any>;
+      const event = JSON.parse(line.slice(6)) as {
+        type?: string;
+        delta?: string;
+        response?: ProviderResponseData;
+      };
       if (typeof event.type === "string") eventTypes.add(event.type);
       if (event.type === "response.output_text.delta") {
         if (!firstTokenAt) firstTokenAt = new Date().toISOString();
@@ -197,9 +225,9 @@ async function parseResponsesJson(response: Response) {
   const body = await response.text();
   const bytesReceived = Buffer.byteLength(body, "utf8");
   if (!body.trim()) throw new Error("provider_responses_empty");
-  let data: Record<string, any>;
+  let data: ProviderResponseData;
   try {
-    data = JSON.parse(body) as Record<string, any>;
+    data = JSON.parse(body) as ProviderResponseData;
   } catch {
     throw new Error("provider_responses_invalid_json");
   }
@@ -262,7 +290,7 @@ async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: nu
         : { data: await response.json(), telemetry: { bytesReceived: 0, eventTypes: ["json_response"], firstTokenAt: undefined as string | undefined } };
     bytesReceived = parsed.telemetry.bytesReceived;
     eventTypes = parsed.telemetry.eventTypes;
-    const data = parsed.data as Record<string, any>;
+    const data = parsed.data as ProviderResponseData;
     requestId ??= data.id;
     return {
       data,
@@ -419,7 +447,9 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
     } catch (error) {
       lastError = error;
       const errorCode = error instanceof Error ? error.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
-      const telemetry = error && typeof error === "object" && "transportTelemetry" in error ? (error as any).transportTelemetry : {};
+      const telemetry: TransportTelemetry = error && typeof error === "object" && "transportTelemetry" in error
+        ? (error as { transportTelemetry?: TransportTelemetry }).transportTelemetry ?? {}
+        : {};
       const mode = modes[attempt - 1];
       attempts.push({ attempt, mode, status: "failed", startedAt: telemetry.attemptStartedAt ?? new Date().toISOString(), durationMs: telemetry.durationMs ?? 0, requestId: telemetry.requestId, errorCode, bytesReceived: telemetry.bytesReceived ?? 0, eventTypes: telemetry.eventTypes ?? [] });
       const retriable = responsesApi && input.transportPreference !== "stream" && /provider_http_(408|429|502|503|504)|provider_responses_(incomplete|empty|invalid_event|body_missing)|TimeoutError|AbortError|fetch_failed|operation_was_aborted_due_to_timeout/i.test(errorCode);

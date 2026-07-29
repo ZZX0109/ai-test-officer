@@ -1,6 +1,13 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { evaluateExperiment, validateExperimentRunMatrix, type BenchmarkCase, type BenchmarkRunRecord, type HumanBenchmarkLabel } from "./benchmark.js";
+import {
+  evaluateExperiment,
+  validateExperimentRunMatrix,
+  type BenchmarkCase,
+  type BenchmarkRunRecord,
+  type ExperimentEvaluation,
+  type HumanBenchmarkLabel
+} from "./benchmark.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
@@ -15,17 +22,26 @@ function externalDirectory(value: string | undefined, name: string) {
   return resolved;
 }
 
-function publicEvaluation(output: any) {
+type EvaluationOutput = {
+  experimentId: string;
+  createdAt: string;
+  status: string;
+  conclusion: string;
+  provenance: Record<string, unknown>;
+  evaluations: ExperimentEvaluation[];
+};
+
+function publicEvaluation<T extends EvaluationOutput>(output: T): T {
   return {
     ...output,
-    evaluations: output.evaluations.map((evaluation: any) => ({
+    evaluations: output.evaluations.map((evaluation) => ({
       ...evaluation,
       // A public blind report must not let a developer infer evaluator labels
       // from a per-run mismatch, failure category, or expected scenario. The
       // complete diagnostic stays in the evaluator-owned report directory.
       diagnostics: evaluation.split === "blind" || evaluation.split === "holdout" ? [] : evaluation.diagnostics
     }))
-  };
+  } as T;
 }
 
 function pct(value: unknown) {
