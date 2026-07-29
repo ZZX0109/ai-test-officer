@@ -22,7 +22,7 @@
     "dev:app": "npm --workspace app-under-test run dev",
     "dev:workbench": "npm --workspace workbench-ui run dev",
     "build:packages": "npm --workspace @ai-test-officer/contracts run build && npm --workspace @ai-test-officer/playwright-runtime run build && npm --workspace @ai-test-officer/desktop-runtime run build && npm --workspace @ai-test-officer/execution-worker run build && npm --workspace @ai-test-officer/agent-orchestration run build",
-    "contracts:generate": "npm --workspace @ai-test-officer/agent run contracts:openapi && openapi-typescript docs/openapi.json -o workbench-ui/src/generated/api.ts",
+    "contracts:generate": "npm --workspace @ai-test-officer/agent run contracts:openapi && openapi-typescript docs/openapi.json -o workbench-ui/src/generated/api.ts && node scripts/generate-pydantic-client.mjs",
     "build": "npm run build:packages && npm --workspace @ai-test-officer/agent run build && npm --workspace app-under-test run build && npm --workspace workbench-ui run build",
     "typecheck": "npm run build:packages && npm --workspaces --if-present run typecheck",
     "test": "npm run build:packages && npm --workspaces --if-present run test",

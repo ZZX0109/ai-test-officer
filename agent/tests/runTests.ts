@@ -51,6 +51,8 @@ import { testLlmLifecycle } from "./llmLifecycle.test.js";
 import { testStructuredActionExecutors } from "./structuredActionExecutors.test.js";
 import { testLlmBudgetLedger } from "./llmBudgetLedger.test.js";
 import { testAgentGraphMode } from "./agentGraphMode.test.js";
+import { testKnowledgeBoundary } from "./knowledgeBoundary.test.js";
+import { testKnowledgeBoundaryPlatform } from "./knowledgeBoundaryPlatform.test.js";
 
 async function main() {
   await testConnectorEnvelope();
@@ -61,6 +63,8 @@ async function main() {
   testLlmLifecycle();
   await testLlmBudgetLedger();
   testAgentGraphMode();
+  testKnowledgeBoundary();
+  await testKnowledgeBoundaryPlatform();
   await testStructuredActionExecutors();
   await testDiscoveryScanDrafts();
   await testDiscoveryProbeExecutesActionBeforeOracle();

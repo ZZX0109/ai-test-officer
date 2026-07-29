@@ -7,6 +7,7 @@ import {
   agentInterruptSchema,
   agentPermissionProfileSchema,
   commandSpecSchema,
+  knowledgeBoundaryOutputSchema,
   llmCallSchema,
   planProvenanceSchema,
   projectManifestSchema
@@ -20,7 +21,7 @@ import {
   rotateCredential,
   updateCredential
 } from "./credentialStore.js";
-import { buildScenarioGrayPlan, fixedGrayPlan } from "./plan.js";
+import { buildScenarioGrayPlan } from "./plan.js";
 import { generatePlan } from "./llmPlanner.js";
 import { analyzeIntake } from "./intakeAnalyzer.js";
 import { routePlanner } from "./llmRoutingPolicy.js";
@@ -34,7 +35,6 @@ import { listRunHistory } from "./runHistory.js";
 import { proposePlanRefinement } from "./planRefinement.js";
 import { captureDesktopScreenshot, desktopCaptureStatus } from "./desktopCaptureAdapter.js";
 import { checkEnvironment } from "./environmentCheck.js";
-import { listPlatformCapabilities } from "./platformCapabilities.js";
 import {
   assertSecurityConfig,
   authContext,
@@ -47,10 +47,31 @@ import {
   requireRole,
   securitySummary
 } from "./security.js";
+import { errorHandler } from "./server/middleware/errorHandler.js";
+import { metaRouter } from "./server/routes/meta.routes.js";
+import { knowledgeRouter } from "./server/routes/knowledge.routes.js";
 import { testCredentialConnection } from "./testConnection.js";
 import { executeLlmCall, listLlmCalls } from "./llmProvider.js";
 import { readLlmBudgetLedger } from "./llmBudgetLedger.js";
 import { subscribeLlmLifecycle } from "./llmLifecycle.js";
+import {
+  assertKnowledgeCanAuthorizeAction,
+  createKnowledgeContext,
+  knowledgeBoundaryJsonSchemaV2,
+  knowledgeBoundarySystemPolicy,
+  publicKnowledgeContext,
+  validateKnowledgeBoundaryOutput
+} from "./knowledgeBoundary.js";
+import { executeKnowledgeBoundedLlm } from "./knowledge-boundary/executeKnowledgeBoundedLlm.js";
+import { subscribeKnowledgeLifecycle } from "./knowledge-boundary/lifecycle.js";
+import {
+  appendAgentMessage,
+  listAgentMessages,
+  listRunKnowledge,
+  listRunKnowledgeConflicts,
+  listRunKnowledgeToolExecutions,
+  readKnowledgeContext
+} from "./knowledge-boundary/store.js";
 import {
   appendHumanOverrideConclusion,
   readProofArtifacts,
@@ -84,7 +105,6 @@ import {
   probeScenarioDraft,
   updateHarnessGap
 } from "./harnessGapStore.js";
-import { readLatestDemoVerification } from "./demoVerificationStore.js";
 import { requireRunnableTarget, runnableTargetShape, targetRuntimeSchema } from "./runRequestContract.js";
 import {
   getProject,
@@ -106,7 +126,6 @@ import { runDiscoveryScan } from "./discoveryScan.js";
 import { readCoverageItems } from "./coverageStore.js";
 import { createProjectGrant, deleteProjectGrant, hasProjectScope, listProjectGrants } from "./projectAccess.js";
 import {
-  auditStoreStatus,
   readEvidenceFromAuditStore,
   readFindingsFromAuditStore,
   readJudgeSummaryFromAuditStore
@@ -205,6 +224,68 @@ async function startProjectWithFreshConfig(id: string) {
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
 
+const knowledgeBoundaryJsonSchema = knowledgeBoundaryJsonSchemaV2;
+const assistantReasoningSummaryJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["phase", "observations", "assessment", "nextStep", "userAction", "confidence"],
+  properties: {
+    phase: { type: "string", enum: ["observing", "diagnosing", "planning", "waiting-user", "acting", "completed"] },
+    observations: {
+      type: "array",
+      maxItems: 6,
+      items: { type: "string", minLength: 1, maxLength: 500 }
+    },
+    assessment: { type: "string", minLength: 1, maxLength: 1_200 },
+    nextStep: { type: "string", minLength: 1, maxLength: 800 },
+    userAction: { type: "string", minLength: 1, maxLength: 800 },
+    confidence: { type: "string", enum: ["high", "medium", "low"] }
+  }
+} as const;
+const assistantReasoningSummarySchema = z.object({
+  phase: z.enum(["observing", "diagnosing", "planning", "waiting-user", "acting", "completed"]),
+  observations: z.array(z.string().min(1).max(500)).max(6),
+  assessment: z.string().min(1).max(1_200),
+  nextStep: z.string().min(1).max(800),
+  userAction: z.string().min(1).max(800),
+  confidence: z.enum(["high", "medium", "low"])
+}).strict();
+
+async function executeStructuredAssistant<T>(input: {
+  credential: NonNullable<Awaited<ReturnType<typeof getCredential>>>;
+  apiKey: string;
+  system: string;
+  prompt: string;
+  schemaName: string;
+  jsonSchema: NonNullable<Parameters<typeof executeLlmCall>[0]["jsonSchema"]>["schema"];
+  parseSchema: z.ZodType<T>;
+  context: Parameters<typeof executeLlmCall>[0]["context"];
+  knowledgeContext: ReturnType<typeof createKnowledgeContext>;
+}) {
+  const callInput = {
+    credential: input.credential,
+    apiKey: input.apiKey,
+    system: input.system,
+    prompt: input.prompt,
+    maxTokens: 700,
+    timeoutMs: 20_000,
+    totalTimeoutMs: 30_000,
+    transportPreference: "non-stream-retry" as const,
+    jsonSchema: { name: input.schemaName, schema: input.jsonSchema },
+    context: input.context
+  };
+  const result = await executeKnowledgeBoundedLlm({
+    ...callInput,
+    knowledgeContext: input.knowledgeContext,
+    parseOutput: (text) => input.parseSchema.parse(JSON.parse(text))
+  });
+  return {
+    assistant: result.value,
+    llm: result,
+    repaired: result.calls.length > 1
+  };
+}
+
 function assertOrganizationAccess(req: express.Request, organizationId: unknown) {
   const context = authContext(req);
   if (!isOrganizationAuthorized(context, organizationId)) throw new Error("organization_forbidden");
@@ -283,6 +364,7 @@ app.get("/artifacts/*", requireArtifactAccess, (req, res, next) => {
   });
 });
 app.use(requireApiToken);
+app.use(knowledgeRouter());
 app.use("/api/credentials", requireRole(["admin"]));
 app.use("/api/projects/grants", requireRole(["admin"]));
 app.post("/v1/runs", requireRole(["admin", "runner"]));
@@ -306,9 +388,7 @@ const credentialSchema = z.object({
   scopes: z.array(z.string()).optional()
 });
 
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "ai-test-officer-agent" });
-});
+app.use(metaRouter);
 
 app.get("/api/credentials", async (_req, res, next) => {
   try {
@@ -410,35 +490,6 @@ app.post("/api/credentials/:id/test", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
-
-app.get("/api/gray-plan", (_req, res) => {
-  res.json(fixedGrayPlan);
-});
-
-app.get("/api/platform-capabilities", (_req, res) => {
-  res.json({ capabilities: listPlatformCapabilities() });
-});
-
-app.get("/api/audit-store/status", (_req, res) => {
-  res.json({ auditStore: auditStoreStatus() });
-});
-
-app.get("/api/demo-verification/latest", async (_req, res, next) => {
-  try {
-    const verification = await readLatestDemoVerification();
-    if (!verification) {
-      res.status(404).json({ error: "No demo verification has been recorded yet" });
-      return;
-    }
-    res.json({ verification });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get("/api/scenarios", (_req, res) => {
-  res.json({ scenarios: listScenarios() });
 });
 
 app.get("/api/harness-gaps", async (_req, res, next) => {
@@ -878,7 +929,17 @@ app.get("/v1/runs/:id/conclusions", async (req, res, next) => {
     let integrity = { valid: false, errors: ["manifest_missing"] };
     if (proof.manifest) {
       try {
-        integrity = verifyEvidenceManifest(await readRunBundle(resultRunId), proof.manifest);
+        const [knowledge, conflicts, toolExecutions, messages] = await Promise.all([
+          listRunKnowledge(resultRunId),
+          listRunKnowledgeConflicts(resultRunId),
+          listRunKnowledgeToolExecutions(resultRunId),
+          listAgentMessages(resultRunId)
+        ]);
+        integrity = verifyEvidenceManifest(
+          await readRunBundle(resultRunId),
+          proof.manifest,
+          { ...knowledge, conflicts, toolExecutions, messages }
+        );
       } catch {
         integrity = { valid: false, errors: ["manifest_verification_failed"] };
       }
@@ -940,6 +1001,7 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    await appendAgentMessage({ runId: run.id, role: "user", content: body.message });
     const project = typeof run.input.projectId === "string" ? await getProject(run.input.projectId) : undefined;
     const publicCredentials = await listCredentials();
     const selectedPublic = body.credentialId
@@ -950,24 +1012,198 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
     const credential = await getCredential(selectedPublic.id);
     if (!credential) return void res.status(409).json({ error: "assistant_model_not_configured" });
     const graph = await getAgentGraphProjection(run.id);
+    const repairs = await listRepairSessions(run.id);
+    const resultFacts = await readRunBundle(run.resultRunId ?? run.id)
+      .then((bundle) => ({
+        summary: bundle.result.summary,
+        executionError: bundle.result.executionError,
+        failedAssertions: bundle.result.assertions
+          .filter((item) => !item.passed)
+          .slice(0, 8)
+          .map((item) => ({
+            name: item.name,
+            expected: item.expected,
+            actual: item.actual,
+            evidenceRefs: item.fact?.evidenceRefs ?? []
+          })),
+        failureAttributions: (bundle.result.failureAttributions ?? []).slice(0, 4).map((item) => ({
+          title: item.title,
+          reasoning: item.reasoning,
+          suggestedFix: item.suggestedFix
+        })),
+        evidenceCount: bundle.evidence.length
+      }))
+      .catch(() => undefined);
+    const runEvidenceRefs = Array.from(new Set(
+      resultFacts?.failedAssertions.flatMap((item) => item.evidenceRefs) ?? []
+    ));
+    const knowledgeContext = createKnowledgeContext({
+      purpose: "assistant",
+      projectSnapshot: { projectId: project?.id ?? String(run.input.projectId) },
+      claims: [
+        {
+          id: "user-message",
+          statement: body.message,
+          status: "user-provided",
+          domain: "user-intent",
+          sourceRefs: [`request:${run.id}:message`],
+          confidence: 1
+        },
+        ...(project ? [{
+          id: "project-record",
+          statement: `Current project is ${project.name} (${project.id}).`,
+          status: "retrieved" as const,
+          domain: "project-static" as const,
+          sourceRefs: [`project:${project.id}`],
+          confidence: 1
+        }] : []),
+        {
+          id: "run-state",
+          subject: "run-state",
+          statement: `Run ${run.id} is in state ${run.state}; final status is ${run.gateStatus ?? "not-decided"}.`,
+          status: "observed",
+          domain: "runtime",
+          sourceRefs: [`run-event:${run.id}`],
+          confidence: 1,
+          observedAt: new Date().toISOString()
+        },
+        ...(run.machineGate ? [{
+          id: "machine-gate",
+          subject: "machine-gate",
+          statement: `Machine gate is ${run.machineGate.status}: ${run.machineGate.reasons.join("; ") || "no reason supplied"}.`,
+          status: "observed" as const,
+          domain: "runtime" as const,
+          sourceRefs: run.machineGate.reasonDetails?.flatMap((item) => item.evidenceRefs).filter(Boolean)
+            ?? (runEvidenceRefs.length ? runEvidenceRefs : [`run-event:${run.id}`]),
+          confidence: 1,
+          observedAt: new Date().toISOString()
+        }] : []),
+        ...(resultFacts ? [{
+          id: "saved-run-result",
+          subject: "saved-run-result",
+          statement: `Saved result summary: ${resultFacts.summary}; execution error: ${resultFacts.executionError ?? "none"}; failed assertions: ${resultFacts.failedAssertions.length}; evidence count: ${resultFacts.evidenceCount}.`,
+          status: "observed" as const,
+          domain: "runtime" as const,
+          sourceRefs: runEvidenceRefs.length ? runEvidenceRefs : [`run-result:${run.resultRunId ?? run.id}`],
+          confidence: 1,
+          observedAt: new Date().toISOString()
+        }] : []),
+        ...repairs.slice(0, 3).map((repair) => ({
+          id: `repair-${repair.id}`,
+          statement: `Repair ${repair.id} status=${repair.status}; changed files=${repair.files.map((file) => file.path).join(", ") || "none"}; validation=${repair.validation?.status ?? "not-run"}.`,
+          status: "observed" as const,
+          domain: "runtime" as const,
+          sourceRefs: [`repair:${repair.id}`],
+          confidence: 1,
+          observedAt: new Date().toISOString()
+        }))
+      ],
+      allowedCapabilities: [
+        "explain-status",
+        "revise-plan",
+        "start-run",
+        "pause-run",
+        "resume-run",
+        "cancel-run",
+        "open-evidence",
+        "request-repair",
+        "request-interrupt-resume"
+      ],
+      allowedTools: ["read-run-evidence", "read-repair-history"],
+      unknowns: resultFacts ? [] : [{
+        id: "saved-result-unavailable",
+        question: "What durable execution result and evidence were saved for this run?",
+        reason: "The run bundle could not be read, so execution details cannot be asserted.",
+        blocking: true,
+        resolvableBy: "tool",
+        requestedTool: "read-run-evidence"
+      }],
+      untrustedInputKinds: ["requirement", "diff", "source", "dom", "console", "network", "prior-model-output"]
+    });
     const replySchema = {
       type: "object",
       additionalProperties: false,
-      required: ["reply", "suggestedAction", "requiresConfirmation"],
+      required: ["reply", "reasoningSummary", "suggestedAction", "requiresConfirmation", "knowledge"],
       properties: {
         reply: { type: "string", minLength: 1, maxLength: 1_200 },
-        suggestedAction: { type: "string", enum: ["none", "resume-interrupt", "create-repair", "open-evidence"] },
-        requiresConfirmation: { type: "boolean" }
+        reasoningSummary: assistantReasoningSummaryJsonSchema,
+        suggestedAction: {
+          type: "string",
+          enum: [
+            "none",
+            "revise-plan",
+            "start-run",
+            "pause-run",
+            "resume-run",
+            "cancel-run",
+            "resume-interrupt",
+            "create-repair",
+            "open-evidence"
+          ]
+        },
+        requiresConfirmation: { type: "boolean" },
+        knowledge: knowledgeBoundaryJsonSchema
       }
     } as const;
-    const llm = await executeLlmCall({
+    const assistantSchema = z.object({
+      reply: z.string().min(1).max(1_200),
+      reasoningSummary: assistantReasoningSummarySchema,
+      suggestedAction: z.enum([
+        "none",
+        "revise-plan",
+        "start-run",
+        "pause-run",
+        "resume-run",
+        "cancel-run",
+        "resume-interrupt",
+        "create-repair",
+        "open-evidence"
+      ]),
+      requiresConfirmation: z.boolean(),
+      knowledge: knowledgeBoundaryOutputSchema
+    }).strict().superRefine((value, ctx) => {
+      try {
+        validateKnowledgeBoundaryOutput(value.knowledge, knowledgeContext);
+        const capability = value.suggestedAction === "resume-interrupt"
+          ? "request-interrupt-resume"
+          : value.suggestedAction === "create-repair"
+            ? "request-repair"
+            : value.suggestedAction === "open-evidence"
+              ? "open-evidence"
+              : value.suggestedAction === "none"
+                ? undefined
+                : value.suggestedAction;
+        if (capability) {
+          assertKnowledgeCanAuthorizeAction({
+            context: knowledgeContext,
+            output: value.knowledge,
+            action: capability,
+            critical: value.suggestedAction !== "open-evidence"
+          });
+        }
+      } catch (error) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["knowledge"],
+          message: error instanceof Error ? error.message : "knowledge_boundary_invalid"
+        });
+      }
+    });
+    const structured = await executeStructuredAssistant({
       credential,
       apiKey: await decrypt(credential.apiKeyEncrypted),
       system: [
         "You are the assistant for an evidence-driven automated testing run.",
         "Use only the supplied durable run facts. Never claim pass from scheduling completion.",
-        "Explain blockers and the next safe action in concise Chinese.",
+        "Reply in concise Chinese with exactly three clearly labelled parts: 发生了什么、系统准备怎么处理、需要你做什么.",
+        "Also return reasoningSummary as an evidence-backed decision summary for the user. It is not hidden chain-of-thought: list only observable facts, the concise assessment, the next system step, and the exact user action.",
+        "If the user does not need to act, explicitly say 无需操作. If a repair session changed no files, explicitly say 未修改项目源码.",
+        "Only claim code was repaired when repairHistory contains concrete changed files, and name those files.",
+        "Do not push technical diagnosis back to the user when resultFacts already identify a timeout, selector, script, environment or product failure.",
+        "When a test-script, selector or product failure has no repair yet, explain that the system can create and validate a sandbox repair, return suggestedAction=create-repair and require confirmation.",
+        "Use open-evidence only when the saved facts are genuinely insufficient; use resume-interrupt for missing permission or credential confirmation.",
         "Do not invent evidence, credentials, commands or test results.",
+        knowledgeBoundarySystemPolicy,
         "Return only the requested JSON."
       ].join(" "),
       prompt: JSON.stringify({
@@ -981,40 +1217,69 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
           judgeRecommendation: run.judgeRecommendation,
           scenarioId: run.selectedScenarioId
         },
-        graph
+        graph,
+        resultFacts,
+        repairHistory: repairs.slice(0, 3).map((repair) => ({
+          id: repair.id,
+          status: repair.status,
+          summary: repair.summary,
+          failureClass: repair.failureClass,
+          changedFiles: repair.files.map((file) => ({
+            path: file.path,
+            status: file.status,
+            additions: file.additions,
+            deletions: file.deletions,
+            risk: file.risk
+          })),
+          validation: repair.validation ? {
+            status: repair.validation.status,
+            targetedPassed: repair.validation.targetedPassed,
+            regressionPassed: repair.validation.regressionPassed,
+            summary: repair.validation.summary
+          } : undefined
+        })),
+        knowledgeContext: publicKnowledgeContext(knowledgeContext)
       }),
-      maxTokens: 700,
-      timeoutMs: 20_000,
-      totalTimeoutMs: 30_000,
-      transportPreference: "non-stream-retry",
-      jsonSchema: { name: "agent_thread_reply", schema: replySchema },
+      schemaName: "agent_thread_reply",
+      jsonSchema: replySchema,
+      parseSchema: assistantSchema,
+      knowledgeContext,
       context: {
         purpose: "assistant",
         runId: run.id,
         modelProfileId: credential.id,
         promptTemplateId: "run-assistant",
-        promptVersion: "assistant-v1",
-        outputSchemaVersion: "agent-thread-reply-v1",
+        promptVersion: "assistant-v2-knowledge-boundary",
+        outputSchemaVersion: "agent-thread-reply-v2",
         graphVersion: "agent-graph-v1",
         routeReason: "user-requested-run-explanation",
         ruleCapable: false,
         cachePolicy: "bypass"
       }
     });
-    const assistant = z.object({
-      reply: z.string().min(1).max(1_200),
-      suggestedAction: z.enum(["none", "resume-interrupt", "create-repair", "open-evidence"]),
-      requiresConfirmation: z.boolean()
-    }).strict().parse(JSON.parse(llm.text));
+    await appendAgentMessage({
+      runId: run.id,
+      role: "assistant",
+      content: structured.assistant.reply,
+      reasoningSummary: structured.assistant.reasoningSummary,
+      knowledgeContextId: structured.llm.knowledgeContext.id,
+      knowledgeDecisionId: structured.llm.knowledgeDecision.id,
+      llmCallId: structured.llm.call.id,
+      suggestedAction: structured.assistant.suggestedAction
+    });
     res.json({
-      assistant,
+      assistant: structured.assistant,
       call: {
-        id: llm.call.id,
-        provider: llm.call.provider,
-        model: llm.call.model,
-        status: llm.call.status,
-        durationMs: llm.call.durationMs,
-        usage: llm.call.usage
+        id: structured.llm.call.id,
+        provider: structured.llm.call.provider,
+        model: structured.llm.call.model,
+        status: structured.llm.call.status,
+        durationMs: structured.llm.call.durationMs,
+        usage: structured.llm.call.usage,
+        semanticRepairApplied: structured.repaired,
+        knowledgeContextId: structured.llm.knowledgeContext.id,
+        knowledgeDecisionId: structured.llm.knowledgeDecision.id,
+        knowledgeValidationStatus: structured.llm.knowledgeDecision.validationStatus
       }
     });
   } catch (error) { next(error); }
@@ -1184,6 +1449,13 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
         ...event.payload
       })}\n\n`);
     });
+    const unsubscribeKnowledge = subscribeKnowledgeLifecycle((event) => {
+      if (event.runId !== req.params.id) return;
+      res.write(`event: ${event.type}\ndata: ${JSON.stringify({
+        at: event.createdAt,
+        ...event.payload
+      })}\n\n`);
+    });
     const send = async () => {
       const events = await runEventStore.events(req.params.id);
       for (const event of events.filter((item) => item.version > sentVersion)) {
@@ -1256,6 +1528,7 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
     req.once("close", () => {
       clearInterval(timer);
       unsubscribeLlm();
+      unsubscribeKnowledge();
     });
   } catch (error) { next(error); }
 });
@@ -1933,59 +2206,149 @@ app.post("/api/assistant/chat", async (req, res, next) => {
     }
     const credential = await getCredential(selectedPublic.id);
     if (!credential) return void res.status(409).json({ error: "assistant_model_not_configured" });
+    const knowledgeContext = createKnowledgeContext({
+      purpose: "assistant",
+      projectSnapshot: { projectId: project.id },
+      claims: [
+        {
+          id: "user-message",
+          statement: body.message,
+          status: "user-provided",
+          domain: "user-intent",
+          sourceRefs: [`request:${project.id}:message`],
+          confidence: 1
+        },
+        {
+          id: "project-record",
+          statement: `Current project is ${project.name} (${project.id}).`,
+          status: "retrieved",
+          domain: "project-static",
+          sourceRefs: [`project:${project.id}`],
+          confidence: 1
+        },
+        {
+          id: "client-workbench-context",
+          subject: "client-workbench-context",
+          statement: `Workbench reports runState=${body.context.runState ?? "unknown"}, finalStatus=${body.context.finalStatus ?? "unknown"}, currentStep=${body.context.currentStep ?? "unknown"}, evidenceCount=${body.context.evidenceCount ?? "unknown"}.`,
+          status: "inferred",
+          domain: "runtime",
+          sourceRefs: [`workbench-context:${body.context.runId ?? "pre-run"}`],
+          confidence: 0.6
+        }
+      ],
+      allowedCapabilities: [
+        "explain-status",
+        "revise-plan",
+        "start-run",
+        "pause-run",
+        "resume-run",
+        "cancel-run",
+        "open-evidence"
+      ],
+      allowedTools: ["read-project-manifest", "read-run-evidence"],
+      unknowns: body.context.runId ? [] : [{
+        id: "durable-run-not-created",
+        question: "What is the durable run state and evidence?",
+        reason: "No runId exists yet; client planning state must not be presented as executed test evidence.",
+        blocking: false,
+        resolvableBy: "none"
+      }],
+      untrustedInputKinds: ["requirement", "diff", "source", "dom", "console", "network", "prior-model-output"]
+    });
     const responseSchema = {
       type: "object",
       additionalProperties: false,
-      required: ["reply", "intent", "suggestedAction", "requiresConfirmation"],
+      required: ["reply", "reasoningSummary", "intent", "suggestedAction", "requiresConfirmation", "knowledge"],
       properties: {
         reply: { type: "string", minLength: 1, maxLength: 1_200 },
+        reasoningSummary: assistantReasoningSummaryJsonSchema,
         intent: { type: "string", enum: ["status-question", "failure-question", "plan-change", "execution-control", "general"] },
         suggestedAction: { type: "string", enum: ["none", "revise-plan", "start-run", "pause-run", "resume-run", "cancel-run", "open-evidence"] },
-        requiresConfirmation: { type: "boolean" }
+        requiresConfirmation: { type: "boolean" },
+        knowledge: knowledgeBoundaryJsonSchema
       }
     } as const;
     const system = [
       "You are the conversational assistant inside an evidence-driven browser testing product.",
       "Answer the user's question directly in concise Chinese using only the supplied run and planning facts.",
+      "For a blocker, review request or repair question, reply with three clearly labelled parts: 发生了什么、系统准备怎么处理、需要你做什么.",
+      "Return reasoningSummary as a short evidence-backed decision summary. Do not reveal hidden chain-of-thought; include only observed facts, concise assessment, next system step and exact user action.",
+      "If no user action is required, explicitly say 无需操作. Never claim source code changed unless the supplied facts contain concrete changed files.",
       "Never claim a test passed merely because scheduling completed.",
       "Never invent screenshots, evidence, failures, credentials, actions, or API results.",
       "You may suggest an action but must require confirmation for starting, pausing, resuming, cancelling, or revising a plan.",
+      knowledgeBoundarySystemPolicy,
       "Return only the requested JSON object."
     ].join(" ");
     const prompt = JSON.stringify({
       project: { id: project.id, name: project.name },
       userMessage: body.message,
       recentConversation: body.history,
-      currentFacts: body.context
+      currentFacts: body.context,
+      knowledgeContext: publicKnowledgeContext(knowledgeContext)
     });
     const apiKey = await decrypt(credential.apiKeyEncrypted);
-    const llm = await executeLlmCall({
+    const assistantSchema = z.object({
+      reply: z.string().min(1).max(1_200),
+      reasoningSummary: assistantReasoningSummarySchema,
+      intent: z.enum(["status-question", "failure-question", "plan-change", "execution-control", "general"]),
+      suggestedAction: z.enum(["none", "revise-plan", "start-run", "pause-run", "resume-run", "cancel-run", "open-evidence"]),
+      requiresConfirmation: z.boolean(),
+      knowledge: knowledgeBoundaryOutputSchema
+    }).strict().superRefine((value, ctx) => {
+      try {
+        validateKnowledgeBoundaryOutput(value.knowledge, knowledgeContext);
+        const capability = value.suggestedAction === "none" ? undefined : value.suggestedAction;
+        if (capability) {
+          assertKnowledgeCanAuthorizeAction({
+            context: knowledgeContext,
+            output: value.knowledge,
+            action: capability,
+            critical: capability !== "open-evidence"
+          });
+        }
+      } catch (error) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["knowledge"],
+          message: error instanceof Error ? error.message : "knowledge_boundary_invalid"
+        });
+      }
+    });
+    const structured = await executeStructuredAssistant({
       credential,
       apiKey,
       system,
       prompt,
-      maxTokens: 700,
-      timeoutMs: 20_000,
-      totalTimeoutMs: 30_000,
-      transportPreference: "non-stream-retry",
-      jsonSchema: { name: "test_assistant_reply", schema: responseSchema },
-      context: { purpose: "planning" }
+      schemaName: "test_assistant_reply",
+      jsonSchema: responseSchema,
+      parseSchema: assistantSchema,
+      knowledgeContext,
+      context: {
+        purpose: "assistant",
+        modelProfileId: credential.id,
+        promptTemplateId: "test-assistant",
+        promptVersion: "assistant-v2-knowledge-boundary",
+        outputSchemaVersion: "test-assistant-reply-v2",
+        projectDigest: project.id,
+        routeReason: "user-requested-planning-assistance",
+        ruleCapable: false,
+        cachePolicy: "bypass"
+      }
     });
-    const parsed = z.object({
-      reply: z.string().min(1).max(1_200),
-      intent: z.enum(["status-question", "failure-question", "plan-change", "execution-control", "general"]),
-      suggestedAction: z.enum(["none", "revise-plan", "start-run", "pause-run", "resume-run", "cancel-run", "open-evidence"]),
-      requiresConfirmation: z.boolean()
-    }).strict().parse(JSON.parse(llm.text));
     res.json({
-      assistant: parsed,
+      assistant: structured.assistant,
       call: {
-        id: llm.call.id,
-        model: llm.call.model,
-        provider: llm.call.provider,
-        status: llm.call.status,
-        durationMs: llm.call.durationMs,
-        usage: llm.call.usage
+        id: structured.llm.call.id,
+        model: structured.llm.call.model,
+        provider: structured.llm.call.provider,
+        status: structured.llm.call.status,
+        durationMs: structured.llm.call.durationMs,
+        usage: structured.llm.call.usage,
+        semanticRepairApplied: structured.repaired,
+        knowledgeContextId: structured.llm.knowledgeContext.id,
+        knowledgeDecisionId: structured.llm.knowledgeDecision.id,
+        knowledgeValidationStatus: structured.llm.knowledgeDecision.validationStatus
       }
     });
   } catch (error) {
@@ -2539,47 +2902,7 @@ app.post("/api/desktop-capture/screenshot", async (req, res, next) => {
   }
 });
 
-app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  if (error instanceof z.ZodError) {
-    res.status(400).json({ error: "Validation failed", details: error.flatten() });
-    return;
-  }
-  if (error instanceof Error && error.message === "CORS origin not allowed") {
-    res.status(403).json({ error: "CORS origin not allowed" });
-    return;
-  }
-  if (error instanceof Error && error.message === "organization_forbidden") {
-    res.status(403).json({ error: "organization_forbidden" });
-    return;
-  }
-  if (error instanceof Error && error.message === "project_forbidden") {
-    res.status(403).json({ error: "project_forbidden" });
-    return;
-  }
-  if (error instanceof Error && (
-    error.message === "repair_host_apply_disabled"
-    || error.message === "repair_high_risk_confirmation_required"
-    || error.message === "repair_validation_required"
-    || error.message === "source_changed"
-    || error.message.startsWith("repair_version_conflict:")
-  )) {
-    res.status(409).json({ error: redactText(error.message) });
-    return;
-  }
-  if (error instanceof Error && (
-    error.message === "repair_path_escape"
-    || error.message === "repair_path_forbidden"
-    || error.message === "repair_contains_forbidden_change"
-  )) {
-    res.status(403).json({ error: redactText(error.message) });
-    return;
-  }
-  const safeError = error instanceof Error
-    ? { name: error.name, message: redactText(error.message), stack: error.stack ? redactText(error.stack) : undefined }
-    : redactValue(error);
-  console.error("Unhandled agent error", safeError);
-  res.status(500).json({ error: error instanceof Error ? redactText(error.message) : "Internal server error" });
-});
+app.use(errorHandler);
 
 assertSecurityConfig(host);
 app.listen(port, host, () => {

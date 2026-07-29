@@ -10,6 +10,8 @@ import { RunTimeline } from "../src/components/RunTimeline";
 import { buildFileTree, ProjectWizardPanel } from "../src/components/ProjectWizardPanel";
 import { ProjectPanel } from "../src/components/ProjectPanel";
 import { RunAssistantPanel } from "../src/components/RunAssistantPanel";
+import { KnowledgeBasis } from "../src/components/KnowledgeBasis";
+import { AssistantReasoningSummary } from "../src/components/AssistantReasoningSummary";
 import { chatWithTestAssistant, subscribeRunEvents } from "../src/api";
 
 vi.mock("@monaco-editor/react", () => ({
@@ -93,11 +95,11 @@ describe("Workbench interactions", () => {
 
     const feedback = screen.getByLabelText("向 AI 测试助手反馈");
     await userEvent.type(feedback, "请改为验证公开页面");
-    await userEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+    await userEvent.click(screen.getByRole("button", { name: "发送给 AI" }));
     expect(submit).toHaveBeenCalledWith("请改为验证公开页面");
 
     await userEvent.type(feedback, "密码: do-not-store-this");
-    await userEvent.click(screen.getByRole("button", { name: "发送反馈" }));
+    await userEvent.click(screen.getByRole("button", { name: "发送给 AI" }));
     expect(screen.getByText(/检测到疑似密码/)).toBeTruthy();
     expect((feedback as HTMLTextAreaElement).value).toBe("");
     expect(submit).toHaveBeenCalledTimes(1);
@@ -133,11 +135,29 @@ describe("Workbench interactions", () => {
     />);
     const panel = within(view.container);
     expect(panel.getByText("可自动处理")).toBeTruthy();
-    expect(panel.queryByLabelText("向 AI 测试助手反馈")).toBeNull();
+    expect(panel.getByLabelText("向 AI 测试助手反馈")).toBeTruthy();
     await userEvent.click(panel.getByRole("button", { name: "分析并修复失败链路" }));
     expect(repair).toHaveBeenCalledTimes(1);
     await userEvent.click(panel.getByRole("button", { name: "修改测试范围" }));
     expect(editPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders review controls separately from the assistant conversation", () => {
+    const view = render(<RunAssistantPanel
+      message="This explanation belongs in the assistant message stream."
+      reviewRequired
+      reviewReason=""
+      onReviewReasonChange={() => undefined}
+      onAcceptRisk={() => undefined}
+      onSubmit={() => undefined}
+      onConfigureCredentials={() => undefined}
+      conversationVisible={false}
+    />);
+    const panel = within(view.container);
+    expect(panel.queryByText("This explanation belongs in the assistant message stream.")).toBeNull();
+    expect(panel.queryByLabelText("向 AI 测试助手反馈")).toBeNull();
+    expect(panel.getByText("需要人工裁决")).toBeTruthy();
+    expect(panel.getByLabelText("裁决原因")).toBeTruthy();
   });
 
   it("proactively offers current or dedicated API credentials without accepting secrets in chat", async () => {
@@ -449,7 +469,15 @@ describe("Workbench interactions", () => {
         reply: "当前运行已完成，证据完整。",
         intent: "status-question",
         suggestedAction: "none",
-        requiresConfirmation: false
+        requiresConfirmation: false,
+        reasoningSummary: {
+          phase: "completed",
+          observations: ["运行已完成", "证据完整性校验通过"],
+          assessment: "当前没有需要用户处理的阻塞项。",
+          nextStep: "查看最终报告。",
+          userAction: "无需操作。",
+          confidence: "high"
+        }
       },
       call: {
         id: "call-1",
@@ -475,8 +503,73 @@ describe("Workbench interactions", () => {
     });
     expect(response.assistant.intent).toBe("status-question");
     expect(response.assistant.reply).toContain("证据完整");
+    expect(response.assistant.reasoningSummary?.assessment).toContain("没有需要用户处理");
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/api/assistant/chat");
     expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("/api/planning/conversation");
+    vi.unstubAllGlobals();
+  });
+
+  it("shows an auditable AI decision summary without exposing hidden reasoning", () => {
+    render(<AssistantReasoningSummary message={{
+      id: "assistant-summary-1",
+      role: "assistant",
+      content: "我需要你确认测试账号。",
+      createdAt: new Date().toISOString(),
+      reasoningSummary: {
+        phase: "waiting-user",
+        observations: ["登录页面返回 401", "当前运行没有可用的测试账号句柄"],
+        assessment: "这是凭据缺失，不是产品功能失败。",
+        nextStep: "绑定一条加密保存的测试账号后恢复当前运行。",
+        userAction: "请点击“配置测试账号”，不要在对话中粘贴密码。",
+        confidence: "high"
+      }
+    }} />);
+    expect(screen.getByText("AI 判断摘要")).toBeTruthy();
+    expect(screen.getByText("这是凭据缺失，不是产品功能失败。")).toBeTruthy();
+    expect(screen.getByText(/请点击“配置测试账号”/)).toBeTruthy();
+    expect(screen.getByText(/不包含模型内部原始思维链/)).toBeTruthy();
+  });
+
+  it("opens a verified knowledge source through the authenticated Agent API", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      claimId: "claim-runtime-1",
+      contextId: "context-1",
+      status: "observed",
+      domain: "runtime",
+      statement: "The captured response returned HTTP 500.",
+      sensitive: false,
+      sourceRefs: ["evidence:evidence-network-1"],
+      scope: { runId: "run-1", attemptId: "attempt-1" }
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<KnowledgeBasis message={{
+      id: "assistant-knowledge-1",
+      role: "assistant",
+      content: "The request failed.",
+      createdAt: new Date().toISOString(),
+      knowledge: {
+        schemaVersion: "2.0",
+        factsUsed: ["claim-runtime-1"],
+        inferences: [],
+        assumptions: [],
+        unknowns: [],
+        toolRequests: [],
+        blockingQuestions: [],
+        proposedActions: []
+      },
+      llmTrace: {
+        callId: "call-1",
+        contextId: "context-1",
+        validationStatus: "verified"
+      }
+    } as never} />);
+    await userEvent.click(screen.getByText("判断依据"));
+    await userEvent.click(screen.getByRole("button", { name: "claim-runtime-1" }));
+    expect(await screen.findByText("The captured response returned HTTP 500.")).toBeTruthy();
+    expect(screen.getByText("evidence:evidence-network-1")).toBeTruthy();
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
+      "/agent-api/v1/knowledge-claims/claim-runtime-1/source?contextId=context-1"
+    );
     vi.unstubAllGlobals();
   });
 });

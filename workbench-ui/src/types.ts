@@ -317,6 +317,30 @@ export interface PlanningMessage {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  reasoningSummary?: {
+    phase: "observing" | "diagnosing" | "planning" | "waiting-user" | "acting" | "completed";
+    observations: string[];
+    assessment: string;
+    nextStep: string;
+    userAction: string;
+    confidence: "high" | "medium" | "low";
+  };
+  knowledge?: {
+    schemaVersion: "2.0";
+    factsUsed: string[];
+    inferences: Array<{ statement: string; sourceClaimIds: string[] }>;
+    assumptions: Array<{ statement: string; risk: "low" | "medium" | "high" }>;
+    unknowns: string[];
+    toolRequests: Array<{ tool: string; input: Record<string, unknown>; reason: string; sourceClaimIds: string[] }>;
+    blockingQuestions: string[];
+    proposedActions: Array<{ capability: string; reason: string; sourceClaimIds: string[]; requiresConfirmation: boolean }>;
+  };
+  llmTrace?: {
+    callId: string;
+    contextId?: string;
+    decisionId?: string;
+    validationStatus?: string;
+  };
 }
 
 export interface PlannedBusinessFlow {

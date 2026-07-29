@@ -36,6 +36,8 @@ import { ProjectPanel } from "./components/ProjectPanel";
 import { ProjectWizardPanel } from "./components/ProjectWizardPanel";
 import { RunTimeline } from "./components/RunTimeline";
 import { RunAssistantPanel } from "./components/RunAssistantPanel";
+import { KnowledgeBasis } from "./components/KnowledgeBasis";
+import { AssistantReasoningSummary } from "./components/AssistantReasoningSummary";
 import { RepairWorkspace } from "./components/RepairWorkspace";
 import { SecurityPanel } from "./components/SecurityPanel";
 import { SourceStatusPanel } from "./components/SourceStatusPanel";
@@ -64,6 +66,8 @@ import {
   getAuditStoreStatus,
   getBenchmarkSummary,
   getLatestDemoVerification,
+  getRunLlmCalls,
+  getRunKnowledge,
   subscribeRunEvents,
   getGrayPlan,
   getRepairFile,
@@ -104,6 +108,7 @@ import {
   saveProject,
   saveProjectLoginCredential,
   savePatrolPlan,
+  sendRunAgentMessage,
   startPatrolJob,
   startProject,
   startProjectAsync,
@@ -252,7 +257,7 @@ export function App() {
   const [planningBusy, setPlanningBusy] = useState(false);
   const [assistantChatBusy, setAssistantChatBusy] = useState(false);
   const [assistantSuggestedAction, setAssistantSuggestedAction] = useState<{
-    action: "revise-plan" | "start-run" | "pause-run" | "resume-run" | "cancel-run" | "open-evidence";
+    action: "revise-plan" | "start-run" | "pause-run" | "resume-run" | "cancel-run" | "open-evidence" | "create-repair" | "resume-interrupt";
     label: string;
   } | null>(null);
   const [planningConfirmed, setPlanningConfirmed] = useState(false);
@@ -262,6 +267,8 @@ export function App() {
     scenarioId?: string;
   }>({ phase: "idle", detail: "" });
   const analyzedBlockedRuns = useRef(new Set<string>());
+  const surfacedAssistantNotices = useRef(new Set<string>());
+  const hydratedAgentThreads = useRef(new Set<string>());
   const [flowDeleteReadyId, setFlowDeleteReadyId] = useState<string | null>(null);
   const flowDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
@@ -419,7 +426,18 @@ export function App() {
   const reviewRequired = activeRun?.state === "awaiting-human-review" || latestDecision === "needs-human-review";
   const pathBindingRepairable = planningAutomation.phase === "blocked"
     && /真实页面路径|安全校验|页面绑定|没有路径通过|失败链路|入口、控件或预期结果/i.test(planningAutomation.detail);
-  const assistantFeedbackRequired = runIsBlocked || authFeedbackRequired || credentialReadyForRetry || apiCredentialFeedbackRequired || screenshotRateLimited || reviewRequired;
+  const codeRepairAvailable = Boolean(
+    activeRunId
+    && result
+    && (
+      result.executionError
+      || result.assertions.some((assertion) => !assertion.passed)
+      || latestDecision === "fail"
+      || latestDecision === "blocked"
+    )
+  );
+  const assistantAutoRepairAvailable = pathBindingRepairable || codeRepairAvailable;
+  const assistantFeedbackRequired = runIsBlocked || authFeedbackRequired || credentialReadyForRetry || apiCredentialFeedbackRequired || screenshotRateLimited || reviewRequired || codeRepairAvailable;
   const latestPlanningAssistantMessage = [...planningMessages].reverse().find((item) => item.role === "assistant")?.content;
   const failedAssertions = (result?.assertions ?? []).filter((assertion) => !assertion.passed);
   const primaryFailure = result?.failureAttributions?.[0];
@@ -476,12 +494,26 @@ export function App() {
   }
 
   async function submitRunAssistantFeedback(feedback: string) {
-    await continueTestPlanning(feedback);
+    await chatWithAssistant(feedback);
   }
 
   async function repairBlockedPlanning() {
+    const pendingId = `binding_repair_pending_${Date.now()}`;
+    const previousFlows = new Map(
+      (planningResult?.businessFlows ?? []).map((flow) => [flow.id, {
+        title: flow.title,
+        status: flow.status,
+        scenarioId: flow.scenarioId
+      }])
+    );
     setPlanningConfirmed(false);
     setMessage("AI 正在读取失败链路、页面探测结果和证据，重新生成可执行计划。");
+    setPlanningMessages((current) => [...current, {
+      id: pendingId,
+      role: "assistant",
+      content: "正在调用当前模型分析页面绑定失败。此步骤只调整测试路径、selector 和 oracle，不会修改被测项目源码。",
+      createdAt: new Date().toISOString()
+    }]);
     const repaired = await continueTestPlanning(
       "请根据刚才保存的真实页面路径校验诊断重新规划。只保留能够绑定实际页面入口、真实控件、确定性 oracle 和完整证据要求的路径；无法验证的候选请标记为覆盖缺口，不要作为可执行测试。",
       "llm-guided",
@@ -490,12 +522,45 @@ export function App() {
     if (repaired) {
       setPlanningAutomation({ phase: "idle", detail: "" });
       setMessage("失败链路分析完成，新计划已经生成。请查看调整后的路径后确认执行。");
+      const llm = repaired.llmPlanning;
+      const modelTrace = llm?.status === "passed"
+        ? `模型 ${llm.model ?? "当前活动模型"} 已返回建议；调用 ${llm.callId ?? "未返回编号"}，耗时 ${llm.durationMs ?? 0}ms。`
+        : llm?.status === "failed"
+          ? `模型调用失败（${llm.errorCode ?? "unknown"}），本次仅保留规则计划。`
+          : "本次未调用模型，仅使用规则扫描结果。";
+      const changedBindings = repaired.businessFlows.flatMap((flow) => {
+        const previous = previousFlows.get(flow.id);
+        if (!previous) return [`新增“${flow.title}”：${flow.status}${flow.scenarioId ? ` → ${flow.scenarioId}` : ""}`];
+        if (previous.status === flow.status && previous.scenarioId === flow.scenarioId) return [];
+        return [
+          `“${flow.title}”：${previous.status}${previous.scenarioId ? `/${previous.scenarioId}` : ""} → ${flow.status}${flow.scenarioId ? `/${flow.scenarioId}` : ""}`
+        ];
+      });
+      const prioritizedTitles = (llm?.prioritizedFlowIds ?? [])
+        .map((id) => repaired.businessFlows.find((flow) => flow.id === id)?.title)
+        .filter((title): title is string => Boolean(title));
+      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+        ...item,
+        content: [
+          modelTrace,
+          `重新规划结果：${repaired.coverage.executable} 条可直接执行，${repaired.coverage.autoBindable} 条等待真实页面绑定，${repaired.coverage.gaps} 条保留为覆盖缺口。`,
+          prioritizedTitles.length ? `模型优先检查：${prioritizedTitles.slice(0, 5).join("、")}。` : "",
+          changedBindings.length
+            ? `实际调整：${changedBindings.slice(0, 5).join("；")}${changedBindings.length > 5 ? `；另有 ${changedBindings.length - 5} 项` : ""}。`
+            : "实际调整：没有路径状态或场景绑定发生变化。",
+          "尚未修改被测项目代码；确认计划后系统会再次执行真实页面绑定。"
+        ].filter(Boolean).join("\n")
+      } : item));
     } else {
       setPlanningAutomation((current) => ({
         ...current,
         phase: "blocked",
         detail: "失败链路分析没有生成有效计划。诊断仍已保留，可以修改测试范围或稍后重试。"
       }));
+      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+        ...item,
+        content: "模型或规划服务没有生成可验证的新路径。系统没有修改源码，也没有把失败路径伪装成通过；可以继续追问具体失败原因。"
+      } : item));
     }
   }
 
@@ -506,6 +571,13 @@ export function App() {
     }
     setRepairBusy(true);
     setMessage("正在创建只读源码快照和可写沙盒副本，并根据失败证据生成最小修复。");
+    const pendingId = `code_repair_pending_${Date.now()}`;
+    setPlanningMessages((current) => [...current, {
+      id: pendingId,
+      role: "assistant",
+      content: "正在创建沙盒源码副本，调用 Repair 模型定位失败文件，并在修改后运行定向测试。原项目保持只读。",
+      createdAt: new Date().toISOString()
+    }]);
     try {
       const response = await createRunRepair(activeRunId, {
         autoAnalyze: true,
@@ -515,8 +587,28 @@ export function App() {
       setRepairSession(response.repair);
       setRepairWorkspaceOpen(true);
       setMessage(response.repair.summary);
+      const calls = await getRunLlmCalls(activeRunId).catch(() => null);
+      const repairCall = [...(calls?.calls ?? [])].reverse().find((call) => call.purpose === "repairing");
+      const changedFiles = response.repair.files.map((file) => `${file.path}（${file.additions}+/${file.deletions}-，${file.risk}）`);
+      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+        ...item,
+        content: [
+          response.repair.summary,
+          `失败归因：${response.repair.failureClass}。`,
+          changedFiles.length ? `沙盒变更：${changedFiles.join("；")}。` : "模型没有生成可安全应用的文件变更。",
+          repairCall
+            ? `模型 ${repairCall.model}；调用 ${repairCall.id}；${repairCall.durationMs}ms；${repairCall.usage.totalTokens ?? 0} Token；状态 ${repairCall.status}。`
+            : "本次没有可用的 Repair 模型调用记录。",
+          "修复工作区已打开，可逐行查看 Diff；重新验证通过前不会应用到原项目。"
+        ].join("\n")
+      } : item));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "创建修复工作区失败");
+      const detail = error instanceof Error ? error.message : "创建修复工作区失败";
+      setMessage(detail);
+      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+        ...item,
+        content: `修复会话创建失败：${detail}。原机器结论和证据保持不变，没有修改项目文件。`
+      } : item));
     } finally {
       setRepairBusy(false);
     }
@@ -1071,6 +1163,43 @@ export function App() {
   }, [selectedProjectId, projectConnection?.ok, projectDiagnosis?.overallStatus]);
 
   useEffect(() => {
+    if (!activeRunId || hydratedAgentThreads.current.has(activeRunId)) return;
+    hydratedAgentThreads.current.add(activeRunId);
+    void getRunKnowledge(activeRunId)
+      .then((snapshot) => {
+        const decisions = new Map(snapshot.decisions.map((item) => [item.id, item]));
+        const durable = snapshot.messages.map((item): PlanningMessage => {
+          const decision = item.knowledgeDecisionId
+            ? decisions.get(item.knowledgeDecisionId)
+            : undefined;
+          return {
+            id: item.id,
+            role: item.role === "system" ? "assistant" : item.role,
+            content: item.content,
+            createdAt: item.createdAt,
+            reasoningSummary: item.reasoningSummary,
+            knowledge: decision?.output,
+            llmTrace: item.llmCallId ? {
+              callId: item.llmCallId,
+              contextId: item.knowledgeContextId,
+              decisionId: item.knowledgeDecisionId,
+              validationStatus: decision?.validationStatus
+            } : undefined
+          };
+        });
+        if (!durable.length) return;
+        setPlanningMessages((current) => {
+          const ids = new Set(current.map((item) => item.id));
+          return [...current, ...durable.filter((item) => !ids.has(item.id))]
+            .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+        });
+      })
+      .catch(() => {
+        hydratedAgentThreads.current.delete(activeRunId);
+      });
+  }, [activeRunId]);
+
+  useEffect(() => {
     if (!activeRunId) return;
     return subscribeRunEvents(activeRunId, ({ id, type, payload }) => {
       if (type !== "state") return;
@@ -1137,68 +1266,237 @@ export function App() {
   }, [activeRunId, activeRun?.state]);
 
   useEffect(() => {
-    const analysisId = activeRunId ?? result?.id;
-    if (!runIsBlocked || !result || !analysisId || !defaultCredential?.id || !(selectedProjectId || projectDraft?.id)) return;
-    if (analyzedBlockedRuns.current.has(analysisId)) return;
-    analyzedBlockedRuns.current.add(analysisId);
-    const messageId = `run_failure_analysis_${analysisId}`;
+    const deterministicNoticeRequired = authFeedbackRequired
+      || credentialReadyForRetry
+      || apiCredentialFeedbackRequired
+      || screenshotRateLimited;
+    if (!deterministicNoticeRequired) return;
+    const noticeKey = [
+      activeRunId ?? selectedProjectId ?? projectDraft?.id ?? "pre-run",
+      runAssistantMessage
+    ].join(":");
+    if (surfacedAssistantNotices.current.has(noticeKey)) return;
+    surfacedAssistantNotices.current.add(noticeKey);
+    setPlanningMessages((current) => [...current, {
+      id: `assistant_notice_${Date.now()}`,
+      role: "assistant",
+      content: runAssistantMessage,
+      createdAt: new Date().toISOString(),
+      reasoningSummary: {
+        phase: authFeedbackRequired || apiCredentialFeedbackRequired ? "waiting-user" : "diagnosing",
+        observations: [
+          authFeedbackRequired
+            ? "测试到达需要登录的页面，但当前运行没有可用的测试账号"
+            : apiCredentialFeedbackRequired
+              ? `被测项目声明需要 ${missingProjectApiCredentials.map((item) => item.envName).join("、")}`
+              : credentialReadyForRetry
+                ? "测试账号已经加密保存"
+                : "现场截图请求触发限流，上一帧证据仍然保留"
+        ],
+        assessment: runAssistantMessage,
+        nextStep: authFeedbackRequired
+          ? "获得测试账号句柄后恢复同一测试线程"
+          : apiCredentialFeedbackRequired
+            ? "获得项目凭据授权后仅向本次沙盒运行注入"
+            : credentialReadyForRetry
+              ? "使用新账号创建可追溯的重试 attempt"
+              : "自动退避并继续采集其他证据",
+        userAction: authFeedbackRequired
+          ? "请点击“配置测试账号”，不要在对话中粘贴密码。"
+          : apiCredentialFeedbackRequired
+            ? "请选择沿用测试模型凭据或单独的项目测试凭据。"
+            : credentialReadyForRetry
+              ? "点击“使用账号重新测试”即可继续。"
+              : "无需操作；持续超过一分钟时再打开证据详情。",
+        confidence: "high"
+      }
+    }]);
+  }, [
+    activeRunId,
+    selectedProjectId,
+    projectDraft?.id,
+    authFeedbackRequired,
+    credentialReadyForRetry,
+    apiCredentialFeedbackRequired,
+    screenshotRateLimited,
+    runAssistantMessage,
+    missingProjectApiCredentials
+  ]);
+
+  useEffect(() => {
+    const needsExplanation = runIsBlocked || reviewRequired || pathBindingRepairable;
+    const analysisId = activeRunId ?? result?.id ?? planningResult?.id;
+    const projectId = selectedProjectId || projectDraft?.id;
+    if (!needsExplanation || !analysisId || !defaultCredential?.id || !projectId || assistantChatBusy) return;
+    const analysisKey = [
+      analysisId,
+      latestDecision,
+      planningAutomation.phase,
+      result?.summary ?? planningAutomation.detail
+    ].join(":");
+    if (analyzedBlockedRuns.current.has(analysisKey)) return;
+    analyzedBlockedRuns.current.add(analysisKey);
+    const messageId = `run_failure_analysis_${Date.now()}`;
     setPlanningMessages((current) => [...current, {
       id: messageId,
       role: "assistant",
-      content: "测试遇到阻塞，正在结合失败步骤和证据生成原因说明…",
+      content: "正在读取机器结论、失败证据和已有修复记录，整理这次问题与下一步操作…",
       createdAt: new Date().toISOString()
     }]);
+    setAssistantChatBusy(true);
     const failurePacket = {
-      finalStatus: result.finalStatus ?? result.gateStatus ?? "blocked",
-      summary: result.summary,
-      executionError: result.executionError,
-      failedAssertions: result.assertions
+      finalStatus: result?.finalStatus ?? result?.gateStatus ?? latestDecision ?? "blocked",
+      summary: result?.summary ?? planningAutomation.detail,
+      executionError: result?.executionError,
+      failedAssertions: (result?.assertions ?? [])
         .filter((item) => !item.passed)
         .slice(0, 8)
         .map((item) => ({ name: item.name, expected: item.expected, actual: item.actual, evidenceRefs: item.fact?.evidenceRefs ?? [] })),
-      failureAttributions: (result.failureAttributions ?? []).slice(0, 4).map((item) => ({
+      failureAttributions: (result?.failureAttributions ?? []).slice(0, 4).map((item) => ({
         title: item.title,
         reasoning: item.reasoning,
         suggestedFix: item.suggestedFix
       })),
-      latestRuntimeLogs: (result.loopEvents ?? []).slice(-6).map((item) => ({
+      latestRuntimeLogs: (result?.loopEvents ?? []).slice(-6).map((item) => ({
         title: item.title,
         status: item.status,
         observation: item.observation,
         evidenceRefs: item.evidenceRefs
-      }))
+      })),
+      planning: {
+        phase: planningAutomation.phase,
+        detail: planningAutomation.detail,
+        discovered: planningResult?.coverage.discovered,
+        executable: planningResult?.coverage.executable,
+        autoBindable: planningResult?.coverage.autoBindable,
+        gaps: planningResult?.coverage.gaps
+      }
     };
-    void continuePlanningConversation({
-      projectId: selectedProjectId || projectDraft!.id,
-      message: [
-        "请作为测试运行故障解释器，只根据下面已保存的事实，用中文说明：失败发生在哪一步、最可能属于产品/脚本/环境/证据哪一类、用户现在是否需要操作，以及系统下一步能自动做什么。不得编造不存在的证据。",
-        JSON.stringify(failurePacket)
-      ].join("\n"),
-      diff: diffText,
-      bugTicket: bugTicketText,
-      history: planningMessages.slice(-4),
-      planningMode: "llm-guided",
-      credentialId: defaultCredential.id
-    }).then((response) => {
-      const content = response.planning.llmPlanning?.summary || response.planning.reply || concreteRunFailureMessage;
+    const diagnosisPrompt = [
+      "请只依据系统提供的真实运行事实回答，并严格分成三段：",
+      "发生了什么：指出具体阶段、失败或复核原因；",
+      "系统准备怎么处理：说明将重新绑定测试路径、创建沙盒代码修复、补证据或保持机器结论中的哪一种；",
+      "需要你做什么：明确写“无需操作”，或只列出必须由用户完成的授权、凭据、风险确认。",
+      "还没有 changed files 时必须明确写“尚未修改项目源码”，不要把分析或重新规划称为代码修复。",
+      JSON.stringify(failurePacket)
+    ].join("\n");
+    const useDurableRunThread = Boolean(activeRunId && result && !pathBindingRepairable);
+    void (async () => {
+      if (useDurableRunThread && activeRunId) {
+        const response = await sendRunAgentMessage(activeRunId, {
+          message: diagnosisPrompt,
+          credentialId: defaultCredential.id
+        });
+        setPlanningMessages((current) => current.map((item) =>
+          item.id === messageId
+            ? {
+              ...item,
+              content: `${response.assistant.reply}\n\n模型 ${response.call.model} · 调用 ${response.call.id} · ${response.call.durationMs}ms · ${response.call.usage?.totalTokens ?? 0} Token${response.call.semanticRepairApplied ? " · JSON 自动修复 1 次" : ""}`,
+              reasoningSummary: response.assistant.reasoningSummary,
+              knowledge: response.assistant.knowledge,
+              llmTrace: {
+                callId: response.call.id,
+                contextId: response.call.knowledgeContextId,
+                decisionId: response.call.knowledgeDecisionId,
+                validationStatus: response.call.knowledgeValidationStatus
+              }
+            }
+            : item
+        ));
+        if (response.assistant.suggestedAction !== "none") {
+          setAssistantSuggestedAction({
+            action: response.assistant.suggestedAction,
+            label: assistantActionLabel(response.assistant.suggestedAction)
+          });
+        }
+        return;
+      }
+      const response = await chatWithTestAssistant({
+        projectId,
+        message: diagnosisPrompt,
+        credentialId: defaultCredential.id,
+        history: planningMessages.slice(-6).map((item) => ({ role: item.role, content: item.content })),
+        context: {
+          runState: planningAutomation.phase,
+          finalStatus: result?.finalStatus ?? result?.gateStatus ?? latestDecision,
+          summary: result?.summary ?? planningAutomation.detail,
+          evidenceCount: liveRun?.evidenceCount ?? result?.evidence.length ?? 0,
+          currentStep: result?.executionError?.stepId ?? planningAutomation.phase,
+          latestLog: result?.executionError?.message ?? planningAutomation.detail,
+          failedAssertions: failurePacket.failedAssertions.map((item) => ({
+            name: item.name,
+            expected: item.expected,
+            actual: item.actual
+          })),
+          planning: planningResult ? {
+            discovered: planningResult.coverage.discovered,
+            executable: planningResult.coverage.executable,
+            autoBindable: planningResult.coverage.autoBindable,
+            confirmed: planningConfirmed
+          } : undefined
+        }
+      });
       setPlanningMessages((current) => current.map((item) =>
-        item.id === messageId ? { ...item, content: content || "失败事实已保存，但模型没有返回有效解释；请展开对应步骤查看完整日志。" } : item
+        item.id === messageId
+          ? {
+            ...item,
+            content: `${response.assistant.reply}\n\n模型 ${response.call.model} · 调用 ${response.call.id} · ${response.call.durationMs}ms · ${response.call.usage.totalTokens ?? 0} Token${response.call.semanticRepairApplied ? " · JSON 自动修复 1 次" : ""}`,
+            reasoningSummary: response.assistant.reasoningSummary,
+            knowledge: response.assistant.knowledge,
+            llmTrace: {
+              callId: response.call.id,
+              contextId: response.call.knowledgeContextId,
+              decisionId: response.call.knowledgeDecisionId,
+              validationStatus: response.call.knowledgeValidationStatus
+            }
+          }
+          : item
       ));
-    }).catch((error) => {
+      if (response.assistant.suggestedAction !== "none") {
+        setAssistantSuggestedAction({
+          action: response.assistant.suggestedAction,
+          label: assistantActionLabel(response.assistant.suggestedAction)
+        });
+      }
+    })().catch((error) => {
       const reason = error instanceof Error ? error.message : "模型调用失败";
       setPlanningMessages((current) => current.map((item) =>
         item.id === messageId
-          ? { ...item, content: `${concreteRunFailureMessage || "失败事实和证据已保存。"} AI 解释暂不可用（${reason}），机器门禁结论不受影响。` }
+          ? {
+            ...item,
+            content: `${concreteRunFailureMessage || "失败事实和证据已保存。"} AI 解释暂不可用（${reason}），机器门禁结论不受影响。`,
+            reasoningSummary: {
+              phase: "waiting-user",
+              observations: [
+                concreteRunFailureMessage || "失败事实和证据已经保存",
+                `模型解释调用失败：${reason}`
+              ],
+              assessment: "模型服务未返回有效解释；系统仍以确定性断言、证据完整性和机器门禁作为当前事实。",
+              nextStep: "其他独立路径继续执行；失败链路保持待诊断状态，不会被自动放行。",
+              userAction: /401|403|credential|api key/i.test(reason)
+                ? "请检查当前模型凭据后，在对话框中要求重新分析。"
+                : "你可以直接追问、打开证据或稍后重试 AI 分析。",
+              confidence: "high"
+            }
+          }
           : item
       ));
+    }).finally(() => {
+      setAssistantChatBusy(false);
     });
   }, [
     activeRunId,
     result?.id,
     runIsBlocked,
+    reviewRequired,
+    pathBindingRepairable,
     defaultCredential?.id,
     selectedProjectId,
-    projectDraft?.id
+    projectDraft?.id,
+    planningAutomation.phase,
+    planningAutomation.detail,
+    latestDecision,
+    assistantChatBusy
   ]);
 
   async function submitCredential(event: React.FormEvent) {
@@ -1642,7 +1940,9 @@ export function App() {
       "pause-run": "确认暂停测试",
       "resume-run": "确认恢复测试",
       "cancel-run": "确认取消测试",
-      "open-evidence": "打开证据详情"
+      "open-evidence": "打开证据详情",
+      "create-repair": "创建沙盒修复",
+      "resume-interrupt": "查看待确认操作"
     }[action];
   }
 
@@ -1663,6 +1963,15 @@ export function App() {
     }
     if (action === "open-evidence") {
       setRightDrawerOpen(true);
+      return;
+    }
+    if (action === "create-repair") {
+      await openCodeRepairWorkspace();
+      return;
+    }
+    if (action === "resume-interrupt") {
+      setRunPreviewModalOpen(true);
+      setMessage("请在准备窗口中确认当前待授权操作。");
       return;
     }
     const control = action === "pause-run" ? "pause" : action === "resume-run" ? "resume" : "cancel";
@@ -1693,19 +2002,51 @@ export function App() {
     setAssistantSuggestedAction(null);
     const latestEvent = (liveRun?.events ?? result?.loopEvents ?? []).at(-1);
     try {
+      const runId = activeRunId ?? (result?.id?.startsWith("run_") ? result.id : undefined);
+      if (runId) {
+        const response = await sendRunAgentMessage(runId, {
+          message: content,
+          credentialId: defaultCredential?.id
+        });
+        setPlanningMessages((current) => current.map((item) =>
+          item.id === pendingId
+            ? {
+              ...item,
+              content: [
+                response.assistant.reply,
+                `模型 ${response.call.model} · 调用 ${response.call.id} · ${response.call.durationMs}ms · ${response.call.usage?.totalTokens ?? 0} Token${response.call.semanticRepairApplied ? " · JSON 自动修复 1 次" : ""}`
+              ].join("\n\n"),
+              reasoningSummary: response.assistant.reasoningSummary,
+              knowledge: response.assistant.knowledge,
+              llmTrace: {
+                callId: response.call.id,
+                contextId: response.call.knowledgeContextId,
+                decisionId: response.call.knowledgeDecisionId,
+                validationStatus: response.call.knowledgeValidationStatus
+              }
+            }
+            : item
+        ));
+        if (response.assistant.suggestedAction !== "none") {
+          setAssistantSuggestedAction({
+            action: response.assistant.suggestedAction,
+            label: assistantActionLabel(response.assistant.suggestedAction)
+          });
+        }
+        return;
+      }
       const response = await chatWithTestAssistant({
         projectId,
         message: content,
         credentialId: defaultCredential?.id,
         history: planningMessages.slice(-8).map((item) => ({ role: item.role, content: item.content })),
         context: {
-          runId: activeRunId ?? result?.id,
           runState: activeRun?.state ?? (isRunning ? "running" : "idle"),
           finalStatus: result?.finalStatus ?? result?.gateStatus,
-          summary: result?.summary,
+          summary: result?.summary ?? planningAutomation.detail,
           evidenceCount: liveRun?.evidenceCount ?? result?.evidence.length ?? 0,
-          currentStep: latestEvent?.title,
-          latestLog: latestEvent?.observation ?? latestEvent?.decisionReason,
+          currentStep: latestEvent?.title ?? planningAutomation.phase,
+          latestLog: latestEvent?.observation ?? latestEvent?.decisionReason ?? planningAutomation.detail,
           failedAssertions: (result?.assertions ?? []).filter((item) => !item.passed).slice(0, 8).map((item) => ({
             name: item.name,
             expected: item.expected,
@@ -1721,7 +2062,18 @@ export function App() {
       });
       setPlanningMessages((current) => current.map((item) =>
         item.id === pendingId
-          ? { ...item, content: `${response.assistant.reply}\n\n${response.call.model} · ${response.call.usage.totalTokens ?? 0} Token` }
+          ? {
+            ...item,
+            content: `${response.assistant.reply}\n\n${response.call.model} · ${response.call.usage.totalTokens ?? 0} Token${response.call.semanticRepairApplied ? " · JSON 自动修复 1 次" : ""}`,
+            reasoningSummary: response.assistant.reasoningSummary,
+            knowledge: response.assistant.knowledge,
+            llmTrace: {
+              callId: response.call.id,
+              contextId: response.call.knowledgeContextId,
+              decisionId: response.call.knowledgeDecisionId,
+              validationStatus: response.call.knowledgeValidationStatus
+            }
+          }
           : item
       ));
       if (response.assistant.suggestedAction !== "none") {
@@ -1734,7 +2086,18 @@ export function App() {
       const detail = error instanceof Error ? error.message : "AI 助手调用失败";
       setPlanningMessages((current) => current.map((item) =>
         item.id === pendingId
-          ? { ...item, content: `AI 助手暂时无法回答：${detail}。现有测试运行不会因此停止。` }
+          ? {
+            ...item,
+            content: `AI 助手暂时无法回答：${detail}。现有测试运行不会因此停止。`,
+            reasoningSummary: {
+              phase: "waiting-user",
+              observations: [`模型调用失败：${detail}`, "机器门禁和已保存证据仍然有效"],
+              assessment: "当前无法获得模型补充解释，但不会把失败误判为通过，也不会清除已经完成的测试。",
+              nextStep: "系统保留现有机器结论；你可以稍后重试模型解释，或直接查看证据和控制运行。",
+              userAction: "无需重复执行已完成路径；如需 AI 继续分析，请检查模型配置后重新发送消息。",
+              confidence: "high"
+            }
+          }
           : item
       ));
     } finally {
@@ -1822,7 +2185,7 @@ export function App() {
         : response.planning.phase === "clarifying"
         ? "系统需要你回答几个问题，回答后会更新计划。"
         : "测试计划草案已生成，请检查业务流程后确认。");
-      return true;
+      return response.planning;
     } catch (error) {
       const detail = error instanceof Error ? error.message : "测试规划失败";
       setPlanningMessages((current) => [...current, {
@@ -1832,7 +2195,7 @@ export function App() {
         createdAt: new Date().toISOString()
       }]);
       setMessage(detail);
-      return false;
+      return null;
     } finally {
       setPlanningBusy(false);
     }
@@ -2700,6 +3063,7 @@ export function App() {
                 <article className={`planning-message ${item.role}`} key={item.id}>
                   <strong>{item.role === "assistant" ? "AI 测试官" : "你"}</strong>
                   <p>{item.content}</p>
+                  <KnowledgeBasis message={item} />
                 </article>
               ))}
               {planningBusy && <article className="planning-message assistant pending"><strong>AI 测试官</strong><p>正在扫描代码和整理业务流程…</p></article>}
@@ -3304,10 +3668,12 @@ export function App() {
               </header>
               <span className="sidebar-current-project">当前项目：{selectedProjectName}</span>
               <div className="sidebar-planning-messages" aria-live="polite">
-                {planningMessages.slice(-2).map((item) => (
+                {planningMessages.map((item) => (
                   <article className={item.role} key={item.id}>
                     <strong>{item.role === "assistant" ? "AI 测试官" : "你"}</strong>
                     <span>{item.content}</span>
+                    {item.role === "assistant" ? <AssistantReasoningSummary message={item} /> : null}
+                    {item.role === "assistant" ? <KnowledgeBasis message={item} /> : null}
                   </article>
                 ))}
                 {planningBusy ? <article className="assistant pending"><strong>AI 测试官</strong><span>正在分析项目和可执行路径…</span></article> : null}
@@ -3316,37 +3682,6 @@ export function App() {
                 <button className="assistant-suggested-action" type="button" onClick={() => void executeAssistantSuggestedAction()}>
                   {assistantSuggestedAction.label}
                 </button>
-              ) : null}
-              {assistantFeedbackRequired ? (
-                <div className="sidebar-run-feedback">
-                  <RunAssistantPanel
-                    message={runAssistantMessage}
-                    blocked={runIsBlocked || screenshotRateLimited}
-                    authRequired={authFeedbackRequired}
-                    credentialReady={credentialReadyForRetry}
-                    apiCredentialRequired={apiCredentialFeedbackRequired}
-                    apiCredentialEnvNames={missingProjectApiCredentials.map((item) => item.envName)}
-                    browserExposedApiCredential={missingProjectApiCredentials.some((item) => item.exposure === "browser")}
-                    credentials={credentials}
-                    defaultCredentialId={defaultCredential?.id}
-                    busy={planningBusy || isRunning || planningAutomationBusy}
-                    onSubmit={submitRunAssistantFeedback}
-                    onConfigureCredentials={openProjectLoginSettings}
-                    onRetryWithCredentials={retryWithConfiguredLogin}
-                    onBindApiCredential={bindMissingProjectApiCredentials}
-                    onOpenApiSettings={openCredentialSettings}
-                    reviewRequired={reviewRequired}
-                    reviewReason={reviewReason}
-                    onReviewReasonChange={setReviewReason}
-                    onAcceptRisk={() => controlActiveRun("decision-override")}
-                    autoRepairAvailable={pathBindingRepairable}
-                    onAutoRepair={repairBlockedPlanning}
-                    onEditPlan={() => {
-                      setPlanningConfirmed(false);
-                      setPlanningAutomation({ phase: "idle", detail: "" });
-                    }}
-                  />
-                </div>
               ) : null}
               {planningResult ? (
                 <div className="sidebar-planning-result">
@@ -3383,6 +3718,42 @@ export function App() {
                   >
                     {planningAutomationBusy ? "准备执行中" : planningConfirmed ? "计划已确认" : planningHasBlockingQuestions ? "请先补充信息" : "确认并执行"}
                   </button>
+                </div>
+              ) : null}
+              {assistantFeedbackRequired ? (
+                <div className="sidebar-run-feedback">
+                  <RunAssistantPanel
+                    message={runAssistantMessage}
+                    blocked={runIsBlocked || screenshotRateLimited}
+                    authRequired={authFeedbackRequired}
+                    credentialReady={credentialReadyForRetry}
+                    apiCredentialRequired={apiCredentialFeedbackRequired}
+                    apiCredentialEnvNames={missingProjectApiCredentials.map((item) => item.envName)}
+                    browserExposedApiCredential={missingProjectApiCredentials.some((item) => item.exposure === "browser")}
+                    credentials={credentials}
+                    defaultCredentialId={defaultCredential?.id}
+                    busy={planningBusy || isRunning || planningAutomationBusy || assistantChatBusy}
+                    onSubmit={submitRunAssistantFeedback}
+                    onConfigureCredentials={openProjectLoginSettings}
+                    onRetryWithCredentials={retryWithConfiguredLogin}
+                    onBindApiCredential={bindMissingProjectApiCredentials}
+                    onOpenApiSettings={openCredentialSettings}
+                    reviewRequired={reviewRequired}
+                    reviewReason={reviewReason}
+                    onReviewReasonChange={setReviewReason}
+                    onAcceptRisk={() => controlActiveRun("decision-override")}
+                    autoRepairAvailable={assistantAutoRepairAvailable}
+                    autoRepairLabel={pathBindingRepairable ? "让 AI 重新绑定测试路径" : "生成沙盒代码修复"}
+                    autoRepairDescription={pathBindingRepairable
+                      ? "AI 会根据真实页面探测重新绑定入口、控件和 oracle；这里只修测试路径，不修改项目源码。"
+                      : "AI 会读取失败断言和证据，在只读源码的沙盒副本中生成最小补丁，并打开 Diff 与验证结果。"}
+                    onAutoRepair={pathBindingRepairable ? repairBlockedPlanning : openCodeRepairWorkspace}
+                    onEditPlan={() => {
+                      setPlanningConfirmed(false);
+                      setPlanningAutomation({ phase: "idle", detail: "" });
+                    }}
+                    conversationVisible={false}
+                  />
                 </div>
               ) : null}
               <form className="sidebar-planning-composer" onSubmit={(event) => {

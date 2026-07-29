@@ -93,6 +93,60 @@ export function getRunConclusions(runId: string) {
   }>(`/v1/runs/${encodeURIComponent(runId)}/conclusions`);
 }
 
+export function getRunKnowledge(runId: string) {
+  return request<{
+    contexts: Array<{ id?: string; generatedAt: string }>;
+    decisions: Array<{
+      id: string;
+      contextId: string;
+      invocationId?: string;
+      validationStatus: "pending" | "verified" | "rejected" | "expired";
+      output: NonNullable<PlanningMessage["knowledge"]>;
+      createdAt: string;
+    }>;
+    conflicts: Array<{ id: string; status: "open" | "resolved" | "superseded"; claimIds: string[] }>;
+    toolExecutions: Array<{ id: string; status: string; request: { tool: string; reason: string } }>;
+    messages: Array<{
+      id: string;
+      role: "user" | "assistant" | "system";
+      content: string;
+      createdAt: string;
+      reasoningSummary?: NonNullable<PlanningMessage["reasoningSummary"]>;
+      knowledgeContextId?: string;
+      knowledgeDecisionId?: string;
+      llmCallId?: string;
+    }>;
+  }>(`/v1/runs/${encodeURIComponent(runId)}/knowledge`);
+}
+
+export function getKnowledgeClaimSource(claimId: string, contextId?: string) {
+  const query = contextId ? `?contextId=${encodeURIComponent(contextId)}` : "";
+  return request<{
+    claimId: string;
+    contextId: string;
+    status: "observed" | "user-provided" | "retrieved" | "inferred" | "assumed" | "unknown";
+    domain: string;
+    statement?: string;
+    sensitive: boolean;
+    sourceRefs: string[];
+    scope: {
+      organizationId?: string;
+      projectId?: string;
+      runId?: string;
+      scenarioId?: string;
+      attemptId?: string;
+      stepId?: string;
+      commitSha?: string;
+      projectDigest?: string;
+      manifestHash?: string;
+      lockfileHash?: string;
+      registryHash?: string;
+      filePath?: string;
+      fileSha256?: string;
+    };
+  }>(`/v1/knowledge-claims/${encodeURIComponent(claimId)}/source${query}`);
+}
+
 export function getConclusionProof(runId: string, conclusionId: string) {
   return request<{
     conclusion: Conclusion;
@@ -108,10 +162,32 @@ export function sendRunAgentMessage(runId: string, payload: { message: string; c
   return request<{
     assistant: {
       reply: string;
-      suggestedAction: "none" | "resume-interrupt" | "create-repair" | "open-evidence";
+      reasoningSummary: NonNullable<PlanningMessage["reasoningSummary"]>;
+      suggestedAction: "none" | "revise-plan" | "start-run" | "pause-run" | "resume-run" | "cancel-run" | "resume-interrupt" | "create-repair" | "open-evidence";
       requiresConfirmation: boolean;
+      knowledge: {
+        schemaVersion: "2.0";
+        factsUsed: string[];
+        inferences: Array<{ statement: string; sourceClaimIds: string[] }>;
+        assumptions: Array<{ statement: string; risk: "low" | "medium" | "high" }>;
+        unknowns: string[];
+        toolRequests: Array<{ tool: string; input: Record<string, unknown>; reason: string; sourceClaimIds: string[] }>;
+        blockingQuestions: string[];
+        proposedActions: Array<{ capability: string; reason: string; sourceClaimIds: string[]; requiresConfirmation: boolean }>;
+      };
     };
-    call: { id: string; provider: string; model: string; status: string; durationMs: number };
+    call: {
+      id: string;
+      provider: string;
+      model: string;
+      status: string;
+      durationMs: number;
+      usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+      semanticRepairApplied?: boolean;
+      knowledgeContextId?: string;
+      knowledgeDecisionId?: string;
+      knowledgeValidationStatus?: string;
+    };
   }>(`/v1/runs/${encodeURIComponent(runId)}/messages`, {
     method: "POST",
     body: JSON.stringify(payload)
@@ -364,9 +440,20 @@ export function chatWithTestAssistant(payload: {
   return request<{
     assistant: {
       reply: string;
+      reasoningSummary: NonNullable<PlanningMessage["reasoningSummary"]>;
       intent: "status-question" | "failure-question" | "plan-change" | "execution-control" | "general";
       suggestedAction: "none" | "revise-plan" | "start-run" | "pause-run" | "resume-run" | "cancel-run" | "open-evidence";
       requiresConfirmation: boolean;
+      knowledge: {
+        schemaVersion: "2.0";
+        factsUsed: string[];
+        inferences: Array<{ statement: string; sourceClaimIds: string[] }>;
+        assumptions: Array<{ statement: string; risk: "low" | "medium" | "high" }>;
+        unknowns: string[];
+        toolRequests: Array<{ tool: string; input: Record<string, unknown>; reason: string; sourceClaimIds: string[] }>;
+        blockingQuestions: string[];
+        proposedActions: Array<{ capability: string; reason: string; sourceClaimIds: string[]; requiresConfirmation: boolean }>;
+      };
     };
     call: {
       id: string;
@@ -375,6 +462,10 @@ export function chatWithTestAssistant(payload: {
       status: string;
       durationMs?: number;
       usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+      semanticRepairApplied?: boolean;
+      knowledgeContextId?: string;
+      knowledgeDecisionId?: string;
+      knowledgeValidationStatus?: string;
     };
   }>("/api/assistant/chat", {
     method: "POST",

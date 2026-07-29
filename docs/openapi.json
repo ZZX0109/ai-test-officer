@@ -2127,6 +2127,38 @@
           "encryptedOutputRef": {
             "type": "string",
             "minLength": 1
+          },
+          "knowledgeContextId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "knowledgeDecisionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "knowledgeToolExecutionIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "maxItems": 20,
+            "default": []
+          },
+          "boundaryPolicyVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "knowledgeValidationStatus": {
+            "type": "string",
+            "enum": [
+              "not-applicable",
+              "pending",
+              "verified",
+              "rejected",
+              "expired"
+            ],
+            "default": "not-applicable"
           }
         },
         "required": [
@@ -2333,6 +2365,1127 @@
           "toType",
           "toId",
           "relation",
+          "createdAt"
+        ]
+      },
+      "KnowledgeClaim": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "supersedesClaimId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "observed",
+              "user-provided",
+              "retrieved",
+              "inferred",
+              "assumed",
+              "unknown"
+            ]
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "general",
+              "project-static",
+              "runtime",
+              "user-intent",
+              "credential-metadata",
+              "external-documentation"
+            ]
+          },
+          "sourceRefs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sensitive": {
+            "type": "boolean",
+            "default": false
+          },
+          "scope": {
+            "type": "object",
+            "properties": {
+              "organizationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "projectId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "scenarioId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attemptId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "stepId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "commitSha": {
+                "type": "string",
+                "minLength": 1
+              },
+              "projectDigest": {
+                "type": "string",
+                "minLength": 1
+              },
+              "manifestHash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "lockfileHash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "registryHash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "filePath": {
+                "type": "string",
+                "minLength": 1
+              },
+              "fileSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "default": {}
+          }
+        },
+        "required": [
+          "id",
+          "statement",
+          "status",
+          "domain",
+          "confidence"
+        ]
+      },
+      "LlmKnowledgeContext": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0",
+              "2.0"
+            ],
+            "default": "2.0"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "invocationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "planning",
+              "judging",
+              "triage",
+              "repairing",
+              "assistant"
+            ]
+          },
+          "projectSnapshot": {
+            "type": "object",
+            "properties": {
+              "projectId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "commitSha": {
+                "type": "string",
+                "minLength": 1
+              },
+              "projectDigest": {
+                "type": "string",
+                "minLength": 1
+              },
+              "manifestSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "lockfileSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "registrySha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "projectId"
+            ]
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "subject": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "supersedesClaimId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "statement": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "observed",
+                    "user-provided",
+                    "retrieved",
+                    "inferred",
+                    "assumed",
+                    "unknown"
+                  ]
+                },
+                "domain": {
+                  "type": "string",
+                  "enum": [
+                    "general",
+                    "project-static",
+                    "runtime",
+                    "user-intent",
+                    "credential-metadata",
+                    "external-documentation"
+                  ]
+                },
+                "sourceRefs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "maxItems": 50,
+                  "default": []
+                },
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "observedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "sensitive": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "scope": {
+                  "type": "object",
+                  "properties": {
+                    "organizationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "projectId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "scenarioId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "stepId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "commitSha": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "projectDigest": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "manifestHash": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "lockfileHash": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "registryHash": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "filePath": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "fileSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "default": {}
+                }
+              },
+              "required": [
+                "id",
+                "statement",
+                "status",
+                "domain",
+                "confidence"
+              ]
+            },
+            "maxItems": 200,
+            "default": []
+          },
+          "allowedCapabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "maxItems": 100,
+            "default": []
+          },
+          "allowedTools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "maxItems": 100,
+            "default": []
+          },
+          "unknowns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "question": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1000
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1000
+                },
+                "blocking": {
+                  "type": "boolean"
+                },
+                "resolvableBy": {
+                  "type": "string",
+                  "enum": [
+                    "tool",
+                    "user",
+                    "none"
+                  ]
+                },
+                "requestedTool": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "id",
+                "question",
+                "reason",
+                "blocking",
+                "resolvableBy"
+              ]
+            },
+            "maxItems": 100,
+            "default": []
+          },
+          "untrustedInputKinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "requirement",
+                "diff",
+                "source",
+                "dom",
+                "console",
+                "network",
+                "external-document",
+                "prior-model-output"
+              ]
+            },
+            "default": []
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "purpose",
+          "generatedAt"
+        ]
+      },
+      "KnowledgeDecision": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contextId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "invocationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "output": {
+            "type": "object",
+            "properties": {
+              "schemaVersion": {
+                "type": "string",
+                "enum": [
+                  "2.0"
+                ],
+                "default": "2.0"
+              },
+              "factsUsed": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "maxItems": 50,
+                "default": []
+              },
+              "inferences": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "statement": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1000
+                    },
+                    "sourceClaimIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
+                    }
+                  },
+                  "required": [
+                    "statement",
+                    "sourceClaimIds"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 20,
+                "default": []
+              },
+              "assumptions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "statement": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1000
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "statement",
+                    "risk"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 20,
+                "default": []
+              },
+              "unknowns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "maxItems": 50,
+                "default": []
+              },
+              "toolRequests": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "tool": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "input": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "nullable": true
+                      },
+                      "default": {}
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1000
+                    },
+                    "sourceClaimIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 20,
+                      "default": []
+                    }
+                  },
+                  "required": [
+                    "tool",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 20,
+                "default": []
+              },
+              "blockingQuestions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1000
+                },
+                "maxItems": 10,
+                "default": []
+              },
+              "proposedActions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "capability": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1000
+                    },
+                    "sourceClaimIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 20,
+                      "default": []
+                    },
+                    "requiresConfirmation": {
+                      "type": "boolean",
+                      "default": false
+                    }
+                  },
+                  "required": [
+                    "capability",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 20,
+                "default": []
+              }
+            },
+            "additionalProperties": false
+          },
+          "validationStatus": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "verified",
+              "rejected",
+              "expired"
+            ]
+          },
+          "validationErrors": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "maxItems": 100,
+            "default": []
+          },
+          "toolExecutionIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "maxItems": 20,
+            "default": []
+          },
+          "canonicalSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "policyVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "contextId",
+          "output",
+          "validationStatus",
+          "canonicalSha256",
+          "policyVersion",
+          "createdAt"
+        ]
+      },
+      "KnowledgeConflict": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contextId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "actual-state",
+              "expected-behavior"
+            ]
+          },
+          "claimIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 2,
+            "maxItems": 20
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "resolved",
+              "superseded"
+            ]
+          },
+          "resolution": {
+            "type": "object",
+            "properties": {
+              "winningClaimId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "resolvedBy": {
+                "type": "string",
+                "enum": [
+                  "policy",
+                  "tool",
+                  "user"
+                ]
+              },
+              "resolvedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "winningClaimId",
+              "reason",
+              "resolvedBy",
+              "resolvedAt"
+            ]
+          },
+          "canonicalSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "contextId",
+          "domain",
+          "claimIds",
+          "status",
+          "canonicalSha256",
+          "createdAt"
+        ]
+      },
+      "KnowledgeToolExecution": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contextId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "request": {
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string",
+                "minLength": 1
+              },
+              "input": {
+                "type": "object",
+                "additionalProperties": {
+                  "nullable": true
+                },
+                "default": {}
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "sourceClaimIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "maxItems": 20,
+                "default": []
+              }
+            },
+            "required": [
+              "tool",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "inputSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "started",
+              "completed",
+              "failed",
+              "denied"
+            ]
+          },
+          "outputClaimIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "maxItems": 100,
+            "default": []
+          },
+          "outputClaims": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "subject": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "supersedesClaimId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "statement": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "observed",
+                    "user-provided",
+                    "retrieved",
+                    "inferred",
+                    "assumed",
+                    "unknown"
+                  ]
+                },
+                "domain": {
+                  "type": "string",
+                  "enum": [
+                    "general",
+                    "project-static",
+                    "runtime",
+                    "user-intent",
+                    "credential-metadata",
+                    "external-documentation"
+                  ]
+                },
+                "sourceRefs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "maxItems": 50,
+                  "default": []
+                },
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "observedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "sensitive": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "scope": {
+                  "type": "object",
+                  "properties": {
+                    "organizationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "projectId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "scenarioId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "stepId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "commitSha": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "projectDigest": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "manifestHash": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "lockfileHash": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "registryHash": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "filePath": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "fileSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "default": {}
+                }
+              },
+              "required": [
+                "id",
+                "statement",
+                "status",
+                "domain",
+                "confidence"
+              ]
+            },
+            "maxItems": 100,
+            "default": []
+          },
+          "outputSummary": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "outputData": {
+            "nullable": true
+          },
+          "errorCode": {
+            "type": "string",
+            "minLength": 1
+          },
+          "permissionEventId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "contextId",
+          "request",
+          "inputSha256",
+          "status",
+          "startedAt"
+        ]
+      },
+      "AgentMessage": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant",
+              "system",
+              "tool"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 8000
+          },
+          "reasoningSummary": {
+            "type": "object",
+            "properties": {
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "observing",
+                  "diagnosing",
+                  "planning",
+                  "waiting-user",
+                  "acting",
+                  "completed"
+                ]
+              },
+              "observations": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "maxItems": 6,
+                "default": []
+              },
+              "assessment": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1200
+              },
+              "nextStep": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 800
+              },
+              "userAction": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 800
+              },
+              "confidence": {
+                "type": "string",
+                "enum": [
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              }
+            },
+            "required": [
+              "phase",
+              "assessment",
+              "nextStep",
+              "userAction",
+              "confidence"
+            ]
+          },
+          "knowledgeContextId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "knowledgeDecisionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "llmCallId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "suggestedAction": {
+            "type": "string",
+            "minLength": 1
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "runId",
+          "role",
+          "content",
           "createdAt"
         ]
       }
@@ -2565,6 +3718,279 @@
                   },
                   "required": [
                     "conclusions"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/knowledge": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge contexts, decisions, conflicts, tools, and durable conversation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "contexts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/LlmKnowledgeContext"
+                      }
+                    },
+                    "decisions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/KnowledgeDecision"
+                      }
+                    },
+                    "conflicts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/KnowledgeConflict"
+                      }
+                    },
+                    "toolExecutions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/KnowledgeToolExecution"
+                      }
+                    },
+                    "messages": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AgentMessage"
+                      }
+                    }
+                  },
+                  "required": [
+                    "contexts",
+                    "decisions",
+                    "conflicts",
+                    "toolExecutions",
+                    "messages"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/knowledge-contexts/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmKnowledgeContext"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/knowledge-claims/{id}/source": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "contextId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resolved claim source handle",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "claimId": {
+                      "type": "string"
+                    },
+                    "contextId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "observed",
+                        "user-provided",
+                        "retrieved",
+                        "inferred",
+                        "assumed",
+                        "unknown"
+                      ]
+                    },
+                    "domain": {
+                      "type": "string",
+                      "enum": [
+                        "general",
+                        "project-static",
+                        "runtime",
+                        "user-intent",
+                        "credential-metadata",
+                        "external-documentation"
+                      ]
+                    },
+                    "statement": {
+                      "type": "string"
+                    },
+                    "sensitive": {
+                      "type": "boolean"
+                    },
+                    "sourceRefs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "scope": {
+                      "type": "object",
+                      "properties": {
+                        "organizationId": {
+                          "type": "string"
+                        },
+                        "projectId": {
+                          "type": "string"
+                        },
+                        "runId": {
+                          "type": "string"
+                        },
+                        "scenarioId": {
+                          "type": "string"
+                        },
+                        "attemptId": {
+                          "type": "string"
+                        },
+                        "projectDigest": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "claimId",
+                    "contextId",
+                    "status",
+                    "domain",
+                    "sensitive",
+                    "sourceRefs",
+                    "scope"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/knowledge-conflicts": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge conflicts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "conflicts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/KnowledgeConflict"
+                      }
+                    }
+                  },
+                  "required": [
+                    "conflicts"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/tool-executions": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge tool executions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "executions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/KnowledgeToolExecution"
+                      }
+                    }
+                  },
+                  "required": [
+                    "executions"
                   ]
                 }
               }

@@ -9,6 +9,12 @@ import {
   conclusionSchema,
   coverageItemSchema,
   createRunRequestSchema,
+  agentMessageSchema,
+  knowledgeClaimSchema,
+  knowledgeConflictSchema,
+  knowledgeDecisionSchema,
+  knowledgeToolExecutionSchema,
+  llmKnowledgeContextSchema,
   llmInvocationSchema,
   proofEdgeSchema,
   repairExportSchema,
@@ -31,12 +37,91 @@ const CoverageItem = registry.register("CoverageItem", coverageItemSchema);
 const LlmInvocation = registry.register("LlmInvocation", llmInvocationSchema);
 const Conclusion = registry.register("Conclusion", conclusionSchema);
 const ProofEdge = registry.register("ProofEdge", proofEdgeSchema);
+const KnowledgeClaim = registry.register("KnowledgeClaim", knowledgeClaimSchema);
+const KnowledgeContext = registry.register("LlmKnowledgeContext", llmKnowledgeContextSchema);
+const KnowledgeDecision = registry.register("KnowledgeDecision", knowledgeDecisionSchema);
+const KnowledgeConflict = registry.register("KnowledgeConflict", knowledgeConflictSchema);
+const KnowledgeToolExecution = registry.register("KnowledgeToolExecution", knowledgeToolExecutionSchema);
+const AgentMessage = registry.register("AgentMessage", agentMessageSchema);
 registry.registerPath({ method: "post", path: "/v1/runs", request: { body: { content: { "application/json": { schema: CreateRun } } } }, responses: { 201: { description: "Created", content: { "application/json": { schema: z.object({ run: Run }) } } }, 400: { description: "Invalid request", content: { "application/json": { schema: ApiError } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Run", content: { "application/json": { schema: z.object({ run: Run }) } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/agent", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Agent graph projection", content: { "application/json": { schema: z.object({ agent: AgentGraphProjection.nullable() }) } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/coverage", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Coverage disposition", content: { "application/json": { schema: z.object({ coverage: z.array(CoverageItem), complete: z.boolean() }) } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/llm-calls", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Versioned LLM invocations", content: { "application/json": { schema: z.object({ calls: z.array(LlmInvocation) }) } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/conclusions", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Verified conclusions", content: { "application/json": { schema: z.object({ conclusions: z.array(Conclusion) }) } } } } });
+registry.registerPath({
+  method: "get",
+  path: "/v1/runs/{id}/knowledge",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    200: {
+      description: "Knowledge contexts, decisions, conflicts, tools, and durable conversation",
+      content: {
+        "application/json": {
+          schema: z.object({
+            contexts: z.array(KnowledgeContext),
+            decisions: z.array(KnowledgeDecision),
+            conflicts: z.array(KnowledgeConflict),
+            toolExecutions: z.array(KnowledgeToolExecution),
+            messages: z.array(AgentMessage)
+          })
+        }
+      }
+    }
+  }
+});
+registry.registerPath({
+  method: "get",
+  path: "/v1/knowledge-contexts/{id}",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: { description: "Knowledge context", content: { "application/json": { schema: KnowledgeContext } } } }
+});
+registry.registerPath({
+  method: "get",
+  path: "/v1/knowledge-claims/{id}/source",
+  request: {
+    params: z.object({ id: z.string() }),
+    query: z.object({ contextId: z.string().optional() })
+  },
+  responses: {
+    200: {
+      description: "Resolved claim source handle",
+      content: {
+        "application/json": {
+          schema: z.object({
+            claimId: z.string(),
+            contextId: z.string(),
+            status: z.enum(["observed", "user-provided", "retrieved", "inferred", "assumed", "unknown"]),
+            domain: z.enum(["general", "project-static", "runtime", "user-intent", "credential-metadata", "external-documentation"]),
+            statement: z.string().optional(),
+            sensitive: z.boolean(),
+            sourceRefs: z.array(z.string()),
+            scope: z.object({
+              organizationId: z.string().optional(),
+              projectId: z.string().optional(),
+              runId: z.string().optional(),
+              scenarioId: z.string().optional(),
+              attemptId: z.string().optional(),
+              projectDigest: z.string().optional()
+            })
+          })
+        }
+      }
+    }
+  }
+});
+registry.registerPath({
+  method: "get",
+  path: "/v1/runs/{id}/knowledge-conflicts",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: { description: "Knowledge conflicts", content: { "application/json": { schema: z.object({ conflicts: z.array(KnowledgeConflict) }) } } } }
+});
+registry.registerPath({
+  method: "get",
+  path: "/v1/runs/{id}/tool-executions",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: { description: "Knowledge tool executions", content: { "application/json": { schema: z.object({ executions: z.array(KnowledgeToolExecution) }) } } } }
+});
 registry.registerPath({ method: "get", path: "/v1/conclusions/{id}/proof", request: { params: z.object({ id: z.string() }), query: z.object({ runId: z.string() }) }, responses: { 200: { description: "Conclusion proof graph", content: { "application/json": { schema: z.object({ conclusion: Conclusion, edges: z.array(ProofEdge) }) } } } } });
 registry.registerPath({
   method: "post",

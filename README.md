@@ -299,6 +299,61 @@ JSON、DSL 或 Evidence 引用错误只允许一次受限语义修复，两类�
 多个节点并发突破 Run 预算。模型价格来自版本化 `ModelPriceCatalog`；历史运行
 保留当时的价格目录版本，不会因之后调价而被回写。
 
+#### LLM 知识边界
+
+Planner、Judge、规划助手、运行助手、启动诊断、场景修复和代码修复统一通过
+`executeKnowledgeBoundedLlm()`，业务模块不能直接绕过知识校验调用 provider。
+模型输入中的需求、Diff、源码、DOM、日志、网络和历史模型输出均是不可信数据。
+
+模型只能把以下三类声明作为事实：
+
+| 声明状态 | 用途 |
+| --- | --- |
+| `observed` | 已由当前运行、Artifact 或确定性检查直接观察 |
+| `user-provided` | 用户在当前组织、项目和 Run 作用域明确提供 |
+| `retrieved` | 由受控只读工具从锁定项目快照或官方文档取得 |
+| `inferred` | 仅作为待验证假设，不授权操作、不支撑正式结论 |
+| `assumed` / `unknown` | 必须补充工具证据或询问用户 |
+
+每个 Knowledge Context 都绑定 Run、项目摘要、commit、manifest、lockfile 和
+Scenario Registry 哈希。来源解析器会拒绝不存在、跨组织、跨项目、跨 Run、
+跨 Attempt、未提交或已过期的引用。期望行为冲突优先采用用户确认需求和正式契约；
+实际状态冲突优先采用当前 Attempt 的运行证据和确定性断言。冲突会生成追加式
+`KnowledgeConflict`，不会由后一次模型回答静默覆盖。
+
+首批自动工具仅为只读：
+
+```text
+read-run-evidence
+read-project-manifest
+inspect-project-file
+inspect-route
+inspect-api-operation
+read-repair-history
+read-runtime-log
+```
+
+每次调用最多两轮只读补充。写沙盒、执行命令、联网安装、使用凭据、修改数据或
+应用源码必须转成 LangGraph capability interrupt，由用户按风险分别授权。
+`.env`、API Key、私钥、连接串、凭据值和被禁止路径不会进入模型上下文或工具记录。
+
+知识审计记录追加写入 `llm_knowledge_contexts_v1`、`knowledge_claims_v1`、
+`knowledge_decisions_v1`、`knowledge_conflicts_v1`、
+`knowledge_tool_executions_v1` 和 `agent_messages_v1`，并纳入
+`RunEvidenceManifest`。Workbench 消息的“判断依据”可以展开已验证事实、AI
+推断、尚未确认项、工具执行和用户待处理事项；服务重启后会从 PostgreSQL 恢复同一
+对话线程。
+
+相关接口：
+
+```http
+GET /v1/runs/:id/knowledge
+GET /v1/knowledge-contexts/:id
+GET /v1/knowledge-claims/:id/source?contextId=:contextId
+GET /v1/runs/:id/knowledge-conflicts
+GET /v1/runs/:id/tool-executions
+```
+
 #### 结论证明链与防篡改
 
 正式结论不再只引用“某个文件路径”，而是建立不可变证明图：

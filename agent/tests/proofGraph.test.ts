@@ -171,11 +171,26 @@ export async function testProofGraph() {
     proofEdges: graph.proofEdges,
     coverageItems: graph.coverageItems
   } as RunBundle;
-  const manifest = createEvidenceManifest(bundle);
-  assert.equal(verifyEvidenceManifest(bundle, manifest).valid, true);
+  const knowledge = {
+    contexts: [{
+      id: "knowledge-context-1",
+      generatedAt: "2026-07-28T00:00:00.500Z",
+      purpose: "judging"
+    }],
+    messages: [{
+      id: "agent-message-1",
+      createdAt: "2026-07-28T00:00:00.750Z",
+      role: "assistant"
+    }]
+  };
+  const manifest = createEvidenceManifest(bundle, knowledge);
+  assert.equal(verifyEvidenceManifest(bundle, manifest, knowledge).valid, true);
   const changed = structuredClone(bundle);
   changed.result.summary = canonicalSha256("tampered");
-  assert.equal(verifyEvidenceManifest(changed, manifest).valid, false);
+  assert.equal(verifyEvidenceManifest(changed, manifest, knowledge).valid, false);
+  const changedKnowledge = structuredClone(knowledge);
+  changedKnowledge.messages[0].role = "user";
+  assert.equal(verifyEvidenceManifest(bundle, manifest, changedKnowledge).valid, false);
 
   await writeRunBundle(bundle);
   const override = await appendHumanOverrideConclusion({

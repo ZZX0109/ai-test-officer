@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { llmCallSchema, type LlmBudget, type LlmCall } from "@ai-test-officer/contracts";
 import type { CredentialRecord } from "./types.js";
 import { publishLlmLifecycle } from "./llmLifecycle.js";
+import { listRunKnowledge } from "./knowledge-boundary/store.js";
 import { estimateModelUsageCost } from "./modelPriceCatalog.js";
 import { finalizeLlmBudget, reserveLlmBudget, type LlmBudgetReservation } from "./llmBudgetLedger.js";
 
@@ -26,6 +27,9 @@ export interface LlmCallContext {
   ruleCapable?: boolean;
   ruleBypassReason?: string;
   cachePolicy?: "use" | "bypass";
+  knowledgeContextId?: string;
+  boundaryPolicyVersion?: string;
+  knowledgeValidationStatus?: "not-applicable" | "pending" | "verified" | "rejected" | "expired";
 }
 
 const LANGCHAIN_ADAPTER_VERSION = "agent-orchestration-0.1.0";
@@ -88,8 +92,8 @@ async function persist(call: LlmCall) {
       );
       await client.query(
         `INSERT INTO llm_invocations_v1
-         (id,run_id,experiment_id,purpose,provider,requested_model,returned_model,status,prompt_sha256,price_catalog_version,final_status_impact,invocation_json,started_at,completed_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         (id,run_id,experiment_id,purpose,provider,requested_model,returned_model,status,prompt_sha256,price_catalog_version,final_status_impact,invocation_json,started_at,completed_at,knowledge_context_id,boundary_policy_version,knowledge_validation_status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
          ON CONFLICT (id) DO NOTHING`,
         [
           call.id,
@@ -105,7 +109,10 @@ async function persist(call: LlmCall) {
           call.finalStatusImpact,
           call,
           call.startedAt,
-          call.completedAt ?? null
+          call.completedAt ?? null,
+          call.knowledgeContextId ?? null,
+          call.boundaryPolicyVersion ?? null,
+          call.knowledgeValidationStatus ?? "not-applicable"
         ]
       );
       await client.query("COMMIT");
@@ -199,7 +206,7 @@ async function parseResponsesJson(response: Response) {
   return { data, telemetry: { bytesReceived, eventTypes: ["json_response"], firstTokenAt: undefined as string | undefined } };
 }
 
-type ExecuteLlmCallInput = {
+export type ExecuteLlmCallInput = {
   credential: CredentialRecord;
   apiKey: string;
   prompt: string;
@@ -499,13 +506,32 @@ export async function executeLlmCall(input: ExecuteLlmCallInput) {
 }
 
 export async function listLlmCalls(runId: string): Promise<LlmCall[]> {
+  const withKnowledgeLinks = async (calls: LlmCall[]) => {
+    const decisions = (await listRunKnowledge(runId)).decisions;
+    const byInvocation = new Map(
+      decisions
+        .filter((item) => item.invocationId)
+        .map((item) => [item.invocationId!, item])
+    );
+    return calls.map((call) => {
+      const decision = byInvocation.get(call.id);
+      return decision ? llmCallSchema.parse({
+        ...call,
+        knowledgeContextId: decision.contextId,
+        knowledgeDecisionId: decision.id,
+        knowledgeToolExecutionIds: decision.toolExecutionIds,
+        boundaryPolicyVersion: decision.policyVersion,
+        knowledgeValidationStatus: decision.validationStatus
+      }) : call;
+    });
+  };
   const directory = path.join(rootDir, "reports", "llm-calls", runId);
   try {
     const files = (await readdir(directory)).filter((file) => file.endsWith(".json"));
     const calls = await Promise.all(files.map(async (file) =>
       llmCallSchema.parse(JSON.parse(await readFile(path.join(directory, file), "utf8")))
     ));
-    return calls.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    return (await withKnowledgeLinks(calls)).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   } catch {
     if (!process.env.DATABASE_URL) return [];
     const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
@@ -525,7 +551,7 @@ export async function listLlmCalls(runId: string): Promise<LlmCall[]> {
           [runId]
         )).rows;
       }
-      return rows.map((row) => llmCallSchema.parse(row.invocation_json));
+      return withKnowledgeLinks(rows.map((row) => llmCallSchema.parse(row.invocation_json)));
     } catch {
       return [];
     } finally {

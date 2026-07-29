@@ -13,7 +13,12 @@ import {
   ,planProvenanceSchema
   ,actionDslSchema
   ,llmCallSchema
+  ,knowledgeClaimSchema
+  ,llmKnowledgeContextSchema
+  ,knowledgeBoundaryOutputSchema
+  ,normalizeKnowledgeBoundaryOutput
   ,runOutcomeSummaryV2Schema
+  ,agentMessageSchema
 } from "../src/index.js";
 
 const artifact = artifactV2Schema.parse({
@@ -64,6 +69,26 @@ assert.equal(resolveFinalStatus({
   humanDecision: { status: "approved", actor: "reviewer", reason: "override", decidedAt: "2026-07-14T00:00:00.000Z" }
 }), "fail");
 assert.equal(defaultResourceBudget.maxAttempts, 2);
+const assistantMessage = agentMessageSchema.parse({
+  id: "message-1",
+  runId: "run-1",
+  role: "assistant",
+  content: "需要测试账号后才能继续。",
+  createdAt: "2026-07-29T00:00:00.000Z",
+  reasoningSummary: {
+    phase: "waiting-user",
+    observations: ["登录接口返回 401"],
+    assessment: "缺少测试账号，不是产品断言失败。",
+    nextStep: "绑定加密凭据后恢复当前运行。",
+    userAction: "请配置测试账号。",
+    confidence: "high"
+  }
+});
+assert.equal(assistantMessage.reasoningSummary?.phase, "waiting-user");
+assert.throws(() => agentMessageSchema.parse({
+  ...assistantMessage,
+  reasoningSummary: { ...assistantMessage.reasoningSummary, assessment: "" }
+}));
 assert.throws(() => projectManifestSchema.parse({ schemaVersion: "1.0", projectId: "demo", workspaceRoot: ".", commandAllowlist: ["npm"], commands: { start: { executable: "npm && rm", args: [] } } }));
 assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "llm-without-model", projectId: "demo", input: { plannerMode: "llm" } }));
 assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "cached-benchmark", projectId: "demo", input: { experimentId: "exp", repetition: 1, cachePolicy: "auto" } }));
@@ -130,4 +155,51 @@ assert.equal(llmCallSchema.parse({
   durationMs: 12, status: "failed", usage: {}, errorCode: "provider_responses_incomplete",
   transportAttempts: [1, 2, 3].map((attempt) => ({ attempt, mode: attempt === 3 ? "non-stream" : "stream", status: "failed", startedAt: "2026-07-19T00:00:00.000Z", durationMs: 4, errorCode: "provider_responses_incomplete", bytesReceived: 32, eventTypes: ["response.output_text.delta"] }))
 }).transportAttempts?.length, 3);
+assert.throws(() => knowledgeClaimSchema.parse({
+  id: "runtime-without-source",
+  statement: "The page is available.",
+  status: "observed",
+  domain: "runtime",
+  sourceRefs: [],
+  confidence: 1
+}));
+assert.equal(knowledgeClaimSchema.parse({
+  id: "runtime-with-source",
+  statement: "The page returned HTTP 200.",
+  status: "observed",
+  domain: "runtime",
+  sourceRefs: ["evidence-1"],
+  confidence: 1
+}).status, "observed");
+assert.throws(() => llmKnowledgeContextSchema.parse({
+  schemaVersion: "1.0",
+  purpose: "assistant",
+  claims: [
+    { id: "duplicate", statement: "one", status: "retrieved", domain: "project-static", sourceRefs: ["file:a"], confidence: 1 },
+    { id: "duplicate", statement: "two", status: "retrieved", domain: "project-static", sourceRefs: ["file:b"], confidence: 1 }
+  ],
+  allowedCapabilities: [],
+  allowedTools: [],
+  unknowns: [],
+  untrustedInputKinds: [],
+  generatedAt: "2026-07-28T00:00:00.000Z"
+}));
+assert.equal(knowledgeBoundaryOutputSchema.parse({
+  schemaVersion: "2.0",
+  factsUsed: ["runtime-with-source"],
+  inferences: [],
+  assumptions: [],
+  unknowns: [],
+  toolRequests: [],
+  blockingQuestions: [],
+  proposedActions: []
+}).factsUsed[0], "runtime-with-source");
+assert.equal(normalizeKnowledgeBoundaryOutput({
+  factsUsed: ["runtime-with-source"],
+  inferences: [],
+  assumptions: [],
+  unknowns: [],
+  requestedTools: ["read-run-evidence"],
+  blockingQuestions: []
+}).toolRequests[0]?.tool, "read-run-evidence");
 console.log("contracts tests passed");

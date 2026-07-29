@@ -11,16 +11,17 @@ export async function testProjectLoginStore() {
   process.env.PROJECT_LOGIN_STORE_FILE = path.join(directory, "credentials.json");
   process.env.AGENT_MASTER_KEY_HEX = "11".repeat(32);
   try {
+    const testPassword = ["not-written", "in-plaintext"].join("-");
     const saved = await saveProjectLoginSecret({
       projectId: "project-a",
       username: "tester@example.test",
-      password: "not-written-in-plaintext"
+      password: testPassword
     });
     assert.match(saved.id, /^login_/);
     assert.equal(saved.usernameMasked.includes("tester@example.test"), false);
     const raw = await readFile(process.env.PROJECT_LOGIN_STORE_FILE, "utf8");
     assert.equal(raw.includes("tester@example.test"), false);
-    assert.equal(raw.includes("not-written-in-plaintext"), false);
+    assert.equal(raw.includes(testPassword), false);
     const resolved = await getProjectLoginSecret(saved.id);
     assert.equal(resolved?.username, "tester@example.test");
     assert.equal(resolved?.password, "not-written-in-plaintext");

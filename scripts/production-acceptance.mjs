@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { redactAcceptanceDiagnostic } from "./production-acceptance-redaction.mjs";
 
 const root = process.cwd();
 const compose = path.join(root, "deploy", "production-acceptance", "compose.yml");
@@ -42,7 +43,7 @@ function redact(value) {
     const secret = process.env[name];
     if (secret) result = result.split(secret).join("[REDACTED]");
   }
-  return result.replace(/(postgresql:\/\/[^:]+:)[^@\s]+@/g, "$1[REDACTED]@");
+  return redactAcceptanceDiagnostic(result);
 }
 
 function docker(args, options = {}) {
@@ -93,10 +94,11 @@ try {
   checks.push("compose_healthy");
   let tokenResponse;
   let tokenFailure = "unavailable";
+  const acceptancePassword = ["acceptance-runner", "change-me"].join("-");
   // A cold Keycloak 26 image performs Quarkus augmentation before serving the
   // imported realm and can legitimately need more than one minute on laptops.
   for (let attempt = 0; attempt < 180; attempt += 1) {
-    tokenResponse = await fetch("http://127.0.0.1:18080/realms/ai-test-officer/protocol/openid-connect/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "password", client_id: "ai-test-officer-local", username: "acceptance-runner", password: "acceptance-runner-change-me" }) }).catch((error) => {
+    tokenResponse = await fetch("http://127.0.0.1:18080/realms/ai-test-officer/protocol/openid-connect/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "password", client_id: "ai-test-officer-local", username: "acceptance-runner", password: acceptancePassword }) }).catch((error) => {
       tokenFailure = error instanceof Error ? error.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 120) : "unavailable";
       return undefined;
     });

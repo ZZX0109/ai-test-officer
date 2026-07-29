@@ -24,7 +24,10 @@ interface RunAssistantPanelProps {
   onAcceptRisk?: () => Promise<void> | void;
   autoRepairAvailable?: boolean;
   onAutoRepair?: () => Promise<void> | void;
+  autoRepairLabel?: string;
+  autoRepairDescription?: string;
   onEditPlan?: () => void;
+  conversationVisible?: boolean;
 }
 
 const SECRET_PATTERN = /\b(?:password|passwd|pwd|api[_ -]?key|access[_ -]?token)\b\s*[:=：]\s*\S+|(?:密码|密钥)\s*[:=：]\s*\S+/i;
@@ -51,7 +54,10 @@ export function RunAssistantPanel({
   onAcceptRisk,
   autoRepairAvailable = false,
   onAutoRepair,
-  onEditPlan
+  autoRepairLabel = "分析并修复失败链路",
+  autoRepairDescription = "我会读取失败链路和已保存证据，生成受限修复并重新验证；其他可执行测试不会因此中止。",
+  onEditPlan,
+  conversationVisible = true
 }: RunAssistantPanelProps) {
   const [feedback, setFeedback] = useState("");
   const [localMessage, setLocalMessage] = useState("");
@@ -73,18 +79,22 @@ export function RunAssistantPanel({
   }
 
   return (
-    <section className={`run-assistant ${blocked && !autoRepairAvailable ? "blocked" : ""} ${autoRepairAvailable ? "auto-repair-message" : ""}`} aria-label="AI 测试助手">
-      <header>
-        <Bot size={15} />
-        <strong>AI 测试助手</strong>
-        <span>{busy ? "处理中" : autoRepairAvailable ? "可自动处理" : apiCredentialRequired ? "等待 API 凭据" : credentialReady ? "账号已就绪" : blocked ? "等待反馈" : "在线"}</span>
-      </header>
-      <p className="run-assistant-message">{message}</p>
+    <section className={`run-assistant ${blocked && !autoRepairAvailable ? "blocked" : ""} ${autoRepairAvailable ? "auto-repair-message" : ""} ${conversationVisible ? "" : "actions-only"}`} aria-label="AI 测试助手">
+      {conversationVisible ? (
+        <>
+          <header>
+            <Bot size={15} />
+            <strong>AI 测试助手</strong>
+            <span>{busy ? "处理中" : autoRepairAvailable ? "可自动处理" : apiCredentialRequired ? "等待 API 凭据" : credentialReady ? "账号已就绪" : blocked ? "等待反馈" : "在线"}</span>
+          </header>
+          <p className="run-assistant-message">{message}</p>
+        </>
+      ) : null}
       {autoRepairAvailable && onAutoRepair ? (
         <div className="run-assistant-auto-repair">
-          <span>我会读取失败链路和已保存证据，重新绑定真实页面、操作与验证结果；其他可执行测试不会因此中止。</span>
+          <span>{autoRepairDescription}</span>
           <button type="button" disabled={busy} onClick={() => void onAutoRepair()}>
-            {busy ? "正在分析失败链路" : "分析并修复失败链路"}
+            {busy ? "AI 正在处理并记录过程" : autoRepairLabel}
           </button>
           {onEditPlan ? <button className="secondary" type="button" disabled={busy} onClick={onEditPlan}>修改测试范围</button> : null}
         </div>
@@ -156,7 +166,7 @@ export function RunAssistantPanel({
           </button>
         </div>
       ) : null}
-      {!autoRepairAvailable ? (
+      {conversationVisible ? (
         <>
           <form onSubmit={submit}>
             <textarea
@@ -164,14 +174,14 @@ export function RunAssistantPanel({
               onChange={(event) => setFeedback(event.target.value)}
               rows={3}
               aria-label="向 AI 测试助手反馈"
-              placeholder="补充页面入口、账号角色或预期结果…"
+              placeholder={autoRepairAvailable ? "可以追问失败原因、修复范围、修改了哪些文件或验证结果…" : "补充页面入口、账号角色或预期结果…"}
             />
             <button type="submit" disabled={busy || !feedback.trim()}>
               <Send size={13} />
-              {busy ? "处理中" : "发送反馈"}
+              {busy ? "处理中" : "发送给 AI"}
             </button>
           </form>
-          <small>{localMessage || "请勿在对话中填写密码或 API Key；凭据只通过加密配置保存并在运行时注入沙盒。"}</small>
+          <small>{localMessage || "这里会调用当前配置的模型并保留调用编号；请勿填写密码或 API Key。"}</small>
         </>
       ) : null}
     </section>

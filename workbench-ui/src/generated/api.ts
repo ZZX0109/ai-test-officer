@@ -250,6 +250,221 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/runs/{id}/knowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Knowledge contexts, decisions, conflicts, tools, and durable conversation */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            contexts: components["schemas"]["LlmKnowledgeContext"][];
+                            decisions: components["schemas"]["KnowledgeDecision"][];
+                            conflicts: components["schemas"]["KnowledgeConflict"][];
+                            toolExecutions: components["schemas"]["KnowledgeToolExecution"][];
+                            messages: components["schemas"]["AgentMessage"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge-contexts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Knowledge context */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["LlmKnowledgeContext"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/knowledge-claims/{id}/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    contextId?: string;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Resolved claim source handle */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            claimId: string;
+                            contextId: string;
+                            /** @enum {string} */
+                            status: "observed" | "user-provided" | "retrieved" | "inferred" | "assumed" | "unknown";
+                            /** @enum {string} */
+                            domain: "general" | "project-static" | "runtime" | "user-intent" | "credential-metadata" | "external-documentation";
+                            statement?: string;
+                            sensitive: boolean;
+                            sourceRefs: string[];
+                            scope: {
+                                organizationId?: string;
+                                projectId?: string;
+                                runId?: string;
+                                scenarioId?: string;
+                                attemptId?: string;
+                                projectDigest?: string;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/knowledge-conflicts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Knowledge conflicts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            conflicts: components["schemas"]["KnowledgeConflict"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/tool-executions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Knowledge tool executions */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            executions: components["schemas"]["KnowledgeToolExecution"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/conclusions/{id}/proof": {
         parameters: {
             query?: never;
@@ -1361,6 +1576,16 @@ export interface components {
                 [key: string]: unknown;
             };
             encryptedOutputRef?: string;
+            knowledgeContextId?: string;
+            knowledgeDecisionId?: string;
+            /** @default [] */
+            knowledgeToolExecutionIds: string[];
+            boundaryPolicyVersion?: string;
+            /**
+             * @default not-applicable
+             * @enum {string}
+             */
+            knowledgeValidationStatus: "not-applicable" | "pending" | "verified" | "rejected" | "expired";
         };
         Conclusion: {
             /** @enum {string} */
@@ -1401,6 +1626,284 @@ export interface components {
             /** @enum {string} */
             relation: "supported-by-assertion" | "evaluates-oracle" | "supported-by-evidence" | "materialized-by-artifact" | "captured-in-attempt" | "produced-by-step" | "supersedes";
             canonicalSha256?: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        KnowledgeClaim: {
+            id: string;
+            subject?: string;
+            supersedesClaimId?: string;
+            statement: string;
+            /** @enum {string} */
+            status: "observed" | "user-provided" | "retrieved" | "inferred" | "assumed" | "unknown";
+            /** @enum {string} */
+            domain: "general" | "project-static" | "runtime" | "user-intent" | "credential-metadata" | "external-documentation";
+            /** @default [] */
+            sourceRefs: string[];
+            confidence: number;
+            /** Format: date-time */
+            observedAt?: string;
+            /** Format: date-time */
+            expiresAt?: string;
+            /** @default false */
+            sensitive: boolean;
+            /** @default {} */
+            scope: {
+                organizationId?: string;
+                projectId?: string;
+                runId?: string;
+                scenarioId?: string;
+                attemptId?: string;
+                stepId?: string;
+                commitSha?: string;
+                projectDigest?: string;
+                manifestHash?: string;
+                lockfileHash?: string;
+                registryHash?: string;
+                filePath?: string;
+                fileSha256?: string;
+            };
+        };
+        LlmKnowledgeContext: {
+            /**
+             * @default 2.0
+             * @enum {string}
+             */
+            schemaVersion: "1.0" | "2.0";
+            id?: string;
+            runId?: string;
+            invocationId?: string;
+            /** @enum {string} */
+            purpose: "planning" | "judging" | "triage" | "repairing" | "assistant";
+            projectSnapshot?: {
+                projectId: string;
+                commitSha?: string;
+                projectDigest?: string;
+                manifestSha256?: string;
+                lockfileSha256?: string;
+                registrySha256?: string;
+            };
+            /** @default [] */
+            claims: {
+                id: string;
+                subject?: string;
+                supersedesClaimId?: string;
+                statement: string;
+                /** @enum {string} */
+                status: "observed" | "user-provided" | "retrieved" | "inferred" | "assumed" | "unknown";
+                /** @enum {string} */
+                domain: "general" | "project-static" | "runtime" | "user-intent" | "credential-metadata" | "external-documentation";
+                /** @default [] */
+                sourceRefs: string[];
+                confidence: number;
+                /** Format: date-time */
+                observedAt?: string;
+                /** Format: date-time */
+                expiresAt?: string;
+                /** @default false */
+                sensitive: boolean;
+                /** @default {} */
+                scope: {
+                    organizationId?: string;
+                    projectId?: string;
+                    runId?: string;
+                    scenarioId?: string;
+                    attemptId?: string;
+                    stepId?: string;
+                    commitSha?: string;
+                    projectDigest?: string;
+                    manifestHash?: string;
+                    lockfileHash?: string;
+                    registryHash?: string;
+                    filePath?: string;
+                    fileSha256?: string;
+                };
+            }[];
+            /** @default [] */
+            allowedCapabilities: string[];
+            /** @default [] */
+            allowedTools: string[];
+            /** @default [] */
+            unknowns: {
+                id: string;
+                question: string;
+                reason: string;
+                blocking: boolean;
+                /** @enum {string} */
+                resolvableBy: "tool" | "user" | "none";
+                requestedTool?: string;
+            }[];
+            /** @default [] */
+            untrustedInputKinds: ("requirement" | "diff" | "source" | "dom" | "console" | "network" | "external-document" | "prior-model-output")[];
+            /** Format: date-time */
+            generatedAt: string;
+        };
+        KnowledgeDecision: {
+            id: string;
+            runId?: string;
+            contextId: string;
+            invocationId?: string;
+            output: {
+                /**
+                 * @default 2.0
+                 * @enum {string}
+                 */
+                schemaVersion: "2.0";
+                /** @default [] */
+                factsUsed: string[];
+                /** @default [] */
+                inferences: {
+                    statement: string;
+                    sourceClaimIds: string[];
+                }[];
+                /** @default [] */
+                assumptions: {
+                    statement: string;
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high";
+                }[];
+                /** @default [] */
+                unknowns: string[];
+                /** @default [] */
+                toolRequests: {
+                    tool: string;
+                    /** @default {} */
+                    input: {
+                        [key: string]: unknown;
+                    };
+                    reason: string;
+                    /** @default [] */
+                    sourceClaimIds: string[];
+                }[];
+                /** @default [] */
+                blockingQuestions: string[];
+                /** @default [] */
+                proposedActions: {
+                    capability: string;
+                    reason: string;
+                    /** @default [] */
+                    sourceClaimIds: string[];
+                    /** @default false */
+                    requiresConfirmation: boolean;
+                }[];
+            };
+            /** @enum {string} */
+            validationStatus: "pending" | "verified" | "rejected" | "expired";
+            /** @default [] */
+            validationErrors: string[];
+            /** @default [] */
+            toolExecutionIds: string[];
+            canonicalSha256: string;
+            policyVersion: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        KnowledgeConflict: {
+            id: string;
+            runId?: string;
+            contextId: string;
+            /** @enum {string} */
+            domain: "actual-state" | "expected-behavior";
+            claimIds: string[];
+            /** @enum {string} */
+            status: "open" | "resolved" | "superseded";
+            resolution?: {
+                winningClaimId: string;
+                reason: string;
+                /** @enum {string} */
+                resolvedBy: "policy" | "tool" | "user";
+                /** Format: date-time */
+                resolvedAt: string;
+            };
+            canonicalSha256: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        KnowledgeToolExecution: {
+            id: string;
+            runId?: string;
+            contextId: string;
+            request: {
+                tool: string;
+                /** @default {} */
+                input: {
+                    [key: string]: unknown;
+                };
+                reason: string;
+                /** @default [] */
+                sourceClaimIds: string[];
+            };
+            inputSha256: string;
+            /** @enum {string} */
+            status: "started" | "completed" | "failed" | "denied";
+            /** @default [] */
+            outputClaimIds: string[];
+            /** @default [] */
+            outputClaims: {
+                id: string;
+                subject?: string;
+                supersedesClaimId?: string;
+                statement: string;
+                /** @enum {string} */
+                status: "observed" | "user-provided" | "retrieved" | "inferred" | "assumed" | "unknown";
+                /** @enum {string} */
+                domain: "general" | "project-static" | "runtime" | "user-intent" | "credential-metadata" | "external-documentation";
+                /** @default [] */
+                sourceRefs: string[];
+                confidence: number;
+                /** Format: date-time */
+                observedAt?: string;
+                /** Format: date-time */
+                expiresAt?: string;
+                /** @default false */
+                sensitive: boolean;
+                /** @default {} */
+                scope: {
+                    organizationId?: string;
+                    projectId?: string;
+                    runId?: string;
+                    scenarioId?: string;
+                    attemptId?: string;
+                    stepId?: string;
+                    commitSha?: string;
+                    projectDigest?: string;
+                    manifestHash?: string;
+                    lockfileHash?: string;
+                    registryHash?: string;
+                    filePath?: string;
+                    fileSha256?: string;
+                };
+            }[];
+            outputSummary?: string;
+            outputData?: unknown;
+            errorCode?: string;
+            permissionEventId?: string;
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            completedAt?: string;
+        };
+        AgentMessage: {
+            id: string;
+            runId: string;
+            /** @enum {string} */
+            role: "user" | "assistant" | "system" | "tool";
+            content: string;
+            reasoningSummary?: {
+                /** @enum {string} */
+                phase: "observing" | "diagnosing" | "planning" | "waiting-user" | "acting" | "completed";
+                /** @default [] */
+                observations: string[];
+                assessment: string;
+                nextStep: string;
+                userAction: string;
+                /** @enum {string} */
+                confidence: "high" | "medium" | "low";
+            };
+            knowledgeContextId?: string;
+            knowledgeDecisionId?: string;
+            llmCallId?: string;
+            suggestedAction?: string;
             /** Format: date-time */
             createdAt: string;
         };

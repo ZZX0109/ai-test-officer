@@ -14,6 +14,12 @@ import {
   type ProofNode,
   type RunEvidenceManifest
 } from "@ai-test-officer/contracts";
+import {
+  listAgentMessages,
+  listRunKnowledge,
+  listRunKnowledgeConflicts,
+  listRunKnowledgeToolExecutions
+} from "./knowledge-boundary/store.js";
 import type { AssertionResult, EvidenceItem, RunBundle, VisualRunResult } from "./types.js";
 import { readRunBundle, writeRunBundle } from "./evidenceStore.js";
 import { persistExecutionResult } from "./executionPersistence.js";
@@ -358,14 +364,48 @@ export function buildProofGraph(result: VisualRunResult): ProofGraphBuild {
   };
 }
 
-export function createEvidenceManifest(bundle: RunBundle): RunEvidenceManifest {
+type KnowledgeManifestInput = {
+  contexts?: Array<{ id?: string; generatedAt: string }>;
+  decisions?: Array<{ id: string; canonicalSha256: string; createdAt: string }>;
+  conflicts?: Array<{ id: string; canonicalSha256: string; createdAt: string }>;
+  toolExecutions?: Array<{ id: string; startedAt: string }>;
+  messages?: Array<{ id: string; createdAt: string }>;
+};
+
+function recordHashes<T extends { id?: string }>(items: T[] | undefined) {
+  return Object.fromEntries((items ?? [])
+    .filter((item): item is T & { id: string } => Boolean(item.id))
+    .map((item) => [item.id, canonicalSha256(item)]));
+}
+
+export function createEvidenceManifest(
+  bundle: RunBundle,
+  knowledge: KnowledgeManifestInput = {}
+): RunEvidenceManifest {
   const artifactHashes = Object.fromEntries((bundle.artifactsV2 ?? []).map((item) => [item.id, item.integrity.sha256]));
   const evidenceHashes = Object.fromEntries(bundle.evidence.map((item) => [item.id, canonicalSha256(item)]));
   const conclusionHashes = Object.fromEntries((bundle.conclusions ?? []).map((item) => [item.conclusionId, item.canonicalSha256 ?? canonicalSha256(item)]));
   const proofNodeHashes = Object.fromEntries((bundle.proofNodes ?? []).map((item) => [item.id, item.canonicalSha256]));
   const proofEdgeHashes = Object.fromEntries((bundle.proofEdges ?? []).map((item) => [item.id, item.canonicalSha256 ?? canonicalSha256(item)]));
+  const knowledgeContextHashes = recordHashes(knowledge.contexts);
+  const knowledgeDecisionHashes = Object.fromEntries((knowledge.decisions ?? []).map((item) => [item.id, item.canonicalSha256]));
+  const knowledgeConflictHashes = Object.fromEntries((knowledge.conflicts ?? []).map((item) => [item.id, item.canonicalSha256]));
+  const knowledgeToolExecutionHashes = recordHashes(knowledge.toolExecutions);
+  const agentMessageHashes = recordHashes(knowledge.messages);
   const reportSha256 = canonicalSha256(bundle.result);
-  const evidenceSetRoot = canonicalSha256({ artifactHashes, evidenceHashes, conclusionHashes, proofNodeHashes, proofEdgeHashes, reportSha256 });
+  const evidenceSetRoot = canonicalSha256({
+    artifactHashes,
+    evidenceHashes,
+    conclusionHashes,
+    proofNodeHashes,
+    proofEdgeHashes,
+    knowledgeContextHashes,
+    knowledgeDecisionHashes,
+    knowledgeConflictHashes,
+    knowledgeToolExecutionHashes,
+    agentMessageHashes,
+    reportSha256
+  });
   const ed25519PrivateKey = process.env.RUN_EVIDENCE_ED25519_PRIVATE_KEY;
   const hmacKey = process.env.RUN_EVIDENCE_SIGNING_KEY;
   const signature = ed25519PrivateKey ? {
@@ -385,6 +425,11 @@ export function createEvidenceManifest(bundle: RunBundle): RunEvidenceManifest {
     conclusionHashes,
     proofNodeHashes,
     proofEdgeHashes,
+    knowledgeContextHashes,
+    knowledgeDecisionHashes,
+    knowledgeConflictHashes,
+    knowledgeToolExecutionHashes,
+    agentMessageHashes,
     reportSha256,
     evidenceSetRoot,
     generatedAt: new Date().toISOString(),
@@ -393,8 +438,26 @@ export function createEvidenceManifest(bundle: RunBundle): RunEvidenceManifest {
   });
 }
 
-export function verifyEvidenceManifest(bundle: RunBundle, manifest: RunEvidenceManifest) {
-  const rebuilt = createEvidenceManifest({ ...bundle, evidenceManifest: undefined });
+export function verifyEvidenceManifest(
+  bundle: RunBundle,
+  manifest: RunEvidenceManifest,
+  knowledge: KnowledgeManifestInput = {}
+) {
+  const cutoff = Date.parse(manifest.generatedAt);
+  const beforeManifest = <T extends { createdAt?: string; generatedAt?: string; startedAt?: string }>(items: T[] | undefined) =>
+    (items ?? []).filter((item) =>
+      Date.parse(item.createdAt ?? item.generatedAt ?? item.startedAt ?? manifest.generatedAt) <= cutoff
+    );
+  const rebuilt = createEvidenceManifest(
+    { ...bundle, evidenceManifest: undefined },
+    {
+      contexts: beforeManifest(knowledge.contexts),
+      decisions: beforeManifest(knowledge.decisions),
+      conflicts: beforeManifest(knowledge.conflicts),
+      toolExecutions: beforeManifest(knowledge.toolExecutions),
+      messages: beforeManifest(knowledge.messages)
+    }
+  );
   const errors: string[] = [];
   if (rebuilt.evidenceSetRoot !== manifest.evidenceSetRoot) errors.push("evidence_set_root_mismatch");
   if (manifest.signature) {
@@ -425,7 +488,18 @@ export function verifyEvidenceManifest(bundle: RunBundle, manifest: RunEvidenceM
 export async function writeProofArtifacts(bundle: RunBundle) {
   const directory = path.join(rootDir, "reports", "runs", bundle.runId);
   await mkdir(directory, { recursive: true });
-  const manifest = createEvidenceManifest(bundle);
+  const [knowledge, conflicts, toolExecutions, messages] = await Promise.all([
+    listRunKnowledge(bundle.runId),
+    listRunKnowledgeConflicts(bundle.runId),
+    listRunKnowledgeToolExecutions(bundle.runId),
+    listAgentMessages(bundle.runId)
+  ]);
+  const manifest = createEvidenceManifest(bundle, {
+    ...knowledge,
+    conflicts,
+    toolExecutions,
+    messages
+  });
   if (process.env.NODE_ENV === "production" && manifest.signature?.algorithm !== "ed25519") {
     throw new Error("evidence_manifest_ed25519_signature_required");
   }
