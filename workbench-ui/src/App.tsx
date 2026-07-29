@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useReducer, useRef, useState } from "react";
 import { initializeOidc, oidcConfigured } from "./auth";
 import { OidcSessionPanel } from "./components/OidcSessionPanel";
 import {
@@ -44,6 +44,11 @@ import { SourceStatusPanel } from "./components/SourceStatusPanel";
 import { StoragePanel } from "./components/StoragePanel";
 import { AuthenticatedArtifactImage, AuthenticatedArtifactLink } from "./components/AuthenticatedArtifact";
 import { useWorkbenchState } from "./hooks/useWorkbenchState";
+import {
+  initialWorkspaceState,
+  workspaceReducer,
+  workspaceSelectors
+} from "./state/workspaceReducer";
 import { readProjectHistoryCache, writeProjectHistoryCache } from "./projectHistoryCache";
 import {
   analyzeConnectedContext,
@@ -208,6 +213,7 @@ function auditStoreSummary(auditStore: AuditStoreStatus | null) {
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
 
 export function App() {
+  const [workspaceState, dispatchWorkspace] = useReducer(workspaceReducer, initialWorkspaceState);
   const [oidcAuthenticated, setOidcAuthenticated] = useState(false);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [plan, setPlan] = useState<GrayPlan | null>(null);
@@ -215,7 +221,19 @@ export function App() {
   const [appUrl, setAppUrl] = useState(viteEnv.VITE_APP_URL ?? "http://localhost:6173");
   const [projects, setProjects] = useState<ProjectConfig[]>(() => readProjectHistoryCache());
   const [projectListNotice, setProjectListNotice] = useState("");
-  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const selectedProjectId = workspaceState.selectedProjectId;
+  const setSelectedProjectId = (projectId: string) => {
+    dispatchWorkspace({ type: "project-selected", projectId });
+  };
+  const beginWorkspaceOperation = (
+    phase: "project-loading" | "generating" | "executing" | "judging",
+    projectId = selectedProjectId,
+    runId?: string
+  ) => {
+    const requestId = crypto.randomUUID();
+    dispatchWorkspace({ type: "operation-started", phase, requestId, projectId, runId });
+    return requestId;
+  };
   const [projectDraft, setProjectDraft] = useState<ProjectConfig | null>(null);
   const [projectPathInput, setProjectPathInput] = useState(viteEnv.VITE_PROJECT_PATH ?? "app-under-test");
   const [projectDetection, setProjectDetection] = useState<ProjectDetectionResult | null>(null);
@@ -1630,6 +1648,14 @@ export function App() {
     }
     const project = projects.find((item) => item.id === projectId);
     setSelectedProjectId(projectId);
+    // A project owns its plan, run and report. Clearing these immediately
+    // prevents the previous project's evidence from surviving while the new
+    // project metadata is still loading.
+    setPlan(null);
+    setResult(null);
+    setActiveRunId(null);
+    setActiveRun(null);
+    setAnalysis(null);
     resetPlanningConversation();
     if (project) {
       setProjectDraft(project);
@@ -1684,12 +1710,15 @@ export function App() {
             } : current.manifest
           } : current);
         })
-        .catch(() => setProjectDetection(null));
+        .catch(() => setProjectDetection(null))
+        .finally(() => dispatchWorkspace({ type: "project-loaded", projectId }));
       getProjectRuntime(projectId)
         .then((response) => setProjectRuntime(response.runtime))
         .catch(() => setProjectRuntime(null));
       listProjectGrants(projectId).then((response) => setProjectGrants(response.grants)).catch(() => setProjectGrants([]));
       getPatrolTrend({ projectId, scenarioId }).then((response) => setPatrolTrend(response.trend)).catch(() => setPatrolTrend(null));
+    } else {
+      dispatchWorkspace({ type: "project-loaded", projectId });
     }
   }
 
