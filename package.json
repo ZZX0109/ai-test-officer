@@ -61,7 +61,7 @@
     "clean": "rm -rf agent/dist app-under-test/dist workbench-ui/dist"
   },
   "devDependencies": {
-    "eslint": "^9.39.5",
+    "eslint": "^10.8.0",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.65.0"
   }
