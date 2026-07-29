@@ -2,8 +2,15 @@ import { spawn } from "node:child_process";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertCurrentNodeSupported, environmentForNode } from "./node-runtime.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+assertCurrentNodeSupported();
+const childEnvironment = environmentForNode(process.execPath, {
+  ...process.env,
+  FORCE_COLOR: "1",
+  HEADLESS: process.env.HEADLESS ?? "1"
+});
 const supervisorPidFile = path.join(rootDir, "reports", "background", "dev-supervisor.pid");
 const services = [
   { id: "agent", args: ["run", "dev:agent"], healthUrl: "http://127.0.0.1:4317/api/health" },
@@ -26,13 +33,9 @@ function startService(service) {
   if (shuttingDown) return;
   const child = spawn("npm", service.args, {
     cwd: rootDir,
-    env: {
-      ...process.env,
-      FORCE_COLOR: "1",
-      // Workbench owns the visual surface; managed Playwright must not open a
-      // second foreground browser window.
-      HEADLESS: process.env.HEADLESS ?? "1"
-    },
+    // Workbench owns the visual surface; managed Playwright must not open a
+    // second foreground browser window.
+    env: childEnvironment,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true
   });

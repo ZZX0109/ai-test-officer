@@ -3,12 +3,14 @@ import { mkdir, readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { environmentForNode, resolveSupportedNode } from "./node-runtime.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const backgroundDir = path.join(rootDir, "reports", "background");
 const pidFile = path.join(backgroundDir, "dev-supervisor.pid");
 const logFile = path.join(backgroundDir, "dev-supervisor.stdout.log");
 const supervisorScript = path.join(rootDir, "scripts", "dev-supervisor.mjs");
+const supportedNode = resolveSupportedNode();
 
 function processIsAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
@@ -37,13 +39,13 @@ if (existingPid) {
 }
 
 const output = openSync(logFile, "a");
-const supervisor = spawn(process.execPath, [supervisorScript], {
+const supervisor = spawn(supportedNode.binary, [supervisorScript], {
   cwd: rootDir,
   detached: true,
-  env: {
+  env: environmentForNode(supportedNode.binary, {
     ...process.env,
     HEADLESS: process.env.HEADLESS ?? "1"
-  },
+  }),
   stdio: ["ignore", output, output]
 });
 supervisor.unref();
@@ -61,4 +63,10 @@ if (!recordedPid) {
   throw new Error(`dev_supervisor_failed_to_detach: inspect ${logFile}`);
 }
 
-console.log(JSON.stringify({ ok: true, alreadyRunning: false, pid: recordedPid, logFile }, null, 2));
+console.log(JSON.stringify({
+  ok: true,
+  alreadyRunning: false,
+  pid: recordedPid,
+  node: supportedNode.binary,
+  logFile
+}, null, 2));

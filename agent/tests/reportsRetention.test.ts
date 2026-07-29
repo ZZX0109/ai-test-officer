@@ -49,10 +49,9 @@ async function runRetention(
       REPORTS_DIR: reportsDir,
       ...(options.archiveRoot ? { REPORT_ARCHIVE_DIR: options.archiveRoot } : {}),
       ...(options.storageHome ? { AI_TEST_OFFICER_HOME: options.storageHome } : {}),
-      REPORT_KEEP_RUNS: "1",
-      REPORT_KEEP_LOOSE_ARTIFACTS: "1",
-      REPORT_RETENTION_DAYS: "365",
-      REPORT_MAX_REPORTS_MB: "10"
+      REPORT_KEEP_SUCCESS_RUNS: "1",
+      REPORT_SUCCESS_RETENTION_DAYS: "1",
+      REPORT_FAILED_RETENTION_DAYS: "1"
     },
     maxBuffer: 1024 * 1024
   });
@@ -74,15 +73,17 @@ export async function testReportsRetention() {
     await setAge(path.join(reportsDir, "runs", "run_old"), oldAge);
     await writeArtifact(path.join(reportsDir, "screenshots", "run_old", "step.png"), 64, oldAge);
     await writeArtifact(path.join(reportsDir, "screenshots", "run_orphan", "step.png"), 64, oldAge);
+    await setAge(path.join(reportsDir, "screenshots", "run_old"), oldAge);
+    await setAge(path.join(reportsDir, "screenshots", "run_orphan"), oldAge);
     await writeArtifact(path.join(reportsDir, "traces", "run_orphan.zip"), 64, oldAge);
     await writeArtifact(path.join(reportsDir, "commit-checks", "old.json"), 64, oldAge);
     await writeArtifact(path.join(reportsDir, "commit-checks", "new.json"), 64);
 
     const dryRun = await runRetention(reportsDir);
     assert.equal(dryRun.dryRun, true);
-    assert.ok(dryRun.actions.some((action: { file: string; reason: string }) => action.file.includes("run_old") && action.reason.includes("keepRuns")));
+    assert.ok(dryRun.actions.some((action: { file: string; reason: string }) => action.file.includes("run_old") && action.reason.includes("retention")));
     assert.ok(dryRun.actions.some((action: { file: string; reason: string }) => action.file.includes("run_orphan") && action.reason.includes("orphaned")));
-    assert.ok(dryRun.actions.some((action: { file: string; reason: string }) => action.file.includes("old.json") && action.reason.includes("keepLooseArtifacts")));
+    assert.ok(dryRun.actions.some((action: { file: string; reason: string }) => action.file.includes("old.json") && action.reason.includes("loose artifact")));
     assert.equal(await exists(path.join(reportsDir, "runs", "run_old")), true);
 
     const applied = await runRetention(reportsDir, true);

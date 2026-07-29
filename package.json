@@ -2,6 +2,9 @@
   "name": "ai-test-officer",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "workspaces": [
     "packages/contracts",
     "packages/playwright-runtime",
@@ -13,7 +16,8 @@
     "workbench-ui"
   ],
   "scripts": {
-    "dev": "node scripts/dev-supervisor.mjs",
+    "dev": "node scripts/run-with-supported-node.mjs dev:internal",
+    "dev:internal": "node scripts/dev-supervisor.mjs",
     "dev:all": "npm run dev",
     "dev:background": "node scripts/start-dev-services.mjs",
     "stop:dev": "node scripts/stop-dev-services.mjs",
@@ -23,9 +27,12 @@
     "dev:workbench": "npm --workspace workbench-ui run dev",
     "build:packages": "npm --workspace @ai-test-officer/contracts run build && npm --workspace @ai-test-officer/playwright-runtime run build && npm --workspace @ai-test-officer/desktop-runtime run build && npm --workspace @ai-test-officer/execution-worker run build && npm --workspace @ai-test-officer/agent-orchestration run build",
     "contracts:generate": "npm --workspace @ai-test-officer/agent run contracts:openapi && openapi-typescript docs/openapi.json -o workbench-ui/src/generated/api.ts && node scripts/generate-pydantic-client.mjs",
-    "build": "npm run build:packages && npm --workspace @ai-test-officer/agent run build && npm --workspace app-under-test run build && npm --workspace workbench-ui run build",
-    "typecheck": "npm run build:packages && npm --workspaces --if-present run typecheck",
-    "test": "npm run build:packages && npm --workspaces --if-present run test",
+    "build": "node scripts/run-with-supported-node.mjs build:internal",
+    "build:internal": "npm run build:packages && npm --workspace @ai-test-officer/agent run build && npm --workspace app-under-test run build && npm --workspace workbench-ui run build",
+    "typecheck": "node scripts/run-with-supported-node.mjs typecheck:internal",
+    "typecheck:internal": "npm run build:packages && npm --workspaces --if-present run typecheck",
+    "test": "node scripts/run-with-supported-node.mjs test:internal",
+    "test:internal": "npm run build:packages && npm --workspaces --if-present run test",
     "test:visual": "npm --workspace @ai-test-officer/agent run test:visual",
     "test:credibility-browser": "npm --workspace @ai-test-officer/agent run test:credibility-browser",
     "commit-check": "npm --workspace @ai-test-officer/agent run commit-check",
@@ -43,8 +50,10 @@
     "acceptance:lock:verify": "node scripts/verify-acceptance-lock.mjs",
     "hooks:install": "sh scripts/install-ai-test-officer-hook.sh",
     "reports:retention": "node scripts/reports-retention.mjs",
+    "test:retention": "node scripts/reports-retention.test.mjs",
     "reports:retention:apply": "node scripts/reports-retention.mjs --apply",
     "reports:retention:archive": "node scripts/reports-retention.mjs --apply --archive",
+    "reports:retention:archive-local": "node scripts/reports-retention.mjs --apply --archive --prune-local-stores",
     "clean": "rm -rf agent/dist app-under-test/dist workbench-ui/dist"
   },
   "devDependencies": {
