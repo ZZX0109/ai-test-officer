@@ -1028,8 +1028,6 @@ export function listProjectGrants(projectId: string) {
 export function createProjectGrant(projectId: string, payload: {
   subject: string;
   role: ProjectGrant["role"];
-  tokenKind?: ProjectGrant["tokenKind"];
-  scopes?: ProjectGrant["scopes"];
   expiresAt?: string;
 }) {
   return request<{ grant: ProjectGrant }>(`/api/projects/${projectId}/grants`, {

@@ -1248,13 +1248,15 @@ export interface PatrolTrend {
   summary: string;
 }
 
+export type ProjectMemberRole = "owner" | "editor" | "viewer";
+
 export interface ProjectGrant {
   id: string;
   projectId: string;
   subject: string;
-  role: "viewer" | "runner" | "maintainer" | "project_admin" | "operator" | "admin";
+  role: ProjectMemberRole;
   tokenKind: "dev" | "deploy" | "project_admin" | "artifact_read";
-  scopes: Array<"read_project" | "run_tests" | "read_artifacts" | "edit_sandbox" | "export_source" | "apply_source" | "manage_project" | "manage_credentials" | "admin">;
+  scopes: Array<"read_project" | "read_artifacts" | "read_reports" | "read_evidence" | "run_tests" | "edit_project" | "edit_sandbox" | "export_source" | "apply_source" | "manage_project" | "manage_members" | "manage_credentials" | "admin">;
   createdAt: string;
   expiresAt?: string;
   lastUsedAt?: string;

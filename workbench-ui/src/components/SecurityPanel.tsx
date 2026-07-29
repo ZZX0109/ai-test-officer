@@ -20,7 +20,7 @@ export function SecurityPanel({
   onRotateCredential
 }: SecurityPanelProps) {
   const [subject, setSubject] = useState("qa-oncall");
-  const [role, setRole] = useState<ProjectGrant["role"]>("runner");
+  const [role, setRole] = useState<ProjectGrant["role"]>("editor");
   const [rotationCredentialId, setRotationCredentialId] = useState("");
   const [rotationKey, setRotationKey] = useState("");
   const [rotationReason, setRotationReason] = useState("routine rotation");
@@ -56,10 +56,8 @@ export function SecurityPanel({
           项目角色
           <select value={role} onChange={(event) => setRole(event.target.value as ProjectGrant["role"])}>
             <option value="viewer">viewer</option>
-            <option value="runner">runner</option>
-            <option value="project_admin">project_admin</option>
-            <option value="operator">operator</option>
-            <option value="admin">admin</option>
+            <option value="editor">editor</option>
+            <option value="owner">owner</option>
           </select>
         </label>
       </div>

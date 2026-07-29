@@ -38,6 +38,14 @@ export function errorHandler(
     res.status(403).json({ error: "project_forbidden" });
     return;
   }
+  if (error instanceof Error && error.message === "project_not_found_or_forbidden") {
+    res.status(404).json({ error: "project_not_found_or_forbidden" });
+    return;
+  }
+  if (error instanceof Error && error.message === "project_scope_forbidden") {
+    res.status(403).json({ error: "project_scope_forbidden" });
+    return;
+  }
   if (error instanceof Error && (
     error.message === "repair_host_apply_disabled"
     || error.message === "repair_high_risk_confirmation_required"

@@ -53,6 +53,7 @@ import { testLlmBudgetLedger } from "./llmBudgetLedger.test.js";
 import { testAgentGraphMode } from "./agentGraphMode.test.js";
 import { testKnowledgeBoundary } from "./knowledgeBoundary.test.js";
 import { testKnowledgeBoundaryPlatform } from "./knowledgeBoundaryPlatform.test.js";
+import { testProjectAuthorizationMatrix } from "./projectAuthorization.test.js";
 
 async function main() {
   await testConnectorEnvelope();
@@ -70,6 +71,7 @@ async function main() {
   await testDiscoveryProbeExecutesActionBeforeOracle();
   await testDiscoveryScanAcceptsVisibleStreamingDom();
   await testGovernanceSecurityBot();
+  await testProjectAuthorizationMatrix();
   testCiContract();
   await testCiGatePolicy();
   await testCiCliErrorReports();

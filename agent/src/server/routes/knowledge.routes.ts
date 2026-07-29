@@ -1,7 +1,7 @@
 import { Router, type Request } from "express";
 import { knowledgeClaimSchema } from "@ai-test-officer/contracts";
 import { authContext, isOrganizationAuthorized } from "../../security.js";
-import { hasProjectScope } from "../../projectAccess.js";
+import { projectAccessDecision } from "../../projectAccess.js";
 import { runEventStore } from "../../runEventStore.js";
 import {
   findKnowledgeClaim,
@@ -24,13 +24,13 @@ async function authorizeRun(req: Request, runId: string) {
     && identity
     && identity.subject !== "local-dev"
     && !identity.roles.includes("admin")
-    && !await hasProjectScope({
+    && !await projectAccessDecision({
       projectId: String(run.input.projectId),
       subject: identity.subject,
       scope: "read_artifacts"
-    })
+    }).then((decision) => decision.allowed)
   ) {
-    throw new Error("project_forbidden");
+    throw new Error("project_not_found_or_forbidden");
   }
   return run;
 }

@@ -124,7 +124,15 @@ import { createRuntimeRecoveryAdvice } from "./runtimeStartupAdvisor.js";
 import { saveProjectLoginSecret } from "./projectLoginStore.js";
 import { runDiscoveryScan } from "./discoveryScan.js";
 import { readCoverageItems } from "./coverageStore.js";
-import { createProjectGrant, deleteProjectGrant, hasProjectScope, listProjectGrants } from "./projectAccess.js";
+import {
+  createProjectGrant,
+  deleteProjectGrant,
+  hasProjectScope,
+  listAccessibleProjectIds,
+  listProjectGrants,
+  projectAccessDecision,
+  projectScopeForOperation
+} from "./projectAccess.js";
 import {
   readEvidenceFromAuditStore,
   readFindingsFromAuditStore,
@@ -296,13 +304,34 @@ type ProjectScope = Parameters<typeof hasProjectScope>[0]["scope"];
 async function assertProjectAccess(req: express.Request, projectId: unknown, scope: ProjectScope) {
   if (!projectId) return;
   const context = authContext(req);
-  if (!context) throw new Error("project_forbidden");
+  if (!context) throw new Error("project_not_found_or_forbidden");
   if (context.subject === "local-dev" || context.roles.includes("admin")) return;
-  if (!await hasProjectScope({ projectId: String(projectId), subject: context.subject, scope })) throw new Error("project_forbidden");
+  const decision = await projectAccessDecision({
+    projectId: String(projectId),
+    subject: context.subject,
+    scope
+  });
+  if (!decision.member) throw new Error("project_not_found_or_forbidden");
+  if (!decision.allowed) throw new Error("project_scope_forbidden");
 }
 
 function artifactUrl(filePath: string) {
   return `/artifacts/${path.relative(reportsDir, filePath).split(path.sep).join("/")}`;
+}
+
+function runBundleProjectId(bundle: Awaited<ReturnType<typeof readRunBundle>>) {
+  return bundle.input?.projectId ?? bundle.project?.id;
+}
+
+async function readAuthorizedLegacyRun(req: express.Request, runId: string, scope: ProjectScope = "read_artifacts") {
+  const bundle = await readRunBundle(runId);
+  const projectId = runBundleProjectId(bundle);
+  const context = authContext(req);
+  if (!projectId && context && context.subject !== "local-dev" && !context.roles.includes("admin")) {
+    throw new Error("project_not_found_or_forbidden");
+  }
+  await assertProjectAccess(req, projectId, scope);
+  return bundle;
 }
 
 function isMissingRunBundle(error: unknown) {
@@ -1641,9 +1670,16 @@ const projectSchema = z.object({
   updatedAt: z.string().optional()
 });
 
-app.get("/api/projects", async (_req, res, next) => {
+app.get("/api/projects", async (req, res, next) => {
   try {
-    res.json({ projects: await listProjects() });
+    const context = authContext(req);
+    const projects = await listProjects();
+    if (!context || context.subject === "local-dev" || context.roles.includes("admin")) {
+      res.json({ projects });
+      return;
+    }
+    const allowed = new Set(await listAccessibleProjectIds(context.subject));
+    res.json({ projects: projects.filter((project) => allowed.has(project.id)) });
   } catch (error) {
     next(error);
   }
@@ -1748,10 +1784,24 @@ app.post("/api/projects/detect-manifest", async (req, res, next) => {
   }
 });
 
-app.post("/api/projects", async (req, res, next) => {
+app.post("/api/projects", requireRole(["admin", "runner"]), async (req, res, next) => {
   try {
     const project = await saveProject(projectSchema.parse(req.body) as ProjectConfig);
+    const context = authContext(req);
+    if (context && context.subject !== "local-dev" && !context.roles.includes("admin")) {
+      await createProjectGrant({ projectId: project.id, subject: context.subject, role: "owner" });
+    }
     res.status(201).json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use("/api/projects/:id", async (req, _res, next) => {
+  try {
+    if (!await getProject(req.params.id)) throw new Error("project_not_found_or_forbidden");
+    await assertProjectAccess(req, req.params.id, projectScopeForOperation(req));
+    next();
   } catch (error) {
     next(error);
   }
@@ -1927,23 +1977,12 @@ app.get("/api/projects/:id/grants", async (req, res, next) => {
   }
 });
 
-app.post("/api/projects/:id/grants", requireRole(["admin"]), async (req, res, next) => {
+app.post("/api/projects/:id/grants", async (req, res, next) => {
   try {
     const body = z.object({
       subject: z.string().min(1),
-      role: z.enum(["viewer", "runner", "maintainer", "project_admin", "operator", "admin"]),
+      role: z.enum(["owner", "editor", "viewer"]),
       expiresAt: z.string().optional(),
-      scopes: z.array(z.enum([
-        "read_project",
-        "run_tests",
-        "read_artifacts",
-        "edit_sandbox",
-        "export_source",
-        "apply_source",
-        "manage_project",
-        "manage_credentials",
-        "admin"
-      ])).optional()
     }).parse(req.body);
     res.status(201).json({ grant: await createProjectGrant({ ...body, projectId: req.params.id }) });
   } catch (error) {
@@ -1951,7 +1990,7 @@ app.post("/api/projects/:id/grants", requireRole(["admin"]), async (req, res, ne
   }
 });
 
-app.delete("/api/projects/:id/grants/:grantId", requireRole(["admin"]), async (req, res, next) => {
+app.delete("/api/projects/:id/grants/:grantId", async (req, res, next) => {
   try {
     res.json({ deleted: await deleteProjectGrant(req.params.id, req.params.grantId) });
   } catch (error) {
@@ -2114,6 +2153,7 @@ app.post("/api/planning/conversation", async (req, res, next) => {
         createdAt: z.string()
       })).max(100).default([])
     }).parse(req.body);
+    await assertProjectAccess(req, body.projectId, "run_tests");
     const project = await getProject(body.projectId);
     if (!project) return void res.status(404).json({ error: "project_not_found" });
     const scenarioContracts = listScenarios()
@@ -2194,6 +2234,7 @@ app.post("/api/assistant/chat", async (req, res, next) => {
         }).optional()
       }).default({ failedAssertions: [] })
     }).parse(req.body);
+    await assertProjectAccess(req, body.projectId, "run_tests");
     const project = await getProject(body.projectId);
     if (!project) return void res.status(404).json({ error: "project_not_found" });
     const publicCredentials = await listCredentials();
@@ -2360,11 +2401,13 @@ app.post("/api/generate-plan", async (req, res, next) => {
   try {
     const body = z
       .object({
+        projectId: z.string().optional(),
         requirement: z.string().min(1),
         diff: z.string().min(1),
         credentialId: z.string().optional()
       })
       .parse(req.body);
+    await assertProjectAccess(req, body.projectId, "run_tests");
     res.json(await generatePlan(body));
   } catch (error) {
     next(error);
@@ -2383,6 +2426,7 @@ app.post("/api/commit-check/run", async (req, res, next) => {
       })
       .superRefine(requireRunnableTarget)
       .parse(req.body);
+    await assertProjectAccess(req, body.projectId, "run_tests");
     res.json({ check: await runCommitCheck(body) });
   } catch (error) {
     next(error);
@@ -2412,6 +2456,7 @@ app.post("/api/requirement-acceptance/run", async (req, res, next) => {
       })
       .superRefine(requireRunnableTarget)
       .parse(req.body);
+    await assertProjectAccess(req, body.projectId, "run_tests");
     res.json({ acceptance: await runRequirementAcceptance(body) });
   } catch (error) {
     next(error);
@@ -2482,6 +2527,7 @@ app.post("/api/discovery/scan", async (req, res, next) => {
       })
       .superRefine(requireRunnableTarget)
       .parse(req.body);
+    await assertProjectAccess(req, body.projectId, "run_tests");
     res.json({ discovery: await runDiscoveryScan(body) });
   } catch (error) {
     next(error);
@@ -2709,14 +2755,14 @@ app.get("/api/audit-log", async (_req, res, next) => {
   }
 });
 
-app.get("/api/runs/latest", async (_req, res, next) => {
+app.get("/api/runs/latest", async (req, res, next) => {
   try {
     const runId = await readLatestRunId();
     if (!runId) {
       res.status(404).json({ error: "No run has been recorded yet" });
       return;
     }
-    res.json(await readRunBundle(runId));
+    res.json(await readAuthorizedLegacyRun(req, runId));
   } catch (error) {
     next(error);
   }
@@ -2724,7 +2770,7 @@ app.get("/api/runs/latest", async (_req, res, next) => {
 
 app.get("/api/runs/:runId", async (req, res, next) => {
   try {
-    res.json(await readRunBundle(req.params.runId));
+    res.json(await readAuthorizedLegacyRun(req, req.params.runId));
   } catch (error) {
     next(error);
   }
@@ -2732,6 +2778,7 @@ app.get("/api/runs/:runId", async (req, res, next) => {
 
 app.get("/api/runs/:runId/evidence", async (req, res, next) => {
   try {
+    await readAuthorizedLegacyRun(req, req.params.runId);
     const evidence = readEvidenceFromAuditStore(req.params.runId);
     // Loop events are written throughout browser execution, while the final
     // run bundle is only committed after judging. Returning both lets the
@@ -2746,16 +2793,18 @@ app.get("/api/runs/:runId/evidence", async (req, res, next) => {
   }
 });
 
-app.get("/api/runs/:runId/findings", (_req, res, next) => {
+app.get("/api/runs/:runId/findings", async (req, res, next) => {
   try {
-    res.json({ findings: readFindingsFromAuditStore(_req.params.runId) });
+    await readAuthorizedLegacyRun(req, req.params.runId);
+    res.json({ findings: readFindingsFromAuditStore(req.params.runId) });
   } catch (error) {
     next(error);
   }
 });
 
-app.get("/api/runs/:runId/judge-summary", (req, res, next) => {
+app.get("/api/runs/:runId/judge-summary", async (req, res, next) => {
   try {
+    await readAuthorizedLegacyRun(req, req.params.runId);
     res.json({ judge: readJudgeSummaryFromAuditStore(req.params.runId) });
   } catch (error) {
     next(error);
@@ -2765,7 +2814,7 @@ app.get("/api/runs/:runId/judge-summary", (req, res, next) => {
 app.post("/api/runs/:runId/download-bundle", async (req, res, next) => {
   try {
     const body = z.object({ maxInlineBytes: z.number().int().positive().optional() }).parse(req.body ?? {});
-    const bundle = await readRunBundle(req.params.runId);
+    const bundle = await readAuthorizedLegacyRun(req, req.params.runId);
     const runDir = path.join(reportsDir, "runs", req.params.runId);
     const archive = await buildRunBundleArchive({
       bundle,
@@ -2788,6 +2837,7 @@ app.post("/api/runs/:runId/download-bundle", async (req, res, next) => {
 
 app.get("/api/runs/:runId/loop-events", async (req, res, next) => {
   try {
+    await readAuthorizedLegacyRun(req, req.params.runId);
     res.json({ events: await readLoopEvents(req.params.runId) });
   } catch (error) {
     next(error);
@@ -2796,7 +2846,10 @@ app.get("/api/runs/:runId/loop-events", async (req, res, next) => {
 
 app.get("/api/loop-events/latest", async (_req, res, next) => {
   try {
-    res.json({ events: await readLatestLoopEvents() });
+    const events = await readLatestLoopEvents();
+    const runId = events.at(-1)?.runId ?? (await readLatestRunId());
+    if (runId) await readAuthorizedLegacyRun(_req, runId);
+    res.json({ events });
   } catch (error) {
     next(error);
   }
@@ -2806,6 +2859,7 @@ app.get("/api/live-run/latest", async (_req, res, next) => {
   try {
     const events = await readLatestLoopEvents();
     const runId = events.at(-1)?.runId ?? (await readLatestRunId());
+    if (runId) await readAuthorizedLegacyRun(_req, runId);
     const evidence = runId ? await readEvidence(runId) : [];
     const latestScreenshot = [...evidence].reverse().find((item) => item.type === "screenshot")?.file;
     const latestEvent = events.at(-1);
@@ -2824,16 +2878,23 @@ app.get("/api/live-run/latest", async (_req, res, next) => {
   }
 });
 
-app.get("/api/run-history", async (_req, res, next) => {
+app.get("/api/run-history", async (req, res, next) => {
   try {
-    const projectId = typeof _req.query.projectId === "string" ? _req.query.projectId : undefined;
-    const scenarioId = typeof _req.query.scenarioId === "string" ? _req.query.scenarioId : undefined;
-    const verdict = typeof _req.query.verdict === "string" ? _req.query.verdict : undefined;
-    const from = typeof _req.query.from === "string" ? Date.parse(_req.query.from) : undefined;
-    const to = typeof _req.query.to === "string" ? Date.parse(_req.query.to) : undefined;
-    const limit = typeof _req.query.limit === "string" ? Number(_req.query.limit) : undefined;
+    const projectId = typeof req.query.projectId === "string" ? req.query.projectId : undefined;
+    const scenarioId = typeof req.query.scenarioId === "string" ? req.query.scenarioId : undefined;
+    const verdict = typeof req.query.verdict === "string" ? req.query.verdict : undefined;
+    const from = typeof req.query.from === "string" ? Date.parse(req.query.from) : undefined;
+    const to = typeof req.query.to === "string" ? Date.parse(req.query.to) : undefined;
+    const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
     let runs = await listRunHistory();
-    if (projectId) runs = runs.filter((run) => run.projectId === projectId);
+    const context = authContext(req);
+    if (projectId) {
+      await assertProjectAccess(req, projectId, "read_reports");
+      runs = runs.filter((run) => run.projectId === projectId);
+    } else if (context && context.subject !== "local-dev" && !context.roles.includes("admin")) {
+      const allowed = new Set(await listAccessibleProjectIds(context.subject));
+      runs = runs.filter((run) => Boolean(run.projectId && allowed.has(run.projectId)));
+    }
     if (scenarioId) runs = runs.filter((run) => run.scenarioId === scenarioId);
     if (verdict) runs = runs.filter((run) => run.verdict === verdict);
     if (Number.isFinite(from)) runs = runs.filter((run) => Date.parse(run.timestamp) >= from!);

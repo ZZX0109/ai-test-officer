@@ -147,7 +147,7 @@ function bundleForDelivery(): RunBundle {
 
 export async function testGovernanceSecurityBot() {
   const projectId = `project_grant_${Date.now()}`;
-  const grant = await createProjectGrant({ projectId, subject: "qa-oncall", role: "project_admin" });
+  const grant = await createProjectGrant({ projectId, subject: "qa-oncall", role: "owner" });
   assert.equal(grant.tokenKind, "project_admin");
   assert.equal(grant.scopes.includes("manage_project"), true);
   assert.equal((await listProjectGrants(projectId)).some((item) => item.id === grant.id), true);
