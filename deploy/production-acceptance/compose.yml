@@ -34,7 +34,12 @@ services:
     networks: [control]
   keycloak:
     image: quay.io/keycloak/keycloak:26.1
-    command: ["start-dev", "--import-realm", "--health-enabled=true"]
+    # The stock Keycloak image is already runnable. Enabling the build-time
+    # health feature here forces a full Quarkus augmentation on every fresh
+    # acceptance container (often > 1 minute on a laptop). The acceptance
+    # runner polls the real token endpoint, which is the authoritative
+    # readiness signal for the OIDC path we exercise.
+    command: ["start-dev", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:?set KEYCLOAK_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}

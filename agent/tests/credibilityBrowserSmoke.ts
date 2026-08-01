@@ -125,6 +125,23 @@ const partial = await runVisualGrayTest({ appUrl: orderUrl, scenarioId: todoPlan
 if (partial.executionError?.code !== "action_binding_failure") throw new Error(`credibility_partial_error_missing:${partial.executionError?.code}`);
 if (partial.outcomeSummary?.executionSucceeded || partial.finalStatus === "pass") throw new Error("credibility_partial_execution_released");
 if (!partial.artifactsV2?.some((artifact) => artifact.kind === "trace") || !partial.artifactsV2.some((artifact) => artifact.kind === "dom")) throw new Error("credibility_partial_artifacts_missing");
+const failureObservation = partial.evidence.find((item) =>
+  item.stepId === partial.executionError?.stepId
+  && item.type === "dom"
+  && item.title.startsWith("失败时页面观测")
+);
+if (!failureObservation?.artifactIds?.length || !failureObservation.locator?.snapshotSha256) {
+  throw new Error("credibility_partial_failure_observation_unlinked");
+}
+const failureOperation = partial.evidence.find((item) =>
+  item.stepId === partial.executionError?.stepId
+  && item.type === "operation"
+  && item.title.endsWith("failed")
+);
+const observationEvidenceRefs = failureOperation?.payload.observationEvidenceRefs;
+if (!Array.isArray(observationEvidenceRefs) || !observationEvidenceRefs.includes(failureObservation.id)) {
+  throw new Error("credibility_partial_failure_operation_observation_missing");
+}
 await access(path.join(process.cwd(), "..", "reports", partial.runBundleFile.replace(/^\/artifacts\//, "")));
 
 console.log(JSON.stringify({ status: "passed", todoRuns: 3, orderRuns: 3, partialFailureRunId: partial.id }, null, 2));

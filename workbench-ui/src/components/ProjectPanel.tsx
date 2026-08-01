@@ -15,7 +15,7 @@ interface ProjectPanelProps {
   revealLoginSettings?: boolean;
   onSelect: (id: string) => void;
   onDraftChange: (draft: ProjectConfig) => void;
-  onRunDiagnosis: () => void;
+  onRunDiagnosis: () => Promise<void>;
   onStop: () => void;
   onApplyRecoveryCandidate?: (candidateId: string) => void;
   onSaveLoginCredential: (input: {
@@ -107,7 +107,7 @@ export function ProjectPanel({
     backend_unreachable: "后端健康检查无法访问，请确认 API 服务是否需要单独启动。",
     credential_missing: "项目需要登录测试账号，但所需测试凭据尚未配置。",
     permission_denied: "系统或沙盒拒绝了启动权限。macOS 原生依赖被拦截时可重新安装依赖后再试。",
-    container_runtime_unavailable: "Docker 或 Podman 未运行，安全沙盒无法创建。你可以启动 Docker Desktop 后重试，或对你上传的可信项目改用本机受控启动。",
+    container_runtime_unavailable: "安全沙盒服务尚未就绪。macOS 本地运行时系统会自动启动 Docker Desktop；仅在未安装或启动超时时才需要手动处理。",
     budget_exceeded: "依赖安装或启动超过了项目资源预算，已安全终止。",
     cleanup_failed: "项目进程已停止，但清理命令失败，请查看残留进程和日志。",
     cancelled: "本次启动已被取消，相关进程正在清理。",
@@ -339,10 +339,14 @@ export function ProjectPanel({
         </details>
       </details> : null}
       <div className="form-actions project-primary-actions">
-        <button className="primary" type="button" onClick={() => {
+        <button className="primary" type="button" onClick={async () => {
           setStartRequested(true);
           setHasSeenLaunchPhase(false);
-          onRunDiagnosis();
+          try {
+            await onRunDiagnosis();
+          } finally {
+            setStartRequested(false);
+          }
         }} disabled={isPreparing} aria-busy={isPreparing}>
           {isPreparing ? <LoaderCircle className="spin" size={15} /> : <Stethoscope size={15} />}
           {isPreparing ? "正在启动…" : "诊断并运行"}
@@ -388,7 +392,7 @@ export function ProjectPanel({
           </section> : null}
           {containerRuntimeUnavailable && !runReady && draft.allowExternalProjectPath ? <section className="runtime-local-fallback">
             <strong>沙盒服务未运行</strong>
-            <p>上传项目必须在系统沙盒中运行。请启动 Docker Desktop 或 Podman 后重试；系统不会退回本机直接启动。</p>
+            <p>系统已尝试自动启动 Docker Desktop。若仍停在这里，请确认 Docker Desktop 已安装且没有权限弹窗；系统不会退回本机直接启动。</p>
           </section> : null}
           {diagnosis && !runtimeFailureMessage ? <div className="diagnosis-summary">
             {diagnosis.stages.filter((stage) => stage.status !== "passed" && stage.status !== "skipped").map((stage) => (

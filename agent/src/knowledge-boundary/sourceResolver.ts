@@ -8,6 +8,7 @@ import {
 } from "@ai-test-officer/contracts";
 import { readRunBundle } from "../evidenceStore.js";
 import { getProject } from "../projectAdapter.js";
+import { readDiscoveryPageObservation } from "../pageObservationStore.js";
 import { listRepairSessions } from "../repairWorkspace.js";
 import { runEventStore } from "../runEventStore.js";
 import { hasScenario } from "../scenarios.js";
@@ -157,6 +158,20 @@ async function resolveSource(
   }
   if (kind === "scenario-registry") {
     if (!hasScenario(value)) throw new Error("knowledge_scenario_not_found");
+    return;
+  }
+  if (kind === "discovery") {
+    const observation = await readDiscoveryPageObservation(value);
+    if (!observation) throw new Error("knowledge_discovery_observation_not_found");
+    if (projectId && observation.projectId !== projectId) {
+      throw new Error("knowledge_source_cross_project");
+    }
+    if (
+      claim.observedAt
+      && Date.parse(claim.observedAt) !== Date.parse(observation.observation.capturedAt)
+    ) {
+      throw new Error("knowledge_discovery_observation_snapshot_expired");
+    }
     return;
   }
   if (kind === "run-event") {

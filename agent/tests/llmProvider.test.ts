@@ -16,6 +16,25 @@ function jsonResponse(value: unknown, status = 200) {
   });
 }
 
+function trackedReaderStream(events: unknown[]) {
+  const chunks = events.map((event) => new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+  let index = 0;
+  let cancelCalls = 0;
+  const response = {
+    body: {
+      getReader: () => ({
+        read: async () => index < chunks.length
+          ? { done: false, value: chunks[index++] }
+          : { done: true, value: undefined },
+        cancel: async () => {
+          cancelCalls += 1;
+        }
+      })
+    }
+  } as unknown as Response;
+  return { response, cancelCalls: () => cancelCalls };
+}
+
 const completedEvents = [
   { type: "response.output_text.delta", delta: '{"ok":true}' },
   { type: "response.completed", response: { id: "response-1", model: "gpt-5.1-codex", usage: { input_tokens: 4, output_tokens: 3, total_tokens: 7 } } }
@@ -27,6 +46,40 @@ export async function testLlmProviderResponsesTransport() {
   assert.deepEqual(parsed.telemetry.eventTypes, ["response.output_text.delta", "response.completed"]);
   await assert.rejects(() => parseResponsesStream(stream([{ type: "response.failed", response: { error: { code: "upstream" } } }])), /provider_responses_failed/);
   await assert.rejects(() => parseResponsesStream(stream([{ type: "response.output_text.delta", delta: "{" }])), /provider_responses_incomplete/);
+  await assert.rejects(
+    () => parseResponsesStream(stream([{
+      type: "response.incomplete",
+      response: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }
+    }])),
+    /provider_responses_output_truncated/
+  );
+  await assert.rejects(
+    () => parseResponsesStream(stream([{
+      type: "response.incomplete",
+      response: { status: "incomplete", incomplete_details: { reason: "content_filter" } }
+    }])),
+    /provider_responses_incomplete:content_filter/
+  );
+  await assert.rejects(
+    () => parseResponsesStream(stream([{
+      type: "response.failed",
+      response: { status: "failed", error: { code: "rate_limit_exceeded" } }
+    }])),
+    /provider_responses_failed:rate_limit_exceeded/
+  );
+
+  const completedReader = trackedReaderStream(completedEvents);
+  await parseResponsesStream(completedReader.response);
+  assert.equal(completedReader.cancelCalls(), 1);
+  const failedReader = trackedReaderStream([{
+    type: "response.incomplete",
+    response: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }
+  }]);
+  await assert.rejects(
+    () => parseResponsesStream(failedReader.response),
+    /provider_responses_output_truncated/
+  );
+  assert.equal(failedReader.cancelCalls(), 1);
 
   const credential = {
     id: "credential-test", name: "test", provider: "openai-compatible", baseUrl: "https://provider.invalid/v1",
@@ -80,6 +133,34 @@ export async function testLlmProviderResponsesTransport() {
     requests = 0;
     globalThis.fetch = (async () => {
       requests += 1;
+      return jsonResponse({
+        id: "response-truncated",
+        model: "gpt-5.1-codex",
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output_text: "{\"reply\":",
+        usage: { input_tokens: 2, output_tokens: 64, total_tokens: 66 }
+      });
+    }) as typeof fetch;
+    await assert.rejects(
+      () => executeLlmCall({
+        credential,
+        apiKey: "test-only",
+        prompt: "{}",
+        system: "json",
+        maxTokens: 64,
+        timeoutMs: 2_000,
+        totalTimeoutMs: 8_000,
+        transportPreference: "non-stream",
+        context: { purpose: "assistant", experimentId: "provider-unit-test" }
+      }),
+      /provider_responses_output_truncated/
+    );
+    assert.equal(requests, 1);
+
+    requests = 0;
+    globalThis.fetch = (async () => {
+      requests += 1;
       if (requests === 1) return jsonResponse({ error: "busy" }, 503);
       return jsonResponse({ id: "response-503-retry", model: "gpt-5.1-codex", output_text: '{"ok":true}', usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } });
     }) as typeof fetch;
@@ -100,6 +181,23 @@ export async function testLlmProviderResponsesTransport() {
     });
     assert.equal(structuredRequest?.text?.format?.type, "json_schema");
     assert.equal(structuredRequest?.text?.format?.name, "test_schema");
+
+    const sophNetCredential = {
+      ...credential,
+      id: "credential-sophnet",
+      baseUrl: "https://api.sophnet.com/v1"
+    } as CredentialRecord;
+    globalThis.fetch = (async (_url, init) => {
+      structuredRequest = JSON.parse(String(init?.body));
+      return jsonResponse({ id: "response-sophnet", model: "gpt-5.1-codex", output_text: '{"ok":true}', usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } });
+    }) as typeof fetch;
+    await executeLlmCall({
+      credential: sophNetCredential, apiKey: "test-only", prompt: "{}", system: "json", maxTokens: 64, timeoutMs: 2_000, totalTimeoutMs: 8_000,
+      transportPreference: "non-stream", jsonSchema: { name: "test_schema", schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false } },
+      context: { purpose: "assistant", experimentId: "provider-unit-test" }
+    });
+    assert.equal(structuredRequest?.text?.format?.type, "json_object");
+    assert.equal(structuredRequest?.text?.format?.name, undefined);
 
     requests = 0;
     globalThis.fetch = (async () => { requests += 1; return stream([{ type: "response.output_text.delta", delta: "{" }]); }) as typeof fetch;

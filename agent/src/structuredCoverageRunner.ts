@@ -14,6 +14,7 @@ import {
 import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
 import { persistExecutionResult } from "./executionPersistence.js";
 import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
+import { finalizeProofBundle, type MachineGateDraft } from "./proof/proofBundleService.js";
 import {
   getProject,
   resolveProjectTarget,
@@ -22,6 +23,7 @@ import {
 } from "./projectAdapter.js";
 import { executeStructuredAction, type StructuredAction } from "./structuredActionExecutors.js";
 import type {
+  ArtifactIntegrityReport,
   JudgeResult,
   LayeredJudgeReport,
   RunBundle,
@@ -176,7 +178,7 @@ export async function runStructuredCoveragePath(input: {
   const summary = executionError
     ? `Structured coverage path could not complete: ${executionError}`
     : execution?.summary ?? "Structured coverage path produced no result.";
-  const machineGate: MachineGate = {
+  const machineGateDraft: MachineGateDraft = {
     status: machineStatus,
     reasons: machineStatus === "pass" ? [] : [executionError ? `structured_execution_error:${executionError}` : "structured_oracle_failed"],
     reasonDetails: machineStatus === "pass" ? [] : [{
@@ -184,16 +186,37 @@ export async function runStructuredCoveragePath(input: {
       summary,
       evidenceRefs: [evidence.id]
     }],
-    assertionFailures: execution?.passed ? [] : [input.coverageItem.oracleIds[0] ?? action.action],
-    evidenceComplete: true
+    assertionFailures: execution?.passed ? [] : [input.coverageItem.oracleIds[0] ?? action.action]
   };
+  // Proof credibility (evidenceComplete / artifactIntegrityVerified /
+  // evidenceGrounded / gateEligible) is computed from the actually-captured
+  // artifact + evidence by the Proof Bundle Service — the single minting point.
+  const requirementCovered = !executionError;
+  const artifactIntegrity: ArtifactIntegrityReport = {
+    id: `${input.runId}_artifact_integrity`,
+    runId: input.runId,
+    generatedAt: new Date().toISOString(),
+    artifactRoot: "/artifacts",
+    summary: { total: 1, present: 1, missing: 0, unreadable: 0, pathEscapes: 0, selfReferences: 0, hashMismatches: 0, hashed: 1 },
+    items: [{ id: artifact.id, artifactUri: artifact.storageUri, kind: "operation", evidenceId: evidence.id, status: "present", sha256: artifact.integrity.sha256, sizeBytes: artifact.integrity.sizeBytes }]
+  };
+  const { machineGate, verdict, issues, gateEligible } = finalizeProofBundle({
+    draft: machineGateDraft,
+    runId: input.runId,
+    evidence: [evidence],
+    artifactsV2: [artifact],
+    artifactIntegrity,
+    requiredArtifactKinds: ["operation-log"],
+    machineGate: { ...machineGateDraft, evidenceComplete: false },
+    judgeReport: judgeReport(machineStatus, evidence.id, summary),
+    gateEligibleFacts: { executionSucceeded: !executionError, requirementCovered }
+  });
   const judgeRecommendation: JudgeRecommendation = {
     status: machineStatus === "pass" ? "pass" : machineStatus === "fail" ? "fail" : "needs-human-review",
     summary,
     evidenceRefs: [evidence.id]
   };
   const finalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
-  const requirementCovered = !executionError;
   const requirementPassed = requirementCovered && execution?.passed === true;
   const outcomeSummary = runOutcomeSummaryV2Schema.parse({
     schemaVersion: "2.0",
@@ -202,9 +225,10 @@ export async function runStructuredCoveragePath(input: {
     executionSucceeded: !executionError,
     requirementCovered,
     requirementPassed,
-    artifactIntegrityVerified: true,
-    evidenceGrounded: true,
-    gateEligible: requirementCovered,
+    artifactIntegrityVerified: verdict.artifactIntegrityVerified,
+    evidenceGrounded: verdict.evidenceGrounded,
+    gateEligible,
+    proofValidationIssues: issues,
     machineGate,
     judgeRecommendation,
     finalStatus

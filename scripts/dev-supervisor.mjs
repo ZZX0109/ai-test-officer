@@ -13,7 +13,7 @@ const childEnvironment = environmentForNode(process.execPath, {
 });
 const supervisorPidFile = path.join(rootDir, "reports", "background", "dev-supervisor.pid");
 const services = [
-  { id: "agent", args: ["run", "dev:agent"], healthUrl: "http://127.0.0.1:4317/api/health" },
+  { id: "agent", args: ["run", "dev:agent"], healthUrl: "http://127.0.0.1:4317/api/health", restartOnConnectionRefused: true },
   { id: "app-api", args: ["--workspace", "app-under-test", "run", "dev:api"], healthUrl: "http://127.0.0.1:6172/api/health" },
   { id: "app-web", args: ["--workspace", "app-under-test", "run", "dev:web"], healthUrl: "http://127.0.0.1:6173" },
   { id: "workbench", args: ["run", "dev:workbench"], healthUrl: "http://127.0.0.1:6174" }
@@ -39,15 +39,31 @@ function startService(service) {
     stdio: ["ignore", "pipe", "pipe"],
     detached: true
   });
-  children.set(service.id, { child, startedAt: Date.now(), unhealthyChecks: 0 });
+  const runtime = {
+    child,
+    startedAt: Date.now(),
+    unhealthyChecks: 0,
+    connectionRefusedChecks: 0,
+    restartScheduled: false,
+    terminating: false
+  };
+  children.set(service.id, runtime);
   console.log(`[supervisor] started ${service.id} pid=${child.pid}`);
   child.stdout.on("data", (chunk) => writePrefixed(process.stdout, service.id, chunk));
   child.stderr.on("data", (chunk) => writePrefixed(process.stderr, service.id, chunk));
-  child.once("exit", (code, signal) => {
+  const scheduleRestart = (reason) => {
+    if (runtime.restartScheduled || shuttingDown) return;
+    runtime.restartScheduled = true;
     children.delete(service.id);
-    if (shuttingDown) return;
-    console.error(`[supervisor] ${service.id} exited code=${code ?? "n/a"} signal=${signal ?? "n/a"}; restarting`);
+    console.error(`[supervisor] ${service.id} ${reason}; restarting`);
     setTimeout(() => startService(service), 750);
+  };
+  child.once("error", (error) => {
+    scheduleRestart(`failed to spawn (${error instanceof Error ? error.message : String(error)})`);
+  });
+  child.once("exit", (code, signal) => {
+    if (shuttingDown) return;
+    scheduleRestart(`exited code=${code ?? "n/a"} signal=${signal ?? "n/a"}`);
   });
 }
 
@@ -70,12 +86,25 @@ async function waitForHealthy(service, timeoutMs = 30_000) {
 }
 
 function stopServiceProcess(child, signal = "SIGTERM") {
-  if (child.killed) return;
+  // child.killed only means a signal was sent; the detached npm/tsx process
+  // group may still be alive. exitCode/signalCode are the actual terminal
+  // indicators and allow a later SIGKILL escalation.
+  if (child.exitCode !== null || child.signalCode !== null) return;
   try {
-    process.kill(-child.pid, signal);
+    if (typeof child.pid === "number") process.kill(-child.pid, signal);
+    else child.kill(signal);
   } catch {
     child.kill(signal);
   }
+}
+
+function connectionErrorCode(error) {
+  if (!error || typeof error !== "object") return "";
+  if ("code" in error && typeof error.code === "string") return error.code;
+  const cause = "cause" in error ? error.cause : undefined;
+  return cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string"
+    ? cause.code
+    : "";
 }
 
 function stopAll(signal) {
@@ -119,10 +148,29 @@ setInterval(async () => {
       try {
         const response = await fetch(service.healthUrl, { signal: AbortSignal.timeout(2_000) });
         runtime.unhealthyChecks = response.ok ? 0 : runtime.unhealthyChecks + 1;
-      } catch {
+        runtime.connectionRefusedChecks = 0;
+      } catch (error) {
         runtime.unhealthyChecks += 1;
+        runtime.connectionRefusedChecks = connectionErrorCode(error) === "ECONNREFUSED"
+          ? runtime.connectionRefusedChecks + 1
+          : 0;
       }
       if (runtime.unhealthyChecks < 4) continue;
+      if (
+        service.restartOnConnectionRefused
+        && runtime.connectionRefusedChecks >= 4
+        && !runtime.terminating
+      ) {
+        runtime.terminating = true;
+        console.error(`[supervisor] ${service.id} has no TCP listener after ${runtime.connectionRefusedChecks} checks; restarting its process group`);
+        stopServiceProcess(runtime.child);
+        setTimeout(() => {
+          if (children.get(service.id) !== runtime) return;
+          console.error(`[supervisor] ${service.id} did not exit after SIGTERM; forcing process-group shutdown`);
+          stopServiceProcess(runtime.child, "SIGKILL");
+        }, 5_000).unref();
+        continue;
+      }
       // The local Agent uses a synchronous development SQLite backend. A
       // large audit/history read can temporarily delay HTTP health responses
       // while the process is still alive and making progress. Killing it here
@@ -130,6 +178,7 @@ setInterval(async () => {
       // Real process exits are already restarted by the child exit handler.
       console.warn(`[supervisor] ${service.id} is temporarily busy after ${runtime.unhealthyChecks} health checks; keeping the live process`);
       runtime.unhealthyChecks = 0;
+      runtime.connectionRefusedChecks = 0;
     }
   } finally {
     healthSweepInProgress = false;

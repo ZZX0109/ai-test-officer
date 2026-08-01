@@ -579,6 +579,61 @@ export interface DiscoveryScanSuggestion {
   draftScenarioRef?: string;
 }
 
+export interface DiscoveryPageObservation {
+  id: string;
+  requestedUrl: string;
+  finalUrl: string;
+  startedAt: string;
+  capturedAt: string;
+  durationMs: number;
+  stage: "launch" | "navigation" | "dom-ready" | "snapshot" | "selection" | "completed";
+  status: "ready" | "degraded" | "failed";
+  navigation: {
+    documentCommitted: boolean;
+    httpStatus?: number;
+    warning?: string;
+  };
+  network?: {
+    totalRequests: number;
+    completedRequests: number;
+    failedRequests: number;
+    activeRequests: number;
+    peakActiveRequests: number;
+    lastActivityAt?: string;
+  };
+  document: {
+    readyState?: string;
+    bodyTextSample?: string;
+    interactiveElementCount: number;
+    viewport?: { width: number; height: number };
+    controls: Array<{
+      kind: "link" | "button" | "input" | "textarea" | "select" | "other";
+      role?: string;
+      accessibleName?: string;
+      testId?: string;
+      inputType?: string;
+      disabled: boolean;
+      visible: boolean;
+    }>;
+  };
+  console: Array<{ type: string; text: string }>;
+  pageErrors: string[];
+  failedRequests: Array<{
+    method: string;
+    url: string;
+    status?: number;
+    resourceType?: string;
+    failure?: string;
+  }>;
+  screenshot?: { storageUri: string; capturedAt: string };
+  diagnosis: {
+    summary: string;
+    likelyCauses: string[];
+    retryable: boolean;
+    userActionRequired: boolean;
+  };
+}
+
 export interface DiscoveryScanResult {
   id: string;
   createdAt: string;
@@ -603,6 +658,7 @@ export interface DiscoveryScanResult {
   };
   networkEndpoints: Array<{ method: string; url: string; status?: number; path?: string; resourceType?: string }>;
   openApiOperations: Array<{ method: string; path: string; operationId?: string; summary?: string }>;
+  observation: DiscoveryPageObservation;
   suggestions: DiscoveryScanSuggestion[];
   drafts: HarnessGapScenarioDraft[];
   recommendedScenarioId?: string;
@@ -617,6 +673,17 @@ export interface DiscoveryScanResult {
   };
   status: "passed" | "partial" | "failed";
   message: string;
+  orchestration?: {
+    status: "waiting" | "ready" | "blocked" | "failed";
+    checkedUrl: string;
+    attempts: number;
+    maxAttempts: number;
+    discoveryAttempts: number;
+    reason: string;
+    retryable: boolean;
+    runtimeStatus?: ProjectRuntimeStatus["status"];
+    httpStatus?: number;
+  };
 }
 
 export interface RunStepEvidence {

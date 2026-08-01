@@ -299,7 +299,11 @@ export const machineGateSchema = z.object({
     evidenceRefs: z.array(z.string().min(1)).min(1)
   })).default([]),
   assertionFailures: z.array(z.string()).default([]),
-  evidenceComplete: z.boolean()
+  evidenceComplete: z.boolean(),
+  // Minted only by the Proof Bundle Service (agent/src/proof/). Business code must
+  // never set these; a missing proofBundleId marks a legacy/unverified record.
+  proofBundleId: z.string().optional(),
+  proofValidationVersion: z.string().optional()
 });
 export const judgeRecommendationSchema = z.object({
   status: z.enum(["pass", "fail", "needs-human-review"]),
@@ -332,7 +336,10 @@ export const runOutcomeSummaryV2Schema = z.object({
   machineGate: machineGateSchema.optional(),
   judgeRecommendation: judgeRecommendationSchema.optional(),
   humanDecision: humanDecisionSchema.optional(),
-  finalStatus: gateStatusSchema.optional()
+  finalStatus: gateStatusSchema.optional(),
+  // Credibility validation issues produced by the Proof Bundle Service. Empty for
+  // a fully verified bundle; non-empty means a formal pass must not be asserted.
+  proofValidationIssues: z.array(z.string()).optional()
 }).superRefine((value, context) => {
   if (value.requirementPassed && !value.requirementCovered) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["requirementPassed"], message: "A requirement cannot pass before it is covered." });
@@ -746,6 +753,7 @@ export const agentMessageSchema = z.object({
   knowledgeDecisionId: z.string().min(1).optional(),
   llmCallId: z.string().min(1).optional(),
   suggestedAction: z.string().min(1).optional(),
+  requiresConfirmation: z.boolean().optional(),
   createdAt: z.string().datetime()
 });
 export type AgentMessage = z.infer<typeof agentMessageSchema>;

@@ -28,11 +28,14 @@ import { buildProofGraph, readProofArtifacts, writeProofArtifacts } from "./proo
 import { persistParentAggregateEvidence } from "./parentRunEvidence.js";
 import { buildLlmJudgeReport } from "./llmJudge.js";
 import { persistExecutionResult } from "./executionPersistence.js";
+import { finalizeProofBundle, type MachineGateDraft } from "./proof/proofBundleService.js";
+import { runSmokeFirstDiscovery } from "./smokeFirstDiscovery.js";
+import type { SourceReadEnvelope } from "./types.js";
 
 function machineGateFromResult(result: Awaited<ReturnType<typeof readRunBundle>>["result"]): MachineGate {
   if (result.machineGate) return result.machineGate;
   const status = result.gateStatus ?? "needs-human-review";
-  return {
+  const draft: MachineGateDraft = {
     status,
     reasons: result.artifactIntegrity?.items
       .filter((item) => !["present", "self_reference"].includes(item.status))
@@ -44,9 +47,16 @@ function machineGateFromResult(result: Awaited<ReturnType<typeof readRunBundle>>
         summary: `${item.id}:${item.status}`,
         evidenceRefs: [item.evidenceId!]
       })),
-    assertionFailures: result.assertions.filter((item) => !item.passed).map((item) => item.name),
-    evidenceComplete: status !== "blocked" && status !== "needs-human-review"
+    assertionFailures: result.assertions.filter((item) => !item.passed).map((item) => item.name)
   };
+  return finalizeProofBundle({
+    draft,
+    runId: result.id,
+    artifactsV2: result.artifactsV2,
+    artifactIntegrity: result.artifactIntegrity,
+    machineGate: { ...draft, evidenceComplete: false },
+    judgeReport: result.judgeReport
+  }).machineGate;
 }
 
 function recommendationFromResult(result: Awaited<ReturnType<typeof readRunBundle>>["result"]): JudgeRecommendation | undefined {
@@ -71,6 +81,90 @@ export function agentOrchestrationMode(projectId?: string): "shadow" | "active" 
     .filter(Boolean);
   if (!allowlist.length) return "active";
   return projectId && allowlist.includes(projectId) ? "active" : "shadow";
+}
+
+function requiresFullCoverage(run: RunProjection) {
+  return run.runKind === "parent" && (
+    run.input.coverageMode === "full"
+    || /全面|灰度|full[\s_-]*(scan|coverage)|all[\s_-]*(paths|flows)/i.test(String(run.input.requirement ?? ""))
+  );
+}
+
+export function requiresActiveBrowserDiscovery(
+  run: RunProjection,
+  manifestBrowserCapability = true
+) {
+  const requestedCapabilities = Array.isArray(run.input.capabilities)
+    ? run.input.capabilities.filter((item): item is string => typeof item === "string")
+    : ["browser"];
+  return requiresFullCoverage(run)
+    && requestedCapabilities.includes("browser")
+    && manifestBrowserCapability;
+}
+
+function discoverySourceContexts(run: RunProjection): SourceReadEnvelope[] {
+  const now = new Date().toISOString();
+  const sources: SourceReadEnvelope[] = [];
+  if (typeof run.input.requirement === "string" && run.input.requirement.trim()) {
+    sources.push({
+      id: "run_requirement",
+      kind: "manual",
+      title: "Run requirement",
+      status: "connected",
+      summary: run.input.requirement,
+      permissionState: "not_required",
+      isSimulated: false,
+      evidenceUse: "primary_requirement",
+      displayStatus: "ready",
+      readAt: now,
+      trustLevel: "medium"
+    });
+  }
+  if (typeof run.input.diff === "string" && run.input.diff.trim()) {
+    sources.push({
+      id: "run_diff",
+      kind: "git_diff",
+      title: "Run diff",
+      status: "connected",
+      summary: run.input.diff,
+      permissionState: "not_required",
+      isSimulated: false,
+      evidenceUse: "change_context",
+      displayStatus: "ready",
+      readAt: now,
+      trustLevel: "high"
+    });
+  }
+  return sources;
+}
+
+function discoveryState(result: Awaited<ReturnType<typeof runSmokeFirstDiscovery>>) {
+  const orchestration = result.orchestration;
+  const status = orchestration?.status ?? (result.status === "passed" ? "ready" : "failed");
+  return {
+    status,
+    reason: orchestration?.reason ?? result.observation.diagnosis.summary ?? result.message,
+    retryable: orchestration?.retryable ?? result.observation.diagnosis.retryable,
+    checkedUrl: orchestration?.checkedUrl ?? result.target.frontendUrl,
+    attempts: orchestration?.attempts ?? 0,
+    maxAttempts: orchestration?.maxAttempts ?? 0,
+    discoveryAttempts: orchestration?.discoveryAttempts ?? 0,
+    observationId: result.observation.id,
+    documentCommitted: result.observation.navigation.documentCommitted,
+    interactiveElementCount: result.observation.document.interactiveElementCount
+  };
+}
+
+function discoveryBlockedGate(discovery: Record<string, unknown>): MachineGate {
+  const status = String(discovery.status ?? "failed");
+  const reason = String(discovery.reason ?? "discovery_smoke_failed");
+  return {
+    status: "blocked",
+    reasons: [`discovery_${status}:${reason}`],
+    reasonDetails: [],
+    assertionFailures: [],
+    evidenceComplete: false
+  };
 }
 
 async function buildService() {
@@ -98,10 +192,55 @@ async function buildService() {
         const run = await runEventStore.get(state.runId);
         return { requirement: typeof run?.input.requirement === "string" ? run.input.requirement : state.requirement };
       }),
-      discover: node("discover", async (state) => {
+      // Discovery is intentionally not wrapped in the durable node-result
+      // cache. A waiting runtime resumes the same LangGraph node and must make
+      // a fresh bounded probe instead of replaying the cached waiting result.
+      // The graph checkpoint still prevents a completed node from running
+      // twice after a service restart.
+      discover: async (state) => {
         const run = await runEventStore.get(state.runId);
-        return { coverageMap: run?.impactAnalysis ? { impactAnalysis: run.impactAnalysis } : {} };
-      }),
+        const baseCoverageMap = run?.impactAnalysis ? { impactAnalysis: run.impactAnalysis } : {};
+        if (state.mode !== "active" || !run) return { coverageMap: baseCoverageMap };
+
+        const project = typeof run.input.projectId === "string"
+          ? await getProject(run.input.projectId)
+          : undefined;
+        if (!requiresActiveBrowserDiscovery(run, project?.manifest?.capabilities.browser !== false)) {
+          return { coverageMap: baseCoverageMap };
+        }
+
+        const result = await runSmokeFirstDiscovery({
+          projectId: typeof run.input.projectId === "string" ? run.input.projectId : undefined,
+          appUrl: typeof run.input.appUrl === "string" ? run.input.appUrl : undefined,
+          sourceContexts: discoverySourceContexts(run),
+          goal: typeof run.input.requirement === "string" ? run.input.requirement : "全面扫描",
+          smokeAttempts: 2,
+          discoveryAttempts: 2
+        });
+        const discovery = discoveryState(result);
+        if (discovery.status === "ready") {
+          return {
+            coverageMap: { ...baseCoverageMap, discovery },
+            discoveryTerminal: false
+          };
+        }
+        if (discovery.status === "waiting") {
+          return {
+            coverageMap: { ...baseCoverageMap, discovery },
+            discoveryTerminal: false
+          };
+        }
+        const machineGate = discoveryBlockedGate(discovery);
+        return {
+          coverageMap: { ...baseCoverageMap, discovery },
+          discoveryTerminal: true,
+          gate: {
+            machineGate,
+            finalStatus: "blocked",
+            discovery
+          }
+        };
+      },
       buildCoverageMap: node("build-coverage-map", async (state) => {
         const run = await runEventStore.get(state.runId);
         if (state.mode === "active" && run) {
@@ -113,10 +252,7 @@ async function buildService() {
           const discovered = requested.length || explicit.length
             ? createCoverageItems({ runId: run.id, scenarioIds: [...requested, ...explicit] })
             : [];
-          const fullCoverage = run.runKind === "parent" && (
-            run.input.coverageMode === "full"
-            || /全面|灰度|full[\s_-]*(scan|coverage)|all[\s_-]*(paths|flows)/i.test(String(run.input.requirement ?? ""))
-          );
+          const fullCoverage = requiresFullCoverage(run);
           const project = fullCoverage && typeof run.input.projectId === "string"
             ? await getProject(run.input.projectId)
             : undefined;
@@ -477,7 +613,11 @@ async function buildService() {
       finalize: node("finalize", async (state) => {
         let run = await runEventStore.get(state.runId);
         if (state.mode === "active" && run && !["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(run.state)) {
-          const machineGate = state.gate?.machineGate as MachineGate | undefined;
+          const discovery = state.coverageMap?.discovery && typeof state.coverageMap.discovery === "object"
+            ? state.coverageMap.discovery as Record<string, unknown>
+            : undefined;
+          const machineGate = (state.gate?.machineGate as MachineGate | undefined)
+            ?? (state.discoveryTerminal && discovery ? discoveryBlockedGate(discovery) : undefined);
           const judgeRecommendation = state.gate?.judgeRecommendation as JudgeRecommendation | undefined;
           const finalStatus = machineGate
             ? resolveFinalStatus({ machineGate, judgeRecommendation })
@@ -489,7 +629,8 @@ async function buildService() {
             machineGate,
             judgeRecommendation,
             finalStatus,
-            outcomeSummary: state.gate?.outcomeSummary
+            outcomeSummary: state.gate?.outcomeSummary,
+            ...(discovery ? { discovery } : {})
           };
           run = finalStatus === "pass"
             ? await appendSystemRunEvent(state.runId, "run_completed", payload)

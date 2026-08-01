@@ -101,10 +101,15 @@ function buildPrompt(input: GeneratePlanInput) {
     .map((scenario) => ({
     id: scenario.id,
     selectorRefs: [
-      ...Object.keys(scenario.corePath).filter((key) => /ButtonName|Label/.test(key)),
+      ...Object.keys(scenario.corePath).filter((key) => /ButtonName|Label|Locator/.test(key)),
       ...(scenario.regressionPath?.triggerButtonName ? ["regressionTriggerButtonName"] : [])
     ],
-    valueRefs: Object.keys(scenario.corePath).filter((key) => /^(input|selectValue)$/.test(key) && typeof scenario.corePath[key as keyof typeof scenario.corePath] === "string"),
+    valueRefs: [
+      ...Object.keys(scenario.corePath).filter((key) => /^(input|selectValue)$/.test(key) && typeof scenario.corePath[key as keyof typeof scenario.corePath] === "string"),
+      ...(["login_as_test_user", "login_invalid_user"].includes(scenario.corePath.action)
+        ? ["projectLoginUsername", "projectLoginPassword"]
+        : [])
+    ],
     fixtureRefs: scenario.corePath.action === "file_upload_validate" ? ["scenarioFixture"] : [],
     oracleIds: scenario.corePath.oracles.map((oracle) => oracle.id),
     semanticContract: scenario.compiledPlanContract,
@@ -295,11 +300,16 @@ export function compileLlmPlanCandidate(
     throw new Error("llm_plan_browser_permission_missing");
   }
   const selectorRefs = new Set([
-    ...Object.keys(scenario.corePath).filter((key) => /ButtonName|Label/.test(key)),
+    ...Object.keys(scenario.corePath).filter((key) => /ButtonName|Label|Locator/.test(key)),
     ...(scenario.regressionPath?.triggerButtonName ? ["regressionTriggerButtonName"] : [])
   ]);
   const oracleIds = new Set(scenario.corePath.oracles.map((oracle) => oracle.id));
-  const valueRefs = new Set(Object.keys(scenario.corePath).filter((key) => /^(input|selectValue)$/.test(key) && typeof scenario.corePath[key as keyof typeof scenario.corePath] === "string"));
+  const valueRefs = new Set([
+    ...Object.keys(scenario.corePath).filter((key) => /^(input|selectValue)$/.test(key) && typeof scenario.corePath[key as keyof typeof scenario.corePath] === "string"),
+    ...(["login_as_test_user", "login_invalid_user"].includes(scenario.corePath.action)
+      ? ["projectLoginUsername", "projectLoginPassword"]
+      : [])
+  ]);
   const fixtureRefs = new Set(scenario.corePath.action === "file_upload_validate" ? ["scenarioFixture"] : []);
   const expectedPlanPaths = new Map<string, string>([
     ["smoke", scenario.smoke.pathId],
@@ -312,7 +322,10 @@ export function compileLlmPlanCandidate(
     const action = step.action as ActionDsl;
     if ("selectorRef" in action && !selectorRefs.has(action.selectorRef)) throw new Error(`llm_plan_unknown_selector:${action.selectorRef}`);
     if (action.action === "click" && !(action.selectorRef.endsWith("ButtonName") || action.selectorRef === "regressionTriggerButtonName")) throw new Error(`llm_plan_click_selector_not_actionable:${action.selectorRef}`);
-    if (action.action === "fill" && action.selectorRef !== "inputLabel") throw new Error(`llm_plan_fill_selector_not_actionable:${action.selectorRef}`);
+    if (action.action === "fill"
+      && !["inputLabel", "usernameLabel", "passwordLabel", "usernameLocator", "passwordLocator"].includes(action.selectorRef)) {
+      throw new Error(`llm_plan_fill_selector_not_actionable:${action.selectorRef}`);
+    }
     if (action.action === "select" && action.selectorRef !== "selectLabel") throw new Error(`llm_plan_select_selector_not_actionable:${action.selectorRef}`);
     if (action.action === "upload" && !action.selectorRef.endsWith("Label")) throw new Error(`llm_plan_upload_selector_not_actionable:${action.selectorRef}`);
     if (action.action === "fill" && !valueRefs.has(action.valueRef)) throw new Error(`llm_plan_unknown_value:${action.valueRef}`);

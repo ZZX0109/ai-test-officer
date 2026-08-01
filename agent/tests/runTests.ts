@@ -1,5 +1,14 @@
 import { testConnectorEnvelope } from "./connector.test.js";
-import { testDiscoveryProbeExecutesActionBeforeOracle, testDiscoveryScanAcceptsVisibleStreamingDom, testDiscoveryScanDrafts } from "./discoveryScan.test.js";
+import {
+  testDiscoveryProbeExecutesActionBeforeOracle,
+  testDiscoveryObservationBoundsAndRedactsRuntimeFacts,
+  testDiscoveryScanAcceptsVisibleStreamingDom,
+  testDiscoveryScanDrafts,
+  testDiscoveryRecognizesLoginAfterNonFormControls,
+  testDiscoveryScanPreservesActiveNetworkAtBudgetBoundary,
+  testDiscoveryScanWaitsForProgressingModuleGraph,
+  testSmokeFirstDiscoveryOrchestration
+} from "./discoveryScan.test.js";
 import { testCiCliErrorReports } from "./ciCliErrorReports.test.js";
 import { testCiContract } from "./ciContract.test.js";
 import { testCiGatePolicy } from "./ciGatePolicy.test.js";
@@ -54,8 +63,14 @@ import { testAgentGraphMode } from "./agentGraphMode.test.js";
 import { testKnowledgeBoundary } from "./knowledgeBoundary.test.js";
 import { testKnowledgeBoundaryPlatform } from "./knowledgeBoundaryPlatform.test.js";
 import { testProjectAuthorizationMatrix } from "./projectAuthorization.test.js";
+import { testAssistantFallback } from "./assistantFallback.test.js";
+import { testProofBundleValidator } from "./proofBundleValidator.test.js";
+import { testEvidenceArtifactLinker } from "./evidenceArtifactLinker.test.js";
 
 async function main() {
+  testAssistantFallback();
+  testProofBundleValidator();
+  testEvidenceArtifactLinker();
   await testConnectorEnvelope();
   await testProjectDetectionWizard();
   await testProjectFolderBrowser();
@@ -68,8 +83,13 @@ async function main() {
   await testKnowledgeBoundaryPlatform();
   await testStructuredActionExecutors();
   await testDiscoveryScanDrafts();
+  await testDiscoveryRecognizesLoginAfterNonFormControls();
+  await testDiscoveryObservationBoundsAndRedactsRuntimeFacts();
+  await testSmokeFirstDiscoveryOrchestration();
   await testDiscoveryProbeExecutesActionBeforeOracle();
   await testDiscoveryScanAcceptsVisibleStreamingDom();
+  await testDiscoveryScanWaitsForProgressingModuleGraph();
+  await testDiscoveryScanPreservesActiveNetworkAtBudgetBoundary();
   await testGovernanceSecurityBot();
   await testProjectAuthorizationMatrix();
   testCiContract();

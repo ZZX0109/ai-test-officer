@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { BudgetTracker, buildOciInvocation, classifyRuntimeFailure, resolveManifestWorkspace } from "../src/index.js";
 import { projectManifestSchema } from "@ai-test-officer/contracts";
 
@@ -60,6 +61,14 @@ assert.match(cachedArgs, /prepared-lock-hash/);
 assert.match(cachedArgs, /\.ato-source-source-hash/);
 assert.match(cachedArgs, /ATO_SOURCE_CACHE_HIT/);
 assert.match(cachedArgs, /ATO_DEPENDENCY_CACHE_HIT/);
+assert.match(cachedArgs, /ATO_DEPENDENCY_CACHE_RELINK/);
+const shellFlagIndex = cachedInvocation.args.lastIndexOf("-c");
+assert.ok(shellFlagIndex >= 0);
+const shellSyntax = spawnSync("/bin/sh", ["-n"], {
+  input: cachedInvocation.args[shellFlagIndex + 1],
+  encoding: "utf8"
+});
+assert.equal(shellSyntax.status, 0, shellSyntax.stderr);
 assert.match(cachedArgs, /npm_config_prefer_offline=true/);
 assert.match(cachedArgs, /GOMODCACHE=\/sandbox-cache\/go\/pkg\/mod/);
 assert.match(cachedArgs, /CARGO_TARGET_DIR=\/sandbox-cache\/cargo-target/);

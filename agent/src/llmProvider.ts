@@ -33,11 +33,19 @@ export interface LlmCallContext {
 }
 
 const LANGCHAIN_ADAPTER_VERSION = "agent-orchestration-0.1.0";
-const PROVIDER_ADAPTER_VERSION = "responses-2.0.0";
+const PROVIDER_ADAPTER_VERSION = "responses-2.1.0";
 
 interface ProviderResponseData {
   id?: string;
   model?: string;
+  status?: "completed" | "failed" | "incomplete" | string;
+  incomplete_details?: {
+    reason?: string;
+  };
+  error?: {
+    code?: string;
+    message?: string;
+  };
   output_text?: string;
   usage?: {
     prompt_tokens?: number;
@@ -182,6 +190,23 @@ export async function parseResponsesStream(response: Response) {
   let invalidEvents = 0;
   let firstTokenAt: string | undefined;
   const eventTypes = new Set<string>();
+  const terminalError = (
+    terminal: ProviderResponseData | undefined,
+    fallback: "failed" | "incomplete"
+  ) => {
+    if (fallback === "failed" || terminal?.status === "failed") {
+      const code = terminal?.error?.code?.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 120);
+      return new Error(code ? `provider_responses_failed:${code}` : "provider_responses_failed");
+    }
+    const reason = terminal?.incomplete_details?.reason
+      ?.replace(/[^a-zA-Z0-9_:-]/g, "_")
+      .slice(0, 120);
+    return new Error(reason === "max_output_tokens"
+      ? "provider_responses_output_truncated"
+      : reason
+        ? `provider_responses_incomplete:${reason}`
+        : "provider_responses_incomplete");
+  };
   const consume = (line: string) => {
     if (!line.startsWith("data: ")) return;
     try {
@@ -196,29 +221,41 @@ export async function parseResponsesStream(response: Response) {
         text += typeof event.delta === "string" ? event.delta : "";
       }
       if (event.type === "response.completed") completed = event.response;
-      if (event.type === "response.failed") throw new Error("provider_responses_failed");
-      if (event.type === "response.incomplete") throw new Error("provider_responses_incomplete");
+      if (event.type === "response.failed") throw terminalError(event.response, "failed");
+      if (event.type === "response.incomplete") throw terminalError(event.response, "incomplete");
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("provider_responses_")) throw error;
       invalidEvents += 1;
     }
   };
-  while (!completed) {
-    const next = await reader.read();
-    bytesReceived += next.value?.byteLength ?? 0;
-    buffer += decoder.decode(next.value ?? new Uint8Array(), { stream: !next.done });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-    for (const line of lines) consume(line);
-    if (next.done) break;
+  try {
+    while (!completed) {
+      const next = await reader.read();
+      bytesReceived += next.value?.byteLength ?? 0;
+      buffer += decoder.decode(next.value ?? new Uint8Array(), { stream: !next.done });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) consume(line);
+      if (next.done) break;
+    }
+    if (!completed && buffer) consume(buffer);
+    if (!completed) {
+      throw new Error(bytesReceived === 0
+        ? "provider_responses_empty"
+        : invalidEvents > 0
+          ? "provider_responses_invalid_event"
+          : "provider_responses_incomplete");
+    }
+    if (completed.status === "failed") throw terminalError(completed, "failed");
+    if (completed.status === "incomplete") throw terminalError(completed, "incomplete");
+    return { data: { ...completed, output_text: text }, telemetry: { bytesReceived, eventTypes: [...eventTypes], firstTokenAt } };
+  } catch (error) {
+    throw Object.assign(error instanceof Error ? error : new Error("provider_responses_failed"), {
+      streamTelemetry: { bytesReceived, eventTypes: [...eventTypes] }
+    });
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  if (!completed && buffer) consume(buffer);
-  if (!completed) {
-    const error = new Error(bytesReceived === 0 ? "provider_responses_empty" : invalidEvents > 0 ? "provider_responses_invalid_event" : "provider_responses_incomplete");
-    throw Object.assign(error, { streamTelemetry: { bytesReceived, eventTypes: [...eventTypes] } });
-  }
-  await reader.cancel().catch(() => undefined);
-  return { data: { ...completed, output_text: text }, telemetry: { bytesReceived, eventTypes: [...eventTypes], firstTokenAt } };
 }
 
 async function parseResponsesJson(response: Response) {
@@ -230,6 +267,19 @@ async function parseResponsesJson(response: Response) {
     data = JSON.parse(body) as ProviderResponseData;
   } catch {
     throw new Error("provider_responses_invalid_json");
+  }
+  if (data.status === "failed") {
+    throw new Error(data.error?.code
+      ? `provider_responses_failed:${data.error.code}`
+      : "provider_responses_failed");
+  }
+  if (data.status === "incomplete") {
+    const reason = data.incomplete_details?.reason;
+    throw new Error(reason === "max_output_tokens"
+      ? "provider_responses_output_truncated"
+      : reason
+        ? `provider_responses_incomplete:${reason}`
+        : "provider_responses_incomplete");
   }
   return { data, telemetry: { bytesReceived, eventTypes: ["json_response"], firstTokenAt: undefined as string | undefined } };
 }
@@ -253,6 +303,18 @@ export type ExecuteLlmCallInput = {
 
 type ResponsesTransportMode = "stream" | "non-stream";
 
+function responsesTextFormat(input: ExecuteLlmCallInput) {
+  // SophNet's Codex Responses endpoint accepts JSON object mode but currently
+  // rejects the native json_schema envelope with HTTP 400. We still validate
+  // the returned object against the exact Zod schema in the application layer.
+  if (/api\.sophnet\.com/i.test(input.credential.baseUrl)) {
+    return { type: "json_object" };
+  }
+  return input.jsonSchema
+    ? { type: "json_schema", name: input.jsonSchema.name, strict: true, schema: input.jsonSchema.schema }
+    : { type: "json_object" };
+}
+
 async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: number, mode: ResponsesTransportMode) {
   const attemptStartedAt = new Date().toISOString();
   const attemptStarted = Date.now();
@@ -275,9 +337,7 @@ async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: nu
         model: input.credential.model, instructions: input.system, input: `${input.prompt}\nReturn a JSON object.`,
         max_output_tokens: input.maxTokens,
         stream: mode === "stream",
-        text: { format: input.jsonSchema
-          ? { type: "json_schema", name: input.jsonSchema.name, strict: true, schema: input.jsonSchema.schema }
-          : { type: "json_object" } }
+        text: { format: responsesTextFormat(input) }
       } : {
         model: input.credential.model, temperature: input.temperature ?? 0, response_format: { type: "json_object" },
         max_tokens: input.maxTokens, messages: [{ role: "system", content: input.system }, { role: "user", content: input.prompt }]

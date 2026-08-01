@@ -7,7 +7,6 @@ import type {
   LayeredJudgeReport,
   VisualRunResult
 } from "./types.js";
-import { fixedGrayPlan } from "./plan.js";
 import { detectUntrustedInstructions } from "./untrustedInput.js";
 
 interface JudgeInput {
@@ -55,13 +54,24 @@ function severityFor(failureClass: FailureClass, fallback: "high" | "medium" | "
 }
 
 function buildPlanJudge(input: JudgeInput): JudgeResult {
-  const plan = input.plan ?? fixedGrayPlan;
+  const plan = input.plan;
   const executedStepIds = new Set(input.result.steps.map((step) => step.stepId));
   const coveredPathIds = new Set(input.result.riskCoverageMatrix.flatMap((item) => item.pathIds));
-  const committedPathIds = new Set(plan.risks.filter((risk) => risk.coverageDisposition === "required").flatMap((risk) => risk.pathIds));
+  const committedPathIds = new Set(
+    plan?.risks
+      .filter((risk) => risk.coverageDisposition === "required")
+      .flatMap((risk) => risk.pathIds)
+    ?? []
+  );
   const findings: JudgeFinding[] = [];
 
-  for (const level of plan.levels) {
+  // An omitted plan means the caller is executing one trusted Scenario, not
+  // the legacy Todo fixture. The former fallback to fixedGrayPlan fabricated
+  // unrelated Todo coverage gaps for arbitrary discovered projects (for
+  // example ANDFlow login), turning a verified machine pass into needless
+  // human review. Scenario coverage is already represented by the runtime's
+  // riskCoverageMatrix; only compare path IDs when a real plan was supplied.
+  for (const level of plan?.levels ?? []) {
     for (const pathItem of level.paths) {
       const ran = executedStepIds.has(pathItem.id) || coveredPathIds.has(pathItem.id);
       const executionCommitted = committedPathIds.has(pathItem.id) || level.id === "smoke" || level.id === "core_path" || level.id === "regression";

@@ -4,6 +4,7 @@ import type { EvidenceItem, RunBundle } from "./types.js";
 import { redactRecord, redactUrl, redactValue } from "./redaction.js";
 import {
   appendEvidenceToAuditStore,
+  finalizeEvidenceArtifactLinksInAuditStore,
   readEvidenceFromAuditStore,
   readRunBundleFromAuditStore,
   readLatestRunIdFromAuditStore,
@@ -67,6 +68,24 @@ export async function readEvidence(runId: string): Promise<EvidenceItem[]> {
   } catch {
     return [];
   }
+}
+
+export async function finalizeEvidenceArtifactLinks(
+  runId: string,
+  evidence: EvidenceItem[]
+) {
+  const previous = writeQueues.get(runId) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      finalizeEvidenceArtifactLinksInAuditStore(runId, evidence);
+      const persisted = readEvidenceFromAuditStore(runId);
+      await mkdir(runDir(runId), { recursive: true });
+      await writeFile(evidenceFile(runId), JSON.stringify(persisted, null, 2));
+      return persisted;
+    });
+  writeQueues.set(runId, next);
+  return next;
 }
 
 export async function writeRunBundle(bundle: RunBundle) {

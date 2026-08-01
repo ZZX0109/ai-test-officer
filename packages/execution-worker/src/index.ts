@@ -199,7 +199,13 @@ export function buildOciInvocation(input: {
     ? [
       `cache_marker=${dependencyCache.storageMode === "volume" ? "/sandbox-meta" : "/sandbox-cache"}/prepared-${dependencyCache.key}`,
       `cache_lock=${dependencyCache.storageMode === "volume" ? "/sandbox-meta" : "/sandbox-cache"}/preparing-${dependencyCache.key}`,
-      "if [ -f \"$cache_marker\" ]; then echo ATO_DEPENDENCY_CACHE_HIT",
+      "if [ -f \"$cache_marker\" ]; then if [ \"${ATO_SOURCE_CHANGED:-0}\" = \"1\" ]; then echo ATO_DEPENDENCY_CACHE_RELINK",
+      // A refreshed monorepo source tree no longer contains package-level
+      // node_modules links (they are intentionally excluded from the source
+      // copy). Re-running the allowlisted install command against the prepared
+      // offline store restores those links without downloading dependencies.
+      prepareCommand,
+      "else echo ATO_DEPENDENCY_CACHE_HIT; fi",
       "else cache_owner=0",
       "while [ \"$cache_owner\" -eq 0 ] && [ ! -f \"$cache_marker\" ]; do if mkdir \"$cache_lock\" 2>/dev/null; then cache_owner=1; else sleep 1; fi; done",
       "if [ \"$cache_owner\" -eq 1 ]; then trap 'rmdir \"$cache_lock\" 2>/dev/null || true' EXIT INT TERM",
@@ -211,10 +217,10 @@ export function buildOciInvocation(input: {
   const workspaceBootstrap = dependencyCache
     ? [
       `source_marker=/workspace/.ato-source-${dependencyCache.sourceFingerprint}`,
-      "if [ -f \"$source_marker\" ]; then echo ATO_SOURCE_CACHE_HIT",
+      "if [ -f \"$source_marker\" ]; then export ATO_SOURCE_CHANGED=0; echo ATO_SOURCE_CACHE_HIT",
       "else find /workspace -mindepth 1 -maxdepth 1 ! -name node_modules ! -name .python-packages ! -name .venv ! -name venv ! -name .bundle ! -name vendor ! -name .ato-bin -exec rm -rf {} +",
       "tar -C /source --exclude=node_modules --exclude=.git --exclude=dist --exclude=build -cf - . | tar -C /workspace -xf -",
-      "rm -f /workspace/.ato-source-*; touch \"$source_marker\"; fi"
+      "rm -f /workspace/.ato-source-*; touch \"$source_marker\"; export ATO_SOURCE_CHANGED=1; fi"
     ].join("; ")
     : "tar -C /source --exclude=node_modules --exclude=.git --exclude=dist --exclude=build -cf - . | tar -C /workspace -xf -";
   const bootstrap = [
@@ -264,6 +270,9 @@ export function buildOciInvocation(input: {
       "--env", "PIP_TARGET=/workspace/.python-packages",
       "--env", "PYTHONPATH=/workspace/.python-packages",
       "--env", "POETRY_VIRTUALENVS_IN_PROJECT=true",
+      // Large Turbo monorepos can otherwise start several Jest/Vitest workers
+      // that collectively exceed the documented 4 GiB sandbox budget.
+      "--env", "TURBO_CONCURRENCY=1",
       "--env", `GOPATH=${dependencyCache ? "/sandbox-cache/go" : "/tmp/go"}`,
       "--env", `GOMODCACHE=${dependencyCache ? "/sandbox-cache/go/pkg/mod" : "/tmp/go/pkg/mod"}`,
       "--env", `GOCACHE=${dependencyCache ? "/sandbox-cache/go-build" : "/tmp/go-build"}`,

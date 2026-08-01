@@ -149,6 +149,7 @@ function openDb() {
       created_at TEXT NOT NULL,
       artifact_uri TEXT,
       url TEXT,
+      locator_json TEXT,
       producer TEXT NOT NULL,
       schema_version INTEGER NOT NULL,
       payload_json TEXT NOT NULL,
@@ -374,7 +375,8 @@ function ensureEvidenceColumns(database: DatabaseSync) {
     ["attempt_id", "TEXT"],
     ["attempt", "INTEGER"],
     ["sequence", "INTEGER"],
-    ["artifact_ids_json", "TEXT"]
+    ["artifact_ids_json", "TEXT"],
+    ["locator_json", "TEXT"]
   ];
   for (const [name, type] of additions) {
     if (!columns.has(name)) {
@@ -410,12 +412,13 @@ export function appendEvidenceToAuditStore(item: EvidenceItem) {
     stepId: item.stepId,
     url: item.url,
     file: item.file,
+    locator: item.locator,
     payload: item.payload
   });
   database.prepare(`
     INSERT OR IGNORE INTO evidence
-      (evidence_id, run_id, type, title, scenario_id, attempt_id, attempt, sequence, artifact_ids_json, path_id, step_id, created_at, artifact_uri, url, producer, schema_version, payload_json, hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (evidence_id, run_id, type, title, scenario_id, attempt_id, attempt, sequence, artifact_ids_json, path_id, step_id, created_at, artifact_uri, url, locator_json, producer, schema_version, payload_json, hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     item.id,
     item.runId,
@@ -431,6 +434,7 @@ export function appendEvidenceToAuditStore(item: EvidenceItem) {
     item.timestamp,
     item.file ?? null,
     item.url ?? null,
+    item.locator ? json(item.locator) : null,
     "agent",
     schemaVersion,
     payloadJson,
@@ -443,6 +447,56 @@ export function appendEvidenceToAuditStore(item: EvidenceItem) {
     `).run(item.runId, item.id, item.type, item.file, evidenceHash, item.timestamp);
   }
   appendAuditEvent({ runId: item.runId, eventType: `evidence.${item.type}`, payload: item });
+}
+
+/**
+ * Monotonically finalizes Artifact links after collectors have committed their
+ * immutable files. Existing links can only be retained or extended.
+ */
+export function finalizeEvidenceArtifactLinksInAuditStore(
+  runId: string,
+  finalizedEvidence: EvidenceItem[]
+) {
+  const database = openDb();
+  for (const item of finalizedEvidence) {
+    if (item.runId !== runId || !(item.artifactIds?.length)) continue;
+    const row = database.prepare(`
+      SELECT artifact_ids_json
+      FROM evidence
+      WHERE evidence_id = ? AND run_id = ?
+    `).get(item.id, runId);
+    if (!row) continue;
+    const currentIds = parseJson<string[]>(row.artifact_ids_json, []);
+    const artifactIds = Array.from(new Set([...currentIds, ...item.artifactIds]));
+    if (artifactIds.length === currentIds.length) continue;
+    const evidenceHash = hash({
+      id: item.id,
+      runId: item.runId,
+      type: item.type,
+      timestamp: item.timestamp,
+      scenarioId: item.scenarioId,
+      attemptId: item.attemptId,
+      attempt: item.attempt,
+      sequence: item.sequence,
+      artifactIds,
+      pathId: item.pathId,
+      stepId: item.stepId,
+      url: item.url,
+      file: item.file,
+      locator: item.locator,
+      payload: item.payload
+    });
+    database.prepare(`
+      UPDATE evidence
+      SET artifact_ids_json = ?, hash = ?
+      WHERE evidence_id = ? AND run_id = ?
+    `).run(json(artifactIds), evidenceHash, item.id, runId);
+    appendAuditEvent({
+      runId,
+      eventType: "evidence.artifacts.finalized",
+      payload: { evidenceId: item.id, artifactIds }
+    });
+  }
 }
 
 function insertStep(runId: string, step: RunStepEvidence, createdAt: string) {
@@ -794,7 +848,7 @@ export function readSourceContextsFromAuditStore(runId: string) {
 export function readEvidenceFromAuditStore(runId: string) {
   const rows = openDb()
     .prepare(`
-      SELECT evidence_id, run_id, type, title, scenario_id, attempt_id, attempt, sequence, artifact_ids_json, path_id, step_id, created_at, artifact_uri, url, payload_json
+      SELECT evidence_id, run_id, type, title, scenario_id, attempt_id, attempt, sequence, artifact_ids_json, path_id, step_id, created_at, artifact_uri, url, locator_json, payload_json
       FROM evidence
       WHERE run_id = ?
       ORDER BY created_at ASC
@@ -815,6 +869,9 @@ export function readEvidenceFromAuditStore(runId: string) {
     stepId: typeof row.step_id === "string" ? row.step_id : undefined,
     url: typeof row.url === "string" ? row.url : undefined,
     file: typeof row.artifact_uri === "string" ? row.artifact_uri : undefined,
+    locator: typeof row.locator_json === "string"
+      ? parseJson<NonNullable<EvidenceItem["locator"]>>(row.locator_json, {})
+      : undefined,
     payload: parseJson<Record<string, unknown>>(row.payload_json, {})
   }));
 }

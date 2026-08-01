@@ -2,6 +2,7 @@ import type { CodeImpactGraph, CodeGraphNode } from "./codeImpactGraph.js";
 import type { GrayPlan, IntakeAnalysis, ProjectConfig } from "./types.js";
 import { getScenario, hasScenario } from "./scenarios.js";
 import type { LlmPlanningAdvice } from "./llmPlanningAdvisor.js";
+import type { DiscoveryConnectivityResult } from "./smokeFirstDiscovery.js";
 
 export type PlanningPhase = "clarifying" | "draft-ready";
 export type BusinessFlowStatus = "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
@@ -44,6 +45,7 @@ export interface PlanningConversationResult {
   analysis: IntakeAnalysis;
   recommendedScenarioId?: string;
   llmPlanning?: LlmPlanningAdvice;
+  discoveryReadiness?: DiscoveryConnectivityResult;
 }
 
 function flowId(kind: string, value: string) {
@@ -74,7 +76,30 @@ function buildFlows(input: {
   graph: CodeImpactGraph;
   analysis: IntakeAnalysis;
   comprehensive: boolean;
+  discoveryReadiness?: DiscoveryConnectivityResult;
 }): PlannedBusinessFlow[] {
+  if (input.discoveryReadiness && input.discoveryReadiness.status !== "ready") {
+    const blocked = input.discoveryReadiness.status === "blocked";
+    const failed = input.discoveryReadiness.status === "failed";
+    return [{
+      id: flowId("smoke", input.discoveryReadiness.checkedUrl),
+      title: "项目连通性与页面基线",
+      kind: "page",
+      target: input.discoveryReadiness.checkedUrl,
+      status: "needs-input",
+      confidence: "high",
+      reason: blocked
+        ? `运行前置条件尚未满足：${input.discoveryReadiness.reason}`
+        : failed
+          ? `连通性 smoke 已完成有限重试但仍失败：${input.discoveryReadiness.reason}`
+          : `项目仍在启动或恢复：${input.discoveryReadiness.reason}`,
+      requiredInformation: blocked
+        ? ["解决项目运行、凭据或权限前置条件后重新检查"]
+        : failed
+          ? ["查看启动与健康检查日志，修复连通性后重新执行 smoke"]
+          : ["等待项目运行状态变为 ready 后自动继续"]
+    }];
+  }
   const flows: PlannedBusinessFlow[] = [];
   const supportsBrowserDiscovery = input.project.manifest?.capabilities.browser !== false;
   for (const candidate of input.analysis.scenarioCandidates.filter((item) => item.source !== "patrol" && item.mappedScenarioId)) {
@@ -221,16 +246,32 @@ export function buildPlanningConversation(input: {
   history: PlanningMessage[];
   graph: CodeImpactGraph;
   analysis: IntakeAnalysis;
+  discoveryReadiness?: DiscoveryConnectivityResult;
 }): PlanningConversationResult {
   const fullText = [...input.history.map((item) => item.content), input.message].join("\n");
   const comprehensive = /全面|全量|所有业务|所有功能|完整灰度|full|comprehensive/i.test(fullText);
-  const flows = buildFlows({ project: input.project, graph: input.graph, analysis: input.analysis, comprehensive });
+  const flows = buildFlows({
+    project: input.project,
+    graph: input.graph,
+    analysis: input.analysis,
+    comprehensive,
+    discoveryReadiness: input.discoveryReadiness
+  });
   const loginSignals = input.graph.nodes.some((node) => /login|signin|auth|登录|认证/i.test(`${node.label} ${node.file ?? ""}`));
   const loginAnswered = /无需登录|不需要登录|测试账号|账号[:：]|用户名|密码|已配置登录/i.test(fullText);
   const destructiveSignals = /删除|支付|退款|审批|发布|发送|批量修改/i.test(fullText);
   const isolationAnswered = /测试数据|沙盒|临时数据库|允许写入|只读/i.test(fullText);
   const clarificationQuestions: string[] = [];
   const blockingQuestions: string[] = [];
+  if (input.discoveryReadiness && input.discoveryReadiness.status !== "ready") {
+    const question = input.discoveryReadiness.status === "waiting"
+      ? "项目仍在启动或恢复；连通性 smoke 通过后，系统会自动展开完整业务流程清单。"
+      : input.discoveryReadiness.status === "blocked"
+        ? `项目存在必须先处理的运行前置条件：${input.discoveryReadiness.reason}`
+        : `项目连通性 smoke 已有限重试但仍失败：${input.discoveryReadiness.reason}`;
+    clarificationQuestions.push(question);
+    blockingQuestions.push(question);
+  }
   if (loginSignals && (!input.project.login || input.project.login.method === "none") && !loginAnswered) {
     clarificationQuestions.push("项目包含登录或权限功能：是否提供测试账号，还是只验证未登录状态？");
   }
@@ -250,8 +291,14 @@ export function buildPlanningConversation(input: {
   const gaps = flows.filter((flow) => flow.status === "coverage-gap").length;
   const phase: PlanningPhase = blockingQuestions.length ? "clarifying" : "draft-ready";
   const scope = comprehensive ? "comprehensive" as const : "targeted" as const;
-  const reply = phase === "clarifying"
-    ? `我扫描了 ${input.project.name}，识别到 ${flows.length} 条业务或技术流程，其中 ${executable} 条已有可执行场景、${autoBindable} 条可由内置浏览器自动绑定、${gaps} 条仍需补充。开始制定最终计划前还需要确认 ${clarificationQuestions.length} 个问题。`
+  const reply = input.discoveryReadiness && input.discoveryReadiness.status !== "ready"
+    ? input.discoveryReadiness.status === "waiting"
+      ? `正在等待 ${input.project.name} 通过连通性 smoke。系统暂不展开大量候选流程，避免生成无法执行的阻塞清单。`
+      : input.discoveryReadiness.status === "blocked"
+        ? `${input.project.name} 的连通性 smoke 被前置条件阻塞。系统只保留一个启动基线，不会先生成大量流程再全部标记阻塞。`
+        : `${input.project.name} 的连通性 smoke 在有限重试后仍失败。系统已停止 Coverage 展开，并保留具体失败原因供诊断。`
+    : phase === "clarifying"
+      ? `我扫描了 ${input.project.name}，识别到 ${flows.length} 条业务或技术流程，其中 ${executable} 条已有可执行场景、${autoBindable} 条可由内置浏览器自动绑定、${gaps} 条仍需补充。开始制定最终计划前还需要确认 ${clarificationQuestions.length} 个问题。`
     : `测试计划已生成：共识别 ${flows.length} 条流程，${executable} 条可以直接执行，${autoBindable} 条会在确认后进入页面 Discovery 和受控场景绑定；只有经过真实页面探测仍无法形成动作与断言的项目才会转为覆盖缺口。当前已有 ${gaps} 条明确缺口。${clarificationQuestions.length ? "仍有可选信息可以补充，但不影响确认计划。" : ""}`;
   return {
     id: `planning_${Date.now()}`,
@@ -270,6 +317,7 @@ export function buildPlanningConversation(input: {
     },
     plan: buildPlan(input.project, flows, comprehensive),
     analysis: input.analysis,
-    recommendedScenarioId: flows.find((flow) => flow.status === "executable")?.scenarioId
+    recommendedScenarioId: flows.find((flow) => flow.status === "executable")?.scenarioId,
+    discoveryReadiness: input.discoveryReadiness
   };
 }

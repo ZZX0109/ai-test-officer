@@ -2,12 +2,32 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { ArtifactV2 } from "@ai-test-officer/contracts";
 import type {
   ArtifactIntegrityItem,
   ArtifactIntegrityReport,
   EvidenceItem,
   VisualRunResult
 } from "./types.js";
+
+/**
+ * Map an artifact kind to its integrity-report kind. Several artifact kinds
+ * (operation-log, download, source-patch, …) are NOT evidence types, so they
+ * are recorded as "unknown" in the integrity report. Centralised here so the
+ * proof-bundle report and the on-disk report stay consistent.
+ */
+export function artifactKindToIntegrityKind(
+  kind: ArtifactV2["kind"]
+): ArtifactIntegrityItem["kind"] {
+  return (
+    kind === "operation-log"
+    || kind === "download"
+    || kind === "attachment"
+    || kind === "source-patch"
+    || kind === "changed-files-archive"
+    || kind === "repair-validation-log"
+  ) ? "unknown" : (kind as ArtifactIntegrityItem["kind"]);
+}
 
 const artifactPrefix = "/artifacts/";
 const selfReferenceNames = new Set([
@@ -99,14 +119,7 @@ function collectPayloadArtifactUris(value: unknown, references: Map<string, Arti
 function collectArtifactReferences(result: VisualRunResult) {
   const references = new Map<string, ArtifactReference>();
   for (const artifact of result.artifactsV2 ?? []) {
-    const integrityKind: ArtifactReference["kind"] = (
-      artifact.kind === "operation-log"
-      || artifact.kind === "download"
-      || artifact.kind === "attachment"
-      || artifact.kind === "source-patch"
-      || artifact.kind === "changed-files-archive"
-      || artifact.kind === "repair-validation-log"
-    ) ? "unknown" : artifact.kind;
+    const integrityKind: ArtifactReference["kind"] = artifactKindToIntegrityKind(artifact.kind);
     addReference(references, {
       artifactUri: artifact.storageUri,
       kind: integrityKind,

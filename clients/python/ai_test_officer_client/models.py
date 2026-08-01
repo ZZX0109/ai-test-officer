@@ -306,6 +306,7 @@ class AgentMessage(BaseModel):
     knowledgeDecisionId: Optional[str] = Field(default=None)
     llmCallId: Optional[str] = Field(default=None)
     suggestedAction: Optional[str] = Field(default=None)
+    requiresConfirmation: Optional[bool] = Field(default=None)
     createdAt: str = Field(...)
 
 for _model in [

@@ -580,6 +580,14 @@ function rootWorkspaceDevCommand(
   return manager === "yarn" ? "yarn run dev" : "npm run dev";
 }
 
+function packageScriptCommand(manager: NodePackageManager, script: string) {
+  return manager === "pnpm"
+    ? `pnpm run ${script}`
+    : manager === "yarn"
+      ? `yarn run ${script}`
+      : `npm run ${script}`;
+}
+
 function projectIdFromPath(projectPath: string) {
   return path.basename(projectPath).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `project_${Date.now()}`;
 }
@@ -620,6 +628,7 @@ function sandboxManifest(input: {
   commandAllowlist?: string[];
   install?: CommandSpec;
   start?: CommandSpec;
+  test?: CommandSpec;
   frontendPort: number;
   backendPort?: number;
 }): ProjectManifest {
@@ -627,7 +636,7 @@ function sandboxManifest(input: {
     schemaVersion: "1.0",
     projectId: input.projectId,
     workspaceRoot: ".",
-    commands: { install: input.install, start: input.start },
+    commands: { install: input.install, start: input.start, test: input.test },
     commandAllowlist: input.commandAllowlist
       ?? ["npm", "npx", "node", "pnpm", "yarn", "python", "python3", "pip", "uv", "uvicorn"],
     ports: [
@@ -873,6 +882,10 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
 
   const projectId = projectIdFromPath(projectPath);
   const installCommandSpec = commandSpec(projectExists && installCommand ? installCommand : undefined);
+  const testCommand = projectExists && scripts.test
+    ? packageScriptCommand(nodePackageManager, "test")
+    : undefined;
+  const testCommandSpec = commandSpec(testCommand, 600_000);
   const processSpecs = processes.map((process) => ({ ...process, commandSpec: commandSpec(process.command) }));
   const detectedApiOperations = projectExists ? await detectFilesystemOpenApi(projectPath) : [];
   const detectedManifest = sandboxManifest({
@@ -883,6 +896,7 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
     commandAllowlist: ecosystemLaunch?.allowlist,
     install: installCommandSpec,
     start: processSpecs[0]?.commandSpec ?? commandSpec(devCommand),
+    test: testCommandSpec,
     frontendPort,
     backendPort
   });
@@ -895,6 +909,8 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
     installCommandSpec,
     startCommand: processes.length ? "" : devCommand,
     startCommandSpec: processes.length ? undefined : commandSpec(devCommand),
+    testCommand,
+    testCommandSpec,
     processes: processSpecs,
     healthCheckUrl: backendUrl ?? frontendUrl,
     frontendUrl,
@@ -1036,6 +1052,11 @@ export async function detectProjectManifest(input: {
   if (fileNames.some((name) => /(^|\/)uv\.lock$/i.test(name))) packageManagers.push("uv");
   if (fileNames.some((name) => /(^|\/)poetry\.lock$/i.test(name))) packageManagers.push("poetry");
   if (!packageManagers.length && packageEntry) packageManagers.push("npm");
+  const nodePackageManager: NodePackageManager = packageManagers.includes("pnpm")
+    ? "pnpm"
+    : packageManagers.includes("yarn")
+      ? "yarn"
+      : "npm";
 
   const frontendPort = configuredFrontendPort(scripts, textFiles, detectedStack.includes("next") ? 3000 : 5173);
   const backendPort = detectedStack.includes("fastapi") ? 8000 : detectedStack.includes("express") ? 3000 : undefined;
@@ -1054,6 +1075,8 @@ export async function detectProjectManifest(input: {
   const detectedApiOperations = detectUploadedOpenApi(input.files);
   const installCommandSpec = commandSpec(resolvedInstallCommand);
   const startCommandSpec = commandSpec(devCommand);
+  const testCommand = scripts.test ? packageScriptCommand(nodePackageManager, "test") : undefined;
+  const testCommandSpec = commandSpec(testCommand, 600_000);
   const suggestedConfig: ProjectConfig = {
     id: projectId,
     name: normalizedRoot.replace(/[-_]+/g, " "),
@@ -1063,6 +1086,8 @@ export async function detectProjectManifest(input: {
     installCommandSpec,
     startCommand: devCommand,
     startCommandSpec,
+    testCommand,
+    testCommandSpec,
     healthCheckUrl: backendUrl ?? frontendUrl,
     frontendUrl,
     backendUrl,
@@ -1077,6 +1102,7 @@ export async function detectProjectManifest(input: {
         nodeEngine: nodeEngineFromPackage(pkg),
         install: installCommandSpec,
         start: startCommandSpec,
+        test: testCommandSpec,
         frontendPort,
         backendPort
       });

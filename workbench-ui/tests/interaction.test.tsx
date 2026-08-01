@@ -12,7 +12,11 @@ import { ProjectPanel } from "../src/components/ProjectPanel";
 import { RunAssistantPanel } from "../src/components/RunAssistantPanel";
 import { KnowledgeBasis } from "../src/components/KnowledgeBasis";
 import { AssistantReasoningSummary } from "../src/components/AssistantReasoningSummary";
+import { AssistantConversationMessage } from "../src/components/AssistantConversationMessage";
+import { DiscoveryPanel } from "../src/components/DiscoveryPanel";
 import { chatWithTestAssistant, generatePlan, subscribeRunEvents } from "../src/api";
+import { commandFallbackAction } from "../src/App";
+import type { DiscoveryScanResult } from "../src/types";
 
 vi.mock("@monaco-editor/react", () => ({
   DiffEditor: ({ original, modified }: { original: string; modified: string }) => (
@@ -26,6 +30,14 @@ vi.mock("@monaco-editor/react", () => ({
 import { RepairWorkspace } from "../src/components/RepairWorkspace";
 
 describe("Workbench interactions", () => {
+  it("turns plain-language test commands into confirmable actions", () => {
+    expect(commandFallbackAction("先继续其他可以执行的测试")).toBe("continue-safe-paths");
+    expect(commandFallbackAction("请重试刚才失败的链路")).toBe("retry-failed-path");
+    expect(commandFallbackAction("把测试暂停一下", "running")).toBe("pause-run");
+    expect(commandFallbackAction("继续测试", "paused")).toBe("resume-run");
+    expect(commandFallbackAction("为什么会失败？", "blocked")).toBeUndefined();
+  });
+
   it("generates a plan through the real project-scoped API contract", async () => {
     const responsePlan = {
       sessionName: "Generated plan",
@@ -250,7 +262,7 @@ describe("Workbench interactions", () => {
       detection,
       onSelect: vi.fn(),
       onDraftChange: vi.fn(),
-      onRunDiagnosis: vi.fn(),
+      onRunDiagnosis: vi.fn(() => new Promise<void>(() => undefined)),
       onStop: vi.fn(),
       onSaveLoginCredential: vi.fn()
     };
@@ -556,10 +568,177 @@ describe("Workbench interactions", () => {
         confidence: "high"
       }
     }} />);
-    expect(screen.getByText("AI 判断摘要")).toBeTruthy();
+    expect(screen.getByText("查看处理依据")).toBeTruthy();
+    expect((screen.getByText("查看处理依据").closest("details") as HTMLDetailsElement).open).toBe(false);
+    fireEvent.click(screen.getByText("查看处理依据"));
     expect(screen.getByText("这是凭据缺失，不是产品功能失败。")).toBeTruthy();
     expect(screen.getByText(/请点击“配置测试账号”/)).toBeTruthy();
-    expect(screen.getByText(/不包含模型内部原始思维链/)).toBeTruthy();
+    expect(screen.getByText(/不展示模型内部思维链/)).toBeTruthy();
+  });
+
+  it("keeps raw runtime diagnostics out of the visible reasoning summary", () => {
+    const view = render(<AssistantReasoningSummary message={{
+      id: "assistant-summary-error",
+      role: "assistant",
+      content: "截图失败，其他路径继续。",
+      createdAt: new Date().toISOString(),
+      reasoningSummary: {
+        phase: "diagnosing",
+        observations: ["action_binding_failure: page.screenshot: Timeout 30000ms exceeded. Call log: waiting for fonts"],
+        assessment: "{\"error\":\"Validation failed\",\"fieldErrors\":{\"claims\":[\"too long\"]}}",
+        nextStep: "保留机器结论并诊断当前链路。",
+        userAction: "无需操作。",
+        confidence: "high"
+      }
+    }} />);
+    const summary = within(view.container);
+    fireEvent.click(summary.getByText("查看处理依据"));
+    expect(summary.getByText("模型返回内容未通过结构校验，机器事实和测试证据不受影响。")).toBeTruthy();
+    expect(summary.getByText("页面截图步骤超过等待时间，已有证据已保留。")).toBeTruthy();
+    expect(summary.queryByText(/Timeout 30000ms exceeded/)).toBeNull();
+  });
+
+  it("presents model failures as a readable chat reply and folds raw diagnostics", () => {
+    render(<AssistantConversationMessage message={{
+      id: "assistant-error-1",
+      role: "assistant",
+      content: "AI解释暂不可用 ({\"error\":\"Validation failed\",\"fieldErrors\":{\"claims\":[\"String must contain at most 2000 character(s)\"]}})",
+      createdAt: new Date().toISOString()
+    }} />);
+    expect(screen.getByText(/没有通过格式校验/)).toBeTruthy();
+    expect((screen.getByText("查看技术详情").closest("details") as HTMLDetailsElement).open).toBe(false);
+    fireEvent.click(screen.getByText("查看技术详情"));
+    expect(screen.getByText(/String must contain at most 2000/)).toBeTruthy();
+  });
+
+  it("shows a failed smoke as not started and hides untrusted bulk suggestions", () => {
+    const discovery = {
+      id: "discovery-failed-smoke",
+      createdAt: new Date().toISOString(),
+      target: { frontendUrl: "http://127.0.0.1:61770" },
+      page: {
+        url: "http://127.0.0.1:61770",
+        title: "",
+        headings: [],
+        links: [],
+        buttons: [],
+        inputs: [],
+        forms: [],
+        testIds: []
+      },
+      networkEndpoints: [],
+      openApiOperations: [],
+      observation: {
+        requestedUrl: "http://127.0.0.1:61770",
+        finalUrl: "http://127.0.0.1:61770",
+        startedAt: new Date().toISOString(),
+        capturedAt: new Date().toISOString(),
+        durationMs: 8_000,
+        stage: "dom-ready",
+        status: "failed",
+        navigation: { documentCommitted: true, httpStatus: 200 },
+        document: { readyState: "complete", interactiveElementCount: 0 },
+        console: [],
+        pageErrors: [],
+        failedRequests: [],
+        diagnosis: {
+          summary: "页面打开，但没有出现可操作控件。",
+          likelyCauses: ["前端尚未完成渲染"],
+          retryable: false,
+          userActionRequired: false
+        }
+      },
+      suggestions: [{
+        id: "phantom-flow",
+        title: "不应显示的 200 条候选流程",
+        riskKind: "navigation",
+        reason: "smoke 未通过",
+        suggestedScenarioId: "phantom",
+        selectors: {},
+        actions: [],
+        oracles: [],
+        evidenceRequirements: [],
+        humanReviewRequired: true
+      }],
+      drafts: [],
+      status: "failed",
+      message: "没有关键控件",
+      orchestration: {
+        status: "failed",
+        checkedUrl: "http://127.0.0.1:61770",
+        attempts: 2,
+        maxAttempts: 2,
+        discoveryAttempts: 2,
+        reason: "页面打开，但没有出现可操作控件。",
+        retryable: false,
+        runtimeStatus: "running",
+        httpStatus: 200
+      }
+    } satisfies DiscoveryScanResult;
+
+    const view = render(<DiscoveryPanel
+      discovery={discovery}
+      drafts={[]}
+      onScan={() => undefined}
+      onProbeDraft={() => undefined}
+      onApproveDraft={() => undefined}
+    />);
+    const panel = within(view.container);
+    expect(panel.getByText("状态：测试尚未开始")).toBeTruthy();
+    expect(panel.getByText(/没有生成大批不可执行流程/)).toBeTruthy();
+    expect(panel.queryByText("不应显示的 200 条候选流程")).toBeNull();
+    const technical = panel.getAllByText("查看技术详情")[0]?.closest("details") as HTMLDetailsElement;
+    expect(technical.open).toBe(false);
+    view.unmount();
+  });
+
+  it("summarizes raw connection diagnostics and keeps the call log folded", () => {
+    const view = render(<AssistantConversationMessage message={{
+      id: "assistant-connection-failure",
+      role: "assistant",
+      content: "page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:61770/ Call log: navigating",
+      createdAt: new Date().toISOString()
+    }} />);
+    const message = within(view.container);
+    expect(message.getByText(/遇到的问题：测试页面当前无法连接/)).toBeTruthy();
+    const technical = message.getByText("查看技术详情").closest("details") as HTMLDetailsElement;
+    expect(technical.open).toBe(false);
+    fireEvent.click(message.getByText("查看技术详情"));
+    expect(technical.open).toBe(true);
+    expect(message.getByText(/Call log: navigating/)).toBeTruthy();
+    view.unmount();
+  });
+
+  it("keeps a failed model call actionable with a fact-based fallback reply", () => {
+    render(<AssistantConversationMessage message={{
+      id: "assistant-fallback-1",
+      role: "assistant",
+      content: [
+        "遇到的问题：实验创建流程没有找到可提交实验的按钮。",
+        "系统已经做了什么：页面扫描结果和失败证据已经保存。",
+        "需要你做什么：请确认是否重试失败链路。"
+      ].join("\n"),
+      createdAt: new Date().toISOString(),
+      suggestedAction: "retry-failed-path",
+      requiresConfirmation: true,
+      llmTrace: {
+        callId: "assistant-fallback-call",
+        model: "gpt-5.1-codex",
+        provider: "openai-compatible",
+        status: "failed",
+        fallbackApplied: true,
+        errorCode: "assistant_output_invalid"
+      }
+    }} actions={<button type="button">重试失败链路</button>} />);
+    expect(screen.getByText(/遇到的问题：实验创建流程/)).toBeTruthy();
+    expect(screen.getByText(/系统已经做了什么：页面扫描结果/)).toBeTruthy();
+    expect(screen.getByText(/需要你做什么：请确认/)).toBeTruthy();
+    const sourceDetails = screen.getByText("回复来源").closest("details") as HTMLDetailsElement;
+    expect(sourceDetails.open).toBe(false);
+    fireEvent.click(screen.getByText("回复来源"));
+    expect(sourceDetails.open).toBe(true);
+    expect(screen.getByText(/系统依据已保存的测试事实生成了这段说明/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重试失败链路" })).toBeTruthy();
   });
 
   it("opens a verified knowledge source through the authenticated Agent API", async () => {

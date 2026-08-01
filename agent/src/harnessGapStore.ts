@@ -325,6 +325,54 @@ async function visiblePageModel(page: Page) {
   })).catch(() => ({ headings: [] as string[], buttons: [] as string[], testIds: [] as string[] }));
 }
 
+async function waitForDraftBindings(
+  page: Page,
+  smoke: Record<string, unknown>,
+  core: Record<string, unknown>,
+  action: string
+) {
+  const buttonNames = Array.from(new Set([
+    core.triggerButtonName,
+    core.submitButtonName
+  ].filter((value): value is string => typeof value === "string" && Boolean(value.trim()))));
+  const boundInputCount = async (field: "username" | "password") => {
+    const locator = typeof core[`${field}Locator`] === "string" ? String(core[`${field}Locator`]).trim() : "";
+    const label = typeof core[`${field}Label`] === "string" ? String(core[`${field}Label`]).trim() : "";
+    if (locator) return page.locator(locator).count();
+    if (!label) return 0;
+    return (await page.getByLabel(label, { exact: true }).count())
+      || page.getByPlaceholder(label, { exact: true }).count();
+  };
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    if (["login_as_test_user", "login_invalid_user"].includes(action)) {
+      const [username, password, submit] = await Promise.all([
+        boundInputCount("username"),
+        boundInputCount("password"),
+        typeof core.submitButtonName === "string"
+          ? page.getByRole("button", { name: core.submitButtonName, exact: true }).count()
+          : Promise.resolve(0)
+      ]);
+      if (username > 0 && password > 0 && submit > 0) return true;
+    } else if (buttonNames.length > 0) {
+      const counts = await Promise.all(buttonNames.map((name) =>
+        page.getByRole("button", { name, exact: true }).count()
+      ));
+      if (counts.every((count) => count > 0)) return true;
+    } else {
+      const heading = typeof smoke.headingName === "string" ? smoke.headingName.trim() : "";
+      if (heading) {
+        const bodyText = await page.locator("body").innerText().catch(() => "");
+        if (bodyText.includes(heading)) return true;
+      } else if (await page.locator("button,input,textarea,select,[data-testid]").count() > 0) {
+        return true;
+      }
+    }
+    await page.waitForTimeout(500);
+  }
+  return false;
+}
+
 async function runSafeProbeAction(
   page: Page,
   core: Record<string, unknown>,
@@ -368,6 +416,12 @@ async function runSafeProbeAction(
       case "complex_form_validate":
         activePage = await clickButton(core.submitButtonName);
         return { page: activePage, executed: true };
+      case "login_as_test_user":
+      case "login_invalid_user":
+        // Discovery probes verify that authentication controls are bindable,
+        // but never submit credentials. The formal runner performs the login
+        // later using the project's encrypted credential after authorization.
+        return { page, executed: false };
       case "table_sort_filter_paginate":
         if (core.triggerButtonName) activePage = await clickButton(core.triggerButtonName);
         if (typeof core.selectLabel === "string" && typeof core.selectValue === "string") {
@@ -421,6 +475,11 @@ async function probeDraftPage(draft: HarnessGapScenarioDraft): Promise<DraftProb
     ? scenario.smoke as Record<string, unknown>
     : {};
   const core = corePathOf(scenario);
+  const action = typeof core.action === "string" ? core.action : "";
+  const buttonNames = Array.from(new Set([
+    core.triggerButtonName,
+    core.submitButtonName
+  ].filter((value): value is string => typeof value === "string" && Boolean(value.trim()))));
   const runtimeIssues: string[] = [];
   const responses: string[] = [];
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
@@ -430,8 +489,18 @@ async function probeDraftPage(draft: HarnessGapScenarioDraft): Promise<DraftProb
     let page = await context.newPage();
     context.on("response", (response) => responses.push(response.url()));
     await page.goto(draft.probeUrl, { waitUntil: "commit", timeout: 20_000 });
-    await page.waitForFunction(() => Boolean(document.body?.innerText?.trim() || document.body?.querySelector("button,input,textarea,select,[data-testid]")), undefined, { timeout: 8_000 });
+    // Wait for this scenario's bindings, not merely the first piece of page
+    // chrome. ANDFlow renders its top navigation before auth configuration is
+    // resolved; treating that shell as "ready" made the probe check Login too
+    // early and report a false missing-control failure.
+    const documentBecameObservable = await waitForDraftBindings(page, smoke, core, action);
     const before = await visiblePageModel(page);
+    if (!documentBecameObservable
+      && before.headings.length === 0
+      && before.buttons.length === 0
+      && before.testIds.length === 0) {
+      runtimeIssues.push("probe.page_not_ready:no_observable_controls");
+    }
     emptyTrace.observedHeadings = before.headings;
     emptyTrace.observedButtons = before.buttons;
     emptyTrace.observedTestIds = before.testIds;
@@ -442,12 +511,7 @@ async function probeDraftPage(draft: HarnessGapScenarioDraft): Promise<DraftProb
       if (!bodyText.includes(heading)) runtimeIssues.push(`probe.heading_missing:${heading}`);
     }
 
-    const action = typeof core.action === "string" ? core.action : "";
     emptyTrace.action = action;
-    const buttonNames = Array.from(new Set([
-      core.triggerButtonName,
-      core.submitButtonName
-    ].filter((value): value is string => typeof value === "string" && Boolean(value.trim()))));
     for (const buttonName of buttonNames) {
       if (await page.getByRole("button", { name: buttonName, exact: true }).count() === 0) {
         runtimeIssues.push(`probe.button_missing:${buttonName}`);
@@ -465,6 +529,19 @@ async function probeDraftPage(draft: HarnessGapScenarioDraft): Promise<DraftProb
       const labelled = await page.getByLabel(inputLabel, { exact: true }).count();
       const placeholder = await page.getByPlaceholder(inputLabel, { exact: true }).count();
       if (labelled === 0 && placeholder === 0) runtimeIssues.push(`probe.input_missing:${inputLabel}`);
+    }
+    if (["login_as_test_user", "login_invalid_user"].includes(action)) {
+      for (const field of ["username", "password"] as const) {
+        const locator = typeof core[`${field}Locator`] === "string" ? String(core[`${field}Locator`]).trim() : "";
+        const label = typeof core[`${field}Label`] === "string" ? String(core[`${field}Label`]).trim() : "";
+        const bound = locator
+          ? await page.locator(locator).count()
+          : label
+            ? await page.getByLabel(label, { exact: true }).count()
+              || await page.getByPlaceholder(label, { exact: true }).count()
+            : 0;
+        if (!bound) runtimeIssues.push(`probe.input_missing:${field}`);
+      }
     }
 
     // Oracle checks describe post-action state. The old probe evaluated them

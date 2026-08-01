@@ -27,7 +27,11 @@ import {
 import { ConnectorPanel } from "./components/ConnectorPanel";
 import { BotDeliveryPanel } from "./components/BotDeliveryPanel";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
-import { DiscoveryPanel } from "./components/DiscoveryPanel";
+import {
+  DiscoveryOrchestrationNotice,
+  DiscoveryPanel,
+  discoveryOrchestrationCopy
+} from "./components/DiscoveryPanel";
 import { EvidencePanel } from "./components/EvidencePanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { ImpactPanel } from "./components/ImpactPanel";
@@ -37,7 +41,7 @@ import { ProjectWizardPanel } from "./components/ProjectWizardPanel";
 import { RunTimeline } from "./components/RunTimeline";
 import { RunAssistantPanel } from "./components/RunAssistantPanel";
 import { KnowledgeBasis } from "./components/KnowledgeBasis";
-import { AssistantReasoningSummary } from "./components/AssistantReasoningSummary";
+import { AssistantConversationMessage } from "./components/AssistantConversationMessage";
 import { RepairWorkspace } from "./components/RepairWorkspace";
 import { SecurityPanel } from "./components/SecurityPanel";
 import { SourceStatusPanel } from "./components/SourceStatusPanel";
@@ -115,7 +119,6 @@ import {
   savePatrolPlan,
   sendRunAgentMessage,
   startPatrolJob,
-  startProject,
   startProjectAsync,
   stopPatrolJob,
   stopProject,
@@ -146,6 +149,7 @@ import type {
   PermissionProfile,
   PlanningConversationResult,
   PlanningMessage,
+  AssistantSuggestedAction,
   PlatformCapability,
   ProjectConfig,
   ProjectDetectionResult,
@@ -168,6 +172,15 @@ import type {
   StorageStatus
 } from "./types";
 import "./styles.css";
+
+interface AutomationFailure {
+  scenarioId: string;
+  title?: string;
+  target?: string;
+  stage: "binding" | "execution";
+  detail: string;
+  requiredInformation?: string[];
+}
 
 function auditStoreClass(auditStore: AuditStoreStatus | null) {
   if (!auditStore) return "warning";
@@ -195,6 +208,50 @@ function userFacingAutomationError(raw: string) {
     return "自动生成的测试路径没有通过安全校验。详细诊断已保存，左侧 AI 测试助手会提示需要补充的内容。";
   }
   return raw.length > 260 ? `${raw.slice(0, 257)}…` : raw;
+}
+
+function boundedAssistantText(value: unknown, limit: number) {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
+  const compact = text
+    .replace(/(\bBearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/((?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/\b(?:sk|afk|AIza)[-_A-Za-z0-9]{16,}\b/g, "[REDACTED]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return compact.length > limit ? `${compact.slice(0, Math.max(0, limit - 1))}…` : compact;
+}
+
+function userFacingAssistantError(error: unknown) {
+  const detail = error instanceof Error ? error.message : "模型调用失败";
+  if (/Validation failed|fieldErrors|provider_http_400/i.test(detail)) {
+    return "模型解释请求没有通过格式校验。系统已压缩上下文，你可以直接重新发送问题；机器结论和证据不受影响。";
+  }
+  if (/output_truncated|assistant_output_truncated/i.test(detail)) {
+    return "模型已经返回回答，但结构化内容在结尾被截断。系统会保留当前诊断并使用更大的输出预算重试，不会清除机器结论或证据。";
+  }
+  if (/401|403|credential|api[_ ]?key|model_not_configured/i.test(detail)) {
+    return "当前模型凭据不可用。请在右上角 API Key 配置中检查凭据后重新发送；现有测试不会被放行或清除。";
+  }
+  if (/timeout|incomplete|network|fetch/i.test(detail)) {
+    return "模型服务本次没有在时限内完成回答。可以直接重试，机器结论和已保存证据不会变化。";
+  }
+  return "AI 测试官本次没有返回有效回答。系统已保留运行状态和证据，你可以重新发送问题或查看技术详情。";
+}
+
+export function commandFallbackAction(
+  message: string,
+  runState?: string
+): Exclude<AssistantSuggestedAction, "none"> | undefined {
+  const normalized = message.replace(/\s+/g, "").toLowerCase();
+  if (/查看.*(证据|截图|日志|trace)|打开.*(证据|截图|日志)/i.test(normalized)) return "open-evidence";
+  if (/暂停|先停一下|等一下/i.test(normalized)) return "pause-run";
+  if (/取消|终止|停止测试/i.test(normalized)) return "cancel-run";
+  if (/重试.*失败|重新.*失败|修复.*失败|重新绑定/i.test(normalized)) return "retry-failed-path";
+  if (/继续.*(其他|剩余|安全|可执行)|跳过.*继续/i.test(normalized)) return "continue-safe-paths";
+  if (/修改.*计划|调整.*计划|修改.*范围|调整.*范围/i.test(normalized)) return "revise-plan";
+  if (/恢复|继续测试/i.test(normalized) && runState === "paused") return "resume-run";
+  if (/开始测试|执行计划|开始执行/i.test(normalized)) return "start-run";
+  return undefined;
 }
 
 function auditStoreSummary(auditStore: AuditStoreStatus | null) {
@@ -275,7 +332,7 @@ export function App() {
   const [planningBusy, setPlanningBusy] = useState(false);
   const [assistantChatBusy, setAssistantChatBusy] = useState(false);
   const [assistantSuggestedAction, setAssistantSuggestedAction] = useState<{
-    action: "revise-plan" | "start-run" | "pause-run" | "resume-run" | "cancel-run" | "open-evidence" | "create-repair" | "resume-interrupt";
+    action: Exclude<AssistantSuggestedAction, "none">;
     label: string;
   } | null>(null);
   const [planningConfirmed, setPlanningConfirmed] = useState(false);
@@ -284,10 +341,13 @@ export function App() {
     detail: string;
     scenarioId?: string;
   }>({ phase: "idle", detail: "" });
+  const [automationFailures, setAutomationFailures] = useState<AutomationFailure[]>([]);
   const analyzedBlockedRuns = useRef(new Set<string>());
   const surfacedAssistantNotices = useRef(new Set<string>());
+  const surfacedProjectDiagnostics = useRef(new Set<string>());
   const hydratedAgentThreads = useRef(new Set<string>());
   const generationRequestRef = useRef<{ id: string; projectId: string; controller: AbortController } | null>(null);
+  const diagnosisOperationRef = useRef<{ id: string; projectId: string } | null>(null);
   const [flowDeleteReadyId, setFlowDeleteReadyId] = useState<string | null>(null);
   const flowDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
@@ -383,9 +443,16 @@ export function App() {
     // whereas every uploaded project gets an OCI manifest during detection.
     ?? "trusted-local";
   const hasSelectedProject = Boolean(selectedProjectId || (projectDraft?.id && projectDetection?.executionReady !== false));
-  const planningHasBlockingQuestions = planningResult ? hasBlockingPlanningQuestions(planningResult) : false;
+  const discoveryAllowsPlanning = !discovery?.orchestration || discovery.orchestration.status === "ready";
+  const planningHasBlockingQuestions = !discoveryAllowsPlanning
+    || (planningResult ? hasBlockingPlanningQuestions(planningResult) : false);
   const planningAutomationBusy = isPlanningAutomationBusy(planningAutomation.phase);
-  const canStartRun = hasSelectedProject && Boolean(requirementText.trim()) && Boolean(scenarioId) && planningConfirmed && !isRunning;
+  const canStartRun = hasSelectedProject
+    && discoveryAllowsPlanning
+    && Boolean(requirementText.trim())
+    && Boolean(scenarioId)
+    && planningConfirmed
+    && !isRunning;
   // A sandbox target is only ever rendered through the port allocated to its
   // active runtime. Never fall back to the saved container port: another app
   // may be listening there and would make a failed launch look like a live
@@ -413,7 +480,7 @@ export function App() {
     ?? requirementAcceptance?.run?.finalStatus
     ?? requirementAcceptance?.run?.gateStatus
     ?? "未运行";
-  const planningDraftReady = Boolean(planningResult && !planningConfirmed && !planningBusy);
+  const planningDraftReady = Boolean(discoveryAllowsPlanning && planningResult && !planningConfirmed && !planningBusy);
   const nextSuggestion = result?.failureAttributions?.[0]?.suggestedFix ??
     result?.failureAttributions?.[0]?.topSuspects?.[0]?.suggestedFix ??
     (patrolTrend?.riskIncreased ? "风险趋势升高，建议打开历史运行对比失败证据。" : "先确认项目连接、输入来源和浏览器授权，然后运行一次测试。");
@@ -445,6 +512,9 @@ export function App() {
   const reviewRequired = activeRun?.state === "awaiting-human-review" || latestDecision === "needs-human-review";
   const pathBindingRepairable = planningAutomation.phase === "blocked"
     && /真实页面路径|安全校验|页面绑定|没有路径通过|失败链路|入口、控件或预期结果/i.test(planningAutomation.detail);
+  const proofInfrastructureFailure = Boolean(result?.machineGate?.reasonDetails?.some((reason) =>
+    /proof|evidence|artifact|integrity|关联|证据/i.test(`${reason.code} ${reason.summary}`)
+  ));
   const codeRepairAvailable = Boolean(
     activeRunId
     && result
@@ -457,7 +527,15 @@ export function App() {
   );
   const assistantAutoRepairAvailable = pathBindingRepairable || codeRepairAvailable;
   const assistantFeedbackRequired = runIsBlocked || authFeedbackRequired || credentialReadyForRetry || apiCredentialFeedbackRequired || screenshotRateLimited || reviewRequired || codeRepairAvailable;
-  const latestPlanningAssistantMessage = [...planningMessages].reverse().find((item) => item.role === "assistant")?.content;
+  const latestPlanningAssistant = [...planningMessages].reverse().find((item) => item.role === "assistant");
+  const latestPlanningAssistantMessage = latestPlanningAssistant?.content;
+  const assistantQuickCommands = runIsBlocked || reviewRequired
+    ? ["用简单的话解释失败原因", "重试失败链路", "继续其他可执行测试"]
+    : isRunning
+      ? ["现在测试到哪一步？", "继续其他可执行测试", "暂停测试"]
+      : planningResult
+        ? ["这份计划主要测什么？", "调整测试范围", "开始执行测试"]
+        : ["全面扫描", "我应该先测试什么？"];
   const failedAssertions = (result?.assertions ?? []).filter((assertion) => !assertion.passed);
   const primaryFailure = result?.failureAttributions?.[0];
   const concreteRunFailureMessage = primaryFailure
@@ -518,6 +596,12 @@ export function App() {
 
   async function repairBlockedPlanning() {
     const pendingId = `binding_repair_pending_${Date.now()}`;
+    const failureSummary = automationFailures.length
+      ? automationFailures.map((failure, index) =>
+          `${index + 1}. ${failure.title ?? failure.scenarioId}：${failure.detail}`
+          + (failure.requiredInformation?.length ? `；仍需 ${failure.requiredInformation.join("、")}` : "")
+        ).join("\n")
+      : planningAutomation.detail;
     const previousFlows = new Map(
       (planningResult?.businessFlows ?? []).map((flow) => [flow.id, {
         title: flow.title,
@@ -530,11 +614,16 @@ export function App() {
     setPlanningMessages((current) => [...current, {
       id: pendingId,
       role: "assistant",
-      content: "正在调用当前模型分析页面绑定失败。此步骤只调整测试路径、selector 和 oracle，不会修改被测项目源码。",
+      content: `正在分析 ${automationFailures.length || "当前"} 条失败链路，重新读取入口、控件和验证条件。此步骤不会修改被测项目源码。`,
       createdAt: new Date().toISOString()
     }]);
     const repaired = await continueTestPlanning(
-      "请根据刚才保存的真实页面路径校验诊断重新规划。只保留能够绑定实际页面入口、真实控件、确定性 oracle 和完整证据要求的路径；无法验证的候选请标记为覆盖缺口，不要作为可执行测试。",
+      [
+        "请根据刚才保存的真实页面路径校验诊断重新规划。",
+        "只保留能够绑定实际页面入口、真实控件、确定性 oracle 和完整证据要求的路径；无法验证的候选请标记为覆盖缺口，不要作为可执行测试。",
+        "需要逐条说明修复了哪个入口、控件或 oracle；未发生变化时必须明确说没有修复。",
+        `本轮失败链路：\n${failureSummary}`
+      ].join("\n"),
       "llm-guided",
       { internalInstruction: true, preserveAutomationState: true }
     );
@@ -681,11 +770,12 @@ export function App() {
   }
 
   async function analyzeAutomationFailures(
-    failures: Array<{ scenarioId: string; stage: "binding" | "execution"; detail: string }>,
+    failures: AutomationFailure[],
     completedCount: number
   ) {
+    setAutomationFailures(failures);
     const compact = failures.slice(0, 12).map((failure) =>
-      `${failure.scenarioId} [${failure.stage}]: ${failure.detail.slice(0, 220)}`
+      `${failure.title ?? failure.scenarioId} [${failure.stage}]: ${failure.detail.slice(0, 220)}`
     );
     let analysis = `已继续完成 ${completedCount} 条可执行路径，并保留 ${failures.length} 条失败链路。失败证据没有被当作通过，也没有阻止后续测试。`;
     if (defaultCredential?.id && (selectedProjectId || projectDraft?.id)) {
@@ -709,11 +799,32 @@ export function App() {
         // is unavailable; model failure must not discard the browser results.
       }
     }
+    const visibleFailures = failures.slice(0, 2).map((failure, index) =>
+      `${index + 1}. ${failure.title ?? failure.scenarioId}：${userFacingAutomationError(failure.detail)}`
+    );
+    const userAction = failures.some((failure) => failure.requiredInformation?.length)
+      ? `请补充：${failures.flatMap((failure) => failure.requiredInformation ?? []).slice(0, 3).join("、")}。`
+      : "你可以直接回复“重试失败链路”，系统会只重新绑定和复验这些路径；也可以回复“继续其他可执行测试”。";
     setPlanningMessages((current) => [...current, {
       id: `automation_failure_analysis_${Date.now()}`,
       role: "assistant",
-      content: `${analysis} 你可以让我按诊断修复失败链路并重新测试；已经成功的路径不会重复计算为失败。`,
-      createdAt: new Date().toISOString()
+      content: [
+        `状态：已完成 ${completedCount} 条；${failures.length} 条路径待处理。`,
+        `阻塞：${visibleFailures.join("；")}`,
+        `系统动作：已保存页面观测和失败证据，只重试失败路径。${boundedAssistantText(analysis, 160)}`,
+        `需要你做什么：${userAction}`
+      ].join("\n"),
+      createdAt: new Date().toISOString(),
+      reasoningSummary: {
+        phase: "waiting-user",
+        observations: visibleFailures,
+        assessment: `${failures.length} 条路径尚未形成可验证闭环，不能计为通过。`,
+        nextStep: "只重试失败路径，已完成路径不会重复执行。",
+        userAction,
+        confidence: "high"
+      },
+      suggestedAction: "retry-failed-path",
+      requiresConfirmation: true
     }]);
     return analysis;
   }
@@ -793,6 +904,7 @@ export function App() {
     setPlanningResult(null);
     setPlanningConfirmed(false);
     setPlanningAutomation({ phase: "idle", detail: "" });
+    setAutomationFailures([]);
     setRequirementText("");
     setScenarioId("");
     setAnalysis(null);
@@ -1197,6 +1309,8 @@ export function App() {
             content: item.content,
             createdAt: item.createdAt,
             reasoningSummary: item.reasoningSummary,
+            suggestedAction: item.suggestedAction as PlanningMessage["suggestedAction"],
+            requiresConfirmation: item.requiresConfirmation,
             knowledge: decision?.output,
             llmTrace: item.llmCallId ? {
               callId: item.llmCallId,
@@ -1391,30 +1505,34 @@ export function App() {
         gaps: planningResult?.coverage.gaps
       }
     };
-    const diagnosisPrompt = [
-      "请只依据系统提供的真实运行事实回答，并严格分成三段：",
-      "发生了什么：指出具体阶段、失败或复核原因；",
-      "系统准备怎么处理：说明将重新绑定测试路径、创建沙盒代码修复、补证据或保持机器结论中的哪一种；",
-      "需要你做什么：明确写“无需操作”，或只列出必须由用户完成的授权、凭据、风险确认。",
-      "还没有 changed files 时必须明确写“尚未修改项目源码”，不要把分析或重新规划称为代码修复。",
-      JSON.stringify(failurePacket)
-    ].join("\n");
+    const diagnosisPrompt = "请解释当前运行卡点：发生了什么、系统准备如何处理、我是否需要操作。只依据已保存的运行事实和证据回答。";
     const useDurableRunThread = Boolean(activeRunId && result && !pathBindingRepairable);
     void (async () => {
       if (useDurableRunThread && activeRunId) {
         const response = await sendRunAgentMessage(activeRunId, {
           message: diagnosisPrompt,
-          credentialId: defaultCredential.id
+          credentialId: defaultCredential.id,
+          origin: "system-diagnosis"
         });
         setPlanningMessages((current) => current.map((item) =>
           item.id === messageId
             ? {
               ...item,
-              content: `${response.assistant.reply}\n\n模型 ${response.call.model} · 调用 ${response.call.id} · ${response.call.durationMs}ms · ${response.call.usage?.totalTokens ?? 0} Token${response.call.semanticRepairApplied ? " · JSON 自动修复 1 次" : ""}`,
+              content: response.assistant.reply,
               reasoningSummary: response.assistant.reasoningSummary,
               knowledge: response.assistant.knowledge,
+              suggestedAction: response.assistant.suggestedAction,
+              requiresConfirmation: response.assistant.requiresConfirmation,
               llmTrace: {
                 callId: response.call.id,
+                model: response.call.model,
+                provider: response.call.provider,
+                durationMs: response.call.durationMs,
+                totalTokens: response.call.usage?.totalTokens,
+                semanticRepairApplied: response.call.semanticRepairApplied,
+                status: response.call.status,
+                fallbackApplied: response.call.fallbackApplied,
+                errorCode: response.call.errorCode,
                 contextId: response.call.knowledgeContextId,
                 decisionId: response.call.knowledgeDecisionId,
                 validationStatus: response.call.knowledgeValidationStatus
@@ -1434,24 +1552,36 @@ export function App() {
         projectId,
         message: diagnosisPrompt,
         credentialId: defaultCredential.id,
-        history: planningMessages.slice(-6).map((item) => ({ role: item.role, content: item.content })),
+        history: planningMessages.slice(-6).map((item) => ({
+          role: item.role,
+          content: boundedAssistantText(item.content, 1_500)
+        })),
         context: {
           runState: planningAutomation.phase,
           finalStatus: result?.finalStatus ?? result?.gateStatus ?? latestDecision,
-          summary: result?.summary ?? planningAutomation.detail,
+          summary: boundedAssistantText(result?.summary ?? planningAutomation.detail, 1_200),
           evidenceCount: liveRun?.evidenceCount ?? result?.evidence.length ?? 0,
-          currentStep: result?.executionError?.stepId ?? planningAutomation.phase,
-          latestLog: result?.executionError?.message ?? planningAutomation.detail,
+          currentStep: boundedAssistantText(result?.executionError?.stepId ?? planningAutomation.phase, 300),
+          latestLog: boundedAssistantText(result?.executionError?.message ?? planningAutomation.detail, 700),
+          pageObservation: discovery?.observation,
           failedAssertions: failurePacket.failedAssertions.map((item) => ({
-            name: item.name,
-            expected: item.expected,
-            actual: item.actual
+            name: boundedAssistantText(item.name, 240),
+            expected: boundedAssistantText(item.expected, 500),
+            actual: boundedAssistantText(item.actual, 500)
           })),
           planning: planningResult ? {
             discovered: planningResult.coverage.discovered,
             executable: planningResult.coverage.executable,
             autoBindable: planningResult.coverage.autoBindable,
-            confirmed: planningConfirmed
+            confirmed: planningConfirmed,
+            failures: automationFailures.map((failure) => ({
+              title: failure.title,
+              target: failure.target ?? failure.scenarioId,
+              stage: failure.stage,
+              detail: boundedAssistantText(failure.detail, 1_000),
+              requiredInformation: failure.requiredInformation?.slice(0, 8) ?? []
+            })),
+            blockingQuestions: planningResult.clarificationQuestions.slice(0, 8)
           } : undefined
         }
       });
@@ -1459,11 +1589,21 @@ export function App() {
         item.id === messageId
           ? {
             ...item,
-            content: `${response.assistant.reply}\n\n模型 ${response.call.model} · 调用 ${response.call.id} · ${response.call.durationMs}ms · ${response.call.usage.totalTokens ?? 0} Token${response.call.semanticRepairApplied ? " · JSON 自动修复 1 次" : ""}`,
+            content: response.assistant.reply,
             reasoningSummary: response.assistant.reasoningSummary,
             knowledge: response.assistant.knowledge,
+            suggestedAction: response.assistant.suggestedAction,
+            requiresConfirmation: response.assistant.requiresConfirmation,
             llmTrace: {
               callId: response.call.id,
+              model: response.call.model,
+              provider: response.call.provider,
+              durationMs: response.call.durationMs,
+              totalTokens: response.call.usage.totalTokens,
+              semanticRepairApplied: response.call.semanticRepairApplied,
+              status: response.call.status,
+              fallbackApplied: response.call.fallbackApplied,
+              errorCode: response.call.errorCode,
               contextId: response.call.knowledgeContextId,
               decisionId: response.call.knowledgeDecisionId,
               validationStatus: response.call.knowledgeValidationStatus
@@ -1478,17 +1618,21 @@ export function App() {
         });
       }
     })().catch((error) => {
+      // A transient Agent/model outage must not permanently suppress the
+      // automatic explanation for this same blocked state. The next stable
+      // render may retry after the service becomes ready.
+      analyzedBlockedRuns.current.delete(analysisKey);
       const reason = error instanceof Error ? error.message : "模型调用失败";
       setPlanningMessages((current) => current.map((item) =>
         item.id === messageId
           ? {
             ...item,
-            content: `${concreteRunFailureMessage || "失败事实和证据已保存。"} AI 解释暂不可用（${reason}），机器门禁结论不受影响。`,
+            content: userFacingAssistantError(error),
             reasoningSummary: {
               phase: "waiting-user",
               observations: [
                 concreteRunFailureMessage || "失败事实和证据已经保存",
-                `模型解释调用失败：${reason}`
+                "模型解释请求未成功，技术原因已记录"
               ],
               assessment: "模型服务未返回有效解释；系统仍以确定性断言、证据完整性和机器门禁作为当前事实。",
               nextStep: "其他独立路径继续执行；失败链路保持待诊断状态，不会被自动放行。",
@@ -1629,6 +1773,10 @@ export function App() {
   function selectProject(projectId: string) {
     generationRequestRef.current?.controller.abort();
     generationRequestRef.current = null;
+    // Invalidate an in-flight startup/diagnosis operation. Its network work
+    // may finish, but it must never write the previous project's state into
+    // the newly selected project.
+    diagnosisOperationRef.current = null;
     // A project picker is configuration-only. Do not let an already-running
     // runtime auto-mount an iframe and reflow the centre test canvas.
     setPreviewSessionProjectId("");
@@ -1768,6 +1916,12 @@ export function App() {
       setMessage("请先识别或选择一个项目。");
       return;
     }
+    const diagnosisOperationId = crypto.randomUUID();
+    diagnosisOperationRef.current = {
+      id: diagnosisOperationId,
+      projectId: selectedCandidate.id
+    };
+    const isCurrentDiagnosis = () => diagnosisOperationRef.current?.id === diagnosisOperationId;
     const detectedCandidate = projectDetection?.suggestedConfig;
     const canApplyDetectedLaunch = Boolean(
       detectedCandidate
@@ -1800,6 +1954,7 @@ export function App() {
       if (projectDetection?.executionReady === false) {
         setProjectLaunchPhase("正在确认项目文件夹…");
         const verified = await detectProject(candidate.projectPath);
+        if (!isCurrentDiagnosis()) return;
         if (!verified.detection.exists) {
           setMessage("项目路径不可访问，请重新选择项目文件夹。");
           return;
@@ -1811,6 +1966,8 @@ export function App() {
         ...candidate,
         allowExternalProjectPath: candidate.allowExternalProjectPath ?? true
       });
+      if (!isCurrentDiagnosis()) return;
+      diagnosisOperationRef.current = { id: diagnosisOperationId, projectId: saved.project.id };
       setProjectDraft(saved.project);
       setSelectedProjectId(saved.project.id);
       setProjectPathInput(saved.project.projectPath);
@@ -1818,6 +1975,7 @@ export function App() {
 
       setProjectLaunchPhase("正在请求 Agent 启动项目…");
       const accepted = await startProjectAsync(saved.project.id);
+      if (!isCurrentDiagnosis()) return;
       setProjectRuntime(accepted.runtime);
       setProjectLaunchPhase("启动任务已提交，正在等待项目响应…");
       const sandboxPrepareTimeout = saved.project.manifest?.execution.mode === "oci"
@@ -1831,7 +1989,9 @@ export function App() {
       let missedRuntimePolls = 0;
       while (Date.now() < startupDeadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
+        if (!isCurrentDiagnosis()) return;
         const snapshot = await getProjectRuntime(saved.project.id).catch(() => null);
+        if (!isCurrentDiagnosis()) return;
         if (!snapshot) {
           missedRuntimePolls += 1;
           setProjectLaunchPhase(missedRuntimePolls > 1 ? "Agent 暂时断开，正在自动重连…" : "正在同步启动状态…");
@@ -1853,13 +2013,27 @@ export function App() {
       if (startedRuntime.status !== "running") {
         setProjectLaunchPhase("正在汇总失败诊断…");
         const diagnosed = await diagnoseProject(saved.project.id).catch(() => null);
+        if (!isCurrentDiagnosis()) return;
         if (diagnosed) setProjectDiagnosis(diagnosed.diagnosis);
+        let recoveryAdvice: RuntimeRecoveryAdvice | null = null;
         if (defaultCredential) {
           setProjectLaunchPhase("正在使用 AI 分析启动日志…");
           const recovery = await getAiStartRecovery(saved.project.id, defaultCredential.id).catch(() => null);
-          if (recovery) setRuntimeRecoveryAdvice(recovery.advice);
+          if (!isCurrentDiagnosis()) return;
+          if (recovery) {
+            recoveryAdvice = recovery.advice;
+            setRuntimeRecoveryAdvice(recovery.advice);
+          }
         }
-        setMessage(startedRuntime.message ?? "项目启动失败，请查看诊断结果。");
+        const failureMessage = startedRuntime.message ?? "项目启动失败，请查看诊断结果。";
+        setPlanningAutomation({ phase: "blocked", detail: failureMessage });
+        setMessage(failureMessage);
+        void surfaceProjectDiagnosticToAssistant({
+          project: saved.project,
+          runtime: startedRuntime,
+          diagnosis: diagnosed?.diagnosis,
+          recoveryAdvice
+        });
         return;
       }
 
@@ -1867,6 +2041,7 @@ export function App() {
         testProjectConnection(saved.project.id),
         diagnoseProject(saved.project.id)
       ]);
+      if (!isCurrentDiagnosis()) return;
       setProjectConnection(tested.result);
       setProjectDiagnosis(diagnosed.diagnosis);
       const readyForPlanning = tested.result.ok && diagnosed.diagnosis.overallStatus === "passed";
@@ -1880,19 +2055,159 @@ export function App() {
           : diagnosed.diagnosis.stages.find((stage) => stage.status === "failed")?.humanMessage
             ?? tested.result.message
       );
+      if (!readyForPlanning) {
+        const failureMessage = diagnosed.diagnosis.stages.find((stage) => stage.status === "failed")?.humanMessage
+          ?? tested.result.message;
+        setPlanningAutomation({ phase: "blocked", detail: failureMessage });
+        void surfaceProjectDiagnosticToAssistant({
+          project: saved.project,
+          runtime: startedRuntime,
+          diagnosis: diagnosed.diagnosis,
+          connection: tested.result
+        });
+      }
     } catch (error) {
+      if (!isCurrentDiagnosis()) return;
       const detail = error instanceof Error ? error.message : "项目诊断失败";
-      setProjectRuntime({
+      const failedRuntime: ProjectRuntimeStatus = {
         projectId: selectedCandidate.id,
         status: "failed",
         phase: "failed",
         updatedAt: new Date().toISOString(),
         failureReason: "unknown",
         message: detail
-      });
+      };
+      setProjectRuntime(failedRuntime);
+      setPlanningAutomation({ phase: "blocked", detail });
       setMessage(detail);
+      void surfaceProjectDiagnosticToAssistant({
+        project: candidate,
+        runtime: failedRuntime
+      });
     } finally {
-      setProjectLaunchPhase("");
+      if (isCurrentDiagnosis()) {
+        setProjectLaunchPhase("");
+        diagnosisOperationRef.current = null;
+      }
+    }
+  }
+
+  async function surfaceProjectDiagnosticToAssistant(input: {
+    project: ProjectConfig;
+    runtime: ProjectRuntimeStatus;
+    diagnosis?: ProjectDiagnosis;
+    connection?: ProjectHealthCheckResult;
+    recoveryAdvice?: RuntimeRecoveryAdvice | null;
+  }) {
+    const failedStages = (input.diagnosis?.stages ?? [])
+      .filter((stage) => stage.status === "failed" || stage.status === "warning");
+    const diagnosticKey = [
+      input.project.id,
+      input.runtime.updatedAt ?? "runtime-unknown",
+      input.diagnosis?.checkedAt ?? "diagnosis-unknown",
+      input.connection?.checkedAt ?? "connection-unknown",
+      input.runtime.failureReason ?? input.runtime.status,
+      failedStages.map((stage) => `${stage.stage}:${stage.reason}`).join("|")
+    ].join(":");
+    if (surfacedProjectDiagnostics.current.has(diagnosticKey)) return;
+    surfacedProjectDiagnostics.current.add(diagnosticKey);
+
+    const pendingId = `project_diagnostic_${Date.now()}`;
+    setPlanningMessages((current) => [...current, {
+      id: pendingId,
+      role: "assistant",
+      content: "正在读取项目启动阶段、健康检查和脱敏日志，整理失败原因与下一步…",
+      createdAt: new Date().toISOString()
+    }]);
+
+    const firstFailure = failedStages[0];
+    const failureText = boundedAssistantText(
+      firstFailure?.humanMessage
+        || input.runtime.message
+        || input.connection?.message
+        || "项目尚未进入可测试状态",
+      1_200
+    );
+    const missingEnv = failedStages.flatMap((stage) => stage.missingEnv ?? []);
+    const ports = failedStages.flatMap((stage) => stage.portConflicts ?? []).map((item) => item.port);
+    const deterministicReply = [
+      `遇到的问题：${failureText}`,
+      `系统已经做了什么：已保存项目启动阶段、连接检查和脱敏诊断。自动化测试尚未开始，因此不会把环境失败误报为产品缺陷。${input.recoveryAdvice?.summary ? ` AI 启动诊断：${boundedAssistantText(input.recoveryAdvice.summary, 500)}` : ""}`,
+      `需要你做什么：${missingEnv.length
+        ? `请在项目凭据配置中补齐 ${missingEnv.slice(0, 4).join("、")}，不要在对话中粘贴密钥。`
+        : ports.length
+          ? `系统可以重新分配沙盒端口；当前冲突端口为 ${ports.slice(0, 4).join("、")}。`
+          : input.runtime.failureReason === "container_runtime_unavailable"
+            ? "请允许系统启动 Docker Desktop 或 Podman；沙盒就绪后再重试。"
+            : "无需猜测配置；可以继续问我“具体失败在哪一步”，或修正设置后重新诊断。"}`
+    ].join("\n");
+
+    try {
+      const response = await chatWithTestAssistant({
+        projectId: input.project.id,
+        message: "请依据项目当前启动状态和诊断结果，用简单中文说明：发生了什么、系统已经做了什么、用户需要做什么。",
+        credentialId: defaultCredential?.id,
+        history: planningMessages.slice(-6).map((item) => ({
+          role: item.role,
+          content: boundedAssistantText(item.content, 1_200)
+        })),
+        context: {
+          runState: `project-${input.runtime.status}`,
+          finalStatus: "blocked",
+          summary: boundedAssistantText(failureText, 1_200),
+          evidenceCount: 0,
+          currentStep: boundedAssistantText(input.runtime.phase ?? firstFailure?.stage ?? "project-startup", 300),
+          latestLog: boundedAssistantText(input.runtime.message ?? input.connection?.message ?? failureText, 700),
+          pageObservation: discovery?.observation,
+          failedAssertions: []
+        }
+      });
+      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+        ...item,
+        content: response.assistant.reply,
+        reasoningSummary: response.assistant.reasoningSummary,
+        knowledge: response.assistant.knowledge,
+        suggestedAction: response.assistant.suggestedAction,
+        requiresConfirmation: response.assistant.requiresConfirmation,
+        llmTrace: {
+          callId: response.call.id,
+          model: response.call.model,
+          provider: response.call.provider,
+          durationMs: response.call.durationMs,
+          totalTokens: response.call.usage.totalTokens,
+          semanticRepairApplied: response.call.semanticRepairApplied,
+          status: response.call.status,
+          fallbackApplied: response.call.fallbackApplied,
+          errorCode: response.call.errorCode,
+          contextId: response.call.knowledgeContextId,
+          decisionId: response.call.knowledgeDecisionId,
+          validationStatus: response.call.knowledgeValidationStatus
+        }
+      } : item));
+    } catch (error) {
+      surfacedProjectDiagnostics.current.delete(diagnosticKey);
+      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+        ...item,
+        content: `模型解读暂时不可用；以下内容来自项目启动器和健康检查的确定性诊断。\n${deterministicReply}`,
+        reasoningSummary: {
+          phase: "waiting-user",
+          observations: [failureText],
+          assessment: "项目启动或连接条件未通过，正式测试尚未开始。",
+          nextStep: "保留诊断并等待项目运行条件恢复后重试。",
+          userAction: deterministicReply.split("需要你做什么：")[1] ?? "修正设置后重新诊断。",
+          confidence: "high"
+        },
+        llmTrace: {
+          callId: `project_diagnostic_fallback_${Date.now()}`,
+          provider: "deterministic",
+          model: "project-startup-diagnostics",
+          status: "failed",
+          fallbackApplied: true,
+          errorCode: error instanceof Error && /truncat/i.test(error.message)
+            ? "assistant_output_truncated"
+            : "assistant_bridge_unavailable"
+        }
+      } : item));
     }
   }
 
@@ -1974,23 +2289,43 @@ export function App() {
       "cancel-run": "确认取消测试",
       "open-evidence": "打开证据详情",
       "create-repair": "创建沙盒修复",
+      "retry-failed-path": "重试失败链路",
+      "continue-safe-paths": "继续其他可执行测试",
       "resume-interrupt": "查看待确认操作"
     }[action];
   }
 
-  async function executeAssistantSuggestedAction() {
-    const action = assistantSuggestedAction?.action;
+  async function executeAssistantSuggestedAction(actionOverride?: Exclude<AssistantSuggestedAction, "none">) {
+    const action = actionOverride ?? assistantSuggestedAction?.action;
     if (!action) return;
+    if (action === "start-run") {
+      if (!planningResult) {
+        setMessage("测试清单尚未生成，正在先扫描项目。");
+        await continueTestPlanning("全面扫描", "llm-guided");
+        return;
+      }
+      setMessage("已收到确认，正在准备沙盒和测试路径。");
+      setPlanningAutomation({
+        phase: !permissionProfile.observe || !permissionProfile.browserControl ? "needs-permission" : "preparing-project",
+        detail: !permissionProfile.observe || !permissionProfile.browserControl
+          ? "需要你允许本次内置浏览器操作，授权后会自动继续。"
+          : "正在提交项目启动任务，请稍候。"
+      });
+      try {
+        await confirmPlanningDraft();
+        setAssistantSuggestedAction(null);
+      } catch (error) {
+        const detail = userFacingAutomationError(error instanceof Error ? error.message : "测试准备失败");
+        setPlanningAutomation({ phase: "blocked", detail });
+        setMessage(detail);
+      }
+      return;
+    }
     setAssistantSuggestedAction(null);
     if (action === "revise-plan") {
       setPlanningConfirmed(false);
       setPlanningAutomation({ phase: "idle", detail: "" });
       setMessage("测试计划已恢复为可编辑状态，请继续告诉 AI 要修改什么。");
-      return;
-    }
-    if (action === "start-run") {
-      if (planningResult) await confirmPlanningDraft();
-      else setMessage("还没有可执行计划，请先告诉 AI 要测试什么。");
       return;
     }
     if (action === "open-evidence") {
@@ -1999,6 +2334,28 @@ export function App() {
     }
     if (action === "create-repair") {
       await openCodeRepairWorkspace();
+      return;
+    }
+    if (action === "retry-failed-path") {
+      if (pathBindingRepairable) {
+        await repairBlockedPlanning();
+      } else if (proofInfrastructureFailure && scenarioId) {
+        setMessage("正在使用同一场景重新执行并重建步骤、断言与证据关联，不会修改项目源码。");
+        await executeConfirmedScenarioAutomatically(scenarioId);
+      } else {
+        await openCodeRepairWorkspace();
+      }
+      return;
+    }
+    if (action === "continue-safe-paths") {
+      const replanned = await continueTestPlanning(
+        "继续执行其余能够绑定真实入口、操作、oracle 和证据的安全路径；保留当前失败链路及其证据并单独标记待诊断，不要让它阻止其他独立路径。",
+        "llm-guided",
+        { internalInstruction: true }
+      );
+      if (replanned && !hasBlockingPlanningQuestions(replanned)) {
+        await confirmPlanningResult(replanned);
+      }
       return;
     }
     if (action === "resume-interrupt") {
@@ -2040,18 +2397,28 @@ export function App() {
           message: content,
           credentialId: defaultCredential?.id
         });
+        const effectiveAction = response.assistant.suggestedAction !== "none"
+          ? response.assistant.suggestedAction
+          : commandFallbackAction(content, activeRun?.state);
         setPlanningMessages((current) => current.map((item) =>
           item.id === pendingId
             ? {
               ...item,
-              content: [
-                response.assistant.reply,
-                `模型 ${response.call.model} · 调用 ${response.call.id} · ${response.call.durationMs}ms · ${response.call.usage?.totalTokens ?? 0} Token${response.call.semanticRepairApplied ? " · JSON 自动修复 1 次" : ""}`
-              ].join("\n\n"),
+              content: response.assistant.reply,
               reasoningSummary: response.assistant.reasoningSummary,
               knowledge: response.assistant.knowledge,
+              suggestedAction: effectiveAction ?? "none",
+              requiresConfirmation: effectiveAction ? true : response.assistant.requiresConfirmation,
               llmTrace: {
                 callId: response.call.id,
+                model: response.call.model,
+                provider: response.call.provider,
+                durationMs: response.call.durationMs,
+                totalTokens: response.call.usage?.totalTokens,
+                semanticRepairApplied: response.call.semanticRepairApplied,
+                status: response.call.status,
+                fallbackApplied: response.call.fallbackApplied,
+                errorCode: response.call.errorCode,
                 contextId: response.call.knowledgeContextId,
                 decisionId: response.call.knowledgeDecisionId,
                 validationStatus: response.call.knowledgeValidationStatus
@@ -2059,10 +2426,10 @@ export function App() {
             }
             : item
         ));
-        if (response.assistant.suggestedAction !== "none") {
+        if (effectiveAction) {
           setAssistantSuggestedAction({
-            action: response.assistant.suggestedAction,
-            label: assistantActionLabel(response.assistant.suggestedAction)
+            action: effectiveAction,
+            label: assistantActionLabel(effectiveAction)
           });
         }
         return;
@@ -2071,36 +2438,61 @@ export function App() {
         projectId,
         message: content,
         credentialId: defaultCredential?.id,
-        history: planningMessages.slice(-8).map((item) => ({ role: item.role, content: item.content })),
+          history: planningMessages.slice(-8).map((item) => ({
+            role: item.role,
+            content: boundedAssistantText(item.content, 1_500)
+          })),
         context: {
           runState: activeRun?.state ?? (isRunning ? "running" : "idle"),
           finalStatus: result?.finalStatus ?? result?.gateStatus,
-          summary: result?.summary ?? planningAutomation.detail,
+          summary: boundedAssistantText(result?.summary ?? planningAutomation.detail, 1_200),
           evidenceCount: liveRun?.evidenceCount ?? result?.evidence.length ?? 0,
-          currentStep: latestEvent?.title ?? planningAutomation.phase,
-          latestLog: latestEvent?.observation ?? latestEvent?.decisionReason ?? planningAutomation.detail,
+          currentStep: boundedAssistantText(latestEvent?.title ?? planningAutomation.phase, 300),
+          latestLog: boundedAssistantText(latestEvent?.observation ?? latestEvent?.decisionReason ?? planningAutomation.detail, 700),
+          pageObservation: discovery?.observation,
           failedAssertions: (result?.assertions ?? []).filter((item) => !item.passed).slice(0, 8).map((item) => ({
-            name: item.name,
-            expected: item.expected,
-            actual: item.actual
+            name: boundedAssistantText(item.name, 240),
+            expected: boundedAssistantText(item.expected, 500),
+            actual: boundedAssistantText(item.actual, 500)
           })),
           planning: planningResult ? {
             discovered: planningResult.coverage.discovered,
             executable: planningResult.coverage.executable,
             autoBindable: planningResult.coverage.autoBindable ?? 0,
-            confirmed: planningConfirmed
+            confirmed: planningConfirmed,
+            failures: automationFailures.map((failure) => ({
+              title: failure.title,
+              target: failure.target ?? failure.scenarioId,
+              stage: failure.stage,
+              detail: boundedAssistantText(failure.detail, 1_000),
+              requiredInformation: failure.requiredInformation?.slice(0, 8) ?? []
+            })),
+            blockingQuestions: planningResult.clarificationQuestions.slice(0, 8)
           } : undefined
         }
       });
+      const effectiveAction = response.assistant.suggestedAction !== "none"
+        ? response.assistant.suggestedAction
+        : commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle"));
       setPlanningMessages((current) => current.map((item) =>
         item.id === pendingId
           ? {
             ...item,
-            content: `${response.assistant.reply}\n\n${response.call.model} · ${response.call.usage.totalTokens ?? 0} Token${response.call.semanticRepairApplied ? " · JSON 自动修复 1 次" : ""}`,
+            content: response.assistant.reply,
             reasoningSummary: response.assistant.reasoningSummary,
             knowledge: response.assistant.knowledge,
+            suggestedAction: effectiveAction ?? "none",
+            requiresConfirmation: effectiveAction ? true : response.assistant.requiresConfirmation,
             llmTrace: {
               callId: response.call.id,
+              model: response.call.model,
+              provider: response.call.provider,
+              durationMs: response.call.durationMs,
+              totalTokens: response.call.usage.totalTokens,
+              semanticRepairApplied: response.call.semanticRepairApplied,
+              status: response.call.status,
+              fallbackApplied: response.call.fallbackApplied,
+              errorCode: response.call.errorCode,
               contextId: response.call.knowledgeContextId,
               decisionId: response.call.knowledgeDecisionId,
               validationStatus: response.call.knowledgeValidationStatus
@@ -2108,22 +2500,24 @@ export function App() {
           }
           : item
       ));
-      if (response.assistant.suggestedAction !== "none") {
+      if (effectiveAction) {
         setAssistantSuggestedAction({
-          action: response.assistant.suggestedAction,
-          label: assistantActionLabel(response.assistant.suggestedAction)
+          action: effectiveAction,
+          label: assistantActionLabel(effectiveAction)
         });
       }
     } catch (error) {
-      const detail = error instanceof Error ? error.message : "AI 助手调用失败";
+      const fallbackAction = commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle"));
       setPlanningMessages((current) => current.map((item) =>
         item.id === pendingId
           ? {
             ...item,
-            content: `AI 助手暂时无法回答：${detail}。现有测试运行不会因此停止。`,
+            content: userFacingAssistantError(error),
+            suggestedAction: fallbackAction ?? "none",
+            requiresConfirmation: Boolean(fallbackAction),
             reasoningSummary: {
               phase: "waiting-user",
-              observations: [`模型调用失败：${detail}`, "机器门禁和已保存证据仍然有效"],
+              observations: ["模型调用未成功，技术原因已记录", "机器门禁和已保存证据仍然有效"],
               assessment: "当前无法获得模型补充解释，但不会把失败误判为通过，也不会清除已经完成的测试。",
               nextStep: "系统保留现有机器结论；你可以稍后重试模型解释，或直接查看证据和控制运行。",
               userAction: "无需重复执行已完成路径；如需 AI 继续分析，请检查模型配置后重新发送消息。",
@@ -2132,24 +2526,34 @@ export function App() {
           }
           : item
       ));
+      if (fallbackAction) {
+        setAssistantSuggestedAction({
+          action: fallbackAction,
+          label: assistantActionLabel(fallbackAction)
+        });
+      }
     } finally {
       setAssistantChatBusy(false);
     }
   }
 
-  async function routeAssistantInput() {
-    const content = planningInput.trim();
+  async function routeAssistantContent(rawContent: string) {
+    const content = rawContent.trim();
     if (!content) return;
-    const normalized = content.replace(/\s+/g, "");
+    const normalized = content.replace(/[\s，。！？、,.!?：:；;“”"'`]/g, "");
     const fullInventoryCommand = ["全面扫描", "灰度测试"].includes(normalized);
     const questionLike = /[？?]$|^(现在|目前|为什么|为何|怎么|如何|什么|是否|有没有|能不能|测试情况|进度|结果|状态)|失败.*原因|情况.*如何/i.test(content);
     const planChange = /修改|调整|增加|添加|删除|去掉|重点测试|测试范围|重新规划|重做计划/i.test(content);
     const explicitTestGoal = /^(请|帮我|我要|我想)?(对|针对)?[^？?]*(测试|验证|检查|扫描)/i.test(content);
     if (fullInventoryCommand || (!questionLike && (planChange || explicitTestGoal) && !planningAutomationBusy)) {
-      await continueTestPlanning(content, fullInventoryCommand ? "scan-only" : "llm-guided");
+      await continueTestPlanning(content, "llm-guided");
       return;
     }
     await chatWithAssistant(content);
+  }
+
+  async function routeAssistantInput() {
+    await routeAssistantContent(planningInput);
   }
 
   async function continueTestPlanning(
@@ -2158,8 +2562,15 @@ export function App() {
     options: { internalInstruction?: boolean; preserveAutomationState?: boolean } = {}
   ) {
     const content = (input ?? planningInput).trim();
-    const fullInventoryCommand = ["全面扫描", "灰度测试"].includes(content.replace(/\s+/g, ""));
-    const effectivePlanningMode = fullInventoryCommand ? "scan-only" : planningMode;
+    const fullInventoryCommand = ["全面扫描", "灰度测试"].includes(
+      content.replace(/[\s，。！？、,.!?：:；;“”"'`]/g, "")
+    );
+    // “全面扫描/灰度测试” uses the hybrid path by default: deterministic
+    // discovery guarantees a list, then the LLM prioritises and explains it.
+    // The explicit low-cost scan button can still opt into scan-only.
+    const effectivePlanningMode = fullInventoryCommand && planningMode !== "scan-only"
+      ? "llm-guided"
+      : planningMode;
     const projectId = selectedProjectId || projectDraft?.id;
     if (!projectId) {
       setMessage("请先接入并识别项目，再开始规划测试。");
@@ -2181,11 +2592,21 @@ export function App() {
     setPlanningInput("");
     setPlanningBusy(true);
     setPlanningConfirmed(false);
+    // A new full inventory must not keep rendering the previous project's or
+    // previous scan's large plan while the one-page smoke gate is pending.
+    if (fullInventoryCommand) {
+      setPlanningResult(null);
+      setDiscovery(null);
+    }
     if (!options.preserveAutomationState) {
       setPlanningAutomation({ phase: "idle", detail: "" });
     }
     setScenarioId("");
-    setMessage(effectivePlanningMode === "scan-only" ? "正在列出项目完整测试清单。" : "正在分析你的目标，并由 AI 制定相关测试计划。");
+    setMessage(effectivePlanningMode === "scan-only"
+      ? "正在用确定性扫描列出项目测试清单。"
+      : fullInventoryCommand
+        ? "正在扫描完整业务流程，并由 AI 排定风险和补充遗漏。"
+        : "正在分析你的目标，并由 AI 制定相关测试计划。");
     try {
       const response = await continuePlanningConversation({
         projectId,
@@ -2196,20 +2617,42 @@ export function App() {
         planningMode: effectivePlanningMode,
         credentialId: effectivePlanningMode === "llm-guided" ? defaultCredential?.id : undefined
       });
+      if (response.discovery) {
+        setDiscovery(response.discovery);
+        setScenarioDrafts(response.discovery.drafts);
+      }
+      const orchestrationCopy = response.discovery
+        ? discoveryOrchestrationCopy(response.discovery)
+        : null;
+      const smokeReady = !response.discovery?.orchestration
+        || response.discovery.orchestration.status === "ready";
       const assistantMessage: PlanningMessage = {
         id: `planning_assistant_${Date.now()}`,
         role: "assistant",
-        content: response.planning.reply,
+        content: smokeReady || !orchestrationCopy
+          ? response.planning.reply
+          : [
+            `遇到的问题：${orchestrationCopy.reason}`,
+            `系统已经做了什么：${orchestrationCopy.completed}`,
+            `需要你做什么：${orchestrationCopy.nextStep}`
+          ].join("\n"),
         createdAt: new Date().toISOString()
       };
       setPlanningMessages((current) => [...current, assistantMessage]);
-      setPlanningResult(response.planning);
       setAnalysis(response.planning.analysis);
       const combinedRequirement = [...planningMessages, ...(options.internalInstruction ? [] : [userMessage])]
         .filter((item) => item.role === "user")
         .map((item) => item.content)
         .join("\n");
       setRequirementText(combinedRequirement);
+      if (!smokeReady) {
+        setPlanningResult(null);
+        setPlanningConfirmed(false);
+        setScenarioId("");
+        setMessage(orchestrationCopy?.status ?? "页面预检未通过，测试尚未开始。");
+        return null;
+      }
+      setPlanningResult(response.planning);
       setMessage(response.planning.llmPlanning?.status === "failed"
         ? "代码扫描已完成，但 AI 规划暂时不可用；已保留可继续编辑的规则计划。"
         : response.planning.llmPlanning?.status === "not_configured"
@@ -2254,24 +2697,56 @@ export function App() {
         : saved.project.frontendUrl;
       return { ...saved.project, frontendUrl: liveUrl, healthCheckUrl: liveUrl };
     }
-    const started = await startProject(saved.project.id);
-    setProjectRuntime(started.runtime);
-    if (started.runtime.status !== "running") {
+    const accepted = await startProjectAsync(saved.project.id);
+    setProjectRuntime(accepted.runtime);
+    const sandboxPrepareTimeout = saved.project.manifest?.execution.mode === "oci"
+      ? (saved.project.manifest.budget.prepareTimeoutMs ?? 300_000)
+      : 0;
+    const startupDeadline = Date.now()
+      + sandboxPrepareTimeout
+      + Math.max(saved.project.timeoutMs ?? 30_000, 30_000)
+      + 10_000;
+    let startedRuntime = accepted.runtime;
+    while (Date.now() < startupDeadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+      const snapshot = await getProjectRuntime(saved.project.id).catch(() => null);
+      if (!snapshot) {
+        setPlanningAutomation((current) => ({
+          ...current,
+          phase: "preparing-project",
+          detail: "Agent 暂时断开，正在自动重新连接并恢复启动状态。"
+        }));
+        continue;
+      }
+      startedRuntime = snapshot.runtime;
+      setProjectRuntime(startedRuntime);
+      setPlanningAutomation((current) => ({
+        ...current,
+        phase: "preparing-project",
+        detail: startedRuntime.status === "installing"
+          ? "正在沙盒中安装项目依赖；完成后会自动继续。"
+          : startedRuntime.status === "starting"
+            ? startedRuntime.message || "正在启动 Docker 沙盒和项目服务。"
+            : "正在确认项目是否可以访问。"
+      }));
+      if (!["idle", "installing", "starting"].includes(startedRuntime.status)) break;
+    }
+    if (startedRuntime.status !== "running") {
       const diagnosed = await diagnoseProject(saved.project.id).catch(() => null);
       if (diagnosed) setProjectDiagnosis(diagnosed.diagnosis);
-      throw new Error(started.runtime.message ?? "项目无法启动。");
+      throw new Error(startedRuntime.message ?? "项目无法启动。");
     }
     const connected = await testProjectConnection(saved.project.id);
     setProjectConnection(connected.result);
     if (!connected.result.ok) throw new Error(connected.result.message || "项目启动后仍无法访问。");
     setPreviewSessionProjectId(saved.project.id);
-    const liveUrl = started.runtime.frontendUrl ?? saved.project.frontendUrl;
+    const liveUrl = startedRuntime.frontendUrl ?? saved.project.frontendUrl;
     setAppUrl(liveUrl);
     return {
       ...saved.project,
       frontendUrl: liveUrl,
-      backendUrl: started.runtime.backendUrl ?? saved.project.backendUrl,
-      healthCheckUrl: started.runtime.healthCheckUrl ?? liveUrl
+      backendUrl: startedRuntime.backendUrl ?? saved.project.backendUrl,
+      healthCheckUrl: startedRuntime.healthCheckUrl ?? liveUrl
     };
   }
 
@@ -2384,8 +2859,13 @@ export function App() {
     }
   }
 
-  async function continueAutomaticPlanning(grantedProfile = permissionProfile, projectOverride?: ProjectConfig) {
-    if (!planningResult) return;
+  async function continueAutomaticPlanning(
+    grantedProfile = permissionProfile,
+    projectOverride?: ProjectConfig,
+    planningOverride?: PlanningConversationResult
+  ) {
+    const activePlanning = planningOverride ?? planningResult;
+    if (!activePlanning) return;
     // Permission is the first user decision. Do not prepare a sandbox and then
     // jump backwards to an authorization step.
     if (!grantedProfile.observe || !grantedProfile.browserControl) {
@@ -2397,18 +2877,31 @@ export function App() {
       setRunPreviewModalOpen(true);
       return;
     }
+    setAutomationFailures([]);
     setPlanningAutomation({ phase: "preparing-project", detail: "正在启动并连接被测项目。" });
     setMessage("计划已确认，正在自动准备项目。");
+    // Track the scenario selected by this invocation. React state updates are
+    // asynchronous, so reading planningAutomation in catch could attribute a
+    // new ANDFlow failure to a stale scenario from the previous project.
+    let activeScenarioId: string | undefined;
     try {
       const project = await ensureProjectReadyForAutomation(projectOverride);
       setPlanningAutomation({ phase: "discovering", detail: "正在读取真实页面、控件、接口和可验证结果。" });
-      const response = await runDiscoveryScan({
-        appUrl: project.frontendUrl,
-        projectId: project.id,
-        sourceContexts: planningResult.analysis.sourceContexts,
-        goal: requirementText || planningResult.plan.sessionName,
-        credentialId: defaultCredential?.id
-      });
+      const reusableDiscovery = discovery
+        && discovery.target.projectId === project.id
+        && discovery.orchestration?.status === "ready"
+        && Date.now() - new Date(discovery.observation.capturedAt).getTime() < 10 * 60_000
+        ? discovery
+        : undefined;
+      const response = reusableDiscovery
+        ? { discovery: reusableDiscovery }
+        : await runDiscoveryScan({
+            appUrl: project.frontendUrl,
+            projectId: project.id,
+            sourceContexts: activePlanning.analysis.sourceContexts,
+            goal: requirementText || activePlanning.plan.sessionName,
+            credentialId: defaultCredential?.id
+          });
       setDiscovery(response.discovery);
       setScenarioDrafts(response.discovery.drafts);
       if (response.discovery.status === "failed") throw new Error(response.discovery.message);
@@ -2442,9 +2935,10 @@ export function App() {
         scenarioId: selectedDrafts[0]?.scenarioId
       });
       const approvedScenarioIds: string[] = [];
-      const bindingFailures: Array<{ scenarioId: string; stage: "binding"; detail: string }> = [];
+      const bindingFailures: AutomationFailure[] = [];
       const bindingRepairs: string[] = [];
       for (const [index, draft] of selectedDrafts.entries()) {
+        activeScenarioId = draft.scenarioId;
         setPlanningAutomation({
           phase: "binding",
           detail: `正在验证第 ${index + 1}/${selectedDrafts.length} 条路径的元素、动作、oracle 和证据要求。`,
@@ -2452,6 +2946,13 @@ export function App() {
         });
         const probed = await probeScenarioDraft(draft.scenarioId, defaultCredential?.id);
         setScenarioDrafts((current) => [probed.draft, ...current.filter((item) => item.scenarioId !== probed.draft.scenarioId)]);
+        const plannedFlow = activePlanning.businessFlows.find((flow) =>
+          flow.scenarioId === draft.scenarioId || flow.id === draft.gapId
+        );
+        const scenarioTitle = typeof draft.scenario["title"] === "string"
+          ? draft.scenario["title"]
+          : undefined;
+        const failureTitle = plannedFlow?.title ?? scenarioTitle ?? draft.scenarioId;
         const successfulRepairs = (probed.draft.repairAttempts ?? []).filter((attempt) => attempt.status === "repaired");
         if (successfulRepairs.length) {
           bindingRepairs.push(
@@ -2463,8 +2964,11 @@ export function App() {
         if (probed.draft.selectorProbeStatus !== "passed") {
           bindingFailures.push({
             scenarioId: draft.scenarioId,
+            title: failureTitle,
+            target: probed.draft.probeUrl ?? probed.draft.probeTrace?.navigationUrl,
             stage: "binding",
-            detail: probed.draft.missingInfo?.join("、") || "无法验证选择器和预期结果"
+            detail: probed.draft.missingInfo?.join("、") || "无法验证选择器和预期结果",
+            requiredInformation: probed.draft.missingInfo ?? []
           });
           continue;
         }
@@ -2474,8 +2978,11 @@ export function App() {
         } else {
           bindingFailures.push({
             scenarioId: draft.scenarioId,
+            title: failureTitle,
+            target: approved.draft.probeUrl ?? approved.draft.probeTrace?.navigationUrl,
             stage: "binding",
-            detail: "测试路径未通过自动可执行性校验"
+            detail: approved.draft.missingInfo?.join("、") || "测试路径未通过自动可执行性校验",
+            requiredInformation: approved.draft.missingInfo ?? []
           });
         }
       }
@@ -2510,10 +3017,12 @@ export function App() {
         coverageScenarioIds: approvedScenarioIds
       });
       const completedCount = parentOutcome?.success ? approvedScenarioIds.length : 0;
-      const executionFailures: Array<{ scenarioId: string; stage: "execution"; detail: string }> = parentOutcome?.success
+      const executionFailures: AutomationFailure[] = parentOutcome?.success
         ? []
         : [{
             scenarioId: approvedScenarioIds[0]!,
+            title: activePlanning.businessFlows.find((flow) => flow.scenarioId === approvedScenarioIds[0])?.title,
+            target: project.frontendUrl,
             stage: "execution",
             detail: parentOutcome?.detail ?? "父运行未返回有效聚合结果"
           }];
@@ -2527,19 +3036,26 @@ export function App() {
         setPlanningAutomation({ phase: "blocked", detail });
         setMessage(detail);
       } else {
+        setAutomationFailures([]);
         const detail = `${completedCount} 条测试路径已全部执行完成。`;
         setPlanningAutomation({ phase: "ready", detail, scenarioId: approvedScenarioIds.at(-1) });
         setMessage(detail);
       }
     } catch (error) {
       const detail = userFacingAutomationError(error instanceof Error ? error.message : "自动生成可执行测试路径失败");
+      setAutomationFailures([{
+        scenarioId: activeScenarioId ?? "automation-preparation",
+        title: "自动化测试准备",
+        stage: "execution",
+        detail
+      }]);
       setPlanningAutomation({ phase: "blocked", detail });
       setMessage(detail);
     }
   }
 
-  async function confirmPlanningDraft() {
-    if (!planningResult || hasBlockingPlanningQuestions(planningResult)) {
+  async function confirmPlanningResult(candidate: PlanningConversationResult) {
+    if (hasBlockingPlanningQuestions(candidate)) {
       setMessage("请先回答规划中的澄清问题。");
       return;
     }
@@ -2551,18 +3067,26 @@ export function App() {
         : "正在检查沙盒、项目服务和测试路径。"
     });
     setRunPreviewModalOpen(true);
-    setPlan(planningResult.plan);
+    setPlan(candidate.plan);
     setPlanningConfirmed(true);
     // Registry scenarios are fixture-specific. Uploaded/OCI projects must
     // first bind a path to their live DOM instead of executing a similarly
     // named scenario from another project.
-    if (planningResult.recommendedScenarioId && selectedProjectExecutionMode !== "oci") {
-      setScenarioId(planningResult.recommendedScenarioId);
-      await executeConfirmedScenarioAutomatically(planningResult.recommendedScenarioId);
+    if (candidate.recommendedScenarioId && selectedProjectExecutionMode !== "oci") {
+      setScenarioId(candidate.recommendedScenarioId);
+      await executeConfirmedScenarioAutomatically(candidate.recommendedScenarioId);
     } else {
       setScenarioId("");
-      await continueAutomaticPlanning();
+      await continueAutomaticPlanning(permissionProfile, undefined, candidate);
     }
+  }
+
+  async function confirmPlanningDraft() {
+    if (!planningResult) {
+      setMessage("请先生成测试计划。");
+      return;
+    }
+    await confirmPlanningResult(planningResult);
   }
 
   async function loadConnectedContext() {
@@ -3704,71 +4228,164 @@ export function App() {
         </aside>
 
         <aside className="simple-sidebar">
-          <div className="sidebar-label">本次测试</div>
-          <button className="context-nav-item active" onClick={() => setLeftDrawerOpen(true)} type="button">
-            <span>01</span>
-            <div>
-              <strong>{selectedProjectName}</strong>
-              <small>项目与连接配置</small>
-            </div>
-          </button>
-          <button className="context-nav-item" disabled={!hasSelectedProject} onClick={loadConnectedContext} title={!hasSelectedProject ? "先完成项目接入" : undefined} type="button">
-            <span>02</span>
-            <div>
-              <strong>测试依据</strong>
-              <small>{sourceContextCount || analysis?.sources.length || 0} 个已读取来源</small>
-            </div>
-          </button>
           <button
-            className="context-nav-item"
-            disabled={!hasSelectedProject}
+            className="sidebar-configure-button"
             onClick={() => {
-              if (!projectPreviewReady) setLeftDrawerOpen(true);
+              setLeftDrawerOpen(true);
+              setRightDrawerOpen(false);
             }}
-            title={!hasSelectedProject ? "先完成项目接入" : projectPreviewReady ? "规划已在左侧 AI 测试助手中" : "完成项目诊断后即可规划测试"}
             type="button"
           >
-            <span>03</span>
-            <div>
-              <strong>规划测试</strong>
-              <small>{planningConfirmed ? "计划已确认" : planningResult ? `${planningResult.coverage.discovered} 条流程待确认` : "由 AI 测试助手规划"}</small>
-            </div>
+            点击配置
           </button>
-          {projectPreviewReady ? (
-            <section className="sidebar-planning-assistant" aria-label="AI 测试助手规划">
+          <section className="sidebar-planning-assistant" aria-label="AI 测试助手规划">
               <header>
                 <div>
                   <span className="section-kicker">AI 测试助手</span>
                   <h3>规划测试</h3>
                 </div>
-                <div className="sidebar-assistant-actions">
-                  <button className="assistant-back-button" type="button" onClick={() => { setLeftDrawerOpen(true); setRightDrawerOpen(false); }} aria-label="切换项目">
-                    <ArrowLeft size={17} />
-                    <span>切换项目</span>
-                  </button>
-                </div>
               </header>
               <span className="sidebar-current-project">当前项目：{selectedProjectName}</span>
               <div className="sidebar-planning-messages" aria-live="polite">
-                {planningMessages.map((item) => (
-                  <article className={item.role} key={item.id}>
-                    <strong>{item.role === "assistant" ? "AI 测试官" : "你"}</strong>
-                    <span>{item.content}</span>
-                    {item.role === "assistant" ? <AssistantReasoningSummary message={item} /> : null}
-                    {item.role === "assistant" ? <KnowledgeBasis message={item} /> : null}
-                  </article>
-                ))}
-                {planningBusy ? <article className="assistant pending"><strong>AI 测试官</strong><span>正在分析项目和可执行路径…</span></article> : null}
+                {planningMessages.map((item, index) => {
+                  const attachesRunActions = assistantFeedbackRequired
+                    && item.role === "assistant"
+                    && item.content === runAssistantMessage
+                    && !planningMessages.slice(index + 1).some((candidate) => candidate.content === runAssistantMessage);
+                  const attachedSuggestedAction = item.suggestedAction && item.suggestedAction !== "none"
+                    ? item.suggestedAction
+                    : undefined;
+                  const isLatestAssistant = item.id === latestPlanningAssistant?.id;
+                  return (
+                    <AssistantConversationMessage
+                      message={item}
+                      key={item.id}
+                      actions={attachesRunActions ? (
+                        <RunAssistantPanel
+                          message={runAssistantMessage}
+                          blocked={runIsBlocked || screenshotRateLimited}
+                          authRequired={authFeedbackRequired}
+                          credentialReady={credentialReadyForRetry}
+                          apiCredentialRequired={apiCredentialFeedbackRequired}
+                          apiCredentialEnvNames={missingProjectApiCredentials.map((candidate) => candidate.envName)}
+                          browserExposedApiCredential={missingProjectApiCredentials.some((candidate) => candidate.exposure === "browser")}
+                          credentials={credentials}
+                          defaultCredentialId={defaultCredential?.id}
+                          busy={planningBusy || isRunning || planningAutomationBusy || assistantChatBusy}
+                          onSubmit={submitRunAssistantFeedback}
+                          onConfigureCredentials={openProjectLoginSettings}
+                          onRetryWithCredentials={retryWithConfiguredLogin}
+                          onBindApiCredential={bindMissingProjectApiCredentials}
+                          onOpenApiSettings={openCredentialSettings}
+                          reviewRequired={reviewRequired}
+                          reviewReason={reviewReason}
+                          onReviewReasonChange={setReviewReason}
+                          onAcceptRisk={() => controlActiveRun("decision-override")}
+                          autoRepairAvailable={assistantAutoRepairAvailable}
+                          autoRepairLabel={pathBindingRepairable ? "重新绑定并验证路径" : "生成沙盒代码修复"}
+                          autoRepairDescription={pathBindingRepairable
+                            ? "根据已探测页面重新绑定入口、控件和验证条件，然后立即复验。不会修改项目源码。"
+                            : "读取失败断言和证据，在沙盒副本中生成最小补丁，并展示 Diff 与验证结果。"}
+                          onAutoRepair={pathBindingRepairable ? repairBlockedPlanning : openCodeRepairWorkspace}
+                          onEditPlan={() => {
+                            setPlanningConfirmed(false);
+                            setPlanningAutomation({ phase: "idle", detail: "" });
+                          }}
+                          conversationVisible={false}
+                        />
+                      ) : attachedSuggestedAction === "start-run" ? (
+                        <div className="assistant-command-preview assistant-plan-command">
+                          {planningResult && discoveryAllowsPlanning ? (
+                            <>
+                              <strong>本次准备测试 {planningResult.businessFlows.length} 条流程</strong>
+                              <div className="assistant-plan-summary">
+                                <span>{planningResult.coverage.executable} 条可直接执行</span>
+                                <span>{planningResult.coverage.autoBindable ?? 0} 条自动绑定页面</span>
+                                {(planningResult.coverage.needsInput + planningResult.coverage.gaps) > 0
+                                  ? <span>{planningResult.coverage.needsInput + planningResult.coverage.gaps} 条需补充或阻塞</span>
+                                  : null}
+                              </div>
+                              <details className="assistant-plan-list" open>
+                                <summary>查看要测试的具体内容</summary>
+                                <ol>
+                                  {planningResult.businessFlows.map((flow) => (
+                                    <li key={flow.id}>
+                                      <span>{flow.title}</span>
+                                      <small>{flow.status === "executable"
+                                        ? "直接执行"
+                                        : flow.status === "auto-bindable"
+                                          ? "自动识别页面后执行"
+                                          : flow.status === "needs-input"
+                                            ? "需要补充条件"
+                                            : "当前阻塞"}</small>
+                                    </li>
+                                  ))}
+                                </ol>
+                              </details>
+                              <button
+                                className="assistant-suggested-action"
+                                type="button"
+                                disabled={assistantChatBusy || isRunning || planningHasBlockingQuestions}
+                                onClick={() => void executeAssistantSuggestedAction(attachedSuggestedAction)}
+                              >
+                                {planningHasBlockingQuestions ? "请先补充必要信息" : "确认并开始测试"}
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <strong>测试清单尚未生成</strong>
+                              <span>系统会先扫描项目并列出页面、功能和接口，再允许确认执行。</span>
+                              <button
+                                className="assistant-suggested-action"
+                                type="button"
+                                disabled={assistantChatBusy || planningBusy}
+                                onClick={() => void continueTestPlanning("全面扫描", "llm-guided")}
+                              >
+                                生成测试清单
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      ) : attachedSuggestedAction ? (
+                        <div className="assistant-command-preview">
+                          <span>{item.requiresConfirmation === false ? "可立即执行" : "确认后执行"}</span>
+                          <button
+                            className="assistant-suggested-action"
+                            type="button"
+                            disabled={assistantChatBusy}
+                            onClick={() => void executeAssistantSuggestedAction(attachedSuggestedAction)}
+                          >
+                            {assistantActionLabel(attachedSuggestedAction)}
+                          </button>
+                        </div>
+                      ) : isLatestAssistant && !assistantChatBusy ? (
+                        <div className="assistant-quick-commands" aria-label="可以继续这样问">
+                          {assistantQuickCommands.slice(0, 3).map((command) => (
+                            <button key={command} type="button" onClick={() => void routeAssistantContent(command)}>
+                              {command}
+                            </button>
+                          ))}
+                        </div>
+                      ) : undefined}
+                    />
+                  );
+                })}
+                {planningBusy ? (
+                  <AssistantConversationMessage message={{
+                    id: "planning_pending",
+                    role: "assistant",
+                    content: "正在分析项目和可执行路径…",
+                    createdAt: new Date().toISOString()
+                  }} />
+                ) : null}
               </div>
-              {assistantSuggestedAction ? (
-                <button className="assistant-suggested-action" type="button" onClick={() => void executeAssistantSuggestedAction()}>
-                  {assistantSuggestedAction.label}
-                </button>
+              {discovery?.orchestration && discovery.orchestration.status !== "ready" ? (
+                <DiscoveryOrchestrationNotice discovery={discovery} />
               ) : null}
-              {planningResult ? (
+              {planningResult && discoveryAllowsPlanning ? (
                 <div className="sidebar-planning-result">
                   <span>{planningResult.coverage.discovered} 条流程 · {planningResult.coverage.executable} 条可直接执行 · {planningResult.coverage.autoBindable ?? 0} 条待页面绑定</span>
-                  <details className="sidebar-flow-list">
+                  <details className="sidebar-flow-list" open>
                     <summary>确认本次要测试的 {planningResult.businessFlows.length} 条流程</summary>
                     <div>
                       {planningResult.businessFlows.map((flow) => (
@@ -3802,42 +4419,6 @@ export function App() {
                   </button>
                 </div>
               ) : null}
-              {assistantFeedbackRequired ? (
-                <div className="sidebar-run-feedback">
-                  <RunAssistantPanel
-                    message={runAssistantMessage}
-                    blocked={runIsBlocked || screenshotRateLimited}
-                    authRequired={authFeedbackRequired}
-                    credentialReady={credentialReadyForRetry}
-                    apiCredentialRequired={apiCredentialFeedbackRequired}
-                    apiCredentialEnvNames={missingProjectApiCredentials.map((item) => item.envName)}
-                    browserExposedApiCredential={missingProjectApiCredentials.some((item) => item.exposure === "browser")}
-                    credentials={credentials}
-                    defaultCredentialId={defaultCredential?.id}
-                    busy={planningBusy || isRunning || planningAutomationBusy || assistantChatBusy}
-                    onSubmit={submitRunAssistantFeedback}
-                    onConfigureCredentials={openProjectLoginSettings}
-                    onRetryWithCredentials={retryWithConfiguredLogin}
-                    onBindApiCredential={bindMissingProjectApiCredentials}
-                    onOpenApiSettings={openCredentialSettings}
-                    reviewRequired={reviewRequired}
-                    reviewReason={reviewReason}
-                    onReviewReasonChange={setReviewReason}
-                    onAcceptRisk={() => controlActiveRun("decision-override")}
-                    autoRepairAvailable={assistantAutoRepairAvailable}
-                    autoRepairLabel={pathBindingRepairable ? "让 AI 重新绑定测试路径" : "生成沙盒代码修复"}
-                    autoRepairDescription={pathBindingRepairable
-                      ? "AI 会根据真实页面探测重新绑定入口、控件和 oracle；这里只修测试路径，不修改项目源码。"
-                      : "AI 会读取失败断言和证据，在只读源码的沙盒副本中生成最小补丁，并打开 Diff 与验证结果。"}
-                    onAutoRepair={pathBindingRepairable ? repairBlockedPlanning : openCodeRepairWorkspace}
-                    onEditPlan={() => {
-                      setPlanningConfirmed(false);
-                      setPlanningAutomation({ phase: "idle", detail: "" });
-                    }}
-                    conversationVisible={false}
-                  />
-                </div>
-              ) : null}
               <form className="sidebar-planning-composer" onSubmit={(event) => {
                 event.preventDefault();
                 if (planningInput.trim()) void routeAssistantInput();
@@ -3860,7 +4441,6 @@ export function App() {
                 </button>
               </form>
             </section>
-          ) : null}
 
           <div className="sidebar-footer">
             <span>{runHistory.length} 次历史运行</span>

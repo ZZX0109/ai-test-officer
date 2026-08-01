@@ -88,7 +88,7 @@ export async function testProjectDetectionWizard() {
       "package.json": JSON.stringify({
         private: true,
         workspaces: ["packages/*"],
-        scripts: { dev: "turbo run dev" }
+        scripts: { dev: "turbo run dev", test: "turbo run test" }
       }),
       "pnpm-lock.yaml": "lockfileVersion: '9.0'",
       "packages/server/package.json": JSON.stringify({
@@ -120,6 +120,9 @@ export async function testProjectDetectionWizard() {
       pnpmWorkspaceDetection.suggestedConfig.installCommand,
       "pnpm --filter @fixture/server... --filter @fixture/dashboard... install --frozen-lockfile"
     );
+    assert.equal(pnpmWorkspaceDetection.suggestedConfig.testCommand, "pnpm run test");
+    assert.equal(pnpmWorkspaceDetection.suggestedConfig.testCommandSpec?.executable, "pnpm");
+    assert.deepEqual(pnpmWorkspaceDetection.suggestedConfig.manifest?.commands.test?.args, ["run", "test"]);
 
     const npmWorkspace = await makeFixture("ai-test-officer-npm-workspace-", {
       "package.json": JSON.stringify({ private: true, workspaces: ["apps/*"] }),

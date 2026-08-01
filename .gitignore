@@ -1,7 +1,6 @@
 node_modules/
 **/__pycache__/
 *.py[cod]
-.workbuddy/
 dist/
 agent/dist/
 app-under-test/dist/

@@ -12,6 +12,7 @@ import { getScenario } from "./scenarios.js";
 import { buildScenarioGrayPlan } from "./plan.js";
 import { compileTrustedScenarioPlan } from "./compiledPlanContract.js";
 import { runStructuredCoveragePath } from "./structuredCoverageRunner.js";
+import { finalizeProofBundle, type MachineGateDraft } from "./proof/proofBundleService.js";
 
 const queueName = process.env.RUN_QUEUE_NAME ?? "ai-test-officer-runs";
 const activeControllers = new Map<string, AbortController>();
@@ -36,7 +37,7 @@ function redisConnection() {
 function machineGateFromResult(result: Awaited<ReturnType<typeof runVisualGrayTest>>): MachineGate {
   if (result.machineGate) return result.machineGate;
   const status = result.gateStatus ?? "needs-human-review";
-  return {
+  const draft: MachineGateDraft = {
     status,
     reasons: result.artifactIntegrity?.items.filter((item) => !["present", "self_reference"].includes(item.status)).map((item) => `${item.id}:${item.status}`) ?? [],
     reasonDetails: (result.artifactIntegrity?.items ?? [])
@@ -46,9 +47,17 @@ function machineGateFromResult(result: Awaited<ReturnType<typeof runVisualGrayTe
         summary: `${item.id}:${item.status}`,
         evidenceRefs: [item.evidenceId!]
       })),
-    assertionFailures: result.assertions.filter((item) => !item.passed).map((item) => item.name),
-    evidenceComplete: status !== "blocked" && status !== "needs-human-review"
+    assertionFailures: result.assertions.filter((item) => !item.passed).map((item) => item.name)
   };
+  return finalizeProofBundle({
+    draft,
+    runId: result.id,
+    evidence: result.evidence,
+    artifactsV2: result.artifactsV2,
+    artifactIntegrity: result.artifactIntegrity,
+    machineGate: { ...draft, evidenceComplete: false },
+    judgeReport: result.judgeReport
+  }).machineGate;
 }
 
 function recommendationFromResult(result: Awaited<ReturnType<typeof runVisualGrayTest>>): JudgeRecommendation {

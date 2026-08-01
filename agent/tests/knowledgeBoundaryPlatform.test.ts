@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { authorizeKnowledgeAction } from "../src/knowledge-boundary/authorization.js";
 import { redactForModel, assertModelSafePath } from "../src/knowledge-boundary/redaction.js";
 import { resolveKnowledgeSources } from "../src/knowledge-boundary/sourceResolver.js";
-import { executeKnowledgeReadTool } from "../src/knowledge-boundary/toolBroker.js";
+import {
+  executeKnowledgeReadTool,
+  summarizeEvidenceForModel
+} from "../src/knowledge-boundary/toolBroker.js";
 import {
   bindAndValidateProjectSnapshot,
   buildProjectKnowledgeSnapshot
 } from "../src/knowledge-boundary/projectSnapshot.js";
 import { createKnowledgeContext, validateKnowledgeBoundaryOutput } from "../src/knowledgeBoundary.js";
+import { writeDiscoveryPageObservation } from "../src/pageObservationStore.js";
 
 export async function testKnowledgeBoundaryPlatform() {
   const root = path.resolve(
@@ -140,6 +145,37 @@ export async function testKnowledgeBoundaryPlatform() {
   assert.equal(redacted.includes("admin:secret"), false);
   assert.equal(redacted.includes("eyJhbGci"), false);
 
+  const pageObservationSummary = summarizeEvidenceForModel({
+    id: "evidence_page_observation",
+    runId: "run-current",
+    scenarioId: "scenario-current",
+    attemptId: "attempt-current",
+    attempt: 1,
+    stepId: "click-submit",
+    type: "dom",
+    title: "失败时页面观测 click-submit",
+    timestamp: new Date().toISOString(),
+    artifactIds: ["artifact_page_observation"],
+    locator: {
+      pageUrl: "http://127.0.0.1:5173/login?token=must-not-leak",
+      selector: "body"
+    },
+    payload: {
+      phase: "failure",
+      readyState: "complete",
+      interactiveElementCount: 2,
+      controls: [{ kind: "input", name: "账号" }, { kind: "button", name: "登录" }],
+      alerts: ["password=hunter2"],
+      consoleErrors: ["Failed to fetch"],
+      failedRequests: [{ method: "GET", url: "/api/session", status: 401 }],
+      changes: []
+    }
+  });
+  assert.equal(pageObservationSummary.type, "dom");
+  assert.match(JSON.stringify(pageObservationSummary), /Failed to fetch/);
+  assert.match(JSON.stringify(pageObservationSummary), /\[REDACTED\]/);
+  assert.equal(JSON.stringify(pageObservationSummary).includes("hunter2"), false);
+
   const crossScope = await resolveKnowledgeSources(createKnowledgeContext({
     purpose: "assistant",
     runId: "run-current",
@@ -179,6 +215,79 @@ export async function testKnowledgeBoundaryPlatform() {
   }));
   assert.deepEqual(expired.expiredClaimIds, ["expired-runtime-fact"]);
   assert.equal(expired.context.claims[0]?.status, "unknown");
+
+  const observationId = `discovery_knowledge_${Date.now()}`;
+  const capturedAt = new Date().toISOString();
+  await writeDiscoveryPageObservation({
+    projectId: "local_demo_app",
+    observation: {
+      id: observationId,
+      requestedUrl: "http://127.0.0.1:6173/",
+      finalUrl: "http://127.0.0.1:6173/",
+      startedAt: capturedAt,
+      capturedAt,
+      durationMs: 12,
+      stage: "completed",
+      status: "ready",
+      navigation: { documentCommitted: true, httpStatus: 200 },
+      document: { interactiveElementCount: 1, controls: [] },
+      console: [],
+      pageErrors: [],
+      failedRequests: [],
+      diagnosis: {
+        summary: "页面已完成观测。",
+        likelyCauses: [],
+        retryable: false,
+        userActionRequired: false
+      }
+    }
+  });
+  const discoverySource = await resolveKnowledgeSources(createKnowledgeContext({
+    purpose: "assistant",
+    projectSnapshot: { projectId: "local_demo_app" },
+    claims: [{
+      id: "discovery-observation",
+      statement: "Discovery observed one interactive element.",
+      status: "observed",
+      domain: "runtime",
+      sourceRefs: [`discovery:${observationId}`],
+      confidence: 1,
+      observedAt: capturedAt,
+      scope: { projectId: "local_demo_app" }
+    }],
+    allowedCapabilities: [],
+    allowedTools: [],
+    unknowns: [],
+    untrustedInputKinds: ["dom", "console", "network"]
+  }));
+  assert.deepEqual(discoverySource.verifiedClaimIds, ["discovery-observation"]);
+  assert.equal(discoverySource.rejected.length, 0);
+  const crossProjectDiscovery = await resolveKnowledgeSources(createKnowledgeContext({
+    purpose: "assistant",
+    projectSnapshot: { projectId: "order-portal-lite" },
+    claims: [{
+      id: "cross-project-discovery",
+      statement: "A different project's page was ready.",
+      status: "observed",
+      domain: "runtime",
+      sourceRefs: [`discovery:${observationId}`],
+      confidence: 1,
+      observedAt: capturedAt,
+      scope: { projectId: "order-portal-lite" }
+    }],
+    allowedCapabilities: [],
+    allowedTools: [],
+    unknowns: [],
+    untrustedInputKinds: []
+  }));
+  assert.equal(crossProjectDiscovery.context.claims[0]?.status, "unknown");
+  assert.equal(crossProjectDiscovery.rejected[0]?.errorCode, "knowledge_source_cross_project");
+  const observationRoot = path.join(root, "reports", "discovery", "observations");
+  const projectKey = createHash("sha256").update("local_demo_app").digest("hex").slice(0, 24);
+  await Promise.all([
+    rm(path.join(observationRoot, `${observationId}.json`), { force: true }),
+    rm(path.join(observationRoot, `latest-${projectKey}.json`), { force: true })
+  ]);
 
   const projectSnapshot = await buildProjectKnowledgeSnapshot("local_demo_app");
   assert.match(projectSnapshot.projectDigest, /^[a-f0-9]{64}$/);

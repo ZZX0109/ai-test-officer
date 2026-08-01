@@ -73,4 +73,45 @@ export function testPlanningConversation() {
   const second = buildPlanningConversation({ project, message: "继续生成计划", history, graph, analysis });
   assert.equal(second.phase, "draft-ready");
   assert.equal(second.plan.levels[0]?.paths.length, 3);
+
+  const waitingForSmoke = buildPlanningConversation({
+    project,
+    message: requirement,
+    history: [],
+    graph,
+    analysis,
+    discoveryReadiness: {
+      status: "waiting",
+      checkedUrl: project.frontendUrl,
+      attempts: 0,
+      maxAttempts: 2,
+      reason: "项目正在启动",
+      retryable: true,
+      runtimeStatus: "starting"
+    }
+  });
+  assert.equal(waitingForSmoke.phase, "clarifying");
+  assert.equal(waitingForSmoke.businessFlows.length, 1, "coverage must not expand before connectivity smoke passes");
+  assert.equal(waitingForSmoke.coverage.discovered, 1);
+  assert.equal(waitingForSmoke.coverage.needsInput, 1);
+  assert.match(waitingForSmoke.reply, /暂不展开大量候选流程/);
+
+  const readyForDiscovery = buildPlanningConversation({
+    project,
+    message: requirement,
+    history: [],
+    graph,
+    analysis,
+    discoveryReadiness: {
+      status: "ready",
+      checkedUrl: project.frontendUrl,
+      attempts: 1,
+      maxAttempts: 2,
+      reason: "connectivity_smoke_passed:http_200",
+      retryable: false,
+      runtimeStatus: "running",
+      httpStatus: 200
+    }
+  });
+  assert.equal(readyForDiscovery.businessFlows.length, 3, "coverage expands only after connectivity smoke passes");
 }

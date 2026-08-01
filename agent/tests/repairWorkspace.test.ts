@@ -16,6 +16,7 @@ export async function testRepairWorkspace() {
   const source = await mkdtemp(path.join(os.tmpdir(), "ai-test-officer-repair-"));
   try {
     await writeFile(path.join(source, "app.ts"), "export const answer = 1;\n");
+    await writeFile(path.join(source, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     await writeFile(path.join(source, ".env"), "SECRET=must-not-copy\n");
     const project: ProjectConfig = {
       id: "repair-test-project",
@@ -30,6 +31,7 @@ export async function testRepairWorkspace() {
     assert.notEqual(session.workspaceRoot, source);
     await assert.rejects(() => readRepairFile(session.id, "../outside.ts"), /repair_path_escape/);
     await assert.rejects(() => readRepairFile(session.id, ".env"), /repair_path_forbidden/);
+    await assert.rejects(() => readRepairFile(session.id, "logo.png"), /repair_path_forbidden/);
 
     const file = await readRepairFile(session.id, "app.ts");
     const edited = await writeRepairFile({

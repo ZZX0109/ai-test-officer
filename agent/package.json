@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
-    "dev": "NODE_ENV=development HOST=127.0.0.1 tsx watch --exclude \"../workbench-ui/**\" --exclude \"../data/**\" --exclude \"../reports/**\" src/server.ts",
+    "dev": "NODE_ENV=development HOST=127.0.0.1 tsx watch --exclude \"../workbench-ui/**\" --exclude \"../data/**\" --exclude \"../reports/**\" --exclude \"**/dist/**\" --exclude \"../packages/**\" src/server.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "NODE_ENV=test tsx tests/runTests.ts",

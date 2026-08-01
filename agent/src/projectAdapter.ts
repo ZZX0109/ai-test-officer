@@ -190,6 +190,7 @@ async function initializeSandboxVolume(input: {
   projectId: string;
 }) {
   const inspected = await captureProcessOutput(input.engine, ["volume", "inspect", input.name], 10_000);
+  const existed = inspected.exitCode === 0;
   if (inspected.exitCode !== 0) {
     const created = await captureProcessOutput(input.engine, [
       "volume", "create",
@@ -197,7 +198,7 @@ async function initializeSandboxVolume(input: {
       "--label", `ai-test-officer.project-id=${input.projectId}`,
       input.name
     ], 20_000);
-    if (created.exitCode !== 0) return false;
+    if (created.exitCode !== 0) return { ready: false, existed: false };
   }
   // The target application still runs as uid 65532. This one-shot container
   // only assigns ownership of an empty managed volume; it never mounts or
@@ -209,19 +210,38 @@ async function initializeSandboxVolume(input: {
     input.image,
     "-c", "chown 65532:65532 /cache && chmod 700 /cache"
   ], 120_000);
-  return initialized.exitCode === 0;
+  return { ready: initialized.exitCode === 0, existed };
 }
 
-async function prepareSandboxDependencyCache(project: ProjectConfig, cwd: string) {
+export async function prepareSandboxDependencyCache(
+  project: ProjectConfig,
+  cwd: string,
+  options?: {
+    /**
+     * Dependency descriptors may come from the immutable source project while
+     * `cwd` points at a writable repair copy. This lets validation reuse the
+     * prepared dependency volume without treating ordinary source edits as a
+     * dependency change.
+     */
+    dependencyDescriptorRoot?: string;
+    /**
+     * Keep the package store shared while assigning a distinct writable
+     * workspace to repair/validation runs. A validation source refresh must
+     * never mutate the volume used by a live target runtime.
+     */
+    workspaceNamespace?: string;
+  }
+) {
   if (project.manifest?.execution.mode !== "oci") return undefined;
+  const dependencyDescriptorRoot = options?.dependencyDescriptorRoot ?? cwd;
   const digest = createHash("sha256");
   digest.update(project.manifest.execution.image ?? "");
   digest.update(JSON.stringify(project.installCommandSpec ?? project.manifest.commands.install ?? null));
   // Include nested workspace descriptors, not just the repository root. A
   // dependency change in apps/web/package.json must invalidate the prepared
   // environment even when the root lockfile has not been regenerated yet.
-  for (const file of await collectDependencyDescriptors(cwd)) {
-    const relative = path.relative(cwd, file).replaceAll(path.sep, "/");
+  for (const file of await collectDependencyDescriptors(dependencyDescriptorRoot)) {
+    const relative = path.relative(dependencyDescriptorRoot, file).replaceAll(path.sep, "/");
     try {
       const metadata = await lstat(file);
       if (!metadata.isFile() || metadata.isSymbolicLink()) continue;
@@ -261,8 +281,13 @@ async function prepareSandboxDependencyCache(project: ProjectConfig, cwd: string
   }
   const sourceFingerprint = sourceDigest.digest("hex").slice(0, 24);
   const safeProjectId = project.id.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const safeWorkspaceNamespace = options?.workspaceNamespace
+    ?.replace(/[^a-zA-Z0-9_.-]/g, "_")
+    .slice(0, 80);
   const cacheRoot = path.join(sandboxCacheDir, safeProjectId, key);
-  const workspaceRoot = path.join(cacheRoot, "workspace");
+  const workspaceRoot = safeWorkspaceNamespace
+    ? path.join(cacheRoot, "workspaces", safeWorkspaceNamespace)
+    : path.join(cacheRoot, "workspace");
   const packageCacheRoot = path.join(cacheRoot, "packages");
   const metadataRoot = path.join(cacheRoot, "metadata");
   await Promise.all([
@@ -283,18 +308,40 @@ async function prepareSandboxDependencyCache(project: ProjectConfig, cwd: string
   // Docker Desktop's very slow macOS bind-mount writes for node_modules.
   const hasLegacyBindData = await directoryHasEntries(workspaceRoot)
     || await directoryHasEntries(packageCacheRoot);
-  const volumeKey = createHash("sha256").update(`${safeProjectId}:${key}`).digest("hex").slice(0, 24);
-  const workspaceVolume = `ato-workspace-${volumeKey}`;
-  const packageCacheVolume = `ato-packages-${volumeKey}`;
+  const packageVolumeKey = createHash("sha256").update(`${safeProjectId}:${key}`).digest("hex").slice(0, 24);
+  const workspaceVolumeKey = createHash("sha256")
+    .update(`${safeProjectId}:${key}:${safeWorkspaceNamespace ?? "runtime"}`)
+    .digest("hex")
+    .slice(0, 24);
+  const workspaceVolume = `ato-workspace-${workspaceVolumeKey}`;
+  const packageCacheVolume = `ato-packages-${packageVolumeKey}`;
   const engine = project.manifest.execution.engine ?? "docker";
   const image = project.manifest.execution.image ?? "node:22-bookworm-slim";
-  const volumeReady = !hasLegacyBindData
-    && await initializeSandboxVolume({ engine, image, name: workspaceVolume, projectId: project.id })
-    && await initializeSandboxVolume({ engine, image, name: packageCacheVolume, projectId: project.id });
-  const storageMode = volumeReady ? "volume" as const : "bind" as const;
+  const [workspaceVolumeState, packageVolumeState] = await Promise.all([
+    initializeSandboxVolume({ engine, image, name: workspaceVolume, projectId: project.id }),
+    initializeSandboxVolume({ engine, image, name: packageCacheVolume, projectId: project.id })
+  ]);
+  const volumeReady = workspaceVolumeState.ready && packageVolumeState.ready;
+  const volumePreparedMarker = await exists(path.join(metadataRoot, `prepared-${key}`));
+  const volumePrepared = volumePreparedMarker
+    && workspaceVolumeState.existed
+    && packageVolumeState.existed;
+  const bindPrepared = await exists(path.join(packageCacheRoot, `prepared-${key}`));
+  // Prefer a previously prepared engine-native volume even when an obsolete
+  // bind cache is still present. The old rule treated any legacy workspace
+  // file as authoritative, so a valid multi-gigabyte volume was ignored and
+  // every launch repeated a cold install until the health check timed out.
+  const storageMode = volumeReady && (volumePrepared || !hasLegacyBindData || !bindPrepared)
+    ? "volume" as const
+    : "bind" as const;
   const markerRoot = storageMode === "volume" ? metadataRoot : packageCacheRoot;
-  const prepared = await exists(path.join(markerRoot, `prepared-${key}`));
+  const prepared = storageMode === "volume"
+    ? volumePrepared
+    : bindPrepared;
   if (!prepared) {
+    // A metadata marker can outlive a deleted/recreated Docker volume. Never
+    // allow that stale marker to make an empty volume look prepared.
+    await rm(path.join(markerRoot, `prepared-${key}`), { force: true });
     await rm(path.join(markerRoot, `preparing-${key}`), { recursive: true, force: true });
   }
   return {
@@ -891,6 +938,117 @@ async function captureProcessOutput(executable: string, args: string[], timeoutM
   });
 }
 
+async function containerEngineIsReady(engine: "docker" | "podman") {
+  const result = await captureProcessOutput(engine, ["info"], 5_000, 64 * 1024);
+  return result.exitCode === 0;
+}
+
+async function ensureContainerEngineReady(project: ProjectConfig): Promise<ProjectRuntimeStatus | undefined> {
+  if (project.manifest?.execution.mode !== "oci") return undefined;
+  const engine = project.manifest.execution.engine;
+  if (await containerEngineIsReady(engine)) return undefined;
+
+  const autoStartEnabled = process.env.CONTAINER_RUNTIME_AUTOSTART !== "0";
+  const canLaunchDockerDesktop = autoStartEnabled && process.platform === "darwin" && engine === "docker";
+  if (!canLaunchDockerDesktop) {
+    return {
+      projectId: project.id,
+      status: "failed",
+      phase: "failed",
+      updatedAt: now(),
+      stoppedAt: now(),
+      failureReason: "container_runtime_unavailable",
+      message: `${engine} is installed but its daemon is unavailable. Automatic desktop startup is not supported in this environment.`
+    };
+  }
+
+  const appCheck = await captureProcessOutput("open", ["-Ra", "Docker"], 5_000, 16 * 1024);
+  if (appCheck.exitCode !== 0) {
+    return {
+      projectId: project.id,
+      status: "failed",
+      phase: "failed",
+      updatedAt: now(),
+      stoppedAt: now(),
+      failureReason: "container_runtime_unavailable",
+      message: "Docker Desktop is not installed or cannot be located in /Applications."
+    };
+  }
+
+  const timeoutMs = Math.min(
+    Math.max(project.manifest.budget.prepareTimeoutMs ?? 120_000, 60_000),
+    180_000
+  );
+  const starting: ProjectRuntimeStatus = {
+    projectId: project.id,
+    status: "starting",
+    ...runtimeTiming(timeoutMs, "starting_processes"),
+    frontendUrl: project.frontendUrl,
+    backendUrl: project.backendUrl,
+    healthCheckUrl: project.healthCheckUrl,
+    message: "正在自动启动 Docker Desktop，并等待安全沙盒服务就绪。"
+  };
+  runningProjects.set(project.id, { status: starting });
+
+  const launched = await captureProcessOutput("open", ["-gj", "-a", "Docker"], 10_000, 16 * 1024);
+  if (launched.exitCode !== 0) {
+    const failed: ProjectRuntimeStatus = {
+      ...starting,
+      status: "failed",
+      phase: "failed",
+      remainingMs: 0,
+      updatedAt: now(),
+      stoppedAt: now(),
+      failureReason: "container_runtime_unavailable",
+      message: `Docker Desktop could not be started automatically: ${redactText(launched.stderr || launched.stdout || "open command failed")}.`
+    };
+    runningProjects.set(project.id, { status: failed });
+    return failed;
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await containerEngineIsReady(engine)) {
+      runningProjects.delete(project.id);
+      return undefined;
+    }
+    const current = runningProjects.get(project.id);
+    if (!current || current.status.status === "stopped") {
+      return {
+        projectId: project.id,
+        status: "failed",
+        phase: "failed",
+        remainingMs: 0,
+        updatedAt: now(),
+        stoppedAt: now(),
+        failureReason: "cancelled",
+        message: "Docker Desktop startup was cancelled."
+      };
+    }
+    current.status = {
+      ...current.status,
+      elapsedMs: Date.now() - startedAt,
+      remainingMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
+      progressPercent: Math.min(90, Math.max(5, Math.round(((Date.now() - startedAt) / timeoutMs) * 100))),
+      updatedAt: now()
+    };
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+
+  const failed: ProjectRuntimeStatus = {
+    ...starting,
+    status: "failed",
+    phase: "failed",
+    remainingMs: 0,
+    updatedAt: now(),
+    stoppedAt: now(),
+    failureReason: "container_runtime_unavailable",
+    message: `Docker Desktop was opened, but the Docker daemon did not become ready within ${Math.round(timeoutMs / 1000)} seconds.`
+  };
+  runningProjects.set(project.id, { status: failed });
+  return failed;
+}
+
 function projectWithPortMappings(project: ProjectConfig, mappings: Map<number, number>) {
   const mapUrl = (url?: string) => {
     const containerPort = portFromUrl(url);
@@ -1364,6 +1522,8 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
       message: `Project credential is missing: ${[...credential.missingEnv, ...apiCredential.missingEnv].join(", ")}.`
     };
   }
+  const containerRuntimeFailure = await ensureContainerEngineReady(project);
+  if (containerRuntimeFailure) return containerRuntimeFailure;
   const recoveredSandbox = await inspectRunningSandbox(project);
   if (recoveredSandbox) {
     runningProjects.set(id, recoveredSandbox.running);

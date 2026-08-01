@@ -11,6 +11,7 @@ import {
 import { readRunBundle } from "../evidenceStore.js";
 import { getProject, getProjectRuntimeStatusWithRecovery } from "../projectAdapter.js";
 import { listRepairSessions } from "../repairWorkspace.js";
+import type { EvidenceItem } from "../types.js";
 import {
   canonicalSha256,
   persistKnowledgeToolExecution,
@@ -158,6 +159,84 @@ function assertNoSensitiveToolInput(value: unknown, key = ""): void {
   }
 }
 
+function modelSafeUnknown(value: unknown): unknown {
+  if (typeof value === "string") return redactForModel(value).slice(0, 1_000);
+  if (Array.isArray(value)) return value.slice(0, 20).map(modelSafeUnknown);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .slice(0, 30)
+        .map(([key, item]) => [
+          key,
+          /password|passwd|secret|token|api[_-]?key|authorization|connection[_-]?string/i.test(key)
+            ? "[REDACTED]"
+            : modelSafeUnknown(item)
+        ])
+    );
+  }
+  return value;
+}
+
+function selectedEvidenceDetails(item: EvidenceItem): Record<string, unknown> | undefined {
+  const payload = item.payload;
+  if (item.type === "dom") {
+    return {
+      phase: payload.phase,
+      readyState: payload.readyState,
+      interactiveElementCount: payload.interactiveElementCount,
+      controls: payload.controls,
+      alerts: payload.alerts,
+      consoleErrors: payload.consoleErrors,
+      failedRequests: payload.failedRequests,
+      changes: payload.changes
+    };
+  }
+  if (item.type === "operation") {
+    return {
+      action: payload.action,
+      code: payload.code,
+      failureClass: payload.failureClass,
+      message: payload.message,
+      observationEvidenceRefs: payload.observationEvidenceRefs,
+      changes: payload.changes
+    };
+  }
+  if (item.type === "assertion") {
+    const assertion = payload.assertion;
+    if (!assertion || typeof assertion !== "object" || Array.isArray(assertion)) return undefined;
+    const record = assertion as Record<string, unknown>;
+    return {
+      name: record.name,
+      passed: record.passed,
+      expected: record.expected,
+      actual: record.actual
+    };
+  }
+  if (item.type === "network" || item.type === "console") {
+    return payload;
+  }
+  return undefined;
+}
+
+/**
+ * Return only the bounded, redacted evidence facts a model needs to explain a
+ * failure. Artifact contents stay outside the prompt and can still be opened
+ * explicitly through the proof/evidence APIs.
+ */
+export function summarizeEvidenceForModel(item: EvidenceItem) {
+  return {
+    id: item.id,
+    type: item.type,
+    scenarioId: item.scenarioId,
+    attemptId: item.attemptId,
+    stepId: item.stepId,
+    summary: redactForModel(item.title).slice(0, 500),
+    artifactIds: item.artifactIds?.slice(0, 20) ?? [],
+    locator: item.locator ? modelSafeUnknown(item.locator) : undefined,
+    details: modelSafeUnknown(selectedEvidenceDetails(item))
+  };
+}
+
 async function executeReadTool(
   tool: KnowledgeReadTool,
   input: Record<string, unknown>,
@@ -173,14 +252,7 @@ async function executeReadTool(
     const evidence = bundle.evidence
       .filter((item) => !requestedIds || requestedIds.has(item.id))
       .slice(0, 100)
-      .map((item) => ({
-        id: item.id,
-        scenarioId: item.scenarioId,
-        attemptId: item.attemptId,
-        stepId: item.stepId,
-        summary: item.title,
-        artifactIds: item.artifactIds
-      }));
+      .map(summarizeEvidenceForModel);
     return {
       summary: `Read ${evidence.length} committed evidence records for run ${runId}.`,
       claims: evidence.map((item) => claim({

@@ -1904,6 +1904,7 @@ export interface components {
             knowledgeDecisionId?: string;
             llmCallId?: string;
             suggestedAction?: string;
+            requiresConfirmation?: boolean;
             /** Format: date-time */
             createdAt: string;
         };

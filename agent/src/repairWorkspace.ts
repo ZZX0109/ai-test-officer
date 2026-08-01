@@ -17,11 +17,13 @@ import {
 } from "@ai-test-officer/contracts";
 import { AttemptClock, commitCapturedFile } from "@ai-test-officer/playwright-runtime";
 import { buildOciInvocation, runAllowlistedCommand } from "@ai-test-officer/execution-worker";
-import type { LayeredJudgeReport, ProjectConfig, RunBundle, VisualRunResult } from "./types.js";
+import type { ArtifactIntegrityReport, LayeredJudgeReport, ProjectConfig, RunBundle, VisualRunResult } from "./types.js";
 import { appendSystemRunEvent, runEventStore } from "./runEventStore.js";
 import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
 import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
+import { finalizeProofBundle, type MachineGateDraft } from "./proof/proofBundleService.js";
 import { persistExecutionResult } from "./executionPersistence.js";
+import { prepareSandboxDependencyCache } from "./projectAdapter.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const repairsRoot = path.join(rootDir, "reports", "repairs");
@@ -32,6 +34,7 @@ const ignoredDirectories = new Set([
 const forbiddenNames = /(^|\/)(\.env(?:\.|$)|\.git(?:\/|$)|id_rsa$|id_ed25519$|.*\.(?:pem|p12|pfx|key|crt))|(^|\/)(node_modules|vendor)(\/|$)/i;
 const binaryExtensions = /\.(?:png|jpe?g|gif|webp|ico|pdf|zip|gz|tar|woff2?|ttf|eot|mp4|mov|sqlite3?|db)$/i;
 const highRiskPaths = /(^|\/)(migrations?|auth|payments?|billing|infra|deploy|terraform|\.github)(\/|$)|(^|\/)(dockerfile|package\.json)$/i;
+const dependencyDescriptorPaths = /(^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|\.yarnrc\.yml|requirements\.txt|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile\.lock|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|Gemfile|Gemfile\.lock|composer\.json|composer\.lock|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.lockfile)$/i;
 const maxEditableBytes = 1024 * 1024;
 let postgresPool: Pool | undefined;
 
@@ -62,6 +65,11 @@ function normalizeRelative(input: string) {
   if (!normalized || normalized.includes("\0") || normalized.split("/").some((part) => part === "..")) {
     throw new Error("repair_path_escape");
   }
+  return normalized;
+}
+
+function normalizeEditableRelative(input: string) {
+  const normalized = normalizeRelative(input);
   if (forbiddenNames.test(normalized) || binaryExtensions.test(normalized)) throw new Error("repair_path_forbidden");
   return normalized;
 }
@@ -79,6 +87,33 @@ function sha256(input: Uint8Array | string) {
 
 async function fileSha256(filePath: string) {
   return sha256(await readFile(filePath));
+}
+
+async function constrainRepairValidationCommand(
+  command: ReturnType<typeof commandSpecSchema.parse>,
+  workspaceRoot: string
+) {
+  if (
+    command.executable !== "pnpm"
+    || command.args[0] !== "run"
+    || command.args[1] !== "test"
+  ) return command;
+  try {
+    const packageJson = JSON.parse(await readFile(path.join(workspaceRoot, "package.json"), "utf8")) as {
+      scripts?: Record<string, unknown>;
+    };
+    const testScript = packageJson.scripts?.test;
+    if (typeof testScript === "string" && /\bturbo\s+run\s+test\b/.test(testScript)) {
+      return commandSpecSchema.parse({
+        ...command,
+        args: ["exec", "turbo", "run", "test", "--concurrency=1", "--", "--runInBand"]
+      });
+    }
+  } catch {
+    // The original allowlisted command remains the safe fallback when a
+    // package manifest cannot be read or does not describe a Turbo workspace.
+  }
+  return command;
 }
 
 async function walk(root: string, relative = ""): Promise<string[]> {
@@ -292,7 +327,7 @@ export async function createRepairSession(input: {
 export async function readRepairFile(id: string, requestedPath: string) {
   const session = await readRepairSession(id);
   if (!session) throw new Error("repair_session_not_found");
-  const relative = normalizeRelative(requestedPath);
+  const relative = normalizeEditableRelative(requestedPath);
   const source = resolveInside(sourceSnapshotDir(id), relative).resolved;
   const patched = resolveInside(workspaceDir(id), relative).resolved;
   const original = await exists(source) ? await readFile(source, "utf8") : "";
@@ -313,7 +348,7 @@ export async function writeRepairFile(input: { id: string; path: string; content
   const session = await readRepairSession(input.id);
   if (!session) throw new Error("repair_session_not_found");
   if (!["editing", "ready-for-review", "failed"].includes(session.status)) throw new Error("repair_session_not_editable");
-  const relative = normalizeRelative(input.path);
+  const relative = normalizeEditableRelative(input.path);
   const risk = riskForPath(relative);
   if (!risk.editable || risk.risk === "forbidden") throw new Error("repair_path_forbidden");
   if (Buffer.byteLength(input.content, "utf8") > maxEditableBytes) throw new Error("repair_file_too_large");
@@ -458,20 +493,33 @@ export async function exportRepairSession(id: string, format: "patch" | "zip"): 
 }
 
 async function createValidationRun(session: RepairSession, project: ProjectConfig) {
-  const runId = `run_repair_validation_${randomUUID()}`;
-  const created = await runEventStore.create({
-    runId,
+  const requestedRunId = `run_repair_validation_${randomUUID()}`;
+  const payload = {
+    runKind: "validation",
+    parentRunId: session.runId,
+    repairSessionId: session.id,
+    projectId: project.id,
+    organizationId: "local",
+    validationOnly: true
+  };
+  let created = await runEventStore.create({
+    runId: requestedRunId,
     actor: "repair-validator",
     idempotencyKey: `${session.id}:validation:${session.iteration + 1}:create`,
-    payload: {
-      runKind: "validation",
-      parentRunId: session.runId,
-      repairSessionId: session.id,
-      projectId: project.id,
-      organizationId: "local",
-      validationOnly: true
-    }
+    payload
   });
+  if (["completed", "failed", "blocked", "cancelled"].includes(created.state)) {
+    created = await runEventStore.create({
+      runId: requestedRunId,
+      actor: "repair-validator",
+      idempotencyKey: `${session.id}:validation:${session.iteration + 1}:${requestedRunId}`,
+      payload
+    });
+  }
+  // Repeated validation requests are idempotent. The event store may return
+  // the projection created by an earlier request, whose runId intentionally
+  // differs from this request's freshly generated candidate.
+  const runId = created.id;
   await appendSystemRunEvent(runId, "plan_generated", { plan: { sessionName: `Repair validation ${session.id}`, risks: [], levels: [] } });
   await appendSystemRunEvent(runId, "plan_approved");
   await appendSystemRunEvent(runId, "permission_granted");
@@ -544,7 +592,7 @@ async function persistRepairValidationRun(input: {
       exitStatus: input.passed ? "passed" : "failed"
     }
   });
-  const machineGate = {
+  const machineGateDraft: MachineGateDraft = {
     status: input.passed ? "pass" as const : "fail" as const,
     reasons: input.passed ? [] : [input.failureReason ?? "repair_validation_failed"],
     reasonDetails: input.passed ? [] : [{
@@ -552,8 +600,7 @@ async function persistRepairValidationRun(input: {
       summary,
       evidenceRefs: [evidence.id]
     }],
-    assertionFailures: input.passed ? [] : ["repair_validation"],
-    evidenceComplete: true
+    assertionFailures: input.passed ? [] : ["repair_validation"]
   };
   const judgeRecommendation = {
     status: input.passed ? "pass" as const : "fail" as const,
@@ -561,6 +608,26 @@ async function persistRepairValidationRun(input: {
     evidenceRefs: [evidence.id]
   };
   const judgeReport = validationJudgeReport(input.passed, evidence.id, summary);
+  // Proof credibility is minted solely by the Proof Bundle Service.
+  const artifactIntegrity: ArtifactIntegrityReport = {
+    id: `${input.childRunId}_artifact_integrity`,
+    runId: input.childRunId,
+    generatedAt: new Date().toISOString(),
+    artifactRoot: "/artifacts",
+    summary: { total: 1, present: 1, missing: 0, unreadable: 0, pathEscapes: 0, selfReferences: 0, hashMismatches: 0, hashed: 1 },
+    items: [{ id: input.artifact.id, artifactUri: input.artifact.storageUri, kind: "operation", evidenceId: evidence.id, status: "present", sha256: input.artifact.integrity.sha256, sizeBytes: input.artifact.integrity.sizeBytes }]
+  };
+  const { machineGate, verdict: proofVerdict, issues, gateEligible } = finalizeProofBundle({
+    draft: machineGateDraft,
+    runId: input.childRunId,
+    evidence: [evidence],
+    artifactsV2: [input.artifact],
+    artifactIntegrity,
+    requiredArtifactKinds: [input.artifact.kind],
+    machineGate: { ...machineGateDraft, evidenceComplete: false },
+    judgeReport,
+    gateEligibleFacts: { executionSucceeded: true, requirementCovered: true }
+  });
   const result: VisualRunResult = {
     id: input.childRunId,
     startedAt: input.startedAt,
@@ -650,9 +717,9 @@ async function persistRepairValidationRun(input: {
       executionSucceeded: true,
       requirementCovered: true,
       requirementPassed: input.passed,
-      artifactIntegrityVerified: true,
-      evidenceGrounded: true,
-      gateEligible: true,
+      artifactIntegrityVerified: proofVerdict.artifactIntegrityVerified,
+      evidenceGrounded: proofVerdict.evidenceGrounded,
+      gateEligible,
       machineGate,
       judgeRecommendation,
       finalStatus: machineGate.status
@@ -701,7 +768,7 @@ async function persistRepairValidationRun(input: {
   bundle.result.evidenceManifest = manifest;
   await writeRunBundle(bundle);
   await persistExecutionResult(input.childRunId, result);
-  return result;
+  return { result, verdict: proofVerdict, issues, gateEligible };
 }
 
 export async function validateRepairSession(id: string, project: ProjectConfig) {
@@ -710,16 +777,54 @@ export async function validateRepairSession(id: string, project: ProjectConfig) 
   const files = await scanChanges(session);
   if (!files.length) throw new Error("repair_has_no_changes");
   if (files.some((item) => item.risk === "forbidden")) throw new Error("repair_contains_forbidden_change");
-  const fullCommand = project.testCommandSpec ?? project.manifest?.commands.test;
-  if (!fullCommand || !project.manifest?.execution.image) {
+  const configuredFullCommand = project.testCommandSpec ?? project.manifest?.commands.test;
+  if (!configuredFullCommand || !project.manifest?.execution.image) {
     const timestamp = new Date().toISOString();
     const validation = repairValidationSchema.parse({
       id: `repair_validation_${randomUUID()}`,
       repairSessionId: id,
       status: "blocked",
-      commands: fullCommand ? [commandSpecSchema.parse(fullCommand)] : [],
+      commands: configuredFullCommand ? [commandSpecSchema.parse(configuredFullCommand)] : [],
       artifactIds: [],
       summary: "项目没有声明可在 OCI 沙盒执行的测试命令。",
+      startedAt: timestamp,
+      finishedAt: timestamp
+    });
+    return persistSession({ ...session, status: "blocked", files, validation, updatedAt: timestamp });
+  }
+  const fullCommand = await constrainRepairValidationCommand(
+    commandSpecSchema.parse(configuredFullCommand),
+    workspaceDir(id)
+  );
+  const dependencyDescriptorsChanged = files.some((item) => dependencyDescriptorPaths.test(item.path));
+  if (dependencyDescriptorsChanged) {
+    const timestamp = new Date().toISOString();
+    const validation = repairValidationSchema.parse({
+      id: `repair_validation_${randomUUID()}`,
+      repairSessionId: id,
+      status: "blocked",
+      commands: [commandSpecSchema.parse(fullCommand)],
+      artifactIds: [],
+      summary: "修复包含依赖清单或锁文件变更，需要单独授权联网安装后才能验证；系统没有复用旧依赖冒充验证成功。",
+      startedAt: timestamp,
+      finishedAt: timestamp
+    });
+    return persistSession({ ...session, status: "blocked", files, validation, updatedAt: timestamp });
+  }
+  const dependencyCache = await prepareSandboxDependencyCache(project, workspaceDir(id), {
+    dependencyDescriptorRoot: path.resolve(project.projectPath),
+    workspaceNamespace: `repair-validation-${id}`
+  });
+  const installCommand = project.installCommandSpec ?? project.manifest.commands.install;
+  if (installCommand && !dependencyCache?.prepared) {
+    const timestamp = new Date().toISOString();
+    const validation = repairValidationSchema.parse({
+      id: `repair_validation_${randomUUID()}`,
+      repairSessionId: id,
+      status: "blocked",
+      commands: [commandSpecSchema.parse(fullCommand)],
+      artifactIds: [],
+      summary: "项目依赖缓存尚未准备完成。请先完成一次项目沙盒启动，系统会复用同一份依赖缓存进行修复验证。",
       startedAt: timestamp,
       finishedAt: timestamp
     });
@@ -728,7 +833,7 @@ export async function validateRepairSession(id: string, project: ProjectConfig) 
   const startedAt = new Date().toISOString();
   const childRunId = await createValidationRun(session, project);
   const validationId = `repair_validation_${randomUUID()}`;
-  const validationCommands = [
+  const validationCandidates = [
     {
       stage: "targeted",
       command: project.manifest.commands.targetedTest ?? fullCommand
@@ -742,6 +847,10 @@ export async function validateRepairSession(id: string, project: ProjectConfig) 
       command: fullCommand
     }
   ] as const;
+  const commandKey = (command: typeof fullCommand) => JSON.stringify(commandSpecSchema.parse(command));
+  const validationCommands = validationCandidates.filter((candidate, index, all) =>
+    all.findIndex((item) => commandKey(item.command) === commandKey(candidate.command)) === index
+  );
   await persistSession({
     ...session,
     status: "validating",
@@ -772,7 +881,9 @@ export async function validateRepairSession(id: string, project: ProjectConfig) 
       image: project.manifest.execution.image,
       manifest: project.manifest,
       repositoryRoot: workspaceDir(id),
-      command: item.command
+      command: item.command,
+      prepareCommand: project.installCommandSpec ?? project.manifest.commands.install,
+      dependencyCache
     });
     const result = await runAllowlistedCommand({
       command: {
@@ -813,13 +924,15 @@ export async function validateRepairSession(id: string, project: ProjectConfig) 
     },
     origin: "runtime-captured"
   });
-  const targetedPassed = stageResults[0]?.exitCode === 0;
-  const relatedPassed = stageResults[1]?.exitCode === 0;
-  const regressionPassed = relatedPassed && stageResults[2]?.exitCode === 0;
+  const stagePassed = (candidate: (typeof validationCandidates)[number]) =>
+    stageResults.find((item) => commandKey(item.command) === commandKey(candidate.command))?.exitCode === 0;
+  const targetedPassed = stagePassed(validationCandidates[0]);
+  const relatedPassed = stagePassed(validationCandidates[1]);
+  const regressionPassed = relatedPassed && stagePassed(validationCandidates[2]);
   const passed = targetedPassed && regressionPassed;
   const failureReason = stageResults.find((item) => item.exitCode !== 0)?.failureReason;
   const finishedAt = new Date().toISOString();
-  const validationResult = await persistRepairValidationRun({
+  const { result: validationResult, verdict: validationVerdict, issues: validationIssues, gateEligible: validationGateEligible } = await persistRepairValidationRun({
     session,
     project,
     childRunId,
@@ -840,9 +953,10 @@ export async function validateRepairSession(id: string, project: ProjectConfig) 
     executionSucceeded: true,
     requirementCovered: true,
     requirementPassed: passed,
-    artifactIntegrityVerified: true,
-    evidenceGrounded: true,
-    gateEligible: true,
+    artifactIntegrityVerified: validationVerdict.artifactIntegrityVerified,
+    evidenceGrounded: validationVerdict.evidenceGrounded,
+    gateEligible: validationGateEligible,
+    proofValidationIssues: validationIssues,
     machineGate,
     finalStatus: passed ? "pass" as const : "fail" as const
   };

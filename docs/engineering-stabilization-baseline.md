@@ -9,7 +9,7 @@ Recorded on 2026-07-29 before the engineering stabilization pass.
 - Baseline commit before this pass: `2230a81`
 - Remote: `origin` points to `ZZX0109/ai-test-officer`
 - Existing source changes were committed separately before cleanup.
-- Local WorkBuddy metadata and the untracked Chinese evaluation document remain outside Git.
+- The untracked Chinese evaluation document remains outside Git.
 
 ## Runtime
 

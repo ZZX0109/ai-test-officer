@@ -71,6 +71,17 @@ if (result.assertions.some((assertion) => !assertion.passed)) {
 const executed = result.steps.map((step) => step.stepId);
 for (const stepId of ["open", "click", "query", "dom", "regression"]) {
   if (!executed.includes(stepId)) throw new Error(`compiled_plan_smoke_step_missing:${stepId}`);
+  const stepObservations = result.evidence.filter((item) =>
+    item.type === "dom"
+    && item.stepId === stepId
+    && (item.title.startsWith("操作前页面观测") || item.title.startsWith("操作后页面观测"))
+  );
+  if (stepObservations.length !== 2) {
+    throw new Error(`compiled_plan_smoke_step_observation_missing:${stepId}:${stepObservations.length}`);
+  }
+  if (stepObservations.some((item) => !item.artifactIds?.length || !item.locator?.snapshotSha256)) {
+    throw new Error(`compiled_plan_smoke_step_observation_unlinked:${stepId}`);
+  }
 }
 if (!result.artifactsV2?.some((artifact) => artifact.kind === "trace")) {
   throw new Error("compiled_plan_smoke_trace_missing");

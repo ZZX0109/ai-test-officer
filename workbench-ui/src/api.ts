@@ -39,6 +39,7 @@ import type {
   CoverageItem,
   ScenarioSummary,
   SecuritySummary,
+  DiscoveryPageObservation,
   DiscoveryScanResult,
   StorageArchive,
   StorageStatus,
@@ -112,6 +113,8 @@ export function getRunKnowledge(runId: string) {
       content: string;
       createdAt: string;
       reasoningSummary?: NonNullable<PlanningMessage["reasoningSummary"]>;
+      suggestedAction?: PlanningMessage["suggestedAction"];
+      requiresConfirmation?: boolean;
       knowledgeContextId?: string;
       knowledgeDecisionId?: string;
       llmCallId?: string;
@@ -158,12 +161,16 @@ export function getConclusionProof(runId: string, conclusionId: string) {
   }>(`/v1/conclusions/${encodeURIComponent(conclusionId)}/proof?runId=${encodeURIComponent(runId)}`);
 }
 
-export function sendRunAgentMessage(runId: string, payload: { message: string; credentialId?: string }) {
+export function sendRunAgentMessage(runId: string, payload: {
+  message: string;
+  credentialId?: string;
+  origin?: "user" | "system-diagnosis";
+}) {
   return request<{
     assistant: {
       reply: string;
       reasoningSummary: NonNullable<PlanningMessage["reasoningSummary"]>;
-      suggestedAction: "none" | "revise-plan" | "start-run" | "pause-run" | "resume-run" | "cancel-run" | "resume-interrupt" | "create-repair" | "open-evidence";
+      suggestedAction: NonNullable<PlanningMessage["suggestedAction"]>;
       requiresConfirmation: boolean;
       knowledge: {
         schemaVersion: "2.0";
@@ -184,6 +191,8 @@ export function sendRunAgentMessage(runId: string, payload: { message: string; c
       durationMs: number;
       usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
       semanticRepairApplied?: boolean;
+      fallbackApplied?: boolean;
+      errorCode?: string;
       knowledgeContextId?: string;
       knowledgeDecisionId?: string;
       knowledgeValidationStatus?: string;
@@ -278,7 +287,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const accessToken = getAccessToken();
   if (accessToken) headers.set("authorization", `Bearer ${accessToken}`);
   const method = (options?.method ?? "GET").toUpperCase();
-  const maxAttempts = method === "GET" ? 3 : 1;
+  const assistantMessageRequest = path === "/api/assistant/chat";
+  // During local development the Agent can briefly restart after a contracts
+  // build while Vite remains visible. Assistant messages get one retry only
+  // when the Agent health endpoint proves that no backend was available; a
+  // healthy Agent response is never replayed because doing so could duplicate
+  // model cost. Durable run-thread messages remain excluded until their POST
+  // carries an explicit idempotency key.
+  const maxAttempts = method === "GET" ? 3 : assistantMessageRequest ? 2 : 1;
   // A slow optional dashboard endpoint must not leave the whole Workbench in
   // an endless "connecting" state. Mutating/LLM requests keep their own
   // operation budgets; ordinary reads receive a bounded total deadline.
@@ -294,10 +310,27 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
         signal: requestSignal
       });
       if (response.ok || ![500, 502, 503, 504].includes(response.status) || attempt === maxAttempts) break;
+      // A model request must not be replayed merely because it returned a
+      // provider/server error: the first attempt may already have consumed
+      // tokens. Retry only when the Agent health endpoint confirms that the
+      // local backend itself is unavailable.
+      if (assistantMessageRequest) {
+        if (await agentIsReady()) break;
+        await waitForAgentReady(15_000);
+      }
     } catch (error) {
       if (options?.signal?.aborted) throw error;
       if (attempt === maxAttempts) {
         throw new Error("AI 测试服务正在启动或暂时不可用，请稍候。");
+      }
+      if (assistantMessageRequest) {
+        // If the Agent is healthy, a failed fetch may mean the response was
+        // lost after the model call completed. Replaying would duplicate cost
+        // and side effects, so surface the transport error instead.
+        if (await agentIsReady()) {
+          throw new Error("AI 回复传输中断，系统没有重复调用模型。请重新发送这条消息。");
+        }
+        await waitForAgentReady(15_000);
       }
     }
     await new Promise((resolve) => window.setTimeout(resolve, 250 * attempt));
@@ -308,6 +341,23 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(detail || `HTTP ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+async function agentIsReady(): Promise<boolean> {
+  try {
+    const headers = new Headers();
+    if (AGENT_TOKEN) headers.set("x-agent-token", AGENT_TOKEN);
+    const accessToken = getAccessToken();
+    if (accessToken) headers.set("authorization", `Bearer ${accessToken}`);
+    const response = await fetch(`${AGENT_URL}/api/health`, {
+      credentials: "include",
+      headers,
+      signal: AbortSignal.timeout(1_500)
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 export async function waitForAgentReady(timeoutMs = 15_000): Promise<void> {
@@ -430,7 +480,7 @@ export function continuePlanningConversation(payload: {
   planningMode?: "llm-guided" | "scan-only";
   credentialId?: string;
 }) {
-  return request<{ planning: PlanningConversationResult }>("/api/planning/conversation", {
+  return request<{ planning: PlanningConversationResult; discovery?: DiscoveryScanResult }>("/api/planning/conversation", {
     method: "POST",
     body: JSON.stringify(payload)
   });
@@ -449,8 +499,22 @@ export function chatWithTestAssistant(payload: {
     evidenceCount?: number;
     currentStep?: string;
     latestLog?: string;
+    pageObservation?: DiscoveryPageObservation;
     failedAssertions: Array<{ name: string; expected: string; actual: string }>;
-    planning?: { discovered: number; executable: number; autoBindable: number; confirmed: boolean };
+    planning?: {
+      discovered: number;
+      executable: number;
+      autoBindable: number;
+      confirmed: boolean;
+      failures?: Array<{
+        title?: string;
+        target?: string;
+        stage?: "binding" | "execution";
+        detail: string;
+        requiredInformation?: string[];
+      }>;
+      blockingQuestions?: string[];
+    };
   };
 }) {
   return request<{
@@ -458,7 +522,7 @@ export function chatWithTestAssistant(payload: {
       reply: string;
       reasoningSummary: NonNullable<PlanningMessage["reasoningSummary"]>;
       intent: "status-question" | "failure-question" | "plan-change" | "execution-control" | "general";
-      suggestedAction: "none" | "revise-plan" | "start-run" | "pause-run" | "resume-run" | "cancel-run" | "open-evidence";
+      suggestedAction: NonNullable<PlanningMessage["suggestedAction"]>;
       requiresConfirmation: boolean;
       knowledge: {
         schemaVersion: "2.0";
@@ -479,6 +543,8 @@ export function chatWithTestAssistant(payload: {
       durationMs?: number;
       usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
       semanticRepairApplied?: boolean;
+      fallbackApplied?: boolean;
+      errorCode?: string;
       knowledgeContextId?: string;
       knowledgeDecisionId?: string;
       knowledgeValidationStatus?: string;

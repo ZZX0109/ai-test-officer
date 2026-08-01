@@ -35,6 +35,7 @@ export type ScenarioOracleType =
   | "empty_state"
   | "error_text"
   | "console_no_error"
+  | "url_not_contains"
   | "api_schema"
   | "file_upload_state"
   | "role_permission_state";
@@ -68,6 +69,7 @@ export interface ScenarioOracle {
   expectedQueryFragment?: string;
   expectedTextIncludes?: string;
   expectedStatusText?: string;
+  excludedUrlIncludes?: string;
 }
 
 export interface ScenarioCorePath {
@@ -104,6 +106,8 @@ export interface ScenarioCorePath {
   registerButtonName?: string;
   usernameLabel?: string;
   passwordLabel?: string;
+  usernameLocator?: string;
+  passwordLocator?: string;
   createAccountButtonName?: string;
   loginButtonName?: string;
   loginSubmitButtonName?: string;
@@ -256,8 +260,18 @@ export function deriveCompiledPlanContract(scenario: ExecutableScenario): Scenar
       break;
     case "login_as_test_user":
     case "login_invalid_user":
-      if (!core.triggerButtonName || !core.submitButtonName) return undefined;
-      add({ action: "click", selectorRef: "triggerButtonName" });
+      if (!core.submitButtonName) return undefined;
+      if (core.usernameLocator && core.passwordLocator) {
+        add({ action: "fill", selectorRef: "usernameLocator", valueRef: "projectLoginUsername" });
+        add({ action: "fill", selectorRef: "passwordLocator", valueRef: "projectLoginPassword" });
+      } else if (core.usernameLabel && core.passwordLabel) {
+        add({ action: "fill", selectorRef: "usernameLabel", valueRef: "projectLoginUsername" });
+        add({ action: "fill", selectorRef: "passwordLabel", valueRef: "projectLoginPassword" });
+      } else if (core.triggerButtonName) {
+        add({ action: "click", selectorRef: "triggerButtonName" });
+      } else {
+        return undefined;
+      }
       add({ action: "click", selectorRef: "submitButtonName" });
       break;
     case "require_permission":
@@ -375,6 +389,13 @@ export function scenarioExecutabilityIssues(scenario: Record<string, unknown>) {
       issues.push("corePath.inputLabel/submitButtonName");
     }
     if (action === "file_upload_validate" && !hasText("inputLabel")) issues.push("corePath.inputLabel");
+    if (["login_as_test_user", "login_invalid_user"].includes(action)
+      && (!hasText("submitButtonName")
+        || (!(hasText("usernameLocator") && hasText("passwordLocator"))
+          && !(hasText("usernameLabel") && hasText("passwordLabel"))
+          && !hasText("triggerButtonName")))) {
+      issues.push("corePath.login bindings");
+    }
     if (action === "role_permission_matrix"
       && (!hasText("selectLabel") || !hasText("selectValue") || !hasText("submitButtonName"))) {
       issues.push("corePath.selectLabel/selectValue/submitButtonName");
