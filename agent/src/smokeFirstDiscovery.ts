@@ -1,5 +1,6 @@
 import type {
   DiscoveryScanResult,
+  DiscoveryLifecycleEvent,
   ProjectRuntimeStatus,
   SourceReadEnvelope,
   TargetAppRuntime
@@ -228,6 +229,23 @@ function deferredDiscoveryResult(
     : blocked
       ? `Discovery 被运行前置条件阻塞：${smoke.reason}`
       : `Discovery 连通性检查失败：${smoke.reason}`;
+  const lifecycle: DiscoveryLifecycleEvent[] = [
+    { stage: "project_started", status: "passed", at: createdAt, message: "已解析项目运行目标。", url: smoke.checkedUrl },
+    {
+      stage: "health_checked",
+      status: smoke.status === "blocked" ? "blocked" : smoke.status === "failed" ? "failed" : "pending",
+      at: createdAt,
+      message: smoke.reason,
+      url: smoke.checkedUrl
+    },
+    ...(["browser_ready", "page_loaded", "authenticated", "discovery_completed", "plan_generated"] as const).map((stage) => ({
+      stage,
+      status: "pending" as const,
+      at: createdAt,
+      message: "等待运行前置条件通过。",
+      url: smoke.checkedUrl
+    }))
+  ];
   return {
     id,
     createdAt,
@@ -266,6 +284,7 @@ function deferredDiscoveryResult(
     }),
     suggestions: [],
     drafts: [],
+    lifecycle,
     status: "failed",
     message,
     orchestration: {
@@ -283,6 +302,65 @@ function discoveryTerminalStatus(result: DiscoveryScanResult): DiscoveryOrchestr
   ) return "ready";
   if (result.observation.diagnosis.userActionRequired) return "blocked";
   return "failed";
+}
+
+function lifecycleForResult(
+  smoke: DiscoveryConnectivityResult,
+  result: DiscoveryScanResult,
+  discoveryAttempts: number
+): DiscoveryLifecycleEvent[] {
+  const at = new Date().toISOString();
+  const url = result.observation.finalUrl || smoke.checkedUrl;
+  const pageLoaded = result.observation.navigation.documentCommitted;
+  const browserReady = pageLoaded || result.observation.stage !== "launch";
+  const loginPage = /(?:\/signin|\/login)(?:[/?#]|$)/i.test(url)
+    || result.page.inputs.some((input) => /password|邮箱|email|用户名|username/i.test(`${input.label ?? ""} ${input.name ?? ""}`));
+  const discoveryStatus = result.status === "passed" ? "passed" : result.observation.diagnosis.userActionRequired ? "blocked" : "failed";
+  return [
+    { stage: "project_started", status: "passed", at, message: "已解析项目运行目标。", url: smoke.checkedUrl },
+    {
+      stage: "health_checked",
+      status: smoke.status === "ready" ? "passed" : smoke.status === "blocked" ? "blocked" : "failed",
+      at,
+      message: smoke.reason,
+      url: smoke.checkedUrl
+    },
+    {
+      stage: "browser_ready",
+      status: browserReady ? "passed" : "failed",
+      at,
+      message: browserReady ? "Playwright 已创建浏览器页面。" : "Playwright 页面未创建或未提交文档。",
+      url
+    },
+    {
+      stage: "page_loaded",
+      status: pageLoaded ? "passed" : "failed",
+      at,
+      message: pageLoaded ? `页面已提交：${url}` : "页面未提交可观测文档。",
+      url
+    },
+    {
+      stage: "authenticated",
+      status: loginPage ? "blocked" : "skipped",
+      at,
+      message: loginPage ? "页面显示登录入口，尚未声明登录成功。" : "未发现需要登录的页面证据，跳过认证阶段。",
+      url
+    },
+    {
+      stage: "discovery_completed",
+      status: discoveryStatus,
+      at,
+      message: result.message,
+      url
+    },
+    {
+      stage: "plan_generated",
+      status: "pending",
+      at,
+      message: `Discovery 尝试 ${discoveryAttempts} 次；测试计划由后续 planning 阶段生成。`,
+      url
+    }
+  ];
 }
 
 export async function runSmokeFirstDiscovery(input: {
@@ -332,6 +410,7 @@ export async function runSmokeFirstDiscovery(input: {
     ) {
       return {
         ...latest,
+        lifecycle: lifecycleForResult(smoke, latest, attempt),
         orchestration: {
           ...smoke,
           status: "ready",
@@ -347,6 +426,7 @@ export async function runSmokeFirstDiscovery(input: {
       const observation = normalizeAutomaticBlankPageObservation(latest);
       const terminalResult: DiscoveryScanResult = {
         ...latest,
+        lifecycle: lifecycleForResult(smoke, latest, attempt),
         observation,
         status: "failed",
         message: status === "blocked"

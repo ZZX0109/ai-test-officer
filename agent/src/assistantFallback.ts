@@ -10,12 +10,56 @@ export const assistantFallbackActions = [
   "cancel-run",
   "resume-interrupt",
   "create-repair",
+  "retry-runtime",
+  "retry-discovery",
   "retry-failed-path",
   "continue-safe-paths",
+  "configure-credentials",
   "open-evidence"
 ] as const;
 
 export type AssistantFallbackAction = typeof assistantFallbackActions[number];
+
+/**
+ * Single mapping from a structured repair decision to the concrete workbench
+ * action. Owner + repair type are the authority for "what the user can press";
+ * hard-coding an action per reply template is exactly how the chat used to
+ * offer "重试失败链路" for a failure only a credential could clear.
+ */
+export function assistantActionForRepairDecision(
+  decision: { owner?: string; type?: string } | undefined
+): AssistantFallbackAction | undefined {
+  if (!decision) return undefined;
+  switch (decision.type) {
+    case "credential_required":
+    case "provide_credential":
+      return "configure-credentials";
+    case "runtime_unavailable":
+    case "fix_environment":
+      return "retry-runtime";
+    case "discovery_incomplete":
+      return "retry-discovery";
+    case "selector_drift":
+    case "update_selector":
+      return "retry-failed-path";
+    case "product_bug":
+    case "modify_code":
+      return "create-repair";
+    case "evidence_missing":
+      // Evidence gaps are cleared by re-executing the same path so the runner
+      // can rebuild step → assertion → artifact links, not by code changes.
+      return "retry-failed-path";
+    case "manual_review":
+      return "open-evidence";
+    default:
+      break;
+  }
+  // No known repair type: fall back to the owner, which still tells us whether
+  // the next move belongs to the environment or to a human reading evidence.
+  if (decision.owner === "environment") return "retry-runtime";
+  if (decision.owner === "user" || decision.owner === "developer") return "open-evidence";
+  return undefined;
+}
 
 export interface AssistantFailureContext {
   userMessage: string;
@@ -90,6 +134,22 @@ export interface AssistantFailureContext {
       requiredInformation?: string[];
     }>;
     blockingQuestions?: string[];
+  };
+  /** Structured repair decision from the failure-attribution / repair-decision
+   * chain. When present, the assistant surfaces its canonical message instead
+   * of improvising a user action. */
+  repairDecision?: {
+    owner: string;
+    /** `RepairActionType` from the repair-decision chain. Drives the offered
+     * workbench action so chat and repair plan can never disagree. */
+    type?: string;
+    /** Whether the agent may act without a human. */
+    executable?: boolean;
+    userMessage: string;
+    steps: string[];
+    validation: string;
+    /** Failure title from the attribution that produced this decision. */
+    problem?: string;
   };
 }
 
@@ -219,6 +279,8 @@ export function requestedAssistantAction(message: string): AssistantFallbackActi
   const normalized = message.replace(/\s+/g, "");
   const asksAQuestion = /(?:能否|是否|为什么|怎么|如何|是什么|可以吗|该怎么办|需要做什么|\?|？)/i.test(normalized);
   if (/查看.*(证据|截图|日志|trace)|打开.*(证据|截图|日志)/i.test(normalized)) return "open-evidence";
+  if (/docker|podman|沙盒|启动.*项目|前端.*打不开|端口.*不可达/i.test(normalized)) return "retry-runtime";
+  if (/重新扫描|扫描页面|discovery/i.test(normalized)) return "retry-discovery";
   if (/重试.*失败|重新.*失败|修复.*失败|重新绑定/i.test(normalized)) return "retry-failed-path";
   if (/继续.*(其他|剩余|安全|可执行)|跳过.*继续/i.test(normalized)) return "continue-safe-paths";
   if (/修改.*(计划|范围)|调整.*(计划|范围)/i.test(normalized)) return "revise-plan";
@@ -277,18 +339,25 @@ function bindingFailureReply(input: AssistantFailureContext) {
   const blockingQuestion = input.planning?.blockingQuestions?.find((question) =>
     authenticationEvidence || !asksForAuthentication(question)
   );
-  const userAction = authenticationEvidence
+  const fallbackUserAction = authenticationEvidence
     ? "页面观测已发现明确认证证据。请通过凭据配置绑定测试账号，不要在对话中发送密码；保存后可恢复当前测试。"
     : observation?.diagnosis.userActionRequired
       ? `请确认目标页面可在测试环境访问。观测提示：${observation.diagnosis.likelyCauses[0] ?? "页面入口或运行条件未就绪"}。当前没有认证证据，无需提供账号密码。`
-    : blockingQuestion
-    ? `需要你先确认：${blockingQuestion}`
-    : "无需补充账号或猜测原因；可以直接重试失败链路，系统会使用已保存的页面观测数据重新绑定。";
+      : blockingQuestion
+        ? `需要你先确认：${blockingQuestion}`
+        : "无需补充账号或猜测原因；可以直接重试失败链路，系统会使用已保存的页面观测数据重新绑定。";
+  // Prefer the structured repair decision's canonical user message when the
+  // failure-attribution chain produced one; otherwise fall back to the
+  // observation-derived guidance.
+  const userAction = input.repairDecision?.userMessage ?? fallbackUserAction;
   return {
     problem: details.length ? `${problem} 当前诊断：${details.join("；")}。` : problem,
     systemAction,
     userAction,
-    action: "retry-failed-path" as const
+    // Heuristic default only. When a repair decision exists,
+    // `assistantActionForRepairDecision` overrides this in
+    // `buildDeterministicAssistantFallback`.
+    action: (authenticationEvidence ? "configure-credentials" : "retry-failed-path") as AssistantFallbackAction
   };
 }
 
@@ -313,7 +382,8 @@ function blockedReply(input: AssistantFailureContext) {
       problem: `当前测试处于${input.finalStatus === "blocked" ? "阻塞" : "等待确认"}状态：${humanizeFailureDetail(rawDetail)}。这表示可信度门禁没有放行，不代表被测项目本身存在缺陷。`,
       systemAction: "系统已经保留本次执行、截图、DOM、网络和 Trace；重新执行失败路径时会重建步骤到证据的关联，并再次校验完整性。",
       userAction: "确认“重试失败链路”即可。无需上传附件，也不需要修改项目源码。",
-      action: "retry-failed-path" as const
+      // Heuristic default; a structured repair decision takes precedence.
+      action: "retry-failed-path" as AssistantFallbackAction
     };
   }
   const problem = `当前测试处于${input.finalStatus === "blocked" ? "阻塞" : "等待确认"}状态：${humanizeFailureDetail(rawDetail) || "缺少继续执行所需的可验证条件"}。`;
@@ -400,7 +470,12 @@ export function buildDeterministicAssistantFallback(input: AssistantFailureConte
           ? blockedReply(input)
           : neutralReply(input);
   const explicitAction = requestedAssistantAction(input.userMessage);
-  const action = explicitAction ?? explanation.action;
+  // Precedence: what the user explicitly asked for > what the owner-aware repair
+  // decision says is actually possible > the template heuristic. Without the
+  // middle term the chat kept offering "重试失败链路" for credential- and
+  // environment-owned failures that a retry can never clear.
+  const decisionAction = assistantActionForRepairDecision(input.repairDecision);
+  const action = explicitAction ?? decisionAction ?? explanation.action;
   const intent = ["pause-run", "resume-run", "cancel-run", "start-run"].includes(action)
     ? "execution-control"
     : action === "revise-plan"
@@ -416,6 +491,15 @@ export function buildDeterministicAssistantFallback(input: AssistantFailureConte
   return {
     reply,
     intent,
+    repairPlan: input.repairDecision
+      ? {
+          owner: input.repairDecision.owner,
+          problem: input.repairDecision.problem,
+          steps: input.repairDecision.steps,
+          validation: input.repairDecision.validation,
+          message: input.repairDecision.userMessage
+        }
+      : undefined,
     reasoningSummary: {
       phase: "waiting-user" as const,
       observations: [

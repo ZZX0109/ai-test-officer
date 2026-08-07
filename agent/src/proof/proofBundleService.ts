@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
 import type { ArtifactV2, MachineGate } from "@ai-test-officer/contracts";
 import {
   deriveGateEligible,
   validateProofBundle,
+  type MachineGateDraft,
   type ProofBundleInput,
   type ProofVerdict
 } from "./proofBundleValidator.js";
@@ -11,7 +11,10 @@ import {
   buildGateReasonProofs,
   type GateReasonProof
 } from "./gateReasonValidator.js";
+import { canonicalSha256 } from "../canonicalHash.js";
 import type { EvidenceItem } from "../types.js";
+
+export type { MachineGateDraft } from "./proofBundleValidator.js";
 
 /**
  * Proof Bundle Service — the ONLY module allowed to mint a `VerifiedMachineGate`.
@@ -27,17 +30,14 @@ import type { EvidenceItem } from "../types.js";
 
 export const PROOF_VALIDATION_VERSION = "1.0.0";
 
-export interface MachineGateDraft {
-  status: MachineGate["status"];
-  reasons: string[];
-  reasonDetails: MachineGate["reasonDetails"];
-  assertionFailures: string[];
-}
-
 export interface VerifiedMachineGate extends MachineGateDraft {
   evidenceComplete: boolean;
   proofBundleId: string;
   proofValidationVersion: string;
+  /** The attempt that actually produced this gate (stable, so it can be bound). */
+  attemptId?: string;
+  /** The scenario the gate was minted for (run-level gates may omit it). */
+  scenarioId?: string;
 }
 
 export interface FinalizeProofBundleInput extends ProofBundleInput {
@@ -56,6 +56,36 @@ export interface FinalizeProofBundleResult {
   gateReasonProofs: GateReasonProof[];
   /** gate eligibility derived from the computed verdict + supplied execution facts. */
   gateEligible: boolean;
+}
+
+/**
+ * Build the idempotent, deterministic proof bundle id.
+ *
+ * The id is a pure function of (runId, scenarioId, attemptId, input hash,
+ * validation version). Re-running the same attempt with identical evidence and
+ * verdict therefore yields the *same* id, which makes the credibility ledger
+ * insert idempotent (a shadow / retry cannot forge a second authoritative
+ * record, and a re-mint overwrites rather than duplicates).
+ */
+function buildProofBundleId(input: FinalizeProofBundleInput): string {
+  const inputHash = canonicalSha256({
+    status: input.draft.status,
+    reasons: [...(input.draft.reasons ?? [])].sort(),
+    reasonDetails: input.draft.reasonDetails ?? [],
+    assertionFailures: [...(input.draft.assertionFailures ?? [])].sort(),
+    evidenceIds: (input.evidence ?? []).map((item) => item.id).sort(),
+    artifactIds: (input.artifactsV2 ?? []).map((item) => item.id).sort(),
+    artifactIntegrity: input.artifactIntegrity ? input.artifactIntegrity.items : undefined,
+    judgeReportSummary: input.judgeReport
+      ? {
+          releaseVerdict: input.judgeReport.releaseJudge?.verdict,
+          evidenceRefs: input.judgeReport.releaseJudge?.findings.flatMap((item) => item.evidenceRefs)
+        }
+      : undefined
+  });
+  const scenario = input.scenarioId ?? "run";
+  const attempt = input.attemptId ?? "run";
+  return `proof_${input.runId}_${scenario}_${attempt}_${inputHash}`;
 }
 
 export function finalizeProofBundle(input: FinalizeProofBundleInput): FinalizeProofBundleResult {
@@ -79,8 +109,10 @@ export function finalizeProofBundle(input: FinalizeProofBundleInput): FinalizePr
     ...input.draft,
     status,
     evidenceComplete: verdict.evidenceComplete,
-    proofBundleId: `proof_${input.runId}_${randomUUID()}`,
-    proofValidationVersion: PROOF_VALIDATION_VERSION
+    proofBundleId: buildProofBundleId(input),
+    proofValidationVersion: PROOF_VALIDATION_VERSION,
+    attemptId: input.attemptId,
+    scenarioId: input.scenarioId
   };
 
   // Gate eligibility is a *computed* fact: execution must have succeeded and the
@@ -94,20 +126,33 @@ export function finalizeProofBundle(input: FinalizeProofBundleInput): FinalizePr
 }
 
 /**
- * Compatibility-read guard. A machine gate that was produced before the Proof
- * Bundle Service existed has no `proofBundleId`. Such a record must never be
- * trusted as a formal pass — it is downgraded to `needs-human-review` so the
- * chain cannot silently assert a verified release on unverifiable evidence.
+ * Single, audited projection of the verified proof result onto the
+ * credibility scalar fields that the rest of the system consumes
+ * (`outcomeSummary`, persisted `RunBundle`, API responses).
+ *
+ * Business/execution code MUST call this helper (or `finalizeProofBundle`
+ * directly) instead of assigning the credibility booleans itself. Every
+ * assignment to a credibility flag therefore lives in this module, and the
+ * static gate in `scripts/check-evidence-complete-assignment.mjs` fails CI on
+ * any assignment outside `agent/src/proof/`.
  */
-export function applyLegacyUnverified(gate: MachineGate | undefined): MachineGate | undefined {
-  if (!gate) return gate;
-  if (gate.proofBundleId) return gate;
-  if (gate.status !== "pass") return gate;
+export function proofCredibility(
+  verdict: Pick<ProofVerdict, "artifactIntegrityVerified" | "evidenceGrounded" | "evidenceComplete">,
+  machineGate: VerifiedMachineGate | MachineGate,
+  gateEligible: boolean
+): {
+  artifactIntegrityVerified: boolean;
+  evidenceGrounded: boolean;
+  evidenceComplete: boolean;
+  gateEligible: boolean;
+  machineGate: VerifiedMachineGate | MachineGate;
+} {
   return {
-    ...gate,
-    status: "needs-human-review",
-    reasons: [...gate.reasons, "legacy_unverified"],
-    evidenceComplete: false
+    artifactIntegrityVerified: verdict.artifactIntegrityVerified,
+    evidenceGrounded: verdict.evidenceGrounded,
+    evidenceComplete: machineGate.evidenceComplete,
+    gateEligible,
+    machineGate
   };
 }
 

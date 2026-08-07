@@ -21,7 +21,7 @@ import type { ArtifactIntegrityReport, LayeredJudgeReport, ProjectConfig, RunBun
 import { appendSystemRunEvent, runEventStore } from "./runEventStore.js";
 import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
 import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
-import { finalizeProofBundle, type MachineGateDraft } from "./proof/proofBundleService.js";
+import { finalizeProofBundle, proofCredibility, type MachineGateDraft } from "./proof/proofBundleService.js";
 import { persistExecutionResult } from "./executionPersistence.js";
 import { prepareSandboxDependencyCache } from "./projectAdapter.js";
 
@@ -624,7 +624,7 @@ async function persistRepairValidationRun(input: {
     artifactsV2: [input.artifact],
     artifactIntegrity,
     requiredArtifactKinds: [input.artifact.kind],
-    machineGate: { ...machineGateDraft, evidenceComplete: false },
+    machineGate: machineGateDraft,
     judgeReport,
     gateEligibleFacts: { executionSucceeded: true, requirementCovered: true }
   });
@@ -717,9 +717,7 @@ async function persistRepairValidationRun(input: {
       executionSucceeded: true,
       requirementCovered: true,
       requirementPassed: input.passed,
-      artifactIntegrityVerified: proofVerdict.artifactIntegrityVerified,
-      evidenceGrounded: proofVerdict.evidenceGrounded,
-      gateEligible,
+      ...proofCredibility(proofVerdict, machineGate, gateEligible),
       machineGate,
       judgeRecommendation,
       finalStatus: machineGate.status
@@ -767,7 +765,7 @@ async function persistRepairValidationRun(input: {
   bundle.evidenceManifest = manifest;
   bundle.result.evidenceManifest = manifest;
   await writeRunBundle(bundle);
-  await persistExecutionResult(input.childRunId, result);
+  await persistExecutionResult(input.childRunId, result, { verdict: proofVerdict, gateEligible });
   return { result, verdict: proofVerdict, issues, gateEligible };
 }
 
@@ -953,9 +951,7 @@ export async function validateRepairSession(id: string, project: ProjectConfig) 
     executionSucceeded: true,
     requirementCovered: true,
     requirementPassed: passed,
-    artifactIntegrityVerified: validationVerdict.artifactIntegrityVerified,
-    evidenceGrounded: validationVerdict.evidenceGrounded,
-    gateEligible: validationGateEligible,
+    ...proofCredibility(validationVerdict, validationResult.machineGate!, validationGateEligible),
     proofValidationIssues: validationIssues,
     machineGate,
     finalStatus: passed ? "pass" as const : "fail" as const

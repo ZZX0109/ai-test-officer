@@ -230,7 +230,7 @@ describe("Workbench interactions", () => {
     expect(openSettings).toHaveBeenCalledTimes(1);
   });
 
-  it("shows login settings only for detected login projects and exposes one run action", async () => {
+  it("keeps project login fields out of project settings until a plan requires them", async () => {
     const project = {
       id: "demo",
       name: "Demo",
@@ -263,8 +263,7 @@ describe("Workbench interactions", () => {
       onSelect: vi.fn(),
       onDraftChange: vi.fn(),
       onRunDiagnosis: vi.fn(() => new Promise<void>(() => undefined)),
-      onStop: vi.fn(),
-      onSaveLoginCredential: vi.fn()
+      onStop: vi.fn()
     };
     const view = render(<ProjectPanel {...props as never} />);
     expect(screen.queryByText("登录与测试账号（需要登录时配置）")).toBeNull();
@@ -285,24 +284,18 @@ describe("Workbench interactions", () => {
         loginCapability: { detected: true, confidence: "high", signals: ["src/pages/login.tsx"] }
       }
     } as never} />);
-    await userEvent.click(screen.getByText("登录与测试账号（需要登录时配置）"));
-    fireEvent.change(screen.getByLabelText("测试账号"), { target: { value: "tester@example.test" } });
-    fireEvent.change(screen.getByLabelText("测试密码"), { target: { value: "secret-for-test" } });
-    await userEvent.click(screen.getByRole("button", { name: "保存测试账号" }));
-    expect(props.onSaveLoginCredential).toHaveBeenCalledWith({
-      username: "tester@example.test",
-      password: "secret-for-test",
-      usernameEnv: "E2E_USERNAME",
-      passwordEnv: "E2E_PASSWORD"
-    });
+    expect(screen.getByText("登录与测试账号（在开始测试时配置）")).toBeTruthy();
+    expect(screen.queryByLabelText("测试账号")).toBeNull();
+    expect(screen.queryByLabelText("测试密码")).toBeNull();
+    expect(screen.getByText(/只有本次测试计划包含登录步骤/)).toBeTruthy();
 
     view.rerender(<ProjectPanel {...{
       ...props,
       detection,
       revealLoginSettings: true
     } as never} />);
-    expect(screen.getByText("登录与测试账号（需要登录时配置）")).toBeTruthy();
-    expect((screen.getByText("登录与测试账号（需要登录时配置）").parentElement as HTMLDetailsElement).open).toBe(true);
+    expect(screen.getByText("登录与测试账号（在开始测试时配置）")).toBeTruthy();
+    expect((screen.getByText("登录与测试账号（在开始测试时配置）").parentElement as HTMLDetailsElement).open).toBe(true);
   });
 
   it("shows recent projects above inline upload controls and the folder tree after selection", async () => {

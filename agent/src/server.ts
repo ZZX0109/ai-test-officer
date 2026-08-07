@@ -30,6 +30,12 @@ import { redactText, redactValue } from "./redaction.js";
 import { readConnectorContext } from "./sourceConnectors.js";
 import { readAuditLog } from "./auditLog.js";
 import { readEvidence, readLatestRunId, readRunBundle } from "./evidenceStore.js";
+import {
+  resolveRunRepairPlan,
+  toAssistantRepairDecision,
+  toRepairPlanPayload
+} from "./repairPlan.js";
+import { finalizeProofBundle, proofCredibility } from "./proof/proofBundleService.js";
 import { readLatestLoopEvents, readLoopEvents } from "./loopEventStore.js";
 import { listRunHistory } from "./runHistory.js";
 import { captureDesktopScreenshot, desktopCaptureStatus } from "./desktopCaptureAdapter.js";
@@ -51,6 +57,7 @@ import { metaRouter } from "./server/routes/meta.routes.js";
 import { knowledgeRouter } from "./server/routes/knowledge.routes.js";
 import { planRouter } from "./server/routes/plan.routes.js";
 import { projectMemberRouter } from "./server/routes/projectMember.routes.js";
+import { repairRouter } from "./server/routes/repair.routes.js";
 import {
   executableTestPlanSchema,
   grayPlanSchema,
@@ -158,7 +165,14 @@ import {
   readJudgeSummaryFromAuditStore
 } from "./sqliteAuditStore.js";
 import { listStorageArchives, runStorageRetention, storageStatus } from "./storageGovernance.js";
-import type { ProjectConfig, SourceReadEnvelope } from "./types.js";
+import type {
+  ProjectConfig,
+  ProjectRecoveryAction,
+  ProjectRecoveryEvent,
+  ProjectRecoveryResult,
+  ProjectRuntimeStatus,
+  SourceReadEnvelope
+} from "./types.js";
 import { loadProjectManifest, manifestToProjectConfig } from "./projectManifest.js";
 import { isIdempotentReplay, runEventStore } from "./runEventStore.js";
 import type { RunEventType } from "@ai-test-officer/contracts";
@@ -187,9 +201,13 @@ import {
   writeRepairFile
 } from "./repairWorkspace.js";
 import { proposeCodeRepair } from "./llmCodeRepair.js";
+import { getAgentSustainability, initializeAgentSustainability } from "./agentSustainability.js";
+import { getWriteSafetyLayer } from "./write-safety/index.js";
 
 const app = express();
 const projectStartTasks = new Map<string, Promise<Awaited<ReturnType<typeof startProject>>>>();
+const projectRecoveryTasks = new Map<string, Promise<ProjectRecoveryResult>>();
+const projectRecoverySnapshots = new Map<string, ProjectRecoveryResult>();
 const port = Number(process.env.PORT ?? 4317);
 const host = process.env.HOST ?? (process.env.AGENT_API_TOKEN ? "0.0.0.0" : "127.0.0.1");
 
@@ -250,6 +268,155 @@ async function startProjectWithFreshConfig(id: string) {
   runtime = await startProject(id);
   return runtime;
 }
+
+function runtimeRecoveryAction(runtime: ProjectRuntimeStatus): ProjectRecoveryAction {
+  if (runtime.status === "running") return "retry-discovery";
+  if (["container_runtime_unavailable", "dependency_missing", "command_not_found", "port_conflict", "health_timeout", "early_exit"].includes(runtime.failureReason ?? "")) return "retry-runtime";
+  if (["idle", "installing", "starting"].includes(runtime.status)) return "retry-runtime";
+  return "unavailable";
+}
+
+function recoveryUserAction(action: ProjectRecoveryAction, runtime: ProjectRuntimeStatus) {
+  if (action === "retry-runtime") {
+    return runtime.failureReason === "container_runtime_unavailable"
+      ? "暂时无需操作；系统会先启动 Docker Desktop。若 180 秒后仍不可用，会提示你检查 Docker 是否已安装并完成系统权限确认。"
+      : "暂时无需操作；系统会重新准备安全沙盒、项目服务和健康检查。";
+  }
+  if (action === "retry-discovery") return "暂时无需操作；系统会重新扫描页面并绑定可执行路径。";
+  return "当前没有安全且可自动执行的恢复动作，请查看运行详情后补充项目启动条件。";
+}
+
+function appendRecoveryEvent(snapshot: ProjectRecoveryResult, phase: ProjectRecoveryEvent["phase"], message: string) {
+  snapshot.events.push({ phase, message, at: new Date().toISOString() });
+  snapshot.updatedAt = new Date().toISOString();
+  projectRecoverySnapshots.set(snapshot.projectId, { ...snapshot, events: [...snapshot.events] });
+}
+
+function recoverAndRetryProject(id: string, requestedMode: "auto" | "runtime" | "discovery" = "auto"): Promise<ProjectRecoveryResult> {
+  const existing = projectRecoveryTasks.get(id);
+  if (existing) return existing;
+  const task = (async (): Promise<ProjectRecoveryResult> => {
+    const project = await getProject(id);
+    if (!project) throw new Error("project_not_found");
+    const initialRuntime = await getProjectRuntimeStatusWithRecovery(id);
+    const action = requestedMode === "discovery" ? "retry-discovery" : runtimeRecoveryAction(initialRuntime);
+    const initial: ProjectRecoveryResult = {
+      recoveryId: `recovery_${crypto.randomUUID()}`,
+      projectId: id,
+      action,
+      status: "accepted",
+      sourceError: initialRuntime.failureReason ?? initialRuntime.message,
+      runtime: initialRuntime,
+      events: [],
+      userAction: recoveryUserAction(action, initialRuntime),
+      updatedAt: new Date().toISOString()
+    };
+    projectRecoverySnapshots.set(id, initial);
+    const snapshot = initial;
+    snapshot.status = "running";
+    if (action === "unavailable") {
+      snapshot.status = "blocked";
+      appendRecoveryEvent(snapshot, "blocked", "当前没有可安全自动执行的恢复动作；未启动代码修复或重试路径。");
+      return snapshot;
+    }
+
+    let runtime = initialRuntime;
+    if (action === "retry-runtime") {
+      appendRecoveryEvent(snapshot, "docker_launching", "正在检查并自动启动 Docker Desktop 安全沙盒。");
+      recordProjectRuntimeStatus({
+        ...runtime,
+        status: "starting",
+        phase: "starting_processes",
+        updatedAt: new Date().toISOString(),
+        message: "恢复中：正在检查 Docker Desktop 并准备安全沙盒。",
+        failureReason: "none"
+      });
+      appendRecoveryEvent(snapshot, "daemon_waiting", "正在等待 Docker daemon 就绪（最长 180 秒）。");
+      runtime = await startProjectWithFreshConfig(id);
+      snapshot.runtime = runtime;
+      // An adopted OCI container may legitimately report `installing` or
+      // `starting` while its dependency layer is still warming. Do not turn
+      // that intermediate lifecycle state into a user-facing blocked result.
+      if (["installing", "starting"].includes(runtime.status)) {
+        appendRecoveryEvent(snapshot, "sandbox_starting", "安全沙盒已接管，正在等待依赖安装和项目健康检查完成。");
+        const waitDeadline = Date.now() + Math.min(
+          Math.max(project.manifest?.budget.prepareTimeoutMs ?? 120_000, 30_000),
+          300_000
+        );
+        while (["installing", "starting"].includes(runtime.status) && Date.now() < waitDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+          runtime = await getProjectRuntimeStatusWithRecovery(id);
+          snapshot.runtime = runtime;
+          snapshot.updatedAt = new Date().toISOString();
+          projectRecoverySnapshots.set(id, { ...snapshot, events: [...snapshot.events] });
+        }
+      }
+      if (runtime.status !== "running") {
+        snapshot.status = "blocked";
+        snapshot.userAction = recoveryUserAction("retry-runtime", runtime);
+        appendRecoveryEvent(snapshot, "blocked", runtime.message || "安全沙盒未能启动。");
+        return snapshot;
+      }
+    }
+
+    appendRecoveryEvent(snapshot, "health_checking", "项目已启动，正在检查沙盒内页面连通性。");
+    const connection = await testProjectConnection(project);
+    if (!connection.ok) {
+      snapshot.runtime = await getProjectRuntimeStatusWithRecovery(id);
+      snapshot.status = "blocked";
+      snapshot.userAction = "无需立即修改源码；请等待系统完成有限恢复。若仍失败，请补充项目启动所需的外部服务或凭据。";
+      appendRecoveryEvent(snapshot, "blocked", connection.message);
+      return snapshot;
+    }
+
+    appendRecoveryEvent(snapshot, "discovery_retrying", "页面已连通，正在重新扫描真实控件、网络和可执行路径。");
+    const discovery = await runSmokeFirstDiscovery({
+      projectId: id,
+      goal: "恢复后重新扫描页面，并只绑定具备真实入口、操作、oracle 和证据要求的测试路径。",
+      smokeAttempts: 2,
+      discoveryAttempts: 2
+    });
+    snapshot.runtime = await getProjectRuntimeStatusWithRecovery(id);
+    snapshot.discovery = discovery;
+    if (discovery.orchestration?.status === "ready") {
+      snapshot.status = "completed";
+      snapshot.userAction = "无需操作；页面扫描已恢复，可以继续生成或执行测试计划。";
+      appendRecoveryEvent(snapshot, "completed", "恢复完成：页面连通性和 Discovery 已通过。");
+    } else {
+      snapshot.status = "blocked";
+      snapshot.userAction = discovery.observation.diagnosis.userActionRequired
+        ? "请根据页面实际提示完成登录、授权或凭据配置后重试。"
+        : "无需重复点击；系统已保存页面截图、DOM、控制台和网络诊断，可查看详情后补充启动条件。";
+      appendRecoveryEvent(snapshot, "blocked", discovery.message);
+    }
+    return snapshot;
+  })().catch(async (error) => {
+    const runtime = await getProjectRuntimeStatusWithRecovery(id).catch(() => ({
+      projectId: id,
+      status: "failed" as const,
+      phase: "failed" as const,
+      updatedAt: new Date().toISOString(),
+      failureReason: "none" as const,
+      message: "恢复任务初始化失败。",
+      processes: []
+    }));
+    const failed: ProjectRecoveryResult = {
+      recoveryId: `recovery_${crypto.randomUUID()}`,
+      projectId: id,
+      action: requestedMode === "discovery" ? "retry-discovery" : runtimeRecoveryAction(runtime),
+      status: "failed",
+      runtime,
+      events: [],
+      userAction: "恢复请求未完成。请查看运行详情；系统没有修改项目源码或覆盖既有测试证据。",
+      updatedAt: new Date().toISOString()
+    };
+    appendRecoveryEvent(failed, "blocked", error instanceof Error ? error.message : "恢复任务发生未知错误。");
+    return failed;
+  }).finally(() => projectRecoveryTasks.delete(id));
+  projectRecoveryTasks.set(id, task);
+  task.catch(() => undefined);
+  return task;
+}
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
 
@@ -287,6 +454,8 @@ const assistantSuggestedActions = [
   "cancel-run",
   "resume-interrupt",
   "create-repair",
+  "retry-runtime",
+  "retry-discovery",
   "retry-failed-path",
   "continue-safe-paths",
   "open-evidence"
@@ -449,6 +618,23 @@ function isMissingRunBundle(error: unknown) {
 
 function unavailableRunReport(run: NonNullable<Awaited<ReturnType<typeof runEventStore.get>>>) {
   const finalStatus = run.gateStatus ?? (run.state === "blocked" ? "blocked" : run.state === "failed" ? "fail" : "needs-human-review");
+  // Even the "bundle unavailable" fallback must mint its gate through the
+  // Proof Bundle Service — never by hard-coding credibility flags.
+  const machineGate = finalizeProofBundle({
+    draft: {
+      status: finalStatus,
+      reasons: ["run_bundle_unavailable"],
+      reasonDetails: [],
+      assertionFailures: []
+    },
+    runId: run.id,
+    machineGate: {
+      status: finalStatus,
+      reasons: ["run_bundle_unavailable"],
+      reasonDetails: [],
+      assertionFailures: []
+    }
+  }).machineGate;
   return {
     runId: run.id,
     state: run.state,
@@ -461,20 +647,21 @@ function unavailableRunReport(run: NonNullable<Awaited<ReturnType<typeof runEven
       executionSucceeded: false,
       requirementCovered: false,
       requirementPassed: false,
-      artifactIntegrityVerified: false,
-      evidenceGrounded: false,
-      gateEligible: false,
-      machineGate: run.machineGate,
+      ...proofCredibility(
+        {
+          artifactIntegrityVerified: machineGate.evidenceComplete,
+          evidenceGrounded: machineGate.evidenceComplete,
+          evidenceComplete: machineGate.evidenceComplete
+        },
+        machineGate,
+        false
+      ),
+      machineGate,
       judgeRecommendation: run.judgeRecommendation,
       humanDecision: run.humanDecision,
       finalStatus
     },
-    machineGate: run.machineGate ?? {
-      status: finalStatus,
-      reasons: ["run_bundle_unavailable"],
-      assertionFailures: [],
-      evidenceComplete: false
-    },
+    machineGate,
     judgeRecommendation: run.judgeRecommendation ?? {
       status: finalStatus === "fail" ? "fail" : "needs-human-review",
       summary: "Run reached a terminal state before a report bundle was committed.",
@@ -504,6 +691,7 @@ app.get("/artifacts/*", requireArtifactAccess, (req, res, next) => {
 app.use(requireApiToken);
 app.use(knowledgeRouter());
 app.use(planRouter(assertProjectAccess));
+app.use(repairRouter(assertProjectAccess));
 app.use("/api/credentials", requireRole(["admin"]));
 app.use("/api/projects/grants", requireRole(["admin"]));
 app.post("/v1/runs", requireRole(["admin", "runner"]));
@@ -1155,6 +1343,11 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
     if (!credential) return void res.status(409).json({ error: "assistant_model_not_configured" });
     const graph = await getAgentGraphProjection(run.id);
     const repairs = await listRepairSessions(run.id);
+    // Owner-aware repair plan derived from the persisted failure attributions.
+    // It is the single source of the "需要你做什么" instruction for this run.
+    const runRepairPlan = await resolveRunRepairPlan(run.resultRunId ?? run.id);
+    const runRepairPlanPayload = toRepairPlanPayload(runRepairPlan);
+    const runRepairDecision = toAssistantRepairDecision(runRepairPlan);
     const resultFacts = await readRunBundle(run.resultRunId ?? run.id)
       .then((bundle) => {
         const pageObservations = bundle.evidence
@@ -1285,7 +1478,12 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
         "request-repair",
         "request-interrupt-resume"
       ],
-      allowedTools: ["read-run-evidence", "read-repair-history"],
+      allowedTools: [
+        "read-run-evidence",
+        "read-repair-history",
+        "read-page-observation",
+        "read-discovery-candidates"
+      ],
       unknowns: resultFacts ? [] : [{
         id: "saved-result-unavailable",
         question: "What durable execution result and evidence were saved for this run?",
@@ -1345,7 +1543,7 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
         "Only claim code was repaired when repairHistory contains concrete changed files, and name those files.",
         "Do not push technical diagnosis back to the user when resultFacts already identify a timeout, selector, script, environment or product failure.",
         "When a test-script, selector or product failure has no repair yet, explain that the system can create and validate a sandbox repair, return suggestedAction=create-repair and require confirmation.",
-        "If the user asks to retry only failed paths, return suggestedAction=retry-failed-path. If the user asks to continue all other safe executable paths, return suggestedAction=continue-safe-paths. Both require confirmation.",
+        "Only recommend retry-failed-path when a persisted failed attempt exists. For sandbox, Docker, port, or project-start failures, return retry-runtime. For a connected page whose discovery is incomplete, return retry-discovery. If no safe recovery exists, return none.",
         "Translate direct user commands such as pause, resume, cancel, revise the plan, inspect evidence, retry failures, or continue safe paths into the matching suggestedAction. Never claim the action already happened.",
         "Use open-evidence only when the saved facts are genuinely insufficient; use resume-interrupt for missing permission or credential confirmation.",
         "Do not invent evidence, credentials, commands or test results.",
@@ -1404,10 +1602,11 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
         }
       });
       const safetyNormalized = assistantReplyNeedsNormalization(structured.assistant);
-      const assistant = safetyNormalized
+      const modelAssistant = safetyNormalized
         ? buildDeterministicAssistantFallback({
           userMessage: body.message,
           projectName: project?.name,
+          repairDecision: runRepairDecision,
           runState: run.state,
           finalStatus: run.gateStatus,
           summary: [
@@ -1421,11 +1620,15 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
           failedAssertions: resultFacts?.failedAssertions
         })
         : structured.assistant;
+      const assistant = runRepairPlanPayload
+        ? { ...modelAssistant, repairPlan: runRepairPlanPayload }
+        : modelAssistant;
       await appendAgentMessage({
         runId: run.id,
         role: "assistant",
         content: assistant.reply,
         reasoningSummary: assistant.reasoningSummary,
+        repairPlan: runRepairPlanPayload,
         knowledgeContextId: structured.llm.knowledgeContext.id,
         knowledgeDecisionId: structured.llm.knowledgeDecision.id,
         llmCallId: structured.llm.call.id,
@@ -1453,6 +1656,7 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
       const assistant = buildDeterministicAssistantFallback({
         userMessage: body.message,
         projectName: project?.name,
+        repairDecision: runRepairDecision,
         runState: run.state,
         finalStatus: run.gateStatus,
         summary: [
@@ -1474,6 +1678,7 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
         role: "assistant",
         content: assistant.reply,
         reasoningSummary: assistant.reasoningSummary,
+        repairPlan: runRepairPlanPayload,
         llmCallId: call.id,
         suggestedAction: assistant.suggestedAction,
         requiresConfirmation: assistant.requiresConfirmation
@@ -1486,8 +1691,11 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
 app.post("/v1/runs/:id/interrupts/:interruptId/resume", async (req, res, next) => {
   try {
     const body = z.object({
-      approved: z.boolean(),
-      input: z.record(z.unknown()).default({})
+      approved: z.boolean().optional(),
+      input: z.record(z.unknown()).default({}),
+      decision: z.enum(["repair", "create-session", "provide-credentials", "recover-sandbox", "reopen-discovery", "dismiss"]).optional(),
+      message: z.string().max(4_000).optional(),
+      repairPlanId: z.string().optional()
     }).parse(req.body);
     const run = await runEventStore.get(req.params.id);
     if (!run) return void res.status(404).json({ error: "run_not_found" });
@@ -1499,7 +1707,20 @@ app.post("/v1/runs/:id/interrupts/:interruptId/resume", async (req, res, next) =
       return void res.status(409).json({ error: "agent_interrupt_conflict" });
     }
     agentInterruptSchema.parse(interrupt);
-    const agent = await resumeAgentGraph(run.id, { approved: body.approved, ...body.input });
+    // The graph node that raised the interrupt decides how to interpret the
+    // resume value. plan-approval / browser-permission / execution-result nodes
+    // expect `{ approved, ...input }`; the repair-decision node expects a
+    // structured RepairDecisionAnswer. Forward the matching shape so the
+    // decision is actually applied rather than silently dismissed.
+    const resumeValue = interrupt.kind === "repair-decision"
+      ? { decision: body.decision ?? "dismiss", message: body.message, repairPlanId: body.repairPlanId }
+      : { approved: body.approved ?? true, ...body.input };
+    await resumeAgentGraph(run.id, resumeValue);
+    // `resume` returns the raw graph state, which is not a projection and would
+    // overwrite the client's view with a malformed object. Re-read the
+    // projection the graph persisted while resuming, so the caller also sees any
+    // *new* interrupt raised downstream of this decision.
+    const agent = await getAgentGraphProjection(run.id);
     res.json({ agent });
   } catch (error) { next(error); }
 });
@@ -1621,7 +1842,41 @@ app.post("/v1/repair-sessions/:id/apply", async (req, res, next) => {
     await assertProjectAccess(req, repair.projectId, "apply_source");
     const project = await getProject(repair.projectId);
     if (!project) return void res.status(404).json({ error: "project_not_found" });
-    res.json({ repair: await applyRepairSession(repair.id, project, { confirmHighRisk: body.confirmHighRisk }) });
+    const safety = getWriteSafetyLayer();
+    const proposed = safety.resolveProposal({
+      actionId: `apply-${repair.id}`,
+      proposedBy: "user",
+      capability: "apply_source_patch",
+      params: { repairSessionId: repair.id },
+      reason: "User explicitly confirmed applying the validated sandbox patch.",
+      sourceClaimIds: ["user-confirmation"],
+      riskLevel: "high",
+      requiresConfirmation: true,
+      idempotencyKey: `apply-${repair.id}`,
+      runId: run.id,
+      projectId: repair.projectId,
+      proposedAt: new Date().toISOString()
+    });
+    const policy = await safety.policyCheck(proposed);
+    if (!policy.allowed) return void res.status(403).json({ error: "write_policy_denied", policy });
+    const workflow = await safety.createApprovalWorkflow(proposed);
+    if (workflow.status === "pending") safety.approveWorkflow(workflow.workflowId, authContext(req)?.subject ?? "user", "Explicit apply confirmation");
+    let applied: Awaited<ReturnType<typeof applyRepairSession>> | undefined;
+    const execution = await safety.executeApproved(proposed, async () => {
+      applied = await applyRepairSession(repair.id, project, { confirmHighRisk: body.confirmHighRisk });
+      return {
+        executionId: `exec-${repair.id}`,
+        actionId: proposed.actionId,
+        status: "executed",
+        affectedTables: ["sandbox_source"],
+        affectedRows: applied.files.length,
+        durationMs: 0,
+        executedAt: new Date().toISOString(),
+        executorId: authContext(req)?.subject ?? "user"
+      };
+    });
+    if (execution.status !== "executed" || !applied) return void res.status(409).json({ error: "write_execution_failed", execution, workflow });
+    res.json({ repair: applied, workflow, execution });
   } catch (error) { next(error); }
 });
 
@@ -1637,6 +1892,7 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
     res.flushHeaders();
     let sentVersion = Number(req.header("last-event-id") ?? 0);
     let sentAgentUpdatedAt = "";
+    let lastInterruptId: string | undefined;
     const sentRepairUpdates = new Map<string, string>();
     const sentLlmCalls = new Map<string, string>();
     let sentEvidenceRoot = "";
@@ -1662,14 +1918,26 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
       }
       const agent = await getAgentGraphProjection(req.params.id);
       if (agent && agent.updatedAt !== sentAgentUpdatedAt) {
-        const eventName = agent.pendingInterrupt
-          ? "agent.interrupt"
-          : agent.status === "failed"
+        if (agent.pendingInterrupt) {
+          const isNew = agent.pendingInterrupt.id !== lastInterruptId;
+          if (isNew) {
+            res.write(`event: agent.interrupt.created\ndata: ${JSON.stringify(agent)}\n\n`);
+            lastInterruptId = agent.pendingInterrupt.id;
+          }
+          res.write(`event: agent.interrupt.waiting\ndata: ${JSON.stringify(agent)}\n\n`);
+          // Backward-compatible event the existing workbench may still consume.
+          res.write(`event: agent.interrupt\ndata: ${JSON.stringify(agent)}\n\n`);
+        } else if (lastInterruptId) {
+          res.write(`event: agent.interrupt.resumed\ndata: ${JSON.stringify(agent)}\n\n`);
+          lastInterruptId = undefined;
+        } else {
+          const eventName = agent.status === "failed"
             ? "agent.node.failed"
             : agent.status === "completed"
               ? "agent.node.completed"
               : "agent.node.started";
-        res.write(`event: ${eventName}\ndata: ${JSON.stringify(agent)}\n\n`);
+          res.write(`event: ${eventName}\ndata: ${JSON.stringify(agent)}\n\n`);
+        }
         sentAgentUpdatedAt = agent.updatedAt;
       }
       const repairs = await listRepairSessions(req.params.id);
@@ -2104,6 +2372,61 @@ app.get("/api/projects/:id/runtime", async (req, res, next) => {
   }
 });
 
+app.get("/api/projects/:id/recovery", async (req, res, next) => {
+  try {
+    const snapshot = projectRecoverySnapshots.get(req.params.id);
+    if (snapshot) return void res.json({ recovery: snapshot });
+    const runtime = await getProjectRuntimeStatusWithRecovery(req.params.id);
+    const action = runtimeRecoveryAction(runtime);
+    res.json({
+      recovery: {
+        recoveryId: "",
+        projectId: req.params.id,
+        action,
+        status: action === "unavailable" ? "blocked" : "accepted",
+        sourceError: runtime.failureReason ?? runtime.message,
+        runtime,
+        events: [],
+        userAction: recoveryUserAction(action, runtime),
+        updatedAt: new Date().toISOString()
+      } satisfies ProjectRecoveryResult
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/:id/recover-and-retry", async (req, res, next) => {
+  try {
+    const body = z.object({ mode: z.enum(["auto", "runtime", "discovery"]).default("auto") }).strict().parse(req.body ?? {});
+    const project = await getProject(req.params.id);
+    if (!project) return void res.status(404).json({ error: "project_not_found" });
+    const existing = projectRecoverySnapshots.get(req.params.id);
+    const runtime = await getProjectRuntimeStatusWithRecovery(req.params.id);
+    const task = recoverAndRetryProject(req.params.id, body.mode);
+    // Deliberately return immediately: Docker startup and dependency recovery
+    // may take minutes. The Workbench polls this same recovery record and
+    // updates one conversation message instead of leaving a dead button.
+    task.catch(() => undefined);
+    res.status(202).json({
+      accepted: true,
+      recovery: existing ?? projectRecoverySnapshots.get(req.params.id) ?? {
+        recoveryId: "",
+        projectId: req.params.id,
+        action: body.mode === "discovery" ? "retry-discovery" : runtimeRecoveryAction(runtime),
+        status: "accepted",
+        sourceError: runtime.failureReason ?? runtime.message,
+        runtime,
+        events: [],
+        userAction: "系统已接收恢复请求，正在同步安全沙盒状态。",
+        updatedAt: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/projects/:id/target-contract", async (req, res, next) => {
   try {
     const project = await getProject(req.params.id);
@@ -2356,7 +2679,8 @@ app.post("/api/planning/conversation", async (req, res, next) => {
         project,
         goal: body.message,
         flows: planning.businessFlows,
-        credentialId: body.credentialId
+        credentialId: body.credentialId,
+        pageObservation: discoverySmoke?.observation
       });
       planning.llmPlanning = advice;
       if (advice.status === "passed") {
@@ -2443,9 +2767,14 @@ app.post("/api/assistant/chat", async (req, res, next) => {
       project.id,
       body.context.finalStatus === "blocked"
     );
+    // The structured failure-attribution chain already decided who owns this
+    // failure and what the operator must do. Reuse that decision verbatim so the
+    // chat reply, the repair-plan API and the UI panel never diverge.
+    const chatRepairPlan = await resolveRunRepairPlan(body.context.runId);
     const fallbackInput = {
       userMessage: body.message,
       projectName: project.name,
+      repairDecision: toAssistantRepairDecision(chatRepairPlan),
       runState: body.context.runState,
       finalStatus: body.context.finalStatus,
       summary: body.context.summary,
@@ -2464,10 +2793,18 @@ app.post("/api/assistant/chat", async (req, res, next) => {
       }
     };
 
-    // Control commands are deterministic. They must remain available while a
-    // model credential is absent or the provider is unhealthy; recognizing a
-    // command is not the same as executing it.
-    if (requestedAssistantAction(body.message)) {
+    // Immediate run controls remain deterministic and available when a model
+    // provider is unhealthy. Recovery and Discovery commands deliberately go
+    // through the knowledge-bounded assistant first: it can inspect the latest
+    // committed observation/candidates and explain why that action is valid.
+    const requestedAction = requestedAssistantAction(body.message);
+    if (requestedAction && [
+      "pause-run",
+      "resume-run",
+      "cancel-run",
+      "start-run",
+      "open-evidence"
+    ].includes(requestedAction)) {
       return void res.json({
         assistant: buildDeterministicAssistantFallback(fallbackInput),
         call: deterministicAssistantCommandCall()
@@ -2583,7 +2920,13 @@ app.post("/api/assistant/chat", async (req, res, next) => {
         "request-repair",
         "request-interrupt-resume"
       ],
-      allowedTools: ["read-project-manifest", "read-run-evidence", "read-runtime-log"],
+      allowedTools: [
+        "read-project-manifest",
+        "read-run-evidence",
+        "read-runtime-log",
+        "read-page-observation",
+        "read-discovery-candidates"
+      ],
       unknowns: body.context.runId ? [] : [{
         id: "durable-run-not-created",
         question: "What is the durable run state and evidence?",
@@ -2622,8 +2965,8 @@ app.post("/api/assistant/chat", async (req, res, next) => {
       "Never claim a test passed merely because scheduling completed.",
       "Never invent screenshots, evidence, failures, credentials, actions, or API results.",
       "You may suggest an action but must require confirmation for starting, pausing, resuming, cancelling, or revising a plan.",
-      "Translate direct user commands into suggestedAction. Use retry-failed-path for retrying failed paths and continue-safe-paths for continuing other independently executable paths.",
-      "Before a durable run exists, suggestedAction=retry-failed-path means revising and revalidating the test plan, so knowledge.proposedActions must use capability=revise-plan. Use capability=request-interrupt-resume for resume-interrupt.",
+      "Translate direct user commands into suggestedAction. Only use retry-failed-path for a persisted failed path. Use retry-runtime for Docker, sandbox, project-start, port, or health failures; use retry-discovery for a connected page whose controls have not been discovered; use continue-safe-paths only for independently executable paths.",
+      "Before a durable run exists, do not suggest retry-failed-path or create-repair. If runtime facts show a sandbox/start failure, use retry-runtime; if page discovery is incomplete, use retry-discovery; otherwise use revise-plan or none. Use capability=request-interrupt-resume for resume-interrupt.",
       "Never say an action was executed merely because it was suggested.",
       "Keep the entire JSON concise: reply under 350 Chinese characters and at most 3 short observations. Knowledge citations and capability authorization are attached by the server; do not output a knowledge field.",
       "Return only the requested JSON object."
@@ -2695,9 +3038,15 @@ app.post("/api/assistant/chat", async (req, res, next) => {
         ...structured.assistant,
         pageObservation: body.context.pageObservation
       });
-      const assistant = safetyNormalized
+      const modelAssistant = safetyNormalized
         ? buildDeterministicAssistantFallback(fallbackInput)
         : structured.assistant;
+      // A model reply never invents the repair plan: it is attached from the
+      // deterministic decision so the panel stays evidence-backed.
+      const chatRepairPlanPayload = toRepairPlanPayload(chatRepairPlan);
+      const assistant = chatRepairPlanPayload
+        ? { ...modelAssistant, repairPlan: chatRepairPlanPayload }
+        : modelAssistant;
       res.json({
         assistant,
         call: {
@@ -3214,6 +3563,33 @@ app.get("/api/storage/status", async (_req, res, next) => {
   }
 });
 
+// Sustainable-agent observability surface. These endpoints expose only the
+// structured, redacted projections; raw credentials and prompts never leave
+// the provider/knowledge-boundary layer.
+app.get("/api/agent/sustainability", async (_req, res, next) => {
+  try {
+    const platform = getAgentSustainability();
+    res.json({
+      modules: ["context-layer", "memory", "tool-gateway", "write-safety", "tracing", "llm-input", "feedback-loop"],
+      tools: platform.tools.getRegistry().listTools(),
+      pendingApprovals: platform.writeSafety.getPendingApprovals().length,
+      feedback: platform.feedback.getStageCounts()
+    });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/runs/:runId/trace", async (req, res, next) => {
+  try {
+    const chain = getAgentSustainability().tracer.getChainByRunId(req.params.runId);
+    if (!chain) return void res.status(404).json({ error: "trace_not_found", runId: req.params.runId });
+    res.json({ chain, spans: chain.spans });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/agent/tools", (_req, res) => {
+  res.json({ tools: getAgentSustainability().tools.getRegistry().listTools() });
+});
+
 app.get("/api/storage/archives", async (_req, res, next) => {
   try {
     res.json({ archives: await listStorageArchives() });
@@ -3266,6 +3642,7 @@ app.post("/api/desktop-capture/screenshot", async (req, res, next) => {
 app.use(errorHandler);
 
 assertSecurityConfig(host);
+initializeAgentSustainability();
 app.listen(port, host, () => {
   console.log(`AI Test Officer agent listening on http://${host}:${port}`);
   console.log("Security boundary:", securitySummary());

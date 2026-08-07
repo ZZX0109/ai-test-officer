@@ -362,6 +362,39 @@ export interface PlanningMessage {
   };
   suggestedAction?: AssistantSuggestedAction;
   requiresConfirmation?: boolean;
+  /** Structured, owner-aware repair plan surfaced from the failure-attribution
+   * + repair-decision chain, rendered by RepairPlanPanel. */
+  repairPlan?: RepairPlanData;
+}
+
+export interface RepairPlanData {
+  owner: "agent" | "user" | "environment" | "developer" | string;
+  problem?: string;
+  steps: string[];
+  validation: string;
+  message?: string;
+  /** `RepairActionType` that produced this plan. Drives the executable action. */
+  type?: string;
+  /** Whether the agent may act without a human. */
+  executable?: boolean;
+  /** Persisted `repair_plans_v1.id`, so an action can be attributed and audited. */
+  planId?: string;
+  runId?: string;
+  attemptId?: string;
+  scenarioId?: string;
+  status?: "pending" | "applied" | "resolved" | "dismissed" | string;
+  /** Evidence ids the plan was derived from; rendered as "看证据" affordances. */
+  evidenceRefs?: string[];
+  policyVersion?: string;
+  /** The concrete workbench action the user can execute from this plan. */
+  action?: Exclude<AssistantSuggestedAction, "none">;
+}
+
+/** Lifecycle of the action button rendered inside `RepairPlanPanel`. */
+export interface RepairPlanActionStatus {
+  planId?: string;
+  state: "idle" | "running" | "done" | "error";
+  message?: string;
 }
 
 export type AssistantSuggestedAction =
@@ -373,8 +406,13 @@ export type AssistantSuggestedAction =
   | "cancel-run"
   | "resume-interrupt"
   | "create-repair"
+  | "retry-runtime"
+  | "retry-discovery"
   | "retry-failed-path"
   | "continue-safe-paths"
+  // Owner=user credential failures: retrying is useless until an account is
+  // bound, so the assistant offers the credential form instead.
+  | "configure-credentials"
   | "open-evidence";
 
 export interface PlannedBusinessFlow {
@@ -942,6 +980,28 @@ export interface ProjectRuntimeStatus {
   message?: string;
 }
 
+export type ProjectRecoveryAction = "retry-runtime" | "retry-discovery" | "retry-path" | "create-repair" | "unavailable";
+export type ProjectRecoveryStatus = "accepted" | "running" | "completed" | "blocked" | "failed";
+
+export interface ProjectRecoveryEvent {
+  phase: "docker_launching" | "daemon_waiting" | "sandbox_starting" | "health_checking" | "discovery_retrying" | "completed" | "blocked";
+  message: string;
+  at: string;
+}
+
+export interface ProjectRecoveryResult {
+  recoveryId: string;
+  projectId: string;
+  action: ProjectRecoveryAction;
+  status: ProjectRecoveryStatus;
+  sourceError?: string;
+  runtime: ProjectRuntimeStatus;
+  events: ProjectRecoveryEvent[];
+  discovery?: DiscoveryScanResult;
+  userAction: string;
+  updatedAt: string;
+}
+
 export interface RuntimeRecoveryAdvice {
   status: "not_configured" | "passed" | "failed";
   summary?: string;
@@ -1132,7 +1192,10 @@ export interface DiscoveryScanResult {
     callId?: string;
     errorCode?: string;
   };
-  status: "passed" | "partial" | "failed";
+  /** `waiting-auth` means the page loaded but is a login wall — a user action,
+   * not a system failure. */
+  status: "passed" | "partial" | "failed" | "waiting-auth";
+  requiredAction?: "credential_required";
   message: string;
   orchestration?: {
     status: "waiting" | "ready" | "blocked" | "failed";
@@ -1355,17 +1418,58 @@ export type AgentGraphNode =
   | "repair"
   | "finalize";
 
+export type AgentInterruptOwner = "agent" | "user" | "environment" | "developer";
+
+/** Concrete operations a human may pick when resolving a `repair-decision`. */
+export type RepairDecisionValue =
+  | "repair"
+  | "create-session"
+  | "provide-credentials"
+  | "recover-sandbox"
+  | "reopen-discovery"
+  | "dismiss";
+
+export interface AgentInterruptOption {
+  value: RepairDecisionValue | string;
+  label: string;
+  description?: string;
+}
+
 export interface AgentInterrupt {
   id: string;
   runId: string;
-  kind: "plan-approval" | "browser-permission" | "credential" | "network-install" | "dangerous-operation" | "repair-apply" | "execution-result";
+  kind:
+    | "plan-approval"
+    | "browser-permission"
+    | "credential"
+    | "network-install"
+    | "dangerous-operation"
+    | "repair-apply"
+    | "repair-decision"
+    | "execution-result";
   status: "pending" | "approved" | "rejected" | "expired";
   title: string;
   detail: string;
   requestedCapabilities: string[];
   payload: Record<string, unknown>;
+  /** Rich carrier for the unified human-in-the-loop `repair-decision`. */
+  owner?: AgentInterruptOwner;
+  context?: Record<string, unknown>;
+  options?: AgentInterruptOption[];
+  diagnoses?: string[];
+  evidenceRefs?: string[];
+  attemptId?: string;
+  scenarioId?: string;
+  decision?: string;
   createdAt: string;
   resolvedAt?: string;
+}
+
+/** The answer submitted when resuming a `repair-decision` interrupt. */
+export interface RepairDecisionAnswer {
+  decision: RepairDecisionValue;
+  message?: string;
+  repairPlanId?: string;
 }
 
 export interface AgentGraphProjection {
@@ -1378,6 +1482,8 @@ export interface AgentGraphProjection {
   completedNodes: AgentGraphNode[];
   progress: number;
   pendingInterrupt?: AgentInterrupt;
+  interruptOwner?: AgentInterruptOwner;
+  interruptContext?: Record<string, unknown>;
   lastError?: { code: string; message: string; node?: AgentGraphNode };
   tokenUsage: number;
   repairSessionId?: string;

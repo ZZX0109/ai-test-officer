@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import {
   assistantReplyNeedsNormalization,
   buildDeterministicAssistantFallback,
-  deterministicAssistantCall
+  deterministicAssistantCall,
+  requestedAssistantAction
 } from "../src/assistantFallback.js";
 
 export function testAssistantFallback() {
+  assert.equal(requestedAssistantAction("重新启动 Docker 沙盒"), "retry-runtime");
+  assert.equal(requestedAssistantAction("重新扫描页面并绑定路径"), "retry-discovery");
+  assert.equal(requestedAssistantAction("重试失败链路"), "retry-failed-path");
   const binding = buildDeterministicAssistantFallback({
     userMessage: "重试失败链路",
     projectName: "PsyExpGen",

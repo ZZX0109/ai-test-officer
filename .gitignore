@@ -6,6 +6,7 @@ agent/dist/
 app-under-test/dist/
 workbench-ui/dist/
 .DS_Store
+.workbuddy/
 .env
 .env.*
 !.env.example

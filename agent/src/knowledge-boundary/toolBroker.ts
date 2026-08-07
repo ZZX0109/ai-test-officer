@@ -11,6 +11,8 @@ import {
 import { readRunBundle } from "../evidenceStore.js";
 import { getProject, getProjectRuntimeStatusWithRecovery } from "../projectAdapter.js";
 import { listRepairSessions } from "../repairWorkspace.js";
+import { readLatestDiscoveryPageObservation } from "../pageObservationStore.js";
+import { listScenarioDrafts } from "../harnessGapStore.js";
 import type { EvidenceItem } from "../types.js";
 import {
   canonicalSha256,
@@ -27,7 +29,9 @@ export const KNOWLEDGE_READ_TOOLS = [
   "inspect-route",
   "inspect-api-operation",
   "read-repair-history",
-  "read-runtime-log"
+  "read-runtime-log",
+  "read-page-observation",
+  "read-discovery-candidates"
 ] as const;
 
 type KnowledgeReadTool = typeof KNOWLEDGE_READ_TOOLS[number];
@@ -358,6 +362,87 @@ async function executeReadTool(
         sourceRefs: [`repair:${session.id}`],
         scope: { runId }
       })),
+      data
+    };
+  }
+  if (tool === "read-page-observation") {
+    const projectId = typeof input.projectId === "string"
+      ? input.projectId
+      : context.projectSnapshot?.projectId;
+    if (!projectId) throw new Error("knowledge_tool_input_missing:projectId");
+    if (context.projectSnapshot?.projectId && context.projectSnapshot.projectId !== projectId) {
+      throw new Error("knowledge_source_cross_project");
+    }
+    const stored = await readLatestDiscoveryPageObservation(projectId);
+    if (!stored) throw new Error("knowledge_discovery_observation_not_found");
+    const observation = stored.observation;
+    const data = {
+      id: observation.id,
+      status: observation.status,
+      stage: observation.stage,
+      requestedUrl: observation.requestedUrl,
+      finalUrl: observation.finalUrl,
+      capturedAt: observation.capturedAt,
+      durationMs: observation.durationMs,
+      navigation: observation.navigation,
+      document: {
+        readyState: observation.document.readyState,
+        bodyTextSample: observation.document.bodyTextSample,
+        interactiveElementCount: observation.document.interactiveElementCount,
+        controls: observation.document.controls
+      },
+      console: observation.console,
+      pageErrors: observation.pageErrors,
+      failedRequests: observation.failedRequests,
+      diagnosis: observation.diagnosis,
+      screenshot: observation.screenshot
+    };
+    return {
+      summary: `Read the latest committed page observation for project ${projectId}: ${observation.status}, ${observation.document.interactiveElementCount} interactive controls at ${observation.finalUrl}.`,
+      claims: [claim({
+        statement: `Discovery ${observation.id} observed ${observation.document.interactiveElementCount} interactive controls at ${observation.finalUrl}; status=${observation.status}; diagnosis=${observation.diagnosis.summary}`,
+        domain: "runtime",
+        sourceRefs: [`discovery:${observation.id}`],
+        scope: { projectId }
+      })],
+      data
+    };
+  }
+  if (tool === "read-discovery-candidates") {
+    const projectId = typeof input.projectId === "string"
+      ? input.projectId
+      : context.projectSnapshot?.projectId;
+    if (!projectId) throw new Error("knowledge_tool_input_missing:projectId");
+    if (context.projectSnapshot?.projectId && context.projectSnapshot.projectId !== projectId) {
+      throw new Error("knowledge_source_cross_project");
+    }
+    const drafts = (await listScenarioDrafts()).filter((draft) => {
+      const matcher = draft.scenario.matcher;
+      if (!matcher || typeof matcher !== "object" || Array.isArray(matcher)) return false;
+      const projectIds = (matcher as Record<string, unknown>).projectIds;
+      return Array.isArray(projectIds) && projectIds.includes(projectId);
+    }).slice(-30);
+    const data = drafts.map((draft) => ({
+      scenarioId: draft.scenarioId,
+      title: typeof draft.scenario.title === "string" ? draft.scenario.title : draft.scenarioId,
+      reviewStatus: draft.draftReviewStatus ?? "draft",
+      selectorProbeStatus: draft.selectorProbeStatus ?? "not_run",
+      riskKind: draft.riskKind,
+      selectors: modelSafeUnknown(draft.selectors),
+      actions: draft.actions?.slice(0, 20) ?? [],
+      oracles: modelSafeUnknown(draft.oracles),
+      evidenceRequirements: draft.evidenceRequirements?.slice(0, 20) ?? [],
+      missingInfo: draft.missingInfo?.slice(0, 20) ?? [],
+      probeTrace: modelSafeUnknown(draft.probeTrace)
+    }));
+    return {
+      summary: `Read ${data.length} Discovery scenario candidates scoped to project ${projectId}.`,
+      claims: [claim({
+        statement: `Project ${projectId} currently has ${data.length} persisted Discovery scenario candidates; ${data.filter((item) => item.selectorProbeStatus === "passed").length} passed selector probing.`,
+        domain: "project-static",
+        sourceRefs: [`project:${projectId}`],
+        scope: { projectId }
+      })],
       data
     };
   }

@@ -1,8 +1,14 @@
 import type { ReactNode } from "react";
 import { Bot, ChevronDown, Clock3, UserRound } from "lucide-react";
-import type { PlanningMessage } from "../types";
+import type {
+  AssistantSuggestedAction,
+  PlanningMessage,
+  RepairPlanActionStatus,
+  RepairPlanData
+} from "../types";
 import { AssistantReasoningSummary } from "./AssistantReasoningSummary";
 import { KnowledgeBasis } from "./KnowledgeBasis";
+import { RepairPlanPanel } from "./RepairPlanPanel";
 
 function conciseLabelledReply(content: string) {
   const labels = ["遇到的问题", "系统已经做了什么", "需要你做什么"] as const;
@@ -76,10 +82,20 @@ function timeLabel(value: string) {
 
 export function AssistantConversationMessage({
   message,
-  actions
+  actions,
+  onRepairPlanAction,
+  onOpenRepairEvidence,
+  repairPlanActionStatus
 }: {
   message: PlanningMessage;
   actions?: ReactNode;
+  /**
+   * Executes the repair plan's action. When omitted the panel renders read-only
+   * — used for历史消息, where re-running an action would be misleading.
+   */
+  onRepairPlanAction?: (action: Exclude<AssistantSuggestedAction, "none">, plan: RepairPlanData) => void;
+  onOpenRepairEvidence?: (evidenceId: string, plan: RepairPlanData) => void;
+  repairPlanActionStatus?: RepairPlanActionStatus;
 }) {
   const presentation = assistantPresentation(message.content);
   const assistant = message.role === "assistant";
@@ -130,6 +146,14 @@ export function AssistantConversationMessage({
       ) : null}
       {assistant ? <AssistantReasoningSummary message={message} /> : null}
       {assistant ? <KnowledgeBasis message={message} /> : null}
+      {assistant && message.repairPlan ? (
+        <RepairPlanPanel
+          data={message.repairPlan}
+          onAction={onRepairPlanAction}
+          onOpenEvidence={onOpenRepairEvidence}
+          actionStatus={repairPlanActionStatus}
+        />
+      ) : null}
       {actions ? <div className="assistant-inline-actions">{actions}</div> : null}
     </article>
   );

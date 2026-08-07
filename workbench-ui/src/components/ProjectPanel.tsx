@@ -18,12 +18,6 @@ interface ProjectPanelProps {
   onRunDiagnosis: () => Promise<void>;
   onStop: () => void;
   onApplyRecoveryCandidate?: (candidateId: string) => void;
-  onSaveLoginCredential: (input: {
-    username: string;
-    password: string;
-    usernameEnv: string;
-    passwordEnv: string;
-  }) => Promise<void>;
 }
 
 export function ProjectPanel({
@@ -41,21 +35,13 @@ export function ProjectPanel({
   onDraftChange,
   onRunDiagnosis,
   onStop,
-  onApplyRecoveryCandidate,
-  onSaveLoginCredential
+  onApplyRecoveryCandidate
 }: ProjectPanelProps) {
-  const [loginUsername, setLoginUsername] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
-  const [savingLogin, setSavingLogin] = useState(false);
   const [startRequested, setStartRequested] = useState(false);
   const [hasSeenLaunchPhase, setHasSeenLaunchPhase] = useState(false);
-  const [loginSaveMessage, setLoginSaveMessage] = useState("");
   const [loginSettingsOpen, setLoginSettingsOpen] = useState(false);
   const [, setClockTick] = useState(0);
   useEffect(() => {
-    setLoginUsername("");
-    setLoginPassword("");
-    setLoginSaveMessage("");
     setLoginSettingsOpen(false);
   }, [draft?.id]);
   useEffect(() => {
@@ -280,57 +266,15 @@ export function ProjectPanel({
         open={loginSettingsOpen}
         onToggle={(event) => setLoginSettingsOpen(event.currentTarget.open)}
       >
-        <summary>登录与测试账号（需要登录时配置）</summary>
+        <summary>登录与测试账号（在开始测试时配置）</summary>
         <p className="project-login-explanation">
-          系统只识别登录功能和配置名称，不读取项目中的明文密码。这里填写的账号会加密保存，并仅在测试启动时注入沙盒。
+          系统只识别登录功能和配置名称。只有本次测试计划包含登录步骤时，开始测试准备窗口才会请求账号；账号会加密保存，并仅在测试启动时注入沙盒。
         </p>
-        <div className="connector-grid">
-          <label>
-            测试账号
-            <input
-              autoComplete="off"
-              value={loginUsername}
-              onChange={(event) => setLoginUsername(event.target.value)}
-              placeholder="邮箱或用户名"
-            />
-          </label>
-          <label>
-            测试密码
-            <input
-              type="password"
-              autoComplete="new-password"
-              value={loginPassword}
-              onChange={(event) => setLoginPassword(event.target.value)}
-              placeholder={login.credentialId ? "已配置；留空不会修改" : "输入测试密码"}
-            />
-          </label>
-        </div>
-        <button
-          type="button"
-          className="secondary project-login-save"
-          disabled={!loginUsername.trim() || !loginPassword || savingLogin}
-          onClick={async () => {
-            setSavingLogin(true);
-            setLoginSaveMessage("");
-            try {
-              await onSaveLoginCredential({
-                username: loginUsername.trim(),
-                password: loginPassword,
-                usernameEnv: login.usernameEnv ?? detection?.loginCapability?.usernameEnv ?? "E2E_USERNAME",
-                passwordEnv: login.passwordEnv ?? detection?.loginCapability?.passwordEnv ?? "E2E_PASSWORD"
-              });
-              setLoginPassword("");
-              setLoginSaveMessage("测试账号已加密保存，运行时会自动注入沙盒。");
-            } catch (error) {
-              setLoginSaveMessage(error instanceof Error ? error.message : "测试账号保存失败。");
-            } finally {
-              setSavingLogin(false);
-            }
-          }}
-        >
-          {savingLogin ? "正在保存…" : login.credentialId ? "更新测试账号" : "保存测试账号"}
-        </button>
-        {loginSaveMessage ? <p className="project-login-save-message">{loginSaveMessage}</p> : null}
+        <p className="project-login-status">
+          {login.credentialId
+            ? "已存在加密测试账号。需要更换账号时，请在开始测试准备窗口中更新。"
+            : "当前尚未保存测试账号；没有登录步骤的测试不会要求配置账号。"}
+        </p>
         <details className="wizard-details project-login-advanced">
           <summary>查看系统识别的登录配置</summary>
           <p>账号变量：{login.usernameEnv ?? detection?.loginCapability?.usernameEnv ?? "E2E_USERNAME"}</p>

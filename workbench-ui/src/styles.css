@@ -284,6 +284,61 @@ h3 {
   border-radius: 3px;
 }
 
+/* Evidence locator: applied briefly when the workbench asks to jump to a piece
+   of evidence (e.g. from a repair plan). Works in both light and dark themes
+   via the shared --accent token. */
+.evidence-focus {
+  outline: 2px solid var(--accent, #2f80ed);
+  outline-offset: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, #2f80ed) 14%, transparent);
+  animation: evidence-pulse 1.2s ease-in-out 0s 2;
+  scroll-margin: 24px;
+}
+
+@keyframes evidence-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(47, 128, 237, 0); }
+  50% { box-shadow: 0 0 0 6px rgba(47, 128, 237, 0.18); }
+}
+
+.evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.evidence-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.05));
+}
+
+.evidence-item header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.evidence-type {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--accent, #2f80ed);
+  color: #fff;
+}
+
+.evidence-item code {
+  font-size: 12px;
+  opacity: 0.8;
+  word-break: break-all;
+}
+
 /* ---- Main panel (center) ---- */
 
 .main-panel {
@@ -6246,3 +6301,307 @@ textarea,
   color: #738196;
   word-break: break-all;
 }
+
+/* Repair plan: who owns the failure, what to do, how it is verified. */
+.repair-plan-panel {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #cddff0;
+  border-left: 3px solid #3b82f6;
+  border-radius: 10px;
+  background: #f7fbff;
+  font-size: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.repair-plan-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 650;
+}
+
+.repair-plan-owner {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #e8eef6;
+  color: #43536a;
+}
+
+.repair-plan-owner-agent {
+  background: #e3f2e8;
+  color: #23694a;
+}
+
+.repair-plan-owner-user {
+  background: #fdf0d8;
+  color: #8a5b12;
+}
+
+.repair-plan-owner-environment {
+  background: #e6eefd;
+  color: #24467f;
+}
+
+.repair-plan-owner-developer {
+  background: #f2e9fb;
+  color: #5b3a8c;
+}
+
+.repair-plan-panel p {
+  margin: 0;
+  line-height: 1.6;
+  color: #33455c;
+}
+
+.repair-plan-message {
+  white-space: pre-wrap;
+}
+
+.repair-plan-label {
+  display: inline-block;
+  margin-right: 6px;
+  color: #6d7d92;
+  font-weight: 650;
+}
+
+.repair-plan-steps ol {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 4px;
+  color: #33455c;
+}
+
+.repair-plan-validation {
+  padding-top: 6px;
+  border-top: 1px solid #e2ecf7;
+  color: #4a5b71;
+}
+
+/* ---------------------------------------------------------------------------
+   Interrupt decision panel
+   A paused run is the one moment the product must be unmissable: the panel is
+   amber-accented and animated so the operator immediately sees the run is
+   waiting on them rather than silently stalled.
+--------------------------------------------------------------------------- */
+.interrupt-decision-panel {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--yellow-border, rgba(204, 167, 0, 0.3));
+  border-left: 3px solid var(--yellow, #cca700);
+  border-radius: var(--radius, 6px);
+  background: var(--yellow-bg, rgba(204, 167, 0, 0.12));
+  font-size: 13px;
+  color: var(--text-primary, #33455c);
+  animation: interrupt-decision-enter 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes interrupt-decision-enter {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.interrupt-decision-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.interrupt-decision-heading {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.interrupt-decision-heading strong { font-size: 14px; }
+
+.interrupt-decision-subtitle {
+  font-size: 11px;
+  color: var(--text-secondary, #6a7c93);
+}
+
+.interrupt-decision-pulse {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--yellow, #cca700);
+  box-shadow: 0 0 0 0 rgba(204, 167, 0, 0.6);
+  animation: interrupt-decision-pulse 1.8s ease-out infinite;
+}
+
+@keyframes interrupt-decision-pulse {
+  70% { box-shadow: 0 0 0 8px rgba(204, 167, 0, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(204, 167, 0, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .interrupt-decision-panel { animation: none; }
+  .interrupt-decision-pulse { animation: none; }
+}
+
+.interrupt-decision-owner {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill, 999px);
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--bg-tertiary, #e8eef6);
+  color: var(--text-secondary, #43536a);
+}
+
+.interrupt-decision-owner-user { background: var(--blue-bg, #e3edfb); color: var(--blue, #2b6cb0); }
+.interrupt-decision-owner-environment { background: var(--yellow-bg, #fdf1dd); color: var(--yellow, #a15c07); }
+.interrupt-decision-owner-developer { background: var(--red-bg, #fbe6e6); color: var(--red, #b03a3a); }
+.interrupt-decision-owner-agent { background: var(--green-bg, #e3f2e8); color: var(--green, #2f7a4d); }
+
+.interrupt-decision-panel p { margin: 0; line-height: 1.6; }
+.interrupt-decision-problem { white-space: pre-wrap; }
+
+.interrupt-decision-block { display: grid; gap: 4px; }
+
+.interrupt-decision-label {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary, #55657d);
+}
+
+.interrupt-decision-block ul,
+.interrupt-decision-block ol {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 3px;
+  line-height: 1.55;
+}
+
+.interrupt-decision-evidence {
+  list-style: none;
+  padding-left: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.interrupt-decision-evidence button {
+  padding: 2px 8px;
+  border: 1px solid var(--border, #cddff0);
+  border-radius: var(--radius-pill, 999px);
+  background: transparent;
+  color: inherit;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  cursor: pointer;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s ease;
+}
+
+.interrupt-decision-evidence button:hover {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.05));
+  transform: translateY(-1px);
+}
+
+.interrupt-decision-warning {
+  padding: 6px 8px;
+  border-radius: var(--radius, 6px);
+  background: var(--red-bg, #fbe6e6);
+  color: var(--red, #b03a3a);
+  font-size: 12px;
+}
+
+.interrupt-decision-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.interrupt-decision-refs div { display: flex; gap: 4px; align-items: baseline; }
+.interrupt-decision-refs dt { color: var(--text-secondary, #6a7c93); font-weight: 600; }
+.interrupt-decision-refs dd { margin: 0; font-family: var(--font-mono, monospace); }
+
+.interrupt-decision-options {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.interrupt-decision-options legend { padding: 0; margin-bottom: 4px; }
+
+.interrupt-decision-option {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #cddff0);
+  border-radius: var(--radius, 6px);
+  background: var(--bg-secondary, #ffffff);
+  cursor: pointer;
+  transition: border-color 0.2s ease, transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.interrupt-decision-option:hover { transform: translateY(-1px); }
+.interrupt-decision-option.is-selected {
+  border-color: var(--border-focus, #3b82f6);
+  box-shadow: inset 0 0 0 1px var(--border-focus, #3b82f6);
+}
+
+.interrupt-decision-option input { margin-top: 3px; flex: none; }
+.interrupt-decision-option-body { display: grid; gap: 2px; }
+.interrupt-decision-option-body em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-secondary, #6a7c93);
+}
+
+.interrupt-decision-message { display: grid; gap: 4px; }
+.interrupt-decision-message textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border, #cddff0);
+  border-radius: var(--radius, 6px);
+  background: var(--bg-input, #ffffff);
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+}
+
+.interrupt-decision-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.interrupt-decision-actions button { cursor: pointer; }
+.interrupt-decision-actions button:disabled { cursor: not-allowed; opacity: 0.6; }
+
+.interrupt-decision-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.interrupt-decision-shortcuts button {
+  padding: 3px 10px;
+  border: 1px dashed var(--border, #cddff0);
+  border-radius: var(--radius-pill, 999px);
+  background: transparent;
+  color: var(--text-secondary, #55657d);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-style 0.2s ease, color 0.2s ease;
+}
+
+.interrupt-decision-shortcuts button:hover {
+  border-style: solid;
+  color: var(--text-primary, #33455c);
+}
+
+.interrupt-decision-hint { font-size: 11px; color: var(--text-secondary, #6a7c93); }
+.interrupt-decision-error { font-size: 12px; color: var(--red, #b03a3a); }

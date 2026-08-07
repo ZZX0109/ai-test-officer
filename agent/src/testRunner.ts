@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import path from "node:path";
 import type { Locator, Page } from "playwright";
 import type { ArtifactIntegrityReport, EvidenceItem, RunBundle, RunRequest, RunStepEvidence, VisualRunResult } from "./types.js";
@@ -34,6 +35,8 @@ import { buildLlmJudgeReport } from "./llmJudge.js";
 import { writeReadableReports } from "./reportRenderer.js";
 import { getProject, getProjectRuntimeStatus, resolveProjectTarget, startProject, stopProject, testProjectConnection } from "./projectAdapter.js";
 import { buildFailureAttributions } from "./failureAttribution.js";
+import { decideRepair } from "./repairDecision.js";
+import { persistRepairPlan, selectRepairableAttribution } from "./repairPlan.js";
 import { artifactKindToIntegrityKind, writeArtifactIntegrityReport } from "./artifactIntegrity.js";
 import { assertExecutablePlan } from "./executablePlan.js";
 import { withProjectRunLock } from "./runLock.js";
@@ -43,7 +46,7 @@ import { classifyRetry } from "./retryPolicy.js";
 import { mirrorArtifactsToConfiguredStore } from "./artifactObjectStore.js";
 import { getProjectLoginSecret } from "./projectLoginStore.js";
 import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
-import { finalizeProofBundle, type MachineGateDraft } from "./proof/proofBundleService.js";
+import { finalizeProofBundle, proofCredibility, type MachineGateDraft } from "./proof/proofBundleService.js";
 import { linkCommittedAttemptArtifacts } from "./proof/evidenceArtifactLinker.js";
 import {
   executeStructuredAction,
@@ -123,8 +126,15 @@ async function waitForUsablePageDom(page: Page) {
     .catch(() => false);
 }
 
-async function navigateToUsablePage(page: Page, url: string) {
-  await page.goto(url, { waitUntil: "commit", timeout: 15_000 });
+async function navigateToUsablePage(page: Page, url: string, onNavigation?: (event: { status: "started" | "succeeded" | "failed"; url: string; httpStatus?: number; error?: string }) => void) {
+  onNavigation?.({ status: "started", url });
+  try {
+    const response = await page.goto(url, { waitUntil: "commit", timeout: 15_000 });
+    onNavigation?.({ status: "succeeded", url: page.url(), httpStatus: response?.status() });
+  } catch (error) {
+    onNavigation?.({ status: "failed", url: page.url() || url, error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
   return waitForUsablePageDom(page);
 }
 
@@ -257,6 +267,7 @@ export interface CompiledActionExecutionContext {
   resolveFixture: (fixtureRef: string) => Promise<string>;
   resolveValue?: (valueRef: string) => Promise<string>;
   executeStructured?: (action: StructuredAction, stepId: string) => Promise<StructuredActionResult>;
+  onNavigation?: (event: { status: "started" | "succeeded" | "failed"; url: string; httpStatus?: number; error?: string }) => void;
 }
 
 /** Execute one already-bound DSL action without accepting raw selectors, URLs, values, or commands. */
@@ -267,7 +278,7 @@ export async function executeCompiledAction(action: ActionDsl, stepId: string, c
     const destination = new URL(action.path, base);
     if (destination.origin !== base.origin) throw new Error("compiled_plan_cross_origin_navigation");
     if (!destination.search && base.search) destination.search = base.search;
-    await navigateToUsablePage(page, destination.toString());
+    await navigateToUsablePage(page, destination.toString(), context.onNavigation);
     return;
   }
   if (action.action === "click") {
@@ -313,6 +324,18 @@ export function targetFrontendUrl(frontendUrl: string, fixtureVariantId?: string
   const url = new URL(frontendUrl);
   if (fixtureVariantId) url.searchParams.set("fixtureVariantId", fixtureVariantId);
   return url.toString();
+}
+
+/**
+ * Discovery drafts can outlive an OCI runtime allocation.  Their human
+ * readable smoke text may therefore contain the previous host port even
+ * though the actual target was re-resolved safely before Playwright starts.
+ * Keep the assertion text aligned with the runtime URL without changing the
+ * scenario contract or treating a stale port as a browser failure.
+ */
+function runtimeSmokeExpectation(expected: string, frontendUrl: string) {
+  const runtimeUrl = frontendUrl.replace(/\/$/, "");
+  return expected.replace(/https?:\/\/[^\s]+/g, runtimeUrl);
 }
 
 export async function runVisualGrayTest(input: RunRequest): Promise<VisualRunResult> {
@@ -362,6 +385,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const screenshotDir = path.join(reportsDir, "screenshots", id);
   const runDir = path.join(reportsDir, "runs", id);
   const evidenceWrites: Promise<unknown>[] = [];
+  const browserLifecycleEvents: Array<Record<string, unknown>> = [];
   // Product runs are rendered inside the Workbench live view. Launching an
   // extra OS browser window steals focus from the user and is not part of the
   // sandbox boundary. Keep execution headless unless a developer explicitly
@@ -458,7 +482,23 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const permissionEvidence = await appendEvidence(id, {
     type: "permission",
     title: "浏览器控制权限快照",
-    payload: { ...input.permissionProfile, headless, recordVideo, recordTrace, runtimeStatus }
+    payload: {
+      ...input.permissionProfile,
+      headless,
+      recordVideo,
+      recordTrace,
+      runtimeStatus,
+      executionOrigin: {
+        executor: "@ai-test-officer/playwright-runtime",
+        host: hostname(),
+        processId: process.pid,
+        browserContext: "isolated-playwright-context",
+        workbenchView: "passive-live-view-mirror",
+        targetFrontendUrl: frontendUrl,
+        targetBackendUrl: targetRuntime.backendUrl,
+        targetHealthCheckUrl: targetRuntime.healthCheckUrl
+      }
+    }
   });
   await appendLoopEvent(id, {
     loopType: "approval_loop",
@@ -476,12 +516,23 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const browserSession = await createPlaywrightRuntimeSession({
     headless,
     signal: input.signal,
+    onLifecycle: (event) => browserLifecycleEvents.push({ ...event, capturedAt: new Date().toISOString() }),
     contextOptions: {
       viewport: { width: 1280, height: 820 },
       ...(recordVideo ? { recordVideo: { dir: path.join(reportsDir, "videos") } } : {})
     }
   });
   const { context, page } = browserSession;
+  const recordBrowserLifecycle = () => {
+    for (const event of browserLifecycleEvents.splice(0)) {
+      evidenceWrites.push(appendEvidence(id, {
+        type: "operation",
+        title: `Playwright ${String(event.type)} ${String(event.status)}`,
+        payload: event
+      }));
+    }
+  };
+  recordBrowserLifecycle();
   let attemptTrace: PlaywrightAttemptTrace | undefined;
   const startAttemptTrace = async () => {
     if (!recordTrace) return;
@@ -617,15 +668,36 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     capturedScreenshotCount += 1;
     const file = path.join(screenshotDir, `${stepId}.png`);
     const url = artifactUrl(file);
-    const artifact = await captureScreenshotAtomic({
-      page,
-      finalPath: file,
-      id: `${id}_screenshot_${activeAttempt}_${stepId}`,
-      identity: attemptIdentity(),
-      stepId,
-      storageUri: url,
-      clock: attemptClock
-    });
+    let artifact: ArtifactV2;
+    try {
+      // A broken webfont or a page that keeps its font-loading promise open
+      // must not turn a real browser action into a fake selector failure. A
+      // screenshot is useful evidence, but it is supplementary; the DOM,
+      // network and Trace collectors remain authoritative when capture times
+      // out. The runtime also applies its own bounded timeout.
+      artifact = await captureScreenshotAtomic({
+        page,
+        finalPath: file,
+        id: `${id}_screenshot_${activeAttempt}_${stepId}`,
+        identity: attemptIdentity(),
+        stepId,
+        storageUri: url,
+        clock: attemptClock
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      evidenceWrites.push(appendEvidence(id, {
+        type: "operation",
+        title: `Screenshot ${stepId} unavailable`,
+        stepId,
+        payload: {
+          code: "screenshot_capture_failed",
+          failureClass: "insufficient_evidence",
+          message: message.slice(0, 500)
+        }
+      }));
+      return undefined;
+    }
     const viewport = page.viewportSize();
     const locatedArtifact: ArtifactV2 = {
       ...artifact,
@@ -981,7 +1053,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     return recordAssertion({
       name: scenario.smoke.assertionName,
       passed: visible,
-      expected: scenario.smoke.expected,
+      expected: runtimeSmokeExpectation(scenario.smoke.expected, frontendUrl),
       actual: visible ? "visible" : "hidden",
       fact: {
         kind: "element.visible",
@@ -1019,9 +1091,50 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     }, pathId, stepId);
   }
 
-  async function clickButton(name: string | undefined) {
+  async function clickButton(name: string | undefined, options: { allowObservedAuthButton?: boolean } = {}) {
     if (!name) throw new Error(`Scenario ${scenario.id} 缺少按钮名称`);
-    await page.getByRole("button", { name, exact: true }).click();
+    const exact = page.getByRole("button", { name, exact: true }).first();
+    if (await exact.count().catch(() => 0)) {
+      await exact.click();
+      return;
+    }
+    // Uploaded projects frequently use a different locale or wording for
+    // their login submit button. Only auth scenarios may use this fallback,
+    // and only after the declared selector was proven absent. The observed
+    // role/name still comes from the current page DOM; no arbitrary selector
+    // or command is accepted.
+    if (options.allowObservedAuthButton) {
+      const observed = page.getByRole("button", { name: /^(login|sign[ -]?in|登录|登录测试账号)$/i }).first();
+      if (await observed.count().catch(() => 0)) {
+        await observed.click();
+        return;
+      }
+    }
+    await exact.click();
+  }
+
+  async function resolveObservedLoginField(
+    declaredLocator: string | undefined,
+    declaredLabel: string | undefined,
+    kind: "username" | "password"
+  ) {
+    const declared = declaredLocator
+      ? page.locator(declaredLocator).first()
+      : declaredLabel
+        ? page.getByLabel(declaredLabel, { exact: true }).first()
+        : undefined;
+    if (declared && await declared.count().catch(() => 0)) return declared;
+    // Keep the fallback constrained to conventional login inputs. It is
+    // useful for real projects whose labels/locales differ from a registry
+    // template, while remaining auditable in the DOM and inaccessible to
+    // arbitrary model-generated selectors.
+    const candidates = kind === "password"
+      ? page.locator("input[type='password'], input[autocomplete='current-password']")
+      : page.locator("input[type='email'], input[name='username'], input[autocomplete='username'], input[type='text']");
+    const fallback = candidates.first();
+    if (await fallback.count().catch(() => 0)) return fallback;
+    if (declared) return declared;
+    throw new Error(`login_${kind}_field_not_found`);
   }
 
   async function runCoreAction(action: ScenarioAction) {
@@ -1039,15 +1152,11 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     if (action === "login_as_test_user") {
       if ((core.usernameLocator || core.usernameLabel) && (core.passwordLocator || core.passwordLabel)) {
         if (!projectLoginSecret) throw new Error("credential_missing:project_login_credential");
-        const username = core.usernameLocator
-          ? page.locator(core.usernameLocator)
-          : page.getByLabel(core.usernameLabel!, { exact: true });
-        const password = core.passwordLocator
-          ? page.locator(core.passwordLocator)
-          : page.getByLabel(core.passwordLabel!, { exact: true });
+        const username = await resolveObservedLoginField(core.usernameLocator, core.usernameLabel, "username");
+        const password = await resolveObservedLoginField(core.passwordLocator, core.passwordLabel, "password");
         await username.fill(projectLoginSecret.username);
         await password.fill(projectLoginSecret.password);
-        await clickButton(core.submitButtonName);
+        await clickButton(core.submitButtonName, { allowObservedAuthButton: true });
         return;
       }
       if (core.triggerButtonName) {
@@ -1056,7 +1165,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
           await logout.click();
         }
       }
-      await clickButton(core.submitButtonName);
+      await clickButton(core.submitButtonName, { allowObservedAuthButton: true });
       return;
     }
     if (action === "login_invalid_user") {
@@ -1203,21 +1312,24 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       result: "recorded",
       details: { runId: id, scenarioId: scenario.id, action: core.action }
     });
+    await page.waitForTimeout(core.waitMs ?? 700);
+    const firstScreenshot = await screenshot(`after_${core.stepId}`);
     const operationEvidence = await appendEvidence(id, {
       type: "operation",
       title: core.title,
       pathId: core.pathId,
       stepId: core.stepId,
-      file: artifactUrl(path.join(screenshotDir, `after_${core.stepId}.png`)),
-      artifactIds: [`${id}_screenshot_${activeAttempt}_after_${core.stepId}`],
+      ...(firstScreenshot ? {
+        file: firstScreenshot,
+        artifactIds: [`${id}_screenshot_${activeAttempt}_after_${core.stepId}`]
+      } : {}),
       payload: {
         action: core.action,
         target: core.triggerButtonName ?? core.submitButtonName ?? core.inputLabel,
-        input: core.input
+        input: core.input,
+        screenshotCaptured: Boolean(firstScreenshot)
       }
     });
-    await page.waitForTimeout(core.waitMs ?? 700);
-    const firstScreenshot = await screenshot(`after_${core.stepId}`);
 
     const preRetryOracles =
       core.action === "simulate_error_and_retry"
@@ -1468,8 +1580,10 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
               target: targetRuntime,
               signal: input.signal
             });
-          }
+          },
+          onNavigation: (event) => browserLifecycleEvents.push({ type: "page_goto", ...event, capturedAt: new Date().toISOString() })
         });
+        recordBrowserLifecycle();
         if (step.pathId === scenario.smoke.pathId && step.action.action === "navigate") {
           await evaluateCompiledSmokePath(step.id);
         }
@@ -1550,8 +1664,10 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
             title: `Compiled action ${step.action.action}`,
             pathId: step.pathId ?? scenario.corePath.pathId,
             stepId: step.id,
-            file: artifactUrl(path.join(screenshotDir, `${step.id}.png`)),
-            artifactIds: [`${id}_screenshot_${activeAttempt}_${step.id}`],
+            ...(stepScreenshot ? {
+              file: stepScreenshot,
+              artifactIds: [`${id}_screenshot_${activeAttempt}_${step.id}`]
+            } : {}),
             payload: {
               action: step.action.action,
               observationEvidenceRefs: [beforeObservation.evidence.id, afterObservation.evidence.id],
@@ -1661,7 +1777,8 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       decisionReason: "先确认页面基础可用",
       evidenceRefs: []
     });
-    await navigateToUsablePage(page, frontendUrl);
+    await navigateToUsablePage(page, frontendUrl, (event) => browserLifecycleEvents.push({ type: "page_goto", ...event, capturedAt: new Date().toISOString() }));
+    recordBrowserLifecycle();
     await appendAudit({
       type: "agent_action",
       action: "browser_open",
@@ -1673,8 +1790,10 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       type: "operation",
       title: scenario.smoke.title,
       stepId: scenario.smoke.stepId,
-      file: openScreenshot,
-      artifactIds: [`${id}_screenshot_${activeAttempt}_${scenario.smoke.stepId}`],
+      ...(openScreenshot ? {
+        file: openScreenshot,
+        artifactIds: [`${id}_screenshot_${activeAttempt}_${scenario.smoke.stepId}`]
+      } : {}),
       payload: { action: "browser_open", appUrl: frontendUrl }
     });
     steps.push({
@@ -1690,7 +1809,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     const pageAssertionEvidence = await recordAssertion({
       name: scenario.smoke.assertionName,
       passed: titleVisible,
-      expected: scenario.smoke.expected,
+      expected: runtimeSmokeExpectation(scenario.smoke.expected, frontendUrl),
       actual: titleVisible ? "标题可见" : "标题不可见",
       fact: {
         kind: "element.visible",
@@ -2131,11 +2250,13 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const { machineGate, verdict, issues, gateEligible } = finalizeProofBundle({
     draft: machineGateDraft,
     runId: id,
+    scenarioId: scenario.id,
+    attemptId: attemptIdentity().attemptId,
     evidence: latestEvidence,
     artifactsV2,
     artifactIntegrity: artifactIntegrityReport,
     requiredArtifactKinds: requiredKinds,
-    machineGate: { ...machineGateDraft, evidenceComplete: false },
+    machineGate: machineGateDraft,
     judgeReport,
     gateEligibleFacts: { executionSucceeded, requirementCovered }
   });
@@ -2152,9 +2273,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     executionSucceeded,
     requirementCovered,
     requirementPassed,
-    artifactIntegrityVerified: verdict.artifactIntegrityVerified,
-    evidenceGrounded: verdict.evidenceGrounded,
-    gateEligible,
+    ...proofCredibility(verdict, machineGate, gateEligible),
     proofValidationIssues: issues,
     machineGate,
     judgeRecommendation,
@@ -2170,6 +2289,19 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     impactAnalysis: input.impactAnalysis,
     diff: input.diff
   });
+  // Persist the owner-aware repair plan alongside the attribution. A failure
+  // that nobody owns is exactly the dead end this chain exists to remove.
+  const topAttribution = selectRepairableAttribution(failureAttributions);
+  if (runFailed && topAttribution) {
+    await persistRepairPlan({
+      runId: id,
+      projectId: targetRuntime.projectId ?? configuredProject?.id,
+      attributionId: topAttribution.id,
+      failureType: topAttribution.failureClass,
+      problem: topAttribution.title,
+      decision: decideRepair(topAttribution)
+    });
+  }
   const failedNames = assertions.filter((assertion) => !assertion.passed).map((assertion) => assertion.name);
   const reflectionNote = runFailed
     ? `本次失败集中在 ${scenario.corePath.title}：${failedNames.join("、") || executionError?.code}。下一轮应优先检查对应 evidence ID 的 network、DOM 和截图是否一致。`
@@ -2249,24 +2381,37 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   result.proofNodes = proofGraph.proofNodes;
   result.proofEdges = proofGraph.proofEdges;
   if (proofGraph.errors.length > 0 && result.finalStatus === "pass") {
-    result.machineGate = {
-      ...(result.machineGate ?? machineGate),
+    // A proof-graph inconsistency must downgrade the gate *through* the Proof
+    // Bundle Service — never by re-assigning credibility flags directly.
+    const degradedDraft: MachineGateDraft = {
       status: "needs-human-review",
-      evidenceComplete: false,
       reasons: [
         ...new Set([
           ...(result.machineGate?.reasons ?? machineGate.reasons),
           ...proofGraph.errors.map((error) => `proof_invalid:${error}`)
         ])
-      ]
+      ],
+      reasonDetails: result.machineGate?.reasonDetails ?? machineGate.reasonDetails,
+      assertionFailures: result.machineGate?.assertionFailures ?? machineGate.assertionFailures
     };
+    const degraded = finalizeProofBundle({
+      draft: degradedDraft,
+      runId: id,
+      scenarioId: scenario.id,
+      attemptId: attemptIdentity().attemptId,
+      evidence: latestEvidence,
+      artifactsV2,
+      artifactIntegrity: artifactIntegrityReport,
+      requiredArtifactKinds: requiredKinds,
+      machineGate: degradedDraft,
+      judgeReport
+    });
+    result.machineGate = degraded.machineGate;
     result.finalStatus = "needs-human-review";
     result.gateStatus = "needs-human-review";
     result.outcomeSummary = runOutcomeSummaryV2Schema.parse({
       ...(result.outcomeSummary ?? outcomeSummary),
-      evidenceGrounded: false,
-      gateEligible: false,
-      machineGate: result.machineGate,
+      ...proofCredibility(degraded.verdict, degraded.machineGate, degraded.gateEligible),
       finalStatus: "needs-human-review"
     });
   }

@@ -4,6 +4,7 @@ import { chromium, type Page } from "playwright";
 import type { HarnessGap, HarnessGapScenarioDraft } from "./types.js";
 import { scenarioExecutabilityIssues } from "./scenarios.js";
 import { createLlmScenarioBindingRepair } from "./llmScenarioRepair.js";
+import { ensurePlaywrightChromium } from "@ai-test-officer/playwright-runtime";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const gapDir = path.join(rootDir, "reports", "harness-gaps");
@@ -484,6 +485,7 @@ async function probeDraftPage(draft: HarnessGapScenarioDraft): Promise<DraftProb
   const responses: string[] = [];
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
+    await ensurePlaywrightChromium();
     browser = await chromium.launch({ headless: process.env.HEADLESS !== "0" });
     const context = await browser.newContext();
     let page = await context.newPage();

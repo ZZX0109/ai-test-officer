@@ -55,7 +55,7 @@ function machineGateFromResult(result: Awaited<ReturnType<typeof runVisualGrayTe
     evidence: result.evidence,
     artifactsV2: result.artifactsV2,
     artifactIntegrity: result.artifactIntegrity,
-    machineGate: { ...draft, evidenceComplete: false },
+    machineGate: draft,
     judgeReport: result.judgeReport
   }).machineGate;
 }

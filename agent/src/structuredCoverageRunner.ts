@@ -14,7 +14,7 @@ import {
 import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
 import { persistExecutionResult } from "./executionPersistence.js";
 import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
-import { finalizeProofBundle, type MachineGateDraft } from "./proof/proofBundleService.js";
+import { finalizeProofBundle, proofCredibility, type MachineGateDraft } from "./proof/proofBundleService.js";
 import {
   getProject,
   resolveProjectTarget,
@@ -207,7 +207,7 @@ export async function runStructuredCoveragePath(input: {
     artifactsV2: [artifact],
     artifactIntegrity,
     requiredArtifactKinds: ["operation-log"],
-    machineGate: { ...machineGateDraft, evidenceComplete: false },
+    machineGate: machineGateDraft,
     judgeReport: judgeReport(machineStatus, evidence.id, summary),
     gateEligibleFacts: { executionSucceeded: !executionError, requirementCovered }
   });
@@ -225,9 +225,7 @@ export async function runStructuredCoveragePath(input: {
     executionSucceeded: !executionError,
     requirementCovered,
     requirementPassed,
-    artifactIntegrityVerified: verdict.artifactIntegrityVerified,
-    evidenceGrounded: verdict.evidenceGrounded,
-    gateEligible,
+    ...proofCredibility(verdict, machineGate, gateEligible),
     proofValidationIssues: issues,
     machineGate,
     judgeRecommendation,
@@ -387,6 +385,6 @@ export async function runStructuredCoveragePath(input: {
   bundle.evidenceManifest = manifest;
   bundle.result.evidenceManifest = manifest;
   await writeRunBundle(bundle);
-  await persistExecutionResult(input.runId, result);
+  await persistExecutionResult(input.runId, result, { verdict, gateEligible });
   return result;
 }

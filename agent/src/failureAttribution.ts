@@ -1,4 +1,4 @@
-import type { FailureAttribution, ImpactAnalysis, SourceReadEnvelope, VisualRunResult } from "./types.js";
+import type { FailureAttribution, FailureClass, ImpactAnalysis, RepairAction, SourceReadEnvelope, VisualRunResult } from "./types.js";
 
 type DiagnosticSignal = NonNullable<NonNullable<FailureAttribution["changeRefs"]>[number]["diagnosticSignals"]>[number];
 
@@ -541,5 +541,102 @@ export function buildFailureAttributions(input: {
     confidence: selectorLike ? "high" : "medium"
   });
 
-  return attributions.map((item, index) => ({ ...item, rank: index + 1 }));
+  return attributions
+    .map((item, index) => ({ ...item, rank: index + 1 }))
+    .map((item) => ({ ...item, repairAction: buildRepairAction(item.failureClass, item.reasoning) }));
+}
+
+/**
+ * Derive a structured, owner-aware repair action from a failure class.
+ *
+ * The classification is deliberately explicit (not a single coarse string):
+ * each `FailureClass` is mapped to a concrete repair *type* that carries its
+ * own owner, and the `reasoning` text is used to refine ambiguous cases (for
+ * example a login wall inside `insufficient_evidence` becomes `credential_required`
+ * rather than a generic evidence gap). Owner is decided by the failure type
+ * together with the observed evidence — `product_bug` is routed to a sandbox
+ * code fix (agent), an auth wall to the user, and `unknown` is NOT silently
+ * handed to a developer when there is a more specific signal.
+ */
+export function buildRepairAction(
+  failureClass: FailureClass,
+  reasoning: string
+): RepairAction {
+  const lower = reasoning.toLowerCase();
+  const looksLikeAuth = /login|log-in|signin|sign-in|auth|oauth|sso|密码|passwor|凭据|credential|401|403/.test(lower);
+  const looksLikeSelector = /selector|binding|定位|xpath|test[_-]?id|找不到控件|no.*control|element.*not.*found/.test(lower);
+
+  if (failureClass === "test_script_issue") {
+    return looksLikeSelector
+      ? {
+          type: "selector_drift",
+          owner: "agent",
+          steps: ["读取最新DOM snapshot", "定位漂移的selector", "更新定位策略", "重新执行Discovery"],
+          validation: "Discovery成功绑定控件"
+        }
+      : {
+          type: "update_selector",
+          owner: "agent",
+          steps: ["读取最新DOM snapshot", "更新断言/脚本", "重新执行Discovery"],
+          validation: "重新执行后断言通过"
+        };
+  }
+  if (failureClass === "environment_issue") {
+    return /runtime|health|端口|port|依赖|dependency|服务.*down|unavailable|503|502/.test(lower)
+      ? {
+          type: "runtime_unavailable",
+          owner: "environment",
+          steps: ["检查服务健康状态", "检查端口与依赖", "重启runtime"],
+          validation: "health check通过且可访问"
+        }
+      : {
+          type: "fix_environment",
+          owner: "environment",
+          steps: ["检查运行环境配置", "检查网络与凭据", "重新诊断"],
+          validation: "环境恢复可用"
+        };
+  }
+  if (failureClass === "insufficient_evidence") {
+    return looksLikeAuth
+      ? {
+          type: "credential_required",
+          owner: "user",
+          steps: ["打开凭据管理", "新增本项目可用测试账号", "保存登录状态", "重新执行Discovery"],
+          validation: "登录后进入业务页面并能发现可操作控件"
+        }
+      : {
+          type: "evidence_missing",
+          owner: "user",
+          steps: ["补充证据来源（trace/网络/截图）", "确认采集配置", "重新执行"],
+          validation: "失败路径产生可验证证据"
+        };
+  }
+  if (failureClass === "product_bug") {
+    // A suspected product defect is NEVER agent-executable: applying it means
+    // editing product source. The agent may reproduce and propose a diff, but
+    // the owner — and the authority to accept the change — stays with a human.
+    return {
+      type: "product_bug",
+      owner: "developer",
+      steps: ["在沙盒中复现失败路径", "定位根因代码", "生成修复方案并展示 Diff", "由开发者确认后验证修复"],
+      validation: "确认后的修复使断言通过且未引入回归"
+    };
+  }
+  // `unknown` is the fallback. We do NOT blindly assign it to a developer when
+  // the reasoning still carries a usable signal; only a truly empty signal
+  // becomes manual_review.
+  if (looksLikeAuth) {
+    return {
+      type: "credential_required",
+      owner: "user",
+      steps: ["打开凭据管理", "新增本项目可用测试账号", "保存登录状态", "重新执行Discovery"],
+      validation: "登录后进入业务页面并能发现可操作控件"
+    };
+  }
+  return {
+    type: "manual_review",
+    owner: "developer",
+    steps: ["查看失败证据", "确认业务行为是否变化", "补充分类信号"],
+    validation: "重新运行测试"
+  };
 }

@@ -62,6 +62,20 @@ export function RunAssistantPanel({
   const [feedback, setFeedback] = useState("");
   const [localMessage, setLocalMessage] = useState("");
   const [selectedCredentialId, setSelectedCredentialId] = useState("");
+  const [recoverySubmitting, setRecoverySubmitting] = useState(false);
+
+  async function runAutoRepair() {
+    if (!onAutoRepair || busy || recoverySubmitting) return;
+    setRecoverySubmitting(true);
+    setLocalMessage("");
+    try {
+      await onAutoRepair();
+    } catch (error) {
+      setLocalMessage(error instanceof Error ? error.message : "恢复操作未完成，请查看运行详情后重试。");
+    } finally {
+      setRecoverySubmitting(false);
+    }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -93,8 +107,8 @@ export function RunAssistantPanel({
       {autoRepairAvailable && onAutoRepair ? (
         <div className="run-assistant-auto-repair">
           <span>{autoRepairDescription}</span>
-          <button type="button" disabled={busy} onClick={() => void onAutoRepair()}>
-            {busy ? "AI 正在处理并记录过程" : autoRepairLabel}
+          <button type="button" disabled={busy || recoverySubmitting} onClick={() => void runAutoRepair()}>
+            {busy || recoverySubmitting ? "AI 正在处理并记录过程" : autoRepairLabel}
           </button>
           {onEditPlan ? <button className="secondary" type="button" disabled={busy} onClick={onEditPlan}>修改测试范围</button> : null}
         </div>

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { mkdir, rename, stat } from "node:fs/promises";
+import { access, mkdir, rename, stat } from "node:fs/promises";
 import path from "node:path";
 import {
   chromium,
@@ -96,7 +97,10 @@ export async function captureScreenshotAtomic(input: {
 }) {
   const temporaryPath = `${input.finalPath}.partial`;
   await mkdir(path.dirname(temporaryPath), { recursive: true });
-  await input.page.screenshot({ path: temporaryPath, fullPage: true, type: "png" });
+  // Font loading can remain pending forever on a broken/partially loaded SPA.
+  // Keep screenshots bounded so evidence collection cannot block the actual
+  // action executor; callers record a degraded evidence item on timeout.
+  await input.page.screenshot({ path: temporaryPath, fullPage: true, type: "png", timeout: 5_000, animations: "disabled" });
   return commitCapturedFile({
     ...input,
     temporaryPath,
@@ -130,6 +134,78 @@ export interface PlaywrightRuntimeSessionOptions {
   signal?: AbortSignal;
   launcher?: Pick<BrowserType, "launch">;
   launchOptions?: Omit<LaunchOptions, "headless">;
+  onLifecycle?: (event: {
+    type: "browser_launch" | "context_create" | "page_new";
+    status: "started" | "succeeded" | "failed";
+    error?: string;
+  }) => void;
+}
+
+export async function isPlaywrightChromiumInstalled() {
+  try {
+    await access(chromium.executablePath());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Development machines do not always run `playwright install` after a clean
+ * checkout. Keep the browser dependency explicit and self-healing for local
+ * execution, while leaving CI free to install it in its normal setup step.
+ */
+export async function ensurePlaywrightChromium() {
+  if (await isPlaywrightChromiumInstalled()) return { installed: true, downloaded: false };
+  const npmCommand = process.platform === "win32" ? "npx.cmd" : "npx";
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(npmCommand, ["playwright", "install", "chromium"], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: "inherit"
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`playwright_browser_install_failed:${code ?? signal ?? "unknown"}`));
+    });
+  });
+  if (!(await isPlaywrightChromiumInstalled())) {
+    throw new Error("playwright_browser_install_incomplete");
+  }
+  return { installed: true, downloaded: true };
+}
+
+type LaunchStage = "browser_launch" | "context_create" | "page_new";
+type LaunchStatus = "started" | "succeeded" | "failed";
+type LifecycleSink = PlaywrightRuntimeSessionOptions["onLifecycle"];
+
+/**
+ * Abort checkpoint between launch stages.
+ *
+ * Extracted so `create` reads as a linear sequence of stages instead of
+ * interleaving cancellation branches with resource acquisition.
+ */
+function assertLaunchNotAborted(signal: AbortSignal | undefined, phase: string) {
+  if (signal?.aborted) throw new Error(`playwright_runtime_cancelled_${phase}`);
+}
+
+/** Curries the optional lifecycle sink so each stage emit is a single call. */
+function launchStageEmitter(sink: LifecycleSink) {
+  return (type: LaunchStage, status: LaunchStatus, error?: string) => {
+    sink?.({ type, status, ...(error ? { error } : {}) });
+  };
+}
+
+/** First stage that never produced a handle is the one that actually failed. */
+function failedLaunchStage(browser?: Browser, context?: BrowserContext): LaunchStage {
+  if (!browser) return "browser_launch";
+  if (!context) return "context_create";
+  return "page_new";
+}
+
+function launchErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -160,18 +236,27 @@ export class PlaywrightRuntimeSession {
   }
 
   static async create(options: PlaywrightRuntimeSessionOptions) {
-    if (options.signal?.aborted) throw new Error("playwright_runtime_cancelled_before_launch");
+    assertLaunchNotAborted(options.signal, "before_launch");
     const launcher = options.launcher ?? chromium;
+    const emit = launchStageEmitter(options.onLifecycle);
     let browser: Browser | undefined;
     let context: BrowserContext | undefined;
     try {
+      if (!options.launcher) await ensurePlaywrightChromium();
+      emit("browser_launch", "started");
       browser = await launcher.launch({ ...options.launchOptions, headless: options.headless });
-      if (options.signal?.aborted) throw new Error("playwright_runtime_cancelled_after_launch");
+      emit("browser_launch", "succeeded");
+      assertLaunchNotAborted(options.signal, "after_launch");
+      emit("context_create", "started");
       context = await browser.newContext(options.contextOptions);
-      if (options.signal?.aborted) throw new Error("playwright_runtime_cancelled_after_context");
+      emit("context_create", "succeeded");
+      assertLaunchNotAborted(options.signal, "after_context");
+      emit("page_new", "started");
       const page = await context.newPage();
+      emit("page_new", "succeeded");
       return new PlaywrightRuntimeSession(browser, context, page, options.signal);
     } catch (error) {
+      emit(failedLaunchStage(browser, context), "failed", launchErrorMessage(error));
       await context?.close().catch(() => undefined);
       await browser?.close().catch(() => undefined);
       throw error;

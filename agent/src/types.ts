@@ -261,6 +261,39 @@ export interface ProjectRuntimeStatus {
   message: string;
 }
 
+/**
+ * A recovery action is deliberately narrower than an assistant suggestion.
+ * It is computed from persisted runtime/discovery facts, so the UI cannot
+ * offer a code-repair action for a project that has not reached a test run.
+ */
+export type ProjectRecoveryAction =
+  | "retry-runtime"
+  | "retry-discovery"
+  | "retry-path"
+  | "create-repair"
+  | "unavailable";
+
+export type ProjectRecoveryStatus = "accepted" | "running" | "completed" | "blocked" | "failed";
+
+export interface ProjectRecoveryEvent {
+  phase: "docker_launching" | "daemon_waiting" | "sandbox_starting" | "health_checking" | "discovery_retrying" | "completed" | "blocked";
+  message: string;
+  at: string;
+}
+
+export interface ProjectRecoveryResult {
+  recoveryId: string;
+  projectId: string;
+  action: ProjectRecoveryAction;
+  status: ProjectRecoveryStatus;
+  sourceError?: string;
+  runtime: ProjectRuntimeStatus;
+  events: ProjectRecoveryEvent[];
+  discovery?: DiscoveryScanResult;
+  userAction: string;
+  updatedAt: string;
+}
+
 export interface ProjectHealthCheckResult {
   projectId: string;
   ok: boolean;
@@ -593,6 +626,14 @@ export interface DiscoveryPageObservation {
     httpStatus?: number;
     warning?: string;
   };
+  browserLifecycle?: Array<{
+    type: "browser_launch" | "context_create" | "page_new" | "page_goto";
+    status: "started" | "succeeded" | "failed";
+    at: string;
+    url?: string;
+    httpStatus?: number;
+    error?: string;
+  }>;
   network?: {
     totalRequests: number;
     completedRequests: number;
@@ -606,6 +647,8 @@ export interface DiscoveryPageObservation {
     bodyTextSample?: string;
     interactiveElementCount: number;
     viewport?: { width: number; height: number };
+    /** Compact ARIA snapshot used by the assistant; full DOM remains an artifact. */
+    accessibilityTree?: string;
     controls: Array<{
       kind: "link" | "button" | "input" | "textarea" | "select" | "other";
       role?: string;
@@ -671,8 +714,23 @@ export interface DiscoveryScanResult {
     callId?: string;
     errorCode?: string;
   };
-  status: "passed" | "partial" | "failed";
+  /**
+   * `waiting-auth` is deliberately distinct from `failed`: the page loaded and
+   * was observed correctly, but it is an authentication wall. Discovery cannot
+   * continue without an authorized test account, and that is a user action, not
+   * a system defect. Collapsing it into `failed` is what produced the old
+   * "test failed, and you do not know what to do" dead end.
+   */
+  status: "passed" | "partial" | "failed" | "waiting-auth";
+  /** Concrete blocking action the operator must take before a retry can help. */
+  requiredAction?: "credential_required";
   message: string;
+  /**
+   * Explicit lifecycle projection for the UI and diagnostics.  These stages
+   * are deliberately independent: a page can be loaded while Discovery or
+   * planning is still blocked, and a generated plan never implies execution.
+   */
+  lifecycle?: DiscoveryLifecycleEvent[];
   orchestration?: {
     status: "waiting" | "ready" | "blocked" | "failed";
     checkedUrl: string;
@@ -684,6 +742,24 @@ export interface DiscoveryScanResult {
     runtimeStatus?: ProjectRuntimeStatus["status"];
     httpStatus?: number;
   };
+}
+
+export type DiscoveryLifecycleStage =
+  | "project_started"
+  | "health_checked"
+  | "browser_ready"
+  | "page_loaded"
+  | "authenticated"
+  | "discovery_completed"
+  | "plan_generated";
+
+export interface DiscoveryLifecycleEvent {
+  stage: DiscoveryLifecycleStage;
+  status: "pending" | "passed" | "blocked" | "failed" | "skipped";
+  at: string;
+  message: string;
+  /** Host/target URL context is diagnostic only; credentials are never stored. */
+  url?: string;
 }
 
 export interface RunStepEvidence {
@@ -964,6 +1040,42 @@ export interface FailureAttribution {
   evidenceRefs: string[];
   sourceContextIds: string[];
   confidence: "high" | "medium" | "low";
+  /** Structured, owner-aware repair guidance derived from the failure class. */
+  repairAction?: RepairAction;
+}
+
+export type RepairActionType =
+  | "update_selector"
+  | "selector_drift"
+  | "provide_credential"
+  | "credential_required"
+  | "fix_environment"
+  | "runtime_unavailable"
+  | "discovery_incomplete"
+  | "modify_code"
+  | "product_bug"
+  | "evidence_missing"
+  | "manual_review";
+
+export type RepairOwner = "agent" | "user" | "environment" | "developer";
+
+export interface RepairAction {
+  type: RepairActionType;
+  owner: RepairOwner;
+  target?: string;
+  steps: string[];
+  validation: string;
+}
+
+export interface RepairDecision {
+  owner: RepairOwner;
+  type: RepairActionType;
+  /** true only when the agent is authorised to act on it autonomously. */
+  executable: boolean;
+  userMessage: string;
+  steps: string[];
+  validation: string;
+  nextAction: RepairActionType;
 }
 
 export interface ArtifactIntegrityItem {

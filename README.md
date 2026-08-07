@@ -75,6 +75,10 @@ flowchart LR
 
 Workbench 将“项目接入、测试规划、执行现场、证据复核、Judge 和人工裁决”放在同一页面。被测页面显示在中央内置浏览器区域，项目不会主动打开外部浏览器窗口。
 
+### 可持续 Agent 模块
+
+模型规划现在经过统一的 Context Layer、LlmInputCompiler、Tool Gateway 和 Tracer；失败会进入 FeedbackLoop，写操作经过 WriteSafetyLayer。模块状态与运行链路可通过 `/api/agent/sustainability`、`/api/agent/tools` 和 `/api/runs/:runId/trace` 查看，详见 [可持续 Agent 模块说明](docs/sustainable-agent-modules.md)。这些模块增强可观测性和经验复用，但不改变 Artifact v2 与确定性 Gate 的安全底线。
+
 ## 主要能力
 
 ### 1. 面向普通用户的项目接入

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { mkdtemp, readdir, rmdir, unlink } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import {
   appendHumanOverrideConclusion,
@@ -8,7 +9,7 @@ import {
   createEvidenceManifest,
   verifyEvidenceManifest
 } from "../src/proofGraph.js";
-import { writeRunBundle } from "../src/evidenceStore.js";
+import { setReportsDir, writeRunBundle } from "../src/evidenceStore.js";
 import type { RunBundle, VisualRunResult } from "../src/types.js";
 
 function fixtureResult(): VisualRunResult {
@@ -128,6 +129,10 @@ function fixtureResult(): VisualRunResult {
 }
 
 export async function testProofGraph() {
+  // Redirect writes to an isolated temp dir so the test never pollutes or
+  // recursively deletes the real workspace `reports/`.
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "proof-graph-"));
+  setReportsDir(tempDir);
   const result = fixtureResult();
   const graph = buildProofGraph(result);
   assert.deepEqual(graph.errors, []);
@@ -202,6 +207,18 @@ export async function testProofGraph() {
   assert.equal(override.conclusion.claimType, "human-override");
   assert.equal(override.conclusion.supersedesConclusionId, graph.conclusions.find((item) => item.claimType === "final-status")?.conclusionId);
   assert.equal(override.conclusion.evidenceRefs.length > 0, true);
-  const repositoryRoot = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
-  await rm(path.join(repositoryRoot, "reports", "runs", bundle.runId), { recursive: true, force: true });
+  // Per-file cleanup inside the isolated temp dir — never a recursive rm over
+  // the workspace. The safety bulk-delete guard stays fully enabled.
+  try {
+    const runDir = path.join(tempDir, "runs", bundle.runId);
+    const entries = await readdir(runDir);
+    for (const entry of entries) {
+      await unlink(path.join(runDir, entry)).catch(() => undefined);
+    }
+    await rmdir(runDir).catch(() => undefined);
+    await rmdir(path.join(tempDir, "runs")).catch(() => undefined);
+  } catch {
+    // best-effort cleanup; a failure here must not mask the test result above
+  }
+  setReportsDir(undefined);
 }

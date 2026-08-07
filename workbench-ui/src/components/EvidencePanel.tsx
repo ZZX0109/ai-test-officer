@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { BotMessageSquare, X } from "lucide-react";
 import type {
   AuditStoreStatus,
@@ -25,6 +26,8 @@ interface EvidencePanelProps {
   deliveries: BotDelivery[];
   isBusy: boolean;
   liveStatusText: string;
+  /** When set, scroll-to + highlight the matching evidence/assertion/artifact. */
+  focusEvidenceId?: string | null;
   onClose: () => void;
 }
 
@@ -61,8 +64,32 @@ export function EvidencePanel({
   deliveries,
   isBusy,
   liveStatusText,
+  focusEvidenceId,
   onClose
 }: EvidencePanelProps) {
+  const drawerBodyRef = useRef<HTMLDivElement>(null);
+
+  // When the workbench asks to locate an evidence id (e.g. from a repair plan),
+  // scroll the matching element into view and flash a highlight so the user is
+  // taken straight to the relevant Evidence / Artifact / Assertion / event.
+  useEffect(() => {
+    if (!focusEvidenceId || !drawerBodyRef.current) return;
+    const root = drawerBodyRef.current;
+    const candidates = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-evidence-id], [data-evidence-refs]")
+    );
+    const target = candidates.find((el) => {
+      if (el.dataset.evidenceId === focusEvidenceId) return true;
+      const refs = el.dataset.evidenceRefs?.split(/\s+/) ?? [];
+      return refs.includes(focusEvidenceId);
+    });
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.classList.add("evidence-focus");
+    const timer = window.setTimeout(() => target.classList.remove("evidence-focus"), 2400);
+    return () => window.clearTimeout(timer);
+  }, [focusEvidenceId, result]);
+
   return (
     <>
       <div className="drawer-header">
@@ -76,7 +103,7 @@ export function EvidencePanel({
           </button>
         </div>
       </div>
-      <div className="drawer-body">
+      <div className="drawer-body" ref={drawerBodyRef}>
         <section className="trust-boundary">
           <h3>Trust Boundary</h3>
           <div className="trust-grid">
@@ -111,10 +138,10 @@ export function EvidencePanel({
           <h3>Artifact v2 / Attempts</h3>
           <div className="network-list">
             {result?.attempts?.map((attempt) => (
-              <code key={attempt.id}>attempt {attempt.attempt} · {attempt.status} · artifacts={attempt.artifactIds.length}{attempt.retryReason ? ` · ${attempt.retryReason}` : ""}</code>
+              <code key={attempt.id} data-evidence-id={attempt.id}>attempt {attempt.attempt} · {attempt.status} · artifacts={attempt.artifactIds.length}{attempt.retryReason ? ` · ${attempt.retryReason}` : ""}</code>
             )) ?? <p className="empty">暂无 attempt 记录。</p>}
             {result?.artifactsV2?.slice(-12).map((artifact) => (
-              <code key={artifact.id}>{artifact.kind} · {artifact.origin} · attempt={artifact.attempt} · sha256={artifact.integrity.sha256.slice(0, 12)}…</code>
+              <code key={artifact.id} data-evidence-id={artifact.id}>{artifact.kind} · {artifact.origin} · attempt={artifact.attempt} · sha256={artifact.integrity.sha256.slice(0, 12)}…</code>
             ))}
           </div>
         </section>
@@ -122,7 +149,11 @@ export function EvidencePanel({
         <section>
           <h3>Assertions</h3>
           {result?.assertions.map((assertion) => (
-            <article className={`assertion ${assertion.passed ? "passed" : "failed"}`} key={assertion.name}>
+            <article
+              className={`assertion ${assertion.passed ? "passed" : "failed"}`}
+              key={assertion.name}
+              data-evidence-refs={assertion.fact?.evidenceRefs.join(" ") ?? ""}
+            >
               <strong>{assertion.name}</strong>
               <p>预期：{assertion.expected}</p>
               <p>实际：{assertion.actual}</p>
@@ -140,6 +171,32 @@ export function EvidencePanel({
               )}
             </article>
           )) ?? <p className="empty">暂无断言结果。</p>}
+        </section>
+
+        <section>
+          <h3>Evidence</h3>
+          <div className="evidence-list">
+            {result?.evidence?.length ? (
+              result.evidence.map((item) => (
+                <article className="evidence-item" data-evidence-id={item.id} key={item.id}>
+                  <header>
+                    <span className={`evidence-type ${item.type}`}>{item.type}</span>
+                    <strong>{item.title}</strong>
+                  </header>
+                  {item.file && <code>{item.file}</code>}
+                  {item.locator?.pageUrl && <code>page: {item.locator.pageUrl}</code>}
+                  {item.locator?.selector && <code>selector: {item.locator.selector}</code>}
+                  {item.locator?.requestId && <code>request: {item.locator.requestId}</code>}
+                  {item.locator?.sourceLocation && <code>source: {item.locator.sourceLocation}</code>}
+                  {item.locator?.lineStart != null && (
+                    <code>lines: {item.locator.lineStart}{item.locator.lineEnd != null ? `–${item.locator.lineEnd}` : ""}</code>
+                  )}
+                </article>
+              ))
+            ) : (
+              <p className="empty">暂无证据项。</p>
+            )}
+          </div>
         </section>
 
         <JudgePanel result={result} />
@@ -172,7 +229,7 @@ export function EvidencePanel({
           <h3>Loop Trace</h3>
           <div className="loop-trace">
             {displayedLoopEvents?.map((event) => (
-              <article className={`loop-event ${event.status}`} key={event.id}>
+              <article className={`loop-event ${event.status}`} key={event.id} data-evidence-id={event.id}>
                 <div>
                   <span>{event.loopType}</span>
                   <strong>{event.title}</strong>

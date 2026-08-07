@@ -9,6 +9,20 @@ import type {
 } from "../types.js";
 
 /**
+ * The draft a producer may emit. Business/execution code is only ever allowed
+ * to assert the *status* and the *reasons* behind it — never the credibility
+ * booleans (`evidenceComplete` / `proofBundleId` / `proofValidationVersion`).
+ * Those are stamped exclusively by `finalizeProofBundle` in this module after
+ * the validator recomputes them from the persisted bundle.
+ */
+export interface MachineGateDraft {
+  status: MachineGate["status"];
+  reasons: string[];
+  reasonDetails: MachineGate["reasonDetails"];
+  assertionFailures: string[];
+}
+
+/**
  * Unified Proof Bundle validator (P0 credibility).
  *
  * The run outcome schema (runOutcomeSummaryV2Schema) only checks that the
@@ -28,7 +42,8 @@ export interface ProofBundleInput {
   artifactIntegrity?: ArtifactIntegrityReport;
   /** artifact kinds the run was required to capture for its verdict to be credible. */
   requiredArtifactKinds?: ArtifactV2["kind"][];
-  machineGate?: MachineGate;
+  /** The same reasons/status that live on `draft`, surfaced for reason-linkage checks. */
+  machineGate?: MachineGateDraft;
   judgeReport?: LayeredJudgeReport;
   oracles?: OracleDefinition[];
   riskCoverageMatrix?: RiskCoverageItem[];

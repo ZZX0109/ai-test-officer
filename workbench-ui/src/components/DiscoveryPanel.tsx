@@ -105,10 +105,14 @@ export function DiscoveryPanel({ discovery, drafts, onScan, onProbeDraft, onAppr
       {discovery?.orchestration ? <DiscoveryOrchestrationNotice discovery={discovery} /> : null}
 
       {discovery ? (
-        <article className={discovery.status === "passed" ? "passed" : discovery.status === "partial" ? "warning" : "failed"}>
+        <article className={discovery.status === "passed"
+          ? "passed"
+          : discovery.status === "partial" || discovery.status === "waiting-auth"
+            ? "warning"
+            : "failed"}>
           <header>
             <strong>{discovery.page.title || discovery.page.url}</strong>
-            <span>{discovery.status}</span>
+            <span>{discovery.status === "waiting-auth" ? "等待登录凭据" : discovery.status}</span>
           </header>
           <p>{discovery.message}</p>
           <p>

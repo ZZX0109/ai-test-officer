@@ -12,11 +12,25 @@ import {
 } from "./sqliteAuditStore.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
-const reportsDir = path.join(rootDir, "reports");
+const defaultReportsDir = path.join(rootDir, "reports");
+let reportsDirOverride: string | undefined;
+
+/**
+ * Test seam: redirect the reports root to an isolated temp directory so tests
+ * never write into (or recursively delete) the real workspace `reports/`.
+ */
+export function setReportsDir(dir?: string): void {
+  reportsDirOverride = dir;
+}
+
+export function getReportsDir(): string {
+  return reportsDirOverride ?? defaultReportsDir;
+}
+
 const writeQueues = new Map<string, Promise<unknown>>();
 
 function runDir(runId: string) {
-  return path.join(reportsDir, "runs", runId);
+  return path.join(getReportsDir(), "runs", runId);
 }
 
 function evidenceFile(runId: string) {
@@ -92,7 +106,7 @@ export async function writeRunBundle(bundle: RunBundle) {
   await mkdir(runDir(bundle.runId), { recursive: true });
   const redactedBundle = redactValue(bundle) as RunBundle;
   await writeFile(bundleFile(bundle.runId), JSON.stringify(redactedBundle, null, 2));
-  await writeFile(path.join(reportsDir, "runs", "latest-run-id.txt"), bundle.runId);
+  await writeFile(path.join(getReportsDir(), "runs", "latest-run-id.txt"), bundle.runId);
   const bundleUri = `/artifacts/runs/${bundle.runId}/run_bundle.json`;
   recordRunBundleInAuditStore(redactedBundle, bundleUri);
   return bundleUri;
@@ -109,7 +123,7 @@ export async function readLatestRunId() {
   const auditRunId = readLatestRunIdFromAuditStore();
   if (auditRunId) return auditRunId;
   try {
-    return (await readFile(path.join(reportsDir, "runs", "latest-run-id.txt"), "utf8")).trim();
+    return (await readFile(path.join(getReportsDir(), "runs", "latest-run-id.txt"), "utf8")).trim();
   } catch {
     return null;
   }

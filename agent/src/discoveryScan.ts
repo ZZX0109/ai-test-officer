@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type {
   DiscoveryPageObservation,
   DiscoveryScanResult,
@@ -13,15 +13,28 @@ import { resolveProjectTarget } from "./projectAdapter.js";
 import { writeScenarioDraft } from "./harnessGapStore.js";
 import { createLlmPlanningAdvice } from "./llmPlanningAdvisor.js";
 import type { PlannedBusinessFlow } from "./planningConversation.js";
-import { writeDiscoveryPageObservation } from "./pageObservationStore.js";
+import { sanitizeDiscoveryPageObservation, writeDiscoveryPageObservation } from "./pageObservationStore.js";
+import { queryRepairExperience } from "./feedback-loop/feedbackLoop.js";
+import { ensurePlaywrightChromium } from "@ai-test-officer/playwright-runtime";
 
 const DISCOVERY_NAVIGATION_TIMEOUT_MS = 20_000;
 const DISCOVERY_TOTAL_OBSERVATION_BUDGET_MS = 60_000;
-const DISCOVERY_NO_PROGRESS_TIMEOUT_MS = 8_000;
+// Cold-started SPAs can spend well over eight seconds resolving their module
+// graph before the first useful control appears. Treat that as startup work,
+// not as proof that the page has no interactive surface.
+const DISCOVERY_NO_PROGRESS_TIMEOUT_MS = 20_000;
 const DISCOVERY_LIFECYCLE_GRACE_MS = 1_000;
 const DISCOVERY_STABLE_WINDOW_MS = 600;
 const DISCOVERY_POLL_INTERVAL_MS = 200;
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
+
+function affectsDiscoveryReadiness(resourceType: string) {
+  // Scripts, fonts and images are useful telemetry, but large Vite/Next module
+  // graphs must not keep Discovery permanently "busy" after a usable DOM is
+  // present. Only navigation and business-data traffic participate in the
+  // readiness barrier; every request is still retained in network evidence.
+  return ["document", "fetch", "xhr"].includes(resourceType);
+}
 
 function boundedDuration(
   value: number | undefined,
@@ -65,6 +78,7 @@ function discoveryDiagnosis(input: {
   status: DiscoveryPageObservation["status"];
   stage: DiscoveryPageObservation["stage"];
   documentCommitted: boolean;
+  documentReadyState?: string;
   interactiveElementCount: number;
   httpStatus?: number;
   console: DiscoveryPageObservation["console"];
@@ -81,6 +95,12 @@ function discoveryDiagnosis(input: {
   }
   if (input.documentCommitted && input.interactiveElementCount === 0) {
     likelyCauses.push("页面已打开，但前端尚未渲染可操作控件");
+    if (!input.documentReadyState || input.documentReadyState !== "complete") {
+      likelyCauses.push("document.readyState 仍未到 complete，前端脚本或认证初始化可能卡住");
+    }
+    if (!input.console.length && !input.pageErrors.length && !input.failedRequests.length) {
+      likelyCauses.push("页面 DOM 仍为空且没有可见浏览器错误，可能是客户端初始化请求未完成");
+    }
   }
   if (input.pageErrors.length || input.console.some((item) => item.type === "error")) {
     likelyCauses.push("页面运行时出现 JavaScript 或 console 异常");
@@ -618,6 +638,52 @@ function buildSuggestions(input: {
   return suggestions.slice(0, 12);
 }
 
+/**
+ * Authentication-wall detection.
+ *
+ * Discovery treats "the page is a login gate" as a distinct, recoverable state
+ * rather than a failure. The signal must come from what the browser actually
+ * observed — a password field plus an identity field and a submit affordance,
+ * an explicit 401/403, or a login route — never from a guess about the product.
+ */
+export function detectAuthenticationGate(input: {
+  page: DiscoveryScanResult["page"];
+  url: string;
+  httpStatus?: number;
+}): { blocked: boolean; reason: string } {
+  if (input.httpStatus === 401 || input.httpStatus === 403) {
+    return { blocked: true, reason: `HTTP ${input.httpStatus}` };
+  }
+  const inputs = input.page.inputs ?? [];
+  const passwordField = inputs.some((item) =>
+    (item.type ?? "").toLowerCase() === "password"
+    || /password|passwd|密码/i.test(`${item.label ?? ""} ${item.name ?? ""} ${item.testId ?? ""}`)
+  );
+  const identityField = inputs.some((item) =>
+    (item.type ?? "").toLowerCase() === "email"
+    || /email|username|user|login|account|邮箱|账号|用户名|手机号/i
+      .test(`${item.label ?? ""} ${item.name ?? ""} ${item.testId ?? ""}`)
+  );
+  const submitAffordance = (input.page.buttons ?? []).some((button) =>
+    /登录|登入|sign[\s-]?in|log[\s-]?in/i.test(`${button.text} ${button.title ?? ""} ${button.testId ?? ""}`)
+    || button.type === "submit"
+  );
+  if (passwordField && identityField && submitAffordance) {
+    return { blocked: true, reason: "页面包含账号、密码与登录按钮" };
+  }
+  // A password field alone is still an authentication wall when the route or
+  // the visible heading says so; a settings page with a "change password" field
+  // will not match both signals.
+  const authRoute = /(?:^|\/)(?:login|signin|sign-in|auth|sso|oauth)(?:\/|$|\?)/i.test(input.url);
+  const authHeading = (input.page.headings ?? []).some((heading) =>
+    /登录|登入|sign\s?in|log\s?in|身份验证|authentication required/i.test(heading)
+  );
+  if (passwordField && (authRoute || authHeading)) {
+    return { blocked: true, reason: authRoute ? "URL 指向登录路由" : "页面标题为登录页" };
+  }
+  return { blocked: false, reason: "" };
+}
+
 export async function runDiscoveryScan(input: {
   appUrl?: string;
   projectId?: string;
@@ -657,7 +723,12 @@ export async function runDiscoveryScan(input: {
   const pageErrors: string[] = [];
   const failedRequests: DiscoveryPageObservation["failedRequests"] = [];
   let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
   let page: Page | undefined;
+  const browserLifecycle: NonNullable<DiscoveryPageObservation["browserLifecycle"]> = [];
+  const lifecycle = (event: NonNullable<DiscoveryPageObservation["browserLifecycle"]>[number]) => {
+    if (browserLifecycle.length < 30) browserLifecycle.push(event);
+  };
   let stage: DiscoveryPageObservation["stage"] = "launch";
   let documentCommitted = false;
   let httpStatus: number | undefined;
@@ -669,6 +740,9 @@ export async function runDiscoveryScan(input: {
   let failedNetworkRequests = 0;
   let peakActiveNetworkRequests = 0;
   let lastNetworkActivityAt = Date.now();
+  let activeReadinessRequests = 0;
+  let readinessRequestSequence = 0;
+  let lastReadinessNetworkActivityAt = Date.now();
   let documentObservation: DiscoveryPageObservation["document"] = {
     interactiveElementCount: 0,
     controls: []
@@ -753,6 +827,9 @@ export async function runDiscoveryScan(input: {
       bodyTextSample: observationText(snapshot.bodyText),
       interactiveElementCount: snapshot.interactiveElementCount,
       viewport: snapshot.viewport,
+      accessibilityTree: await page.locator("body").ariaSnapshot({ timeout: 1_000 })
+        .then((tree) => observationText(tree, 4_000))
+        .catch(() => undefined),
       controls: snapshot.controls.map((control) => ({
         ...control,
         accessibleName: control.accessibleName
@@ -854,9 +931,7 @@ export async function runDiscoveryScan(input: {
     let lastSignature = "";
     let stableSince = 0;
     let lastProgressAt = Date.now();
-    let previousRequestTotal = totalNetworkRequests;
-    let previousRequestCompleted = completedNetworkRequests;
-    let previousActiveRequests = activeNetworkRequests;
+    let previousReadinessSequence = readinessRequestSequence;
     while (Date.now() < observationDeadline) {
       await observeDocument();
       const usable = Boolean(
@@ -864,17 +939,16 @@ export async function runDiscoveryScan(input: {
         || documentObservation.interactiveElementCount > 0
       );
       const signature = [
+        page?.url() ?? "about:blank",
         documentObservation.readyState ?? "unknown",
         documentObservation.interactiveElementCount,
         documentObservation.bodyTextSample?.slice(0, 400) ?? ""
       ].join(":");
-      const networkProgressed = totalNetworkRequests !== previousRequestTotal
-        || completedNetworkRequests !== previousRequestCompleted
-        || activeNetworkRequests !== previousActiveRequests;
+      const networkProgressed = readinessRequestSequence !== previousReadinessSequence;
       const domProgressed = signature !== lastSignature;
       if (networkProgressed || domProgressed) lastProgressAt = Date.now();
-      const networkQuiet = activeNetworkRequests === 0
-        && Date.now() - lastNetworkActivityAt >= DISCOVERY_STABLE_WINDOW_MS;
+      const networkQuiet = activeReadinessRequests === 0
+        && Date.now() - lastReadinessNetworkActivityAt >= DISCOVERY_STABLE_WINDOW_MS;
       if (usable && networkQuiet && signature === lastSignature) {
         stableSince ||= Date.now();
         if (Date.now() - stableSince >= DISCOVERY_STABLE_WINDOW_MS) {
@@ -884,15 +958,13 @@ export async function runDiscoveryScan(input: {
         stableSince = 0;
       }
       if (
-        activeNetworkRequests === 0
+        activeReadinessRequests === 0
         && Date.now() - lastProgressAt >= noProgressTimeoutMs
       ) {
         return "no_progress" satisfies WaitOutcome;
       }
       lastSignature = signature;
-      previousRequestTotal = totalNetworkRequests;
-      previousRequestCompleted = completedNetworkRequests;
-      previousActiveRequests = activeNetworkRequests;
+      previousReadinessSequence = readinessRequestSequence;
       const remainingMs = observationDeadline - Date.now();
       if (remainingMs <= 0) break;
       await page?.waitForTimeout(Math.min(DISCOVERY_POLL_INTERVAL_MS, remainingMs));
@@ -931,11 +1003,13 @@ export async function runDiscoveryScan(input: {
     console: consoleEvents.slice(-20),
     pageErrors: pageErrors.slice(-20),
     failedRequests: failedRequests.slice(-20),
+    browserLifecycle: browserLifecycle.slice(),
     screenshot,
     diagnosis: discoveryDiagnosis({
       status,
       stage,
       documentCommitted,
+      documentReadyState: documentObservation.readyState,
       interactiveElementCount: documentObservation.interactiveElementCount,
       httpStatus,
       console: consoleEvents,
@@ -946,20 +1020,38 @@ export async function runDiscoveryScan(input: {
   });
 
   try {
+    await ensurePlaywrightChromium();
+    lifecycle({ type: "browser_launch", status: "started", at: new Date().toISOString() });
     browser = await chromium.launch({ headless: process.env.HEADLESS !== "0" });
-    page = await browser.newPage();
+    lifecycle({ type: "browser_launch", status: "succeeded", at: new Date().toISOString() });
+    lifecycle({ type: "context_create", status: "started", at: new Date().toISOString() });
+    context = await browser.newContext();
+    lifecycle({ type: "context_create", status: "succeeded", at: new Date().toISOString() });
+    lifecycle({ type: "page_new", status: "started", at: new Date().toISOString() });
+    page = await context.newPage();
+    lifecycle({ type: "page_new", status: "succeeded", at: new Date().toISOString() });
     page.on("request", (request) => {
       if (["websocket", "eventsource", "media"].includes(request.resourceType())) return;
       totalNetworkRequests += 1;
       activeNetworkRequests += 1;
       peakActiveNetworkRequests = Math.max(peakActiveNetworkRequests, activeNetworkRequests);
       lastNetworkActivityAt = Date.now();
+      if (affectsDiscoveryReadiness(request.resourceType())) {
+        activeReadinessRequests += 1;
+        readinessRequestSequence += 1;
+        lastReadinessNetworkActivityAt = Date.now();
+      }
     });
     page.on("requestfinished", (request) => {
       if (["websocket", "eventsource", "media"].includes(request.resourceType())) return;
       completedNetworkRequests += 1;
       activeNetworkRequests = Math.max(0, activeNetworkRequests - 1);
       lastNetworkActivityAt = Date.now();
+      if (affectsDiscoveryReadiness(request.resourceType())) {
+        activeReadinessRequests = Math.max(0, activeReadinessRequests - 1);
+        readinessRequestSequence += 1;
+        lastReadinessNetworkActivityAt = Date.now();
+      }
     });
     page.on("console", (event) => {
       if (!["warning", "error"].includes(event.type()) || consoleEvents.length >= 100) return;
@@ -973,6 +1065,11 @@ export async function runDiscoveryScan(input: {
         failedNetworkRequests += 1;
         activeNetworkRequests = Math.max(0, activeNetworkRequests - 1);
         lastNetworkActivityAt = Date.now();
+        if (affectsDiscoveryReadiness(request.resourceType())) {
+          activeReadinessRequests = Math.max(0, activeReadinessRequests - 1);
+          readinessRequestSequence += 1;
+          lastReadinessNetworkActivityAt = Date.now();
+        }
       }
       if (failedRequests.length >= 100) return;
       failedRequests.push({
@@ -1019,6 +1116,7 @@ export async function runDiscoveryScan(input: {
     // than a specific browser lifecycle event.
     stage = "navigation";
     try {
+      lifecycle({ type: "page_goto", status: "started", at: new Date().toISOString(), url });
       const navigationBudgetMs = Math.max(
         1,
         Math.min(DISCOVERY_NAVIGATION_TIMEOUT_MS, observationDeadline - Date.now())
@@ -1026,7 +1124,15 @@ export async function runDiscoveryScan(input: {
       const response = await page.goto(url, { waitUntil: "commit", timeout: navigationBudgetMs });
       documentCommitted = true;
       httpStatus = response?.status();
+      lifecycle({ type: "page_goto", status: "succeeded", at: new Date().toISOString(), url: page.url(), httpStatus });
     } catch (error) {
+      lifecycle({
+        type: "page_goto",
+        status: "failed",
+        at: new Date().toISOString(),
+        url: page?.url() || url,
+        error: error instanceof Error ? error.message : String(error)
+      });
       const hasCommittedDocument = await page.evaluate(() =>
         location.href !== "about:blank" &&
         Boolean(document.documentElement)
@@ -1080,9 +1186,29 @@ export async function runDiscoveryScan(input: {
       writeScenarioDraft(suggestionDraft({ suggestion, heading, url, projectId: target.projectId }))
     ));
     stage = "completed";
-    const observation = buildObservation(
-      navigationWarning || consoleEvents.length || pageErrors.length || failedRequests.length ? "degraded" : "ready"
-    );
+    const hasInteractiveSurface = documentObservation.interactiveElementCount > 0;
+    // An authentication wall is only blocking when no test account was supplied.
+    // With a credential the login flow itself becomes a legitimate test point.
+    const authenticationGate = input.credentialId
+      ? { blocked: false, reason: "" }
+      : detectAuthenticationGate({ page: pageModel, url: page?.url() || url, httpStatus });
+    // Close the experience loop: if this project already resolved an auth block
+    // before, say so instead of asking the same question as if it were new.
+    const priorAuthExperience = authenticationGate.blocked && (target.projectId ?? input.projectId)
+      ? await queryRepairExperience({
+        projectId: (target.projectId ?? input.projectId)!,
+        repairStrategy: ["auth_fix"],
+        limit: 1
+      })
+      : [];
+    const priorAuthHint = priorAuthExperience[0]
+      ? `历史经验：该项目此前通过“${priorAuthExperience[0].repairDescription}”解决过同类阻塞（成功率 ${Math.round(priorAuthExperience[0].successRate * 100)}%）。`
+      : "";
+    const observation = sanitizeDiscoveryPageObservation(buildObservation(
+      navigationWarning || consoleEvents.length || pageErrors.length || failedRequests.length || !hasInteractiveSurface
+        ? "degraded"
+        : "ready"
+    ));
     await writeDiscoveryPageObservation({
       projectId: target.projectId ?? input.projectId,
       observation
@@ -1095,15 +1221,36 @@ export async function runDiscoveryScan(input: {
       networkEndpoints: networkEndpoints.slice(0, 80),
       openApiOperations,
       observation,
-      suggestions,
-      drafts,
-      ...selection,
-      status: "passed",
-      message: navigationWarning
+      suggestions: hasInteractiveSurface ? suggestions : [],
+      drafts: hasInteractiveSurface ? drafts : [],
+      ...(hasInteractiveSurface
+        ? selection
+        : {
+          recommendedScenarioId: undefined,
+          recommendedScenarioIds: [],
+          selectionProvenance: { mode: "deterministic" as const, reason: "no_interactive_surface" }
+        }),
+      status: authenticationGate.blocked
+        ? "waiting-auth"
+        : hasInteractiveSurface ? "passed" : "partial",
+      ...(authenticationGate.blocked ? { requiredAction: "credential_required" as const } : {}),
+      message: authenticationGate.blocked
+        ? `检测到登录页面，请配置测试账号。判定依据：${authenticationGate.reason}。${priorAuthHint}配置后重新执行 Discovery。`
+        : !hasInteractiveSurface
+        ? "Discovery Scan 已打开页面，但没有发现可操作控件；已保留页面观测，未生成可执行测试流程。"
+        : navigationWarning
         ? `Discovery Scan 完成：页面已渲染，浏览器生命周期未在等待窗口内结束；已按可见 DOM 发现 ${suggestions.length} 个测试点草案。`
         : `Discovery Scan 完成：发现 ${suggestions.length} 个测试点草案。`
     };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!browserLifecycle.some((event) => event.type === "browser_launch" && event.status === "succeeded")) {
+      lifecycle({ type: "browser_launch", status: "failed", at: new Date().toISOString(), error: message });
+    } else if (!browserLifecycle.some((event) => event.type === "context_create" && event.status === "succeeded")) {
+      lifecycle({ type: "context_create", status: "failed", at: new Date().toISOString(), error: message });
+    } else if (!browserLifecycle.some((event) => event.type === "page_new" && event.status === "succeeded")) {
+      lifecycle({ type: "page_new", status: "failed", at: new Date().toISOString(), error: message });
+    }
     if (page && documentCommitted) {
       screenshot = await captureDiscoveryScreenshot(page, discoveryId).catch((captureError) => {
         navigationWarning ??= `screenshot_failed:${captureError instanceof Error ? captureError.message : String(captureError)}`;
@@ -1114,8 +1261,7 @@ export async function runDiscoveryScan(input: {
     // timeout may outlive the original failure and allow a late SPA mount.
     await observeDocument();
     const failedPageModel = await readPageModel().catch(() => undefined);
-    const message = error instanceof Error ? error.message : String(error);
-    const observation = buildObservation("failed", message);
+    const observation = sanitizeDiscoveryPageObservation(buildObservation("failed", message));
     await writeDiscoveryPageObservation({
       projectId: target.projectId ?? input.projectId,
       observation
@@ -1143,6 +1289,7 @@ export async function runDiscoveryScan(input: {
       message: `Discovery Scan 失败：${observationText(message, 500)}`
     };
   } finally {
+    await context?.close().catch(() => undefined);
     await browser?.close().catch(() => undefined);
   }
 }

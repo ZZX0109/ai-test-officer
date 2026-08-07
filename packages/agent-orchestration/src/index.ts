@@ -1,9 +1,11 @@
 import {
   agentGraphNodeSchema,
+  agentInterruptSchema,
   type AgentGraphNode,
   type AgentGraphProjection,
   type AgentInterrupt,
-  type AgentPermissionProfile
+  type AgentPermissionProfile,
+  type RepairDecisionAnswer
 } from "@ai-test-officer/contracts";
 import {
   Annotation,
@@ -40,6 +42,8 @@ export interface AgentGraphState extends AgentGraphInput {
   progress: number;
   tokenUsage: number;
   pendingInterrupt?: AgentInterrupt;
+  interruptOwner?: "agent" | "user" | "environment" | "developer";
+  interruptContext?: Record<string, unknown>;
   lastError?: AgentGraphProjection["lastError"];
   coverageMap?: Record<string, unknown>;
   planData?: Record<string, unknown>;
@@ -72,7 +76,7 @@ export interface AgentGraphHooks {
   collectAndGate?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   triageFailure?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   selectiveJudge?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
-  repair?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  repair?: (state: AgentGraphState, resume?: RepairDecisionAnswer) => Promise<Partial<AgentGraphState> & { repairInterrupt?: AgentInterrupt }>;
   finalize?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   onProjection?: (projection: AgentGraphProjection) => Promise<void>;
 }
@@ -114,6 +118,8 @@ const GraphState = Annotation.Root({
     default: () => 0
   }),
   pendingInterrupt: Annotation<AgentInterrupt | undefined>(),
+  interruptOwner: Annotation<"agent" | "user" | "environment" | "developer" | undefined>(),
+  interruptContext: Annotation<Record<string, unknown> | undefined>(),
   lastError: Annotation<AgentGraphProjection["lastError"] | undefined>(),
   coverageMap: Annotation<Record<string, unknown> | undefined>(),
   planData: Annotation<Record<string, unknown> | undefined>(),
@@ -143,6 +149,8 @@ function projection(state: AgentGraphState): AgentGraphProjection {
     completedNodes: state.completedNodes,
     progress: state.progress,
     pendingInterrupt: state.pendingInterrupt,
+    interruptOwner: state.interruptOwner,
+    interruptContext: state.interruptContext,
     lastError: state.lastError,
     tokenUsage: state.tokenUsage,
     repairSessionId: state.repairSessionId,
@@ -431,6 +439,142 @@ function executionNode(hooks: AgentGraphHooks) {
   };
 }
 
+/**
+ * Repair is the human-in-the-loop hub: when the triage attributes the failure
+ * to a user / environment / developer owned cause (or the agent lacks sandbox
+ * write access), the node raises a real LangGraph `interrupt()` carrying the
+ * problem, the diagnosis performed so far, the suggested handling, and the
+ * concrete operations the human may choose. The graph pauses here until the
+ * caller resumes the same `thread_id` with a `Command({ resume })` answer, after
+ * which the chosen action is applied. Auto-repairable (agent-owned, writable)
+ * failures skip the interrupt and proceed directly.
+ *
+ * The assessment pass and the resume pass are separated by the idempotency
+ * `attempt` (1 = assess, 2 = apply) so a restart that replays the assessment
+ * never re-applies the user's decision.
+ */
+function repairNode(hooks: AgentGraphHooks) {
+  return async (state: AgentGraphState) => {
+    if (state.mode === "shadow") return makeNode("repair", hooks.repair, hooks)(state);
+    const index = orderedNodes.indexOf("repair");
+    const started: AgentGraphState = {
+      ...state,
+      status: "running",
+      currentNode: "repair",
+      pendingInterrupt: undefined,
+      progress: index / orderedNodes.length,
+      updatedAt: now()
+    };
+    await hooks.onProjection?.(projection(started));
+
+    const assessed = await hooks.repair?.(started) ?? {};
+    const { repairInterrupt, ...assessedRest } = assessed as Partial<AgentGraphState> & { repairInterrupt?: AgentInterrupt };
+    if (repairInterrupt) {
+      const pending = repairInterrupt;
+      await hooks.onProjection?.(projection({
+        ...started,
+        ...assessedRest,
+        status: "interrupted",
+        currentNode: "repair",
+        pendingInterrupt: pending,
+        interruptOwner: pending.owner,
+        interruptContext: pending.context,
+        progress: index / orderedNodes.length,
+        updatedAt: now()
+      }));
+      // Real pause: the graph checkpoints and waits for Command({ resume }).
+      const answer = interrupt(pending) as RepairDecisionAnswer;
+      const update = await hooks.repair?.({ ...started, ...assessedRest, pendingInterrupt: undefined }, answer) ?? assessedRest;
+      const { repairInterrupt: _ignored, ...updateRest } = update as Partial<AgentGraphState> & { repairInterrupt?: AgentInterrupt };
+      const completed: AgentGraphState = {
+        ...started,
+        ...updateRest,
+        currentNode: "repair",
+        completedNodes: Array.from(new Set([...started.completedNodes, "repair" as const])),
+        progress: (index + 1) / orderedNodes.length,
+        pendingInterrupt: undefined,
+        interruptOwner: undefined,
+        interruptContext: undefined,
+        status: "running",
+        updatedAt: now()
+      };
+      await hooks.onProjection?.(projection(completed));
+      return {
+        ...updateRest,
+        status: "running",
+        currentNode: "repair",
+        completedNodes: ["repair" as const],
+        progress: (index + 1) / orderedNodes.length,
+        pendingInterrupt: undefined,
+        interruptOwner: undefined,
+        interruptContext: undefined,
+        updatedAt: now()
+      };
+    }
+
+    const completed: AgentGraphState = {
+      ...started,
+      ...assessedRest,
+      currentNode: "repair",
+      completedNodes: Array.from(new Set([...started.completedNodes, "repair" as const])),
+      progress: (index + 1) / orderedNodes.length,
+      pendingInterrupt: undefined,
+      status: "running",
+      updatedAt: now()
+    };
+    await hooks.onProjection?.(projection(completed));
+    return {
+      ...assessedRest,
+      status: "running",
+      currentNode: "repair",
+      completedNodes: ["repair" as const],
+      progress: (index + 1) / orderedNodes.length,
+      pendingInterrupt: undefined,
+      updatedAt: now()
+    };
+  };
+}
+
+/**
+ * Safety net: a node must never finalize while a human-in-the-loop interrupt is
+ * still unresolved. The real `interrupt()` in `repairNode` already pauses the
+ * graph, so this guard only protects against programming errors that would
+ * otherwise let `finalize` run with a dangling pending interrupt.
+ */
+function finalizeNode(hooks: AgentGraphHooks) {
+  return async (state: AgentGraphState) => {
+    if (state.pendingInterrupt?.status === "pending") {
+      return {
+        status: "interrupted" as const,
+        currentNode: "finalize" as const,
+        pendingInterrupt: state.pendingInterrupt
+      };
+    }
+    return makeNode("finalize", hooks.finalize, hooks)(state);
+  };
+}
+
+/**
+ * Extracts the interrupt a suspended graph is actually waiting on.
+ *
+ * A `interrupt()` call unwinds the node, so nothing the node was about to
+ * return — including our mirrored `pendingInterrupt` channel — is committed to
+ * the checkpoint. LangGraph instead records the pending value on the task
+ * descriptor, which is what a restarted process must read to know a human
+ * decision is still outstanding.
+ */
+function liveInterrupt(snapshot: { tasks?: readonly unknown[] }): AgentInterrupt | undefined {
+  for (const task of snapshot.tasks ?? []) {
+    const interrupts = (task as { interrupts?: readonly unknown[] }).interrupts ?? [];
+    for (const entry of interrupts) {
+      const value = (entry as { value?: unknown }).value;
+      const parsed = agentInterruptSchema.safeParse(value);
+      if (parsed.success) return parsed.data;
+    }
+  }
+  return undefined;
+}
+
 export async function createAgentCheckpointer(input?: { databaseUrl?: string; schema?: string }) {
   if (!input?.databaseUrl) return new MemorySaver();
   const saver = PostgresSaver.fromConnString(input.databaseUrl, { schema: input.schema ?? "langgraph" });
@@ -456,8 +600,8 @@ export function createAgentOrchestrationGraph(input: {
     .addNode("collect-and-gate", makeNode("collect-and-gate", hooks.collectAndGate, hooks))
     .addNode("triage-failure", makeNode("triage-failure", hooks.triageFailure, hooks))
     .addNode("selective-judge", makeNode("selective-judge", hooks.selectiveJudge, hooks))
-    .addNode("repair", makeNode("repair", hooks.repair, hooks))
-    .addNode("finalize", makeNode("finalize", hooks.finalize, hooks))
+    .addNode("repair", repairNode(hooks))
+    .addNode("finalize", finalizeNode(hooks))
     .addEdge(START, "intake")
     .addEdge("intake", "discover")
     .addConditionalEdges("discover", (state) =>
@@ -504,10 +648,23 @@ export function createAgentOrchestrationGraph(input: {
       const snapshot = await graph.getState({ configurable: { thread_id: runId } });
       const values = snapshot.values as AgentGraphState;
       if (!values?.runId) return undefined;
-      const status: AgentGraphStatus = snapshot.next.length === 0
+      // `interrupt()` throws, so the pausing node never commits its return
+      // value: the mirrored `pendingInterrupt` channel is empty while the graph
+      // is suspended. LangGraph's own task descriptors are the only source of
+      // truth here, so read the live interrupt from the checkpoint first and
+      // only fall back to the committed channel.
+      const live = liveInterrupt(snapshot);
+      const pendingInterrupt = live ?? values.pendingInterrupt;
+      const status: AgentGraphStatus = snapshot.next.length === 0 && !live
         ? values.lastError ? "failed" : "completed"
-        : values.pendingInterrupt ? "interrupted" : values.status;
-      return projection({ ...values, status });
+        : pendingInterrupt ? "interrupted" : values.status;
+      return projection({
+        ...values,
+        status,
+        pendingInterrupt,
+        interruptOwner: pendingInterrupt?.owner ?? values.interruptOwner,
+        interruptContext: pendingInterrupt?.context ?? values.interruptContext
+      });
     }
   };
 }

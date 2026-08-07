@@ -14,6 +14,12 @@ import {
 import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
 import { persistExecutionResult } from "./executionPersistence.js";
 import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
+import {
+  finalizeProofBundle,
+  proofCredibility,
+  type MachineGateDraft
+} from "./proof/proofBundleService.js";
+import { assertVerifiedMachineGate } from "./proof/proofBundleIntegrity.js";
 import type {
   JudgeResult,
   LayeredJudgeReport,
@@ -72,8 +78,15 @@ export async function persistParentAggregateEvidence(input: {
     evidenceSetRoot?: string;
     artifactIntegrityVerified: boolean;
     evidenceGrounded: boolean;
+    /** The child's own verified gate — required so the parent can prove each
+     * child was itself minted by the Proof Bundle Service (proofBundleId
+     * present), not self-asserted. */
+    machineGate?: MachineGate;
   }>;
-  machineGate: MachineGate;
+  /** The aggregate draft (status + reasons). Credibility flags are never
+   * supplied here; the parent mints them via `finalizeProofBundle`. */
+  machineGateDraft: MachineGateDraft;
+  gateEligibleFacts: { executionSucceeded: boolean; requirementCovered: boolean };
   judgeRecommendation: JudgeRecommendation;
 }) {
   const now = new Date().toISOString();
@@ -93,7 +106,7 @@ export async function persistParentAggregateEvidence(input: {
       childRunId: item.childRunId
     })),
     children: input.children,
-    machineGate: input.machineGate
+    machineGate: input.machineGateDraft
   }, null, 2));
   const clock = new AttemptClock();
   const artifact = await commitCapturedFile({
@@ -124,35 +137,58 @@ export async function persistParentAggregateEvidence(input: {
       coverageDispositionComplete: input.coverage.every((item) => item.disposition !== "pending")
     }
   });
-  const machineGate: MachineGate = {
-    ...input.machineGate,
-    reasonDetails: input.machineGate.reasons.map((reason) => ({
-      code: reason.split(":")[0] || "parent_aggregate_reason",
-      summary: reason,
-      evidenceRefs: [evidence.id]
-    }))
-  };
   const judgeRecommendation: JudgeRecommendation = {
     ...input.judgeRecommendation,
     evidenceRefs: [evidence.id]
   };
-  const finalStatus = resolveFinalStatus({
-    machineGate,
-    judgeRecommendation
+  // Prove every child run was itself minted by the Proof Bundle Service
+  // (carries a proofBundleId), so the parent aggregate cannot launder an
+  // unverified child gate into a pass. Unverified children downgrade the
+  // aggregate to needs-human-review via an explicit reason.
+  const unverifiedChildren = input.children
+    .map((child) => child.machineGate)
+    .filter((gate): gate is MachineGate => Boolean(gate))
+    .filter((gate) => {
+      try {
+        assertVerifiedMachineGate(gate);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+  const draft: MachineGateDraft = {
+    status: input.machineGateDraft.status,
+    reasons: [
+      ...input.machineGateDraft.reasons,
+      ...(unverifiedChildren.length ? [`child_gate_unverified:${unverifiedChildren.length}`] : [])
+    ],
+    reasonDetails: input.machineGateDraft.reasonDetails ?? [],
+    assertionFailures: input.machineGateDraft.assertionFailures ?? []
+  };
+  // The parent re-mints its own verified gate from its own evidence + artifacts
+  // (the aggregate operation-log + the child evidence-set roots it references).
+  // Credibility flags are computed here, never copied from a child gate.
+  const finalized = finalizeProofBundle({
+    draft,
+    runId: input.runId,
+    scenarioId,
+    attemptId,
+    evidence: [evidence],
+    artifactsV2: [artifact],
+    gateEligibleFacts: input.gateEligibleFacts
   });
+  const machineGate = finalized.machineGate;
+  const finalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
   const covered = input.coverage.length > 0 && input.coverage.every((item) => item.disposition !== "pending");
-  const evidenceComplete = machineGate.evidenceComplete;
   const requirementPassed = machineGate.status === "pass";
   const outcomeSummary = runOutcomeSummaryV2Schema.parse({
     schemaVersion: "2.0",
     schedulingCompleted: true,
     executionStarted: true,
-    executionSucceeded: input.children.length > 0 && input.children.every((item) => ["completed", "failed", "blocked", "awaiting-human-review"].includes(item.state)),
+    executionSucceeded: input.gateEligibleFacts.executionSucceeded,
     requirementCovered: covered,
     requirementPassed,
-    artifactIntegrityVerified: evidenceComplete,
-    evidenceGrounded: evidenceComplete,
-    gateEligible: covered && evidenceComplete,
+    ...proofCredibility(finalized.verdict, machineGate, finalized.gateEligible),
     machineGate,
     judgeRecommendation,
     finalStatus
@@ -297,6 +333,6 @@ export async function persistParentAggregateEvidence(input: {
   bundle.evidenceManifest = manifest;
   bundle.result.evidenceManifest = manifest;
   await writeRunBundle(bundle);
-  await persistExecutionResult(input.runId, result);
+  await persistExecutionResult(input.runId, result, { verdict: finalized.verdict, gateEligible: finalized.gateEligible });
   return { result, bundle, manifest };
 }

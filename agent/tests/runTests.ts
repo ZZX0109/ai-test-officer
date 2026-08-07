@@ -39,6 +39,8 @@ import { testBenchmarkEvaluation } from "./benchmark.test.js";
 import { testLlmRoutingPolicy } from "./llmRoutingPolicy.test.js";
 import { testIndependentFixtures } from "./independentFixtures.test.js";
 import { testRepairProposals } from "./repairProposal.test.js";
+import { testRepairDecision } from "./repairDecision.test.js";
+import { testRepairPlanLedger } from "./repairPlanLedger.test.js";
 import { testRunEventStore } from "./runEventStore.test.js";
 import { testRetryPolicy } from "./retryPolicy.test.js";
 import { testGithubChecks } from "./githubChecks.test.js";
@@ -60,17 +62,22 @@ import { testLlmLifecycle } from "./llmLifecycle.test.js";
 import { testStructuredActionExecutors } from "./structuredActionExecutors.test.js";
 import { testLlmBudgetLedger } from "./llmBudgetLedger.test.js";
 import { testAgentGraphMode } from "./agentGraphMode.test.js";
+import { testHumanInLoopInterrupt } from "./humanInLoopInterrupt.test.js";
 import { testKnowledgeBoundary } from "./knowledgeBoundary.test.js";
 import { testKnowledgeBoundaryPlatform } from "./knowledgeBoundaryPlatform.test.js";
 import { testProjectAuthorizationMatrix } from "./projectAuthorization.test.js";
 import { testAssistantFallback } from "./assistantFallback.test.js";
 import { testProofBundleValidator } from "./proofBundleValidator.test.js";
+import { testProofBundleIntegrity } from "./proofBundleIntegrity.test.js";
 import { testEvidenceArtifactLinker } from "./evidenceArtifactLinker.test.js";
+import { testSustainabilityModules } from "./sustainabilityModules.test.js";
 
 async function main() {
   testAssistantFallback();
   testProofBundleValidator();
   testEvidenceArtifactLinker();
+  await testSustainabilityModules();
+  testProofBundleIntegrity();
   await testConnectorEnvelope();
   await testProjectDetectionWizard();
   await testProjectFolderBrowser();
@@ -79,6 +86,7 @@ async function main() {
   testLlmLifecycle();
   await testLlmBudgetLedger();
   testAgentGraphMode();
+  await testHumanInLoopInterrupt();
   testKnowledgeBoundary();
   await testKnowledgeBoundaryPlatform();
   await testStructuredActionExecutors();
@@ -113,6 +121,8 @@ async function main() {
   testLlmRoutingPolicy();
   await testIndependentFixtures();
   testRepairProposals();
+  testRepairDecision();
+  await testRepairPlanLedger();
   await testRunEventStore();
   testRetryPolicy();
   testGithubChecks();

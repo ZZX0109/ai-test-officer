@@ -2,6 +2,7 @@ import type {
   BotDelivery,
   AuditStoreStatus,
   AgentGraphProjection,
+  RepairDecisionAnswer,
   BenchmarkSummary,
   CommitCheckResult,
   ConnectorContext,
@@ -24,10 +25,12 @@ import type {
   ProjectDiagnosis,
   ProjectGrant,
   ProjectHealthCheckResult,
+  ProjectRecoveryResult,
   ProjectRuntimeStatus,
   RuntimeRecoveryAdvice,
   RequirementAcceptanceResult,
   RepairFileContent,
+  RepairPlanData,
   RepairSession,
   RunBundle,
   RunBundleDownloadManifest,
@@ -161,6 +164,53 @@ export function getConclusionProof(runId: string, conclusionId: string) {
   }>(`/v1/conclusions/${encodeURIComponent(conclusionId)}/proof?runId=${encodeURIComponent(runId)}`);
 }
 
+/**
+ * Owner-aware repair plan for a run.
+ *
+ * Returns `null` when the run has no failure attribution yet (404 from the
+ * API) — "no plan" is a normal state, not an error, so callers can poll this
+ * without treating the empty case as a failure.
+ */
+export async function getRunRepairPlan(runId: string): Promise<RepairPlanData | null> {
+  try {
+    const plan = await request<RepairPlanData & { persisted?: boolean; idempotencyKey?: string }>(
+      `/v1/runs/${encodeURIComponent(runId)}/repair-plan`
+    );
+    return plan;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/no_repair_plan|run_not_found|\b404\b/.test(message)) return null;
+    throw error;
+  }
+}
+
+/**
+ * Persist a repair-plan lifecycle transition on the backend (status change +
+ * audit event) so an executed/resolved plan survives a workbench refresh.
+ */
+export async function updateRepairPlanStatus(
+  runId: string,
+  planId: string,
+  status?: "applied" | "resolved" | "dismissed",
+  opts?: { event?: string; note?: string }
+): Promise<RepairPlanData | null> {
+  try {
+    const plan = await request<RepairPlanData & { persisted?: boolean }>(
+      `/v1/runs/${encodeURIComponent(runId)}/repair-plan/${encodeURIComponent(planId)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status, ...opts })
+      }
+    );
+    return plan;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/repair_plan_not_found|run_not_found|\b404\b/.test(message)) return null;
+    throw error;
+  }
+}
+
 export function sendRunAgentMessage(runId: string, payload: {
   message: string;
   credentialId?: string;
@@ -170,6 +220,7 @@ export function sendRunAgentMessage(runId: string, payload: {
     assistant: {
       reply: string;
       reasoningSummary: NonNullable<PlanningMessage["reasoningSummary"]>;
+      repairPlan?: PlanningMessage["repairPlan"];
       suggestedAction: NonNullable<PlanningMessage["suggestedAction"]>;
       requiresConfirmation: boolean;
       knowledge: {
@@ -211,6 +262,31 @@ export function resumeRunAgentInterrupt(
   return request<{ agent: AgentGraphProjection }>(
     `/v1/runs/${encodeURIComponent(runId)}/interrupts/${encodeURIComponent(interruptId)}/resume`,
     { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+/**
+ * Resume a `repair-decision` interrupt. Unlike the generic approval resume this
+ * forwards a full {@link RepairDecisionAnswer}, which the graph applies before
+ * continuing the very same thread — the user's choice is what unblocks the run,
+ * not a bare boolean.
+ */
+export function resumeRepairDecision(
+  runId: string,
+  interruptId: string,
+  answer: RepairDecisionAnswer
+) {
+  return request<{ agent: AgentGraphProjection }>(
+    `/v1/runs/${encodeURIComponent(runId)}/interrupts/${encodeURIComponent(interruptId)}/resume`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        approved: answer.decision !== "dismiss",
+        decision: answer.decision,
+        ...(answer.message ? { message: answer.message } : {}),
+        ...(answer.repairPlanId ? { repairPlanId: answer.repairPlanId } : {})
+      })
+    }
   );
 }
 
@@ -521,6 +597,7 @@ export function chatWithTestAssistant(payload: {
     assistant: {
       reply: string;
       reasoningSummary: NonNullable<PlanningMessage["reasoningSummary"]>;
+      repairPlan?: PlanningMessage["repairPlan"];
       intent: "status-question" | "failure-question" | "plan-change" | "execution-control" | "general";
       suggestedAction: NonNullable<PlanningMessage["suggestedAction"]>;
       requiresConfirmation: boolean;
@@ -1096,6 +1173,17 @@ export function getAiStartRecovery(id: string, credentialId?: string) {
   return request<{ advice: RuntimeRecoveryAdvice }>(`/api/projects/${id}/ai-start-recovery`, {
     method: "POST",
     body: JSON.stringify({ credentialId })
+  });
+}
+
+export function getProjectRecovery(id: string) {
+  return request<{ recovery: ProjectRecoveryResult }>(`/api/projects/${encodeURIComponent(id)}/recovery`);
+}
+
+export function recoverAndRetryProject(id: string, mode: "auto" | "runtime" | "discovery" = "auto") {
+  return request<{ accepted: boolean; recovery: ProjectRecoveryResult }>(`/api/projects/${encodeURIComponent(id)}/recover-and-retry`, {
+    method: "POST",
+    body: JSON.stringify({ mode })
   });
 }
 

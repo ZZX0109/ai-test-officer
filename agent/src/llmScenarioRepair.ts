@@ -123,7 +123,7 @@ export async function createLlmScenarioBindingRepair(input: {
       }
     ],
     allowedCapabilities: ["repair-scenario-binding"],
-    allowedTools: [],
+    allowedTools: ["read-page-observation", "read-discovery-candidates"],
     unknowns: [],
     untrustedInputKinds: ["dom", "network", "prior-model-output"]
   });

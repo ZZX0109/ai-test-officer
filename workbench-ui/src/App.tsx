@@ -33,6 +33,7 @@ import {
   discoveryOrchestrationCopy
 } from "./components/DiscoveryPanel";
 import { EvidencePanel } from "./components/EvidencePanel";
+import { InterruptDecisionPanel } from "./components/InterruptDecisionPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { ImpactPanel } from "./components/ImpactPanel";
 import { PatrolPanel } from "./components/PatrolPanel";
@@ -54,6 +55,7 @@ import {
   workspaceSelectors
 } from "./state/workspaceReducer";
 import { readProjectHistoryCache, writeProjectHistoryCache } from "./projectHistoryCache";
+import { planRequiresLoginCredentials } from "./loginPlan";
 import {
   analyzeConnectedContext,
   bindProjectApiCredential,
@@ -82,12 +84,16 @@ import {
   getRepairFile,
   getPatrolTrend,
   getProjectRuntime,
+  getProjectRecovery,
   getAiStartRecovery,
   getSecuritySummary,
   getStorageStatus,
   getRunBundle,
   getRunEvidence,
   getRunProjection,
+  getRunAgent,
+  resumeRepairDecision,
+  listRunRepairs,
   applyRepair,
   exportRepair,
   listHarnessGaps,
@@ -109,6 +115,7 @@ import {
   runPatrol,
   runPatrolPlanNow,
   runRequirementAcceptance,
+  recoverAndRetryProject,
   runStorageRetention,
   createVisualRun,
   approveRunPlan,
@@ -128,6 +135,7 @@ import {
   updateHarnessGap,
   updateCredential,
   updateRepairFile,
+  updateRepairPlanStatus,
   validateRepair,
   waitForAgentReady
 } from "./api";
@@ -156,10 +164,15 @@ import type {
   ProjectDiagnosis,
   ProjectGrant,
   ProjectHealthCheckResult,
+  ProjectRecoveryResult,
   ProjectRuntimeStatus,
   RuntimeRecoveryAdvice,
   RequirementAcceptanceResult,
   RepairFileContent,
+  RepairPlanActionStatus,
+  AgentGraphProjection,
+  RepairDecisionValue,
+  RepairPlanData,
   RepairSession,
   RunBundle,
   RunProjection,
@@ -196,7 +209,7 @@ function hasBlockingPlanningQuestions(result: PlanningConversationResult) {
   );
 }
 
-function isPlanningAutomationBusy(phase: "idle" | "preparing-project" | "discovering" | "binding" | "starting-run" | "running" | "ready" | "needs-permission" | "blocked") {
+function isPlanningAutomationBusy(phase: "idle" | "preparing-project" | "discovering" | "binding" | "starting-run" | "running" | "ready" | "needs-permission" | "needs-credentials" | "blocked") {
   return ["preparing-project", "discovering", "binding", "starting-run", "running"].includes(phase);
 }
 
@@ -244,6 +257,8 @@ export function commandFallbackAction(
 ): Exclude<AssistantSuggestedAction, "none"> | undefined {
   const normalized = message.replace(/\s+/g, "").toLowerCase();
   if (/查看.*(证据|截图|日志|trace)|打开.*(证据|截图|日志)/i.test(normalized)) return "open-evidence";
+  if (/docker|podman|沙盒|启动.*项目|前端.*打不开|端口.*不可达/i.test(normalized)) return "retry-runtime";
+  if (/重新扫描|扫描页面|discovery/i.test(normalized)) return "retry-discovery";
   if (/暂停|先停一下|等一下/i.test(normalized)) return "pause-run";
   if (/取消|终止|停止测试/i.test(normalized)) return "cancel-run";
   if (/重试.*失败|重新.*失败|修复.*失败|重新绑定/i.test(normalized)) return "retry-failed-path";
@@ -252,6 +267,24 @@ export function commandFallbackAction(
   if (/恢复|继续测试/i.test(normalized) && runState === "paused") return "resume-run";
   if (/开始测试|执行计划|开始执行/i.test(normalized)) return "start-run";
   return undefined;
+}
+
+export function isExplicitAssistantActionConfirmation(
+  message: string,
+  action: Exclude<AssistantSuggestedAction, "none"> | undefined
+) {
+  if (!action || ![
+    "retry-runtime",
+    "retry-discovery",
+    "retry-failed-path",
+    "continue-safe-paths"
+  ].includes(action)) return false;
+  const normalized = message.replace(/\s+/g, "").toLowerCase();
+  if (/(?:为什么|怎么|如何|是什么|能否|是否|可以吗|需要做什么|该怎么办|\?|？)/i.test(normalized)) {
+    return false;
+  }
+  return /^(?:请)?(?:确认|同意|可以|继续|执行|重试|重新|再试|修复|扫描|启动)/i.test(normalized)
+    || /(?:重新尝试即可|继续处理|继续执行|重试失败链路|重新扫描页面|重新绑定路径)/i.test(normalized);
 }
 
 function auditStoreSummary(auditStore: AuditStoreStatus | null) {
@@ -299,6 +332,8 @@ export function App() {
   const [projectGrants, setProjectGrants] = useState<ProjectGrant[]>([]);
   const [projectConnection, setProjectConnection] = useState<ProjectHealthCheckResult | null>(null);
   const [projectRuntime, setProjectRuntime] = useState<ProjectRuntimeStatus | null>(null);
+  const [projectRecovery, setProjectRecovery] = useState<ProjectRecoveryResult | null>(null);
+  const [projectRecoveryBusy, setProjectRecoveryBusy] = useState(false);
   // Selecting a saved project must not immediately mount its live iframe.
   // A live preview is opened only after this Workbench session has explicitly
   // diagnosed and prepared that project for testing.
@@ -335,12 +370,19 @@ export function App() {
     action: Exclude<AssistantSuggestedAction, "none">;
     label: string;
   } | null>(null);
+  // Progress of the action executed from a RepairPlanPanel. Scoped by planId so
+  // one plan's failure never renders under a different plan.
+  const [repairPlanActionStatus, setRepairPlanActionStatus] = useState<RepairPlanActionStatus | null>(null);
   const [planningConfirmed, setPlanningConfirmed] = useState(false);
   const [planningAutomation, setPlanningAutomation] = useState<{
-    phase: "idle" | "preparing-project" | "discovering" | "binding" | "starting-run" | "running" | "ready" | "needs-permission" | "blocked";
+    phase: "idle" | "preparing-project" | "discovering" | "binding" | "starting-run" | "running" | "ready" | "needs-permission" | "needs-credentials" | "blocked";
     detail: string;
     scenarioId?: string;
   }>({ phase: "idle", detail: "" });
+  const [preparationLoginUsername, setPreparationLoginUsername] = useState("");
+  const [preparationLoginPassword, setPreparationLoginPassword] = useState("");
+  const [preparationLoginError, setPreparationLoginError] = useState("");
+  const [preparationLoginSaving, setPreparationLoginSaving] = useState(false);
   const [automationFailures, setAutomationFailures] = useState<AutomationFailure[]>([]);
   const analyzedBlockedRuns = useRef(new Set<string>());
   const surfacedAssistantNotices = useRef(new Set<string>());
@@ -393,6 +435,13 @@ export function App() {
   const [revealProjectLoginSettings, setRevealProjectLoginSettings] = useState(false);
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
+  /** Evidence id to scroll-to + highlight when the workbench asks to locate one. */
+  const [focusEvidenceId, setFocusEvidenceId] = useState<string | null>(null);
+  // The graph projection is the only place a *paused* run surfaces. Without it
+  // an interrupted run is indistinguishable from a stalled one.
+  const [agentProjection, setAgentProjection] = useState<AgentGraphProjection | null>(null);
+  const [interruptBusy, setInterruptBusy] = useState(false);
+  const [interruptError, setInterruptError] = useState<string | null>(null);
   const [permissionProfile, setPermissionProfile] = useState<PermissionProfile>({
     observe: true,
     browserControl: false,
@@ -447,6 +496,11 @@ export function App() {
   const planningHasBlockingQuestions = !discoveryAllowsPlanning
     || (planningResult ? hasBlockingPlanningQuestions(planningResult) : false);
   const planningAutomationBusy = isPlanningAutomationBusy(planningAutomation.phase);
+  // Credentials are a property of the confirmed plan, not merely of the
+  // project manifest. This keeps login fields out of runs that never execute
+  // an authentication step.
+  const preparationPlan = planningResult ?? plan;
+  const preparationRequiresLogin = planRequiresLoginCredentials(preparationPlan);
   const canStartRun = hasSelectedProject
     && discoveryAllowsPlanning
     && Boolean(requirementText.trim())
@@ -525,8 +579,21 @@ export function App() {
       || latestDecision === "blocked"
     )
   );
-  const assistantAutoRepairAvailable = pathBindingRepairable || codeRepairAvailable;
-  const assistantFeedbackRequired = runIsBlocked || authFeedbackRequired || credentialReadyForRetry || apiCredentialFeedbackRequired || screenshotRateLimited || reviewRequired || codeRepairAvailable;
+  const runtimeRecoveryAvailable = Boolean(
+    projectRuntime
+    && projectRuntime.status !== "running"
+    && (
+      ["idle", "failed", "starting", "installing"].includes(projectRuntime.status)
+      || ["container_runtime_unavailable", "dependency_missing", "command_not_found", "port_conflict", "health_timeout", "early_exit"].includes(projectRuntime.failureReason ?? "")
+    )
+  );
+  const discoveryRecoveryAvailable = Boolean(
+    projectRuntime?.status === "running"
+    && planningAutomation.phase === "blocked"
+    && /Discovery|真实页面|页面绑定|入口、控件或预期结果|可执行路径/i.test(planningAutomation.detail)
+  );
+  const assistantAutoRepairAvailable = runtimeRecoveryAvailable || discoveryRecoveryAvailable || pathBindingRepairable || codeRepairAvailable;
+  const assistantFeedbackRequired = runIsBlocked || runtimeRecoveryAvailable || discoveryRecoveryAvailable || authFeedbackRequired || credentialReadyForRetry || apiCredentialFeedbackRequired || screenshotRateLimited || reviewRequired || codeRepairAvailable;
   const latestPlanningAssistant = [...planningMessages].reverse().find((item) => item.role === "assistant");
   const latestPlanningAssistantMessage = latestPlanningAssistant?.content;
   const assistantQuickCommands = runIsBlocked || reviewRequired
@@ -581,6 +648,17 @@ export function App() {
   }
 
   function openProjectLoginSettings() {
+    if (preparationRequiresLogin) {
+      setPreparationLoginError("");
+      setPreparationLoginUsername("");
+      setPreparationLoginPassword("");
+      setPlanningAutomation({
+        phase: "needs-credentials",
+        detail: "当前测试计划需要登录账号，请在准备窗口中配置后继续。"
+      });
+      setRunPreviewModalOpen(true);
+      return;
+    }
     setRevealProjectLoginSettings(true);
     setLeftDrawerOpen(true);
     setRightDrawerOpen(false);
@@ -1335,6 +1413,17 @@ export function App() {
   useEffect(() => {
     if (!activeRunId) return;
     return subscribeRunEvents(activeRunId, ({ id, type, payload }) => {
+      // Graph lifecycle frames carry the projection itself. `agent.interrupt.*`
+      // is what turns a silently paused run into a visible decision request, so
+      // it must be consumed here rather than polled.
+      if (type.startsWith("agent.")) {
+        const projection = payload as unknown as AgentGraphProjection;
+        if (projection?.runId === activeRunId) {
+          setAgentProjection(projection);
+          if (projection.pendingInterrupt) setInterruptError(null);
+        }
+        return;
+      }
       if (type !== "state") return;
       const event = payload as { id?: string; type?: string; createdAt?: string; payload?: Record<string, unknown> };
       const finished = ["run_completed", "run_failed", "run_blocked", "run_cancelled", "human_review_requested"].includes(event.type ?? "");
@@ -1362,6 +1451,39 @@ export function App() {
       });
       void getRunProjection(activeRunId).then(({ run }) => setActiveRun(run)).catch(() => undefined);
     });
+  }, [activeRunId]);
+
+  /**
+   * Hydrate the graph projection whenever the active run changes.
+   *
+   * SSE only delivers *future* frames. A run that was already interrupted —
+   * because the operator reloaded the page or the service restarted — would
+   * otherwise show no decision request at all and appear permanently stuck.
+   * Polling continues while an interrupt is pending so a decision made in
+   * another tab clears this one too.
+   */
+  useEffect(() => {
+    if (!activeRunId) {
+      setAgentProjection(null);
+      setInterruptError(null);
+      return;
+    }
+    let disposed = false;
+    const hydrate = async () => {
+      try {
+        const { agent } = await getRunAgent(activeRunId);
+        if (!disposed && agent?.runId === activeRunId) setAgentProjection(agent);
+      } catch {
+        // A run started before the graph was enabled has no projection. The
+        // deterministic run view stays authoritative.
+      }
+    };
+    void hydrate();
+    const interval = window.setInterval(() => void hydrate(), 4_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
   }, [activeRunId]);
 
   useEffect(() => {
@@ -1519,6 +1641,7 @@ export function App() {
             ? {
               ...item,
               content: response.assistant.reply,
+              repairPlan: response.assistant.repairPlan,
               reasoningSummary: response.assistant.reasoningSummary,
               knowledge: response.assistant.knowledge,
               suggestedAction: response.assistant.suggestedAction,
@@ -1590,6 +1713,7 @@ export function App() {
           ? {
             ...item,
             content: response.assistant.reply,
+            repairPlan: response.assistant.repairPlan,
             reasoningSummary: response.assistant.reasoningSummary,
             knowledge: response.assistant.knowledge,
             suggestedAction: response.assistant.suggestedAction,
@@ -2165,6 +2289,7 @@ export function App() {
       setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
         ...item,
         content: response.assistant.reply,
+        repairPlan: response.assistant.repairPlan,
         reasoningSummary: response.assistant.reasoningSummary,
         knowledge: response.assistant.knowledge,
         suggestedAction: response.assistant.suggestedAction,
@@ -2265,6 +2390,70 @@ export function App() {
     } else {
       setMessage("测试账号已加密保存，运行时会自动注入沙盒。");
     }
+    return response.project;
+  }
+
+  async function savePreparationLoginAndContinue() {
+    if (!preparationRequiresLogin) {
+      setPlanningAutomation({ phase: "preparing-project", detail: "正在检查沙盒、项目服务和测试路径。" });
+      return;
+    }
+    if (projectDraft?.login?.credentialId && !preparationLoginUsername.trim() && !preparationLoginPassword) {
+      setPreparationLoginError("");
+      setPlanningAutomation({
+        phase: !permissionProfile.observe || !permissionProfile.browserControl ? "needs-permission" : "preparing-project",
+        detail: !permissionProfile.observe || !permissionProfile.browserControl
+          ? "先允许本次浏览器操作，授权后系统会按顺序准备和执行测试。"
+          : "正在检查沙盒、项目服务和测试路径。"
+      });
+      if (!permissionProfile.observe || !permissionProfile.browserControl) return;
+      const activePlan = planningResult;
+      if (activePlan?.recommendedScenarioId && selectedProjectExecutionMode !== "oci") {
+        setScenarioId(activePlan.recommendedScenarioId);
+        await executeConfirmedScenarioAutomatically(activePlan.recommendedScenarioId);
+      } else {
+        await continueAutomaticPlanning(permissionProfile, projectDraft ?? undefined, activePlan ?? undefined);
+      }
+      return;
+    }
+    if (!projectDraft) {
+      setPreparationLoginError("项目配置尚未保存，请先完成项目接入。");
+      return;
+    }
+    if (!preparationLoginUsername.trim() || !preparationLoginPassword) {
+      setPreparationLoginError("本次计划包含登录步骤，请填写测试账号和测试密码，或先配置已保存的测试账号。");
+      return;
+    }
+    setPreparationLoginSaving(true);
+    setPreparationLoginError("");
+    try {
+      const savedProject = await saveCurrentProjectLoginCredential({
+        username: preparationLoginUsername.trim(),
+        password: preparationLoginPassword,
+        usernameEnv: projectDraft.login?.usernameEnv ?? projectDetection?.loginCapability?.usernameEnv ?? "E2E_USERNAME",
+        passwordEnv: projectDraft.login?.passwordEnv ?? projectDetection?.loginCapability?.passwordEnv ?? "E2E_PASSWORD"
+      });
+      setPreparationLoginPassword("");
+      setPlanningAutomation({
+        phase: !permissionProfile.observe || !permissionProfile.browserControl ? "needs-permission" : "preparing-project",
+        detail: !permissionProfile.observe || !permissionProfile.browserControl
+          ? "测试账号已加密保存。请允许本次浏览器操作后继续。"
+          : "测试账号已加密保存，正在检查沙盒、项目服务和测试路径。"
+      });
+      if (!permissionProfile.observe || !permissionProfile.browserControl) return;
+      const activePlan = planningResult;
+      if (activePlan?.recommendedScenarioId && selectedProjectExecutionMode !== "oci") {
+        setScenarioId(activePlan.recommendedScenarioId);
+        await executeConfirmedScenarioAutomatically(activePlan.recommendedScenarioId);
+      } else {
+        await continueAutomaticPlanning(permissionProfile, savedProject, activePlan ?? undefined);
+      }
+    } catch (error) {
+      setPreparationLoginError(error instanceof Error ? error.message : "测试账号保存失败，请重试。");
+      setPlanningAutomation({ phase: "needs-credentials", detail: "测试账号尚未保存，项目准备暂停。" });
+    } finally {
+      setPreparationLoginSaving(false);
+    }
   }
 
   async function stopCurrentProject() {
@@ -2272,6 +2461,87 @@ export function App() {
     const response = await stopProject(projectDraft.id);
     setProjectRuntime(response.runtime);
     setMessage(response.runtime.message ?? `项目状态：${response.runtime.status}`);
+  }
+
+  async function recoverProjectAndRetry(mode: "auto" | "runtime" | "discovery" = "auto") {
+    const projectId = selectedProjectId || projectDraft?.id;
+    if (!projectId) {
+      const detail = "当前没有已选择的项目，因此没有可执行的恢复操作。";
+      setMessage(detail);
+      setPlanningMessages((current) => [...current, {
+        id: `recovery_unavailable_${Date.now()}`,
+        role: "assistant",
+        content: `遇到的问题：${detail}\n系统正在做什么：未启动重试，也没有创建代码修复。\n需要你操作：先选择并保存一个项目。`,
+        createdAt: new Date().toISOString()
+      }]);
+      return;
+    }
+    if (projectRecoveryBusy) return;
+
+    setProjectRecoveryBusy(true);
+    const pendingId = `project_recovery_${Date.now()}`;
+    const initialText = mode === "discovery"
+      ? "遇到的问题：页面 Discovery 尚未完成。\n系统正在做什么：正在重新扫描页面、控件、网络和可执行路径。\n需要你操作：暂时无需操作。"
+      : "遇到的问题：安全沙盒或项目服务尚未就绪。\n系统正在做什么：正在重新启动沙盒、检查 Docker Desktop、项目服务和页面连通性。\n需要你操作：暂时无需操作；若 180 秒后仍不可用，系统会给出明确提示。";
+    setPlanningMessages((current) => [...current, {
+      id: pendingId,
+      role: "assistant",
+      content: initialText,
+      createdAt: new Date().toISOString()
+    }]);
+    setMessage(mode === "discovery" ? "正在重新扫描页面并绑定路径…" : "正在重新启动沙盒并诊断项目…");
+
+    try {
+      const accepted = await recoverAndRetryProject(projectId, mode);
+      let recovery = accepted.recovery;
+      setProjectRecovery(recovery);
+      const deadline = Date.now() + 190_000;
+      while (["accepted", "running"].includes(recovery.status) && Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 900));
+        const snapshot = await getProjectRecovery(projectId);
+        recovery = snapshot.recovery;
+        setProjectRecovery(recovery);
+        setProjectRuntime(recovery.runtime);
+        const lastEvent = recovery.events.at(-1);
+        setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+          ...item,
+          content: [
+            "遇到的问题：正在恢复项目测试环境。",
+            `系统正在做什么：${lastEvent?.message ?? "正在同步恢复状态。"}`,
+            `需要你操作：${recovery.userAction}`
+          ].join("\n")
+        } : item));
+      }
+      setProjectRecovery(recovery);
+      setProjectRuntime(recovery.runtime);
+      const lastEvent = recovery.events.at(-1);
+      const completed = recovery.status === "completed";
+      const finalText = completed
+        ? `遇到的问题：恢复完成。\n系统已经做了什么：${lastEvent?.message ?? "沙盒、页面连通性和 Discovery 已恢复。"}\n需要你操作：无需操作；现在可以继续生成或执行测试计划。`
+        : `遇到的问题：${lastEvent?.message ?? recovery.sourceError ?? "恢复未完成。"}\n系统已经做了什么：已执行受限恢复并保留运行状态；没有修改项目源码，也没有覆盖既有证据。\n需要你操作：${recovery.userAction}`;
+      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+        ...item,
+        content: finalText,
+        suggestedAction: completed ? "start-run" : "none",
+        requiresConfirmation: completed
+      } : item));
+      setMessage(completed ? "项目环境已恢复，可以继续测试。" : recovery.userAction);
+      if (completed) {
+        setPlanningAutomation({ phase: "idle", detail: "项目恢复完成，等待继续规划或执行测试。" });
+        setPreviewSessionProjectId(projectId);
+      } else {
+        setPlanningAutomation({ phase: "blocked", detail: lastEvent?.message ?? recovery.sourceError ?? "项目恢复未完成" });
+      }
+    } catch (error) {
+      const detail = userFacingAutomationError(error instanceof Error ? error.message : "恢复请求失败");
+      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+        ...item,
+        content: `遇到的问题：${detail}\n系统已经做了什么：恢复请求未完成，系统没有启动代码修复或覆盖已有测试证据。\n需要你操作：请稍后重试；如果持续失败，请查看运行详情。`
+      } : item));
+      setMessage(detail);
+    } finally {
+      setProjectRecoveryBusy(false);
+    }
   }
 
   function requireBrowserAuthorization(action: string) {
@@ -2289,8 +2559,11 @@ export function App() {
       "cancel-run": "确认取消测试",
       "open-evidence": "打开证据详情",
       "create-repair": "创建沙盒修复",
+      "retry-runtime": "重新启动沙盒并诊断",
+      "retry-discovery": "重新扫描页面并绑定路径",
       "retry-failed-path": "重试失败链路",
       "continue-safe-paths": "继续其他可执行测试",
+      "configure-credentials": "配置测试账号",
       "resume-interrupt": "查看待确认操作"
     }[action];
   }
@@ -2298,6 +2571,15 @@ export function App() {
   async function executeAssistantSuggestedAction(actionOverride?: Exclude<AssistantSuggestedAction, "none">) {
     const action = actionOverride ?? assistantSuggestedAction?.action;
     if (!action) return;
+    try {
+    if (action === "retry-runtime") {
+      await recoverProjectAndRetry("runtime");
+      return;
+    }
+    if (action === "retry-discovery") {
+      await recoverProjectAndRetry("discovery");
+      return;
+    }
     if (action === "start-run") {
       if (!planningResult) {
         setMessage("测试清单尚未生成，正在先扫描项目。");
@@ -2333,6 +2615,10 @@ export function App() {
       return;
     }
     if (action === "create-repair") {
+      if (!activeRunId) {
+        setMessage("当前没有可关联的失败运行，因此不能创建代码修复。请先恢复项目或执行一条真实失败路径。");
+        return;
+      }
       await openCodeRepairWorkspace();
       return;
     }
@@ -2343,7 +2629,21 @@ export function App() {
         setMessage("正在使用同一场景重新执行并重建步骤、断言与证据关联，不会修改项目源码。");
         await executeConfirmedScenarioAutomatically(scenarioId);
       } else {
-        await openCodeRepairWorkspace();
+        const runtimeNeedsRecovery = projectRuntime?.status !== "running"
+          || projectRuntime?.failureReason === "container_runtime_unavailable";
+        if (runtimeNeedsRecovery) {
+          await recoverProjectAndRetry("runtime");
+        } else if (activeRunId && codeRepairAvailable) {
+          await openCodeRepairWorkspace();
+        } else {
+          setMessage("当前没有可重试的持久化失败路径。系统不会伪造重试或打开空的代码修复；可重新扫描页面或查看运行详情。");
+          setPlanningMessages((current) => [...current, {
+            id: `retry_not_available_${Date.now()}`,
+            role: "assistant",
+            content: "遇到的问题：当前没有可重试的测试路径。\n系统已经做了什么：没有创建代码修复，也没有覆盖既有证据。\n需要你操作：请先重新启动沙盒并扫描页面，或查看运行详情。",
+            createdAt: new Date().toISOString()
+          }]);
+        }
       }
       return;
     }
@@ -2363,8 +2663,150 @@ export function App() {
       setMessage("请在准备窗口中确认当前待授权操作。");
       return;
     }
+    if (action === "configure-credentials") {
+      // owner=user credential failures: retrying is useless until an account is
+      // bound. Open the credential form instead of falling through to the
+      // run-control branch below (which would have cancelled the run).
+      setRevealProjectLoginSettings(true);
+      setPlanningAutomation({
+        phase: "needs-credentials",
+        detail: "请填写本项目的测试账号，保存后系统会自动继续。"
+      });
+      setMessage("请配置本项目的测试账号；密码只在服务端加密保存，不要在对话中发送。");
+      return;
+    }
     const control = action === "pause-run" ? "pause" : action === "resume-run" ? "resume" : "cancel";
     await controlActiveRun(control);
+    } catch (error) {
+      const detail = userFacingAutomationError(error instanceof Error ? error.message : "操作未完成");
+      setMessage(detail);
+      setPlanningMessages((current) => [...current, {
+        id: `assistant_action_error_${Date.now()}`,
+        role: "assistant",
+        content: `遇到的问题：${detail}\n系统已经做了什么：已停止当前操作，未修改项目源码或覆盖证据。\n需要你操作：请重试，或查看运行详情。`,
+        createdAt: new Date().toISOString()
+      }]);
+    }
+  }
+
+  /**
+   * Execute the action a repair plan declares.
+   *
+   * The plan panel does not invent its own recovery logic: it reuses the exact
+   * same executor as the chat suggestion, so "按钮做的事" and "AI 说的事" cannot
+   * drift apart. Progress is reported back into the panel, keyed by plan id.
+   */
+  async function executeRepairPlanAction(
+    action: Exclude<AssistantSuggestedAction, "none">,
+    plan: RepairPlanData
+  ) {
+    // Persist the lifecycle transition so an executed plan survives a refresh
+    // instead of reverting to "待处理". Backend writes are best-effort: a
+    // persistence outage must not turn an explained action into an unexplained one.
+    const persist = (status?: "applied" | "resolved" | "dismissed", event?: string, note?: string) => {
+      if (!plan.runId || !plan.planId) return Promise.resolve(null);
+      return updateRepairPlanStatus(plan.runId, plan.planId, status, { event, note }).catch(() => null);
+    };
+
+    setRepairPlanActionStatus({
+      planId: plan.planId,
+      state: "running",
+      message: `正在执行：${assistantActionLabel(action) ?? action}`
+    });
+    await persist(undefined, "action_started", assistantActionLabel(action) ?? action);
+    try {
+      await executeAssistantSuggestedAction(action);
+      setRepairPlanActionStatus({
+        planId: plan.planId,
+        state: "done",
+        message: "已按修复方案执行；结果会在运行状态和证据中体现。"
+      });
+      await persist("applied", "action_executed");
+    } catch (error) {
+      setRepairPlanActionStatus({
+        planId: plan.planId,
+        state: "error",
+        message: userFacingAutomationError(error instanceof Error ? error.message : "修复动作未完成")
+      });
+      await persist(undefined, "action_failed", error instanceof Error ? error.message : "修复动作未完成");
+    }
+  }
+
+  /**
+   * Open the evidence a repair plan was derived from. Without this the plan's
+   * "依据证据" is an unverifiable claim.
+   */
+  function openRepairPlanEvidence(evidenceId: string, plan: RepairPlanData) {
+    setRightDrawerOpen(true);
+    setLeftDrawerOpen(false);
+    // Drive the panel to scroll-to + highlight the exact evidence item rather
+    // than only showing a toast. The panel reads this on mount/update.
+    setFocusEvidenceId(evidenceId);
+    setMessage(`已定位证据 ${evidenceId}${plan.attemptId ? `（attempt ${plan.attemptId}）` : ""}。`);
+  }
+
+  /** Locate a single evidence item referenced by a pending interrupt. */
+  function openInterruptEvidence(evidenceId: string) {
+    setRightDrawerOpen(true);
+    setLeftDrawerOpen(false);
+    setFocusEvidenceId(evidenceId);
+    setMessage(`已定位证据 ${evidenceId}。`);
+  }
+
+  /**
+   * Submit a human decision and resume the *paused graph*.
+   *
+   * This is the hinge of the whole human-in-the-loop story: the run is blocked
+   * inside LangGraph's `interrupt()` and only a real backend resume restarts it
+   * on the same thread. Opening a modal or writing a local note would leave the
+   * run paused forever, so failures here are surfaced rather than swallowed.
+   */
+  async function submitInterruptDecision(decision: RepairDecisionValue, note?: string) {
+    const interrupt = agentProjection?.pendingInterrupt;
+    if (!interrupt || !activeRunId) return;
+    setInterruptBusy(true);
+    setInterruptError(null);
+    try {
+      const { agent } = await resumeRepairDecision(activeRunId, interrupt.id, {
+        decision,
+        message: note
+      });
+      setAgentProjection(agent);
+      setMessage(
+        decision === "dismiss"
+          ? "已保留失败结论，测试不再自动修复。"
+          : "决策已提交，测试正在从中断处继续。"
+      );
+      // The decision changes run state (repair session, credentials, sandbox),
+      // so refresh the deterministic projection instead of trusting the graph
+      // snapshot alone.
+      void getRunProjection(activeRunId).then(({ run }) => setActiveRun(run)).catch(() => undefined);
+      // A repair decision produces a sandbox session. Surface it immediately so
+      // the operator lands in the workspace instead of hunting for it.
+      if (decision === "create-session" || decision === "repair") {
+        void listRunRepairs(activeRunId)
+          .then(({ repairs }) => {
+            const latest = repairs.at(-1);
+            if (latest) setRepairSession(latest);
+          })
+          .catch(() => undefined);
+      }
+    } catch (error) {
+      setInterruptError(
+        userFacingAutomationError(error instanceof Error ? error.message : "决策提交失败，测试仍处于暂停状态")
+      );
+    } finally {
+      setInterruptBusy(false);
+    }
+  }
+
+  function resolveRecoverableAssistantAction(action: Exclude<AssistantSuggestedAction, "none"> | undefined) {
+    if (!action) return action;
+    const recoveryRequested = action === "retry-failed-path" || action === "create-repair";
+    if (recoveryRequested && projectRuntime?.status !== "running") return "retry-runtime" as const;
+    if (recoveryRequested && discovery?.orchestration && discovery.orchestration.status !== "ready") return "retry-discovery" as const;
+    if (action === "create-repair" && !activeRunId) return undefined;
+    return action;
   }
 
   async function chatWithAssistant(content: string) {
@@ -2397,14 +2839,15 @@ export function App() {
           message: content,
           credentialId: defaultCredential?.id
         });
-        const effectiveAction = response.assistant.suggestedAction !== "none"
+        const effectiveAction = resolveRecoverableAssistantAction(response.assistant.suggestedAction !== "none"
           ? response.assistant.suggestedAction
-          : commandFallbackAction(content, activeRun?.state);
+          : commandFallbackAction(content, activeRun?.state));
         setPlanningMessages((current) => current.map((item) =>
           item.id === pendingId
             ? {
               ...item,
               content: response.assistant.reply,
+              repairPlan: response.assistant.repairPlan,
               reasoningSummary: response.assistant.reasoningSummary,
               knowledge: response.assistant.knowledge,
               suggestedAction: effectiveAction ?? "none",
@@ -2431,6 +2874,10 @@ export function App() {
             action: effectiveAction,
             label: assistantActionLabel(effectiveAction)
           });
+        }
+        if (isExplicitAssistantActionConfirmation(content, effectiveAction)) {
+          setAssistantSuggestedAction(null);
+          await executeAssistantSuggestedAction(effectiveAction);
         }
         return;
       }
@@ -2471,14 +2918,15 @@ export function App() {
           } : undefined
         }
       });
-      const effectiveAction = response.assistant.suggestedAction !== "none"
+      const effectiveAction = resolveRecoverableAssistantAction(response.assistant.suggestedAction !== "none"
         ? response.assistant.suggestedAction
-        : commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle"));
+        : commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle")));
       setPlanningMessages((current) => current.map((item) =>
         item.id === pendingId
           ? {
             ...item,
             content: response.assistant.reply,
+            repairPlan: response.assistant.repairPlan,
             reasoningSummary: response.assistant.reasoningSummary,
             knowledge: response.assistant.knowledge,
             suggestedAction: effectiveAction ?? "none",
@@ -2506,8 +2954,12 @@ export function App() {
           label: assistantActionLabel(effectiveAction)
         });
       }
+      if (isExplicitAssistantActionConfirmation(content, effectiveAction)) {
+        setAssistantSuggestedAction(null);
+        await executeAssistantSuggestedAction(effectiveAction);
+      }
     } catch (error) {
-      const fallbackAction = commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle"));
+      const fallbackAction = resolveRecoverableAssistantAction(commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle")));
       setPlanningMessages((current) => current.map((item) =>
         item.id === pendingId
           ? {
@@ -2531,6 +2983,10 @@ export function App() {
           action: fallbackAction,
           label: assistantActionLabel(fallbackAction)
         });
+      }
+      if (isExplicitAssistantActionConfirmation(content, fallbackAction)) {
+        setAssistantSuggestedAction(null);
+        await executeAssistantSuggestedAction(fallbackAction);
       }
     } finally {
       setAssistantChatBusy(false);
@@ -2904,6 +3360,44 @@ export function App() {
           });
       setDiscovery(response.discovery);
       setScenarioDrafts(response.discovery.drafts);
+      // A login wall is not a defect: the page loaded and was observed. Stop the
+      // automation and hand the operator a concrete, owner-tagged action instead
+      // of a generic "no executable path" failure.
+      if (response.discovery.status === "waiting-auth") {
+        setPlanningMessages((current) => [...current, {
+          id: `discovery_waiting_auth_${Date.now()}`,
+          role: "assistant",
+          content: response.discovery.message,
+          createdAt: new Date().toISOString(),
+          repairPlan: {
+            owner: "user",
+            type: "credential_required",
+            executable: false,
+            problem: "被测页面是登录入口，未配置可用的测试账号。",
+            steps: [
+              "打开凭据管理，新增本项目可用的测试账号。",
+              "不要在对话中直接发送密码，凭据只在服务端加密保存。",
+              "保存后重新执行页面扫描。"
+            ],
+            validation: "重新扫描后页面不再停留在登录页，且能发现可操作控件。",
+            message: response.discovery.message,
+            status: "pending",
+            // A login wall is cleared by binding an account, never by re-granting
+            // browser permission — the action must open the credential form.
+            action: "configure-credentials"
+          }
+        }]);
+        setPlanningAutomation({
+          // NOT "needs-permission": browser control is already granted here, and
+          // showing the permission dialog leaves the user pressing a button that
+          // cannot clear the block.
+          phase: "needs-credentials",
+          detail: "被测页面需要登录，请先配置测试账号再重新扫描。"
+        });
+        setRevealProjectLoginSettings(true);
+        setMessage("被测页面需要登录，请先配置测试账号。");
+        return;
+      }
       if (response.discovery.status === "failed") throw new Error(response.discovery.message);
       const recommendedIds = response.discovery.recommendedScenarioIds?.length
         ? response.discovery.recommendedScenarioIds
@@ -3060,15 +3554,26 @@ export function App() {
       return;
     }
     closeDrawers();
+    const requiresLogin = planRequiresLoginCredentials(candidate);
+    setPreparationLoginError("");
+    setPreparationLoginUsername("");
+    setPreparationLoginPassword("");
     setPlanningAutomation({
-      phase: !permissionProfile.observe || !permissionProfile.browserControl ? "needs-permission" : "preparing-project",
-      detail: !permissionProfile.observe || !permissionProfile.browserControl
+      phase: requiresLogin && !projectDraft?.login?.credentialId
+        ? "needs-credentials"
+        : !permissionProfile.observe || !permissionProfile.browserControl ? "needs-permission" : "preparing-project",
+      detail: requiresLogin && !projectDraft?.login?.credentialId
+        ? "本次测试包含登录步骤，请先配置仅用于沙盒的测试账号。"
+        : !permissionProfile.observe || !permissionProfile.browserControl
         ? "先允许本次浏览器操作，授权后系统会按顺序准备并执行测试。"
         : "正在检查沙盒、项目服务和测试路径。"
     });
     setRunPreviewModalOpen(true);
     setPlan(candidate.plan);
     setPlanningConfirmed(true);
+    if (requiresLogin && !projectDraft?.login?.credentialId) {
+      return;
+    }
     // Registry scenarios are fixture-specific. Uploaded/OCI projects must
     // first bind a path to their live DOM instead of executing a similarly
     // named scenario from another project.
@@ -3649,7 +4154,6 @@ export function App() {
             onRunDiagnosis={diagnoseAndRunCurrentProject}
             onStop={stopCurrentProject}
             onApplyRecoveryCandidate={applyAiRecoveryCandidate}
-            onSaveLoginCredential={saveCurrentProjectLoginCredential}
           />
 
           <section className="planning-conversation" aria-label="测试规划对话">
@@ -4098,6 +4602,7 @@ export function App() {
         deliveries={deliveries}
         isBusy={isBusy}
         liveStatusText={liveStatusText}
+        focusEvidenceId={focusEvidenceId}
         onClose={() => setRightDrawerOpen(false)}
       />
     );
@@ -4150,9 +4655,10 @@ export function App() {
         <div className="run-preview-overlay" role="dialog" aria-modal="true" aria-label="AI 测试准备与授权">
           <section className="run-preview-dialog showing-preparation">
             <header>
-              <div>
-                <span className="section-kicker">
-                  {planningAutomation.phase === "needs-permission" ? "需要你的确认"
+                  <div>
+                    <span className="section-kicker">
+                  {planningAutomation.phase === "needs-credentials" ? "需要测试账号"
+                    : planningAutomation.phase === "needs-permission" ? "需要你的确认"
                     : planningAutomation.phase === "blocked" ? "准备遇到问题"
                       : "正在准备测试"}
                 </span>
@@ -4162,7 +4668,7 @@ export function App() {
             </header>
             <div className="run-preparation-panel" aria-live="polite">
               <ol className="run-preparation-steps">
-                <li className={planningAutomation.phase === "needs-permission"
+                <li className={planningAutomation.phase === "needs-permission" || planningAutomation.phase === "needs-credentials"
                   ? "active"
                   : ["preparing-project", "discovering", "binding", "starting-run", "running", "ready"].includes(planningAutomation.phase) ? "complete" : ""}>
                   <span>1</span>
@@ -4187,7 +4693,45 @@ export function App() {
                   <div><strong>生成可执行路径</strong><small>绑定动作、断言与证据要求</small></div>
                 </li>
               </ol>
-              {planningAutomation.phase === "needs-permission" ? (
+              {planningAutomation.phase === "needs-credentials" ? (
+                <section className="run-permission-request run-credentials-request">
+                  <strong>本次测试需要登录账号</strong>
+                  <p>测试计划包含登录步骤。账号会加密保存，只在本次项目的隔离沙盒中使用，不会写入对话或项目源码。</p>
+                  <div className="connector-grid">
+                    <label>
+                      测试账号
+                      <input
+                        autoComplete="off"
+                        value={preparationLoginUsername}
+                        onChange={(event) => setPreparationLoginUsername(event.target.value)}
+                        placeholder="邮箱或用户名"
+                      />
+                    </label>
+                    <label>
+                      测试密码
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={preparationLoginPassword}
+                        onChange={(event) => setPreparationLoginPassword(event.target.value)}
+                        placeholder="输入测试密码"
+                      />
+                    </label>
+                  </div>
+                  {preparationLoginError ? <p className="project-login-save-message" role="alert">{preparationLoginError}</p> : null}
+                  <div>
+                    <button type="button" onClick={() => {
+                      setRunPreviewModalOpen(false);
+                      setPlanningConfirmed(false);
+                      setPlanningAutomation({ phase: "idle", detail: "" });
+                      setMessage("本次测试尚未开始；确认包含登录步骤的计划前，需要先配置测试账号。");
+                    }}>暂不配置</button>
+                    <button className="primary" type="button" disabled={preparationLoginSaving} onClick={() => void savePreparationLoginAndContinue()}>
+                      {preparationLoginSaving ? "正在保存…" : "保存账号并继续"}
+                    </button>
+                  </div>
+                </section>
+              ) : planningAutomation.phase === "needs-permission" ? (
                 <section className="run-permission-request">
                   <strong>允许 AI 操作本次沙盒浏览器？</strong>
                   <p>将执行点击、输入、页面跳转和证据采集；不会控制你的桌面或其他应用。</p>
@@ -4260,6 +4804,11 @@ export function App() {
                     <AssistantConversationMessage
                       message={item}
                       key={item.id}
+                      // Only the latest assistant message may act: re-running a
+                      // stale plan would fight the current run state.
+                      onRepairPlanAction={isLatestAssistant ? executeRepairPlanAction : undefined}
+                      onOpenRepairEvidence={openRepairPlanEvidence}
+                      repairPlanActionStatus={repairPlanActionStatus ?? undefined}
                       actions={attachesRunActions ? (
                         <RunAssistantPanel
                           message={runAssistantMessage}
@@ -4271,7 +4820,7 @@ export function App() {
                           browserExposedApiCredential={missingProjectApiCredentials.some((candidate) => candidate.exposure === "browser")}
                           credentials={credentials}
                           defaultCredentialId={defaultCredential?.id}
-                          busy={planningBusy || isRunning || planningAutomationBusy || assistantChatBusy}
+                          busy={planningBusy || isRunning || planningAutomationBusy || assistantChatBusy || projectRecoveryBusy}
                           onSubmit={submitRunAssistantFeedback}
                           onConfigureCredentials={openProjectLoginSettings}
                           onRetryWithCredentials={retryWithConfiguredLogin}
@@ -4282,11 +4831,21 @@ export function App() {
                           onReviewReasonChange={setReviewReason}
                           onAcceptRisk={() => controlActiveRun("decision-override")}
                           autoRepairAvailable={assistantAutoRepairAvailable}
-                          autoRepairLabel={pathBindingRepairable ? "重新绑定并验证路径" : "生成沙盒代码修复"}
-                          autoRepairDescription={pathBindingRepairable
-                            ? "根据已探测页面重新绑定入口、控件和验证条件，然后立即复验。不会修改项目源码。"
-                            : "读取失败断言和证据，在沙盒副本中生成最小补丁，并展示 Diff 与验证结果。"}
-                          onAutoRepair={pathBindingRepairable ? repairBlockedPlanning : openCodeRepairWorkspace}
+                          autoRepairLabel={runtimeRecoveryAvailable
+                            ? "重新启动沙盒并诊断"
+                            : discoveryRecoveryAvailable ? "重新扫描页面并绑定路径"
+                            : pathBindingRepairable ? "重新绑定并验证路径" : "生成沙盒代码修复"}
+                          autoRepairDescription={runtimeRecoveryAvailable
+                            ? "系统会自动启动 Docker Desktop（如需要）、重新启动沙盒、检查健康状态并重新扫描页面；不会修改项目源码。"
+                            : discoveryRecoveryAvailable
+                              ? "页面已经连通；系统只会重新扫描页面、控件和网络并重新绑定路径，不会修改项目源码或覆盖已有证据。"
+                            : pathBindingRepairable
+                              ? "根据已探测页面重新绑定入口、控件和验证条件，然后立即复验。不会修改项目源码。"
+                              : "读取失败断言和证据，在沙盒副本中生成最小补丁，并展示 Diff 与验证结果。"}
+                          onAutoRepair={runtimeRecoveryAvailable
+                            ? () => recoverProjectAndRetry("runtime")
+                            : discoveryRecoveryAvailable ? () => recoverProjectAndRetry("discovery")
+                            : pathBindingRepairable ? repairBlockedPlanning : openCodeRepairWorkspace}
                           onEditPlan={() => {
                             setPlanningConfirmed(false);
                             setPlanningAutomation({ phase: "idle", detail: "" });
@@ -4555,6 +5114,26 @@ export function App() {
               onExport={exportCurrentRepair}
               onApply={applyCurrentRepair}
               onClose={() => setRepairWorkspaceOpen(false)}
+            />
+          ) : null}
+
+          {/* A paused run outranks everything else on screen: the graph is
+              literally blocked until the operator answers, so the decision
+              request sits above the live view rather than inside a drawer. */}
+          {agentProjection?.pendingInterrupt && agentProjection.pendingInterrupt.status === "pending" ? (
+            <InterruptDecisionPanel
+              interrupt={agentProjection.pendingInterrupt}
+              busy={interruptBusy}
+              error={interruptError ?? undefined}
+              onDecide={(decision, note) => submitInterruptDecision(decision, note)}
+              onOpenEvidence={openInterruptEvidence}
+              onOpenCredentials={() => {
+                setLeftDrawerOpen(true);
+                setMessage("请在项目设置中配置测试账号，配置完成后回到此处提交决策。");
+              }}
+              onRecoverSandbox={() => void executeAssistantSuggestedAction("retry-runtime")}
+              onReopenDiscovery={() => void executeAssistantSuggestedAction("retry-discovery")}
+              onOpenRepairWorkspace={() => void openCodeRepairWorkspace()}
             />
           ) : null}
 

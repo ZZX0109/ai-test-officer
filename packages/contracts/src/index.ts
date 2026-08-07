@@ -150,6 +150,7 @@ export const runEventTypeSchema = z.enum([
   "run_judging",
   "human_review_requested",
   "decision_overridden",
+  "repair_decision_recorded",
   "run_completed",
   "run_failed",
   "run_blocked",
@@ -754,6 +755,26 @@ export const agentMessageSchema = z.object({
   llmCallId: z.string().min(1).optional(),
   suggestedAction: z.string().min(1).optional(),
   requiresConfirmation: z.boolean().optional(),
+  // The repair plan is only useful if it is *bindable*: the panel needs the
+  // plan/attempt/scenario it refers to, its lifecycle status, the evidence it
+  // was derived from, and the single action the user may press.
+  repairPlan: z.object({
+    owner: z.string(),
+    problem: z.string().optional(),
+    type: z.string().optional(),
+    executable: z.boolean().optional(),
+    steps: z.array(z.string()),
+    validation: z.string(),
+    message: z.string().optional(),
+    planId: z.string().min(1).optional(),
+    runId: z.string().min(1).optional(),
+    attemptId: z.string().min(1).optional(),
+    scenarioId: z.string().min(1).optional(),
+    status: z.enum(["pending", "applied", "resolved", "dismissed"]).optional(),
+    evidenceRefs: z.array(z.string().min(1)).optional(),
+    policyVersion: z.string().min(1).optional(),
+    action: z.string().min(1).optional()
+  }).optional(),
   createdAt: z.string().datetime()
 });
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
@@ -906,6 +927,7 @@ export const agentInterruptKindSchema = z.enum([
   "network-install",
   "dangerous-operation",
   "repair-apply",
+  "repair-decision",
   "execution-result"
 ]);
 export const agentInterruptSchema = z.object({
@@ -917,10 +939,40 @@ export const agentInterruptSchema = z.object({
   detail: z.string().min(1),
   requestedCapabilities: z.array(z.string().min(1)).default([]),
   payload: z.record(z.unknown()).default({}),
+  // Rich carrier for the unified human-in-the-loop `repair-decision` interrupt.
+  // Carries the problem, the diagnosis already performed by the system, the
+  // suggested handling, and the concrete operations the user may choose.
+  owner: z.enum(["agent", "user", "environment", "developer"]).optional(),
+  context: z.record(z.unknown()).optional(),
+  options: z.array(z.object({
+    value: z.string().min(1),
+    label: z.string().min(1),
+    description: z.string().optional()
+  })).optional(),
+  diagnoses: z.array(z.string()).optional(),
+  evidenceRefs: z.array(z.string().min(1)).optional(),
+  attemptId: z.string().min(1).optional(),
+  scenarioId: z.string().min(1).optional(),
+  decision: z.string().optional(),
   createdAt: z.string().datetime(),
   resolvedAt: z.string().datetime().optional()
 });
 export type AgentInterrupt = z.infer<typeof agentInterruptSchema>;
+
+/** The answer a user submits when resuming a `repair-decision` interrupt. */
+export const repairDecisionAnswerSchema = z.object({
+  decision: z.enum([
+    "repair",
+    "create-session",
+    "provide-credentials",
+    "recover-sandbox",
+    "reopen-discovery",
+    "dismiss"
+  ]),
+  message: z.string().max(4_000).optional(),
+  repairPlanId: z.string().min(1).optional()
+});
+export type RepairDecisionAnswer = z.infer<typeof repairDecisionAnswerSchema>;
 
 export const agentGraphProjectionSchema = z.object({
   schemaVersion: z.literal("1.0"),
@@ -932,6 +984,8 @@ export const agentGraphProjectionSchema = z.object({
   completedNodes: z.array(agentGraphNodeSchema).default([]),
   progress: z.number().min(0).max(1),
   pendingInterrupt: agentInterruptSchema.optional(),
+  interruptOwner: z.enum(["agent", "user", "environment", "developer"]).optional(),
+  interruptContext: z.record(z.unknown()).optional(),
   lastError: z.object({ code: z.string().min(1), message: z.string().min(1), node: agentGraphNodeSchema.optional() }).optional(),
   tokenUsage: z.number().int().nonnegative().default(0),
   repairSessionId: z.string().min(1).optional(),
@@ -1227,6 +1281,11 @@ export const runStreamEventSchema = z.object({
     "agent.node.completed",
     "agent.node.failed",
     "agent.interrupt",
+    "agent.interrupt.created",
+    "agent.interrupt.waiting",
+    "agent.interrupt.resumed",
+    "agent.interrupt.rejected",
+    "agent.interrupt.expired",
     "llm.call.started",
     "llm.call.retried",
     "llm.call.completed",
@@ -1273,3 +1332,140 @@ export function validateEvidenceArtifactLinks(evidence: EvidenceV2, artifacts: A
   }
   return { valid: errors.length === 0, errors };
 }
+
+// ─── Architecture Transformation: New Modules ─────────────────────
+
+// Agent Context Layer
+export {
+  contextAccessPolicySchema,
+  contextLayerOutputSchema,
+  evidenceContextSchema,
+  failureHistoryContextSchema,
+  projectContextSchema,
+  repairHistoryContextSchema,
+  runStatusContextSchema
+} from "./context-layer.js";
+export type {
+  ContextAccessPolicy,
+  ContextLayerOutput,
+  EvidenceContext,
+  FailureHistoryContext,
+  ProjectContext,
+  RepairHistoryContext,
+  RunStatusContext
+} from "./context-layer.js";
+
+// Agent Memory
+export {
+  experienceMemoryEntrySchema,
+  experienceMemoryQuerySchema,
+  memoryStatisticsSchema,
+  projectMemoryEntrySchema,
+  projectMemoryQuerySchema
+} from "./agent-memory.js";
+export type {
+  ExperienceMemoryEntry,
+  ExperienceMemoryQuery,
+  MemoryStatistics,
+  ProjectMemoryEntry,
+  ProjectMemoryQuery
+} from "./agent-memory.js";
+
+// Schema Versioning
+export {
+  apiContractVersionSchema,
+  dbMigrationVersionSchema,
+  toolVersionSchema,
+  versionCompatibilitySchema
+} from "./schema-versioning.js";
+export type {
+  ApiContractVersion,
+  DbMigrationVersion,
+  ToolVersion,
+  VersionCompatibility
+} from "./schema-versioning.js";
+
+// Write Safety Layer
+export {
+  approvalWorkflowSchema,
+  policyCheckResultSchema,
+  riskLevelSchema,
+  writeActionSchema,
+  writeExecutionResultSchema,
+  writeOperationLogSchema
+} from "./write-safety.js";
+export type {
+  ApprovalNode,
+  ApprovalWorkflow,
+  PolicyCheckResult,
+  RiskLevel,
+  WriteAction,
+  WriteExecutionResult,
+  WriteOperationLog
+} from "./write-safety.js";
+
+// Monitoring
+export {
+  agentQualityMetricsSchema,
+  operationsDashboardSchema,
+  systemQualityMetricsSchema,
+  testQualityMetricsSchema
+} from "./monitoring.js";
+export type {
+  AgentQualityMetrics,
+  OperationsDashboard,
+  SystemQualityMetrics,
+  TestQualityMetrics
+} from "./monitoring.js";
+
+// Trace Chain
+export {
+  traceChainSchema,
+  traceQuerySchema,
+  traceSpanSchema
+} from "./trace-chain.js";
+export type {
+  TraceActor,
+  TraceChain,
+  TraceId,
+  TraceQuery,
+  TraceSpan,
+  TraceSpanKind,
+  TraceSpanStatus,
+  SpanId
+} from "./trace-chain.js";
+
+// LLM Input Optimization
+export {
+  observedEvidenceSchema,
+  optimizedLlmInputSchema,
+  retrievedKnowledgeSchema,
+  unknownInformationSchema,
+  verifiedFactSchema
+} from "./llm-input.js";
+export type {
+  InformationCategory,
+  ObservedEvidence,
+  OptimizedLlmInput,
+  RetrievedKnowledge,
+  UnknownInformation,
+  VerifiedFact
+} from "./llm-input.js";
+
+// Experience Feedback Loop
+export {
+  failureDetectionSchema,
+  feedbackLoopSessionSchema,
+  feedbackStageSchema,
+  repairProposalSchema,
+  repairValidationSchema as feedbackRepairValidationSchema,
+  rootCauseAnalysisSchema
+} from "./feedback-loop.js";
+export type {
+  FailureDetection,
+  FeedbackLoopSession,
+  FeedbackStage,
+  RepairProposal,
+  RepairValidation as FeedbackRepairValidation,
+  RootCauseAnalysis
+} from "./feedback-loop.js";

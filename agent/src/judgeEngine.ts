@@ -91,7 +91,13 @@ function buildPlanJudge(input: JudgeInput): JudgeResult {
   const hasDiffSignal = Boolean(input.diff?.trim());
   const hasRequirementSignal = Boolean(input.requirement?.trim());
   const changeScopedRequirement = /代码变更|本次变更|本次修改|提交|合并请求|pull request|\bpr\b|\bdiff\b/i.test(input.requirement ?? "");
-  if (!hasRequirementSignal || (changeScopedRequirement && !hasDiffSignal)) {
+  // A direct Scenario/Discovery run is already bound to an approved scenario
+  // contract.  It may intentionally have no free-form requirement or diff;
+  // treating that as a plan gap made a successful login/browser run end in
+  // needs-human-review even though every declared oracle was covered.  Keep
+  // the strict context check for real plans and change-scoped requests.
+  const trustedScenarioRun = !plan && !hasRequirementSignal;
+  if ((!trustedScenarioRun && !hasRequirementSignal) || (changeScopedRequirement && !hasDiffSignal)) {
     findings.push({
       id: "plan_context_missing",
       severity: "medium",

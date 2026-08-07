@@ -23,6 +23,14 @@ export const discoveryPageObservationSchema = z.object({
     httpStatus: z.number().int().optional(),
     warning: z.string().max(500).optional()
   }),
+  browserLifecycle: z.array(z.object({
+    type: z.enum(["browser_launch", "context_create", "page_new", "page_goto"]),
+    status: z.enum(["started", "succeeded", "failed"]),
+    at: z.string(),
+    url: z.string().max(2_000).optional(),
+    httpStatus: z.number().int().optional(),
+    error: z.string().max(500).optional()
+  })).max(30).optional(),
   network: z.object({
     totalRequests: z.number().int().nonnegative(),
     completedRequests: z.number().int().nonnegative(),
@@ -36,6 +44,7 @@ export const discoveryPageObservationSchema = z.object({
     bodyTextSample: z.string().max(1_200).optional(),
     interactiveElementCount: z.number().int().nonnegative(),
     viewport: z.object({ width: z.number(), height: z.number() }).optional(),
+    accessibilityTree: z.string().max(4_000).optional(),
     controls: z.array(z.object({
       kind: z.enum(["link", "button", "input", "textarea", "select", "other"]),
       role: z.string().max(80).optional(),
@@ -121,6 +130,17 @@ function redactObservationUrl(value: string) {
   }
 }
 
+function redactAccessibilityTree(value: string) {
+  // Playwright's ARIA snapshot may include the current value of a textbox
+  // after a colon.  Accessible names are useful evidence; values are not and
+  // can contain credentials or fixture secrets, so keep only the control
+  // identity and replace the value portion.
+  return value.replace(
+    /(textbox|searchbox|spinbutton|combobox)\s+("[^"]*")\s*:\s*([^\n]+)/gi,
+    "$1 $2: [REDACTED]"
+  );
+}
+
 export function sanitizeDiscoveryPageObservation(input: DiscoveryPageObservation) {
   return discoveryPageObservationSchema.parse({
     ...input,
@@ -132,10 +152,18 @@ export function sanitizeDiscoveryPageObservation(input: DiscoveryPageObservation
         ? redactObservationText(input.navigation.warning, 500)
         : undefined
     },
+    browserLifecycle: input.browserLifecycle?.map((event) => ({
+      ...event,
+      url: event.url ? redactObservationUrl(event.url) : undefined,
+      error: event.error ? redactObservationText(event.error, 500) : undefined
+    })),
     document: {
       ...input.document,
       bodyTextSample: input.document.bodyTextSample
         ? redactObservationText(input.document.bodyTextSample, 1_200)
+        : undefined,
+      accessibilityTree: input.document.accessibilityTree
+        ? redactObservationText(redactAccessibilityTree(input.document.accessibilityTree), 4_000)
         : undefined,
       controls: input.document.controls.map((control) => ({
         ...control,
