@@ -155,11 +155,20 @@ function parseTypeScriptFile(file: ParserSourceFile, framework: "react" | "next"
   const componentKeys: string[] = [];
   const actionKeys = new Map<string, string>();
   const callKeys: Array<{ key: string; owner?: string }> = [];
+  // Route handler/guard identifiers are resolved AFTER the whole file has been
+  // visited: the argument identifier is traversed after its CallExpression, so
+  // eager lookup misses facts declared later in the module.
+  const routeBindings: Array<{ routeKey: string; argName: string }> = [];
   const functionStack: string[] = [];
   const conventionRoute = routeFromConvention(file.relative);
   if (conventionRoute) add({ key: `page:route:${conventionRoute}`, kind: "page", label: conventionRoute, line: 1, confidence: "high", metadata: { route: conventionRoute, framework } });
   else if (/(^|\/)(?:views?|components?)\//i.test(file.relative) || /(?:^|\/)App\.[cm]?[jt]sx?$/i.test(file.relative)) {
     add({ key: "page:convention", kind: "page", label: file.relative, line: 1, confidence: "medium", metadata: { framework } });
+  }
+  // A single-page app's entry module (src/main.tsx, src/index.tsx) is its one
+  // user-facing surface even though no router convention matches it.
+  else if (/(^|\/)src\/(?:main|index)\.[cm]?[jt]sx$/i.test(file.relative)) {
+    add({ key: "page:entry", kind: "page", label: "应用主界面", line: 1, confidence: "medium", metadata: { framework, entry: "spa" } });
   }
   const addFunction = (name: string, node: ts.Node) => {
     const kind = classifiedFunction(name);
@@ -206,10 +215,8 @@ function parseTypeScriptFile(file: ParserSourceFile, framework: "react" | "next"
       if (receiver && ["app", "router"].includes(receiver) && method && requestMethods.has(method.toLowerCase()) && routeValue) {
         const route = normaliseRoute(routeValue);
         const key = add({ key: `route:${node.pos}`, kind: "api-route", label: `${method.toUpperCase()} ${route}`, line: sourceLine(node), confidence: "high", metadata: { route, method: method.toUpperCase(), framework: receiver === "router" ? "express-router" : "express" } });
-        const handlerArg = node.arguments.find((argument, index) => index > 0 && ts.isIdentifier(argument));
-        if (handlerArg && ts.isIdentifier(handlerArg)) {
-          const handler = actionKeys.get(handlerArg.text) ?? [...byKey.entries()].find(([, fact]) => fact.label === handlerArg.text)?.[0];
-          if (handler) relations.push({ from: key, to: handler, kind: "handles", confidence: "high", reason: `Express 路由引用处理函数 ${handlerArg.text}。` });
+        for (const argument of node.arguments.slice(1)) {
+          if (ts.isIdentifier(argument)) routeBindings.push({ routeKey: key, argName: argument.text });
         }
       }
       if (receiver && ["router", "navigation"].includes(receiver) && ["push", "replace"].includes(method ?? "") && routeValue) {
@@ -236,50 +243,70 @@ function parseTypeScriptFile(file: ParserSourceFile, framework: "react" | "next"
   const pages = facts.filter((fact) => fact.kind === "page");
   for (const page of pages) for (const component of componentKeys) relations.push({ from: page.key, to: component, kind: "renders", confidence: "medium", reason: "页面路由与组件由同一 AST 模块导出。" });
   for (const call of callKeys) if (call.owner) relations.push({ from: call.owner, to: call.key, kind: "calls", confidence: "high", reason: "函数体内调用前端请求。" });
+  // All facts exist now: bind every route argument — auth middleware becomes a
+  // guards edge (guard → route), the remaining identifiers are handlers
+  // (route → handler). This is what lets a business path carry its real
+  // authentication boundary instead of losing it during traversal.
+  for (const binding of routeBindings) {
+    const isAuth = authNames.has(binding.argName.toLowerCase());
+    const target = isAuth
+      ? facts.find((fact) => fact.kind === "auth-guard" && fact.label === binding.argName)?.key
+      : facts.find((fact) => fact.label === binding.argName && fact.kind !== "auth-guard")?.key;
+    if (!target || target === binding.routeKey) continue;
+    relations.push(isAuth
+      ? { from: target, to: binding.routeKey, kind: "guards", confidence: "high", reason: `路由使用 ${binding.argName} 鉴权。` }
+      : { from: binding.routeKey, to: target, kind: "handles", confidence: "high", reason: `Express 路由引用处理函数 ${binding.argName}。` });
+  }
   return { adapter: `${framework}-ast`, facts, relations, diagnostics: [] };
 }
 
-function runPythonAst(source: string) {
-  const script = String.raw`import ast,json,sys
-src=sys.stdin.read(); out=[]
-try: tree=ast.parse(src)
-except SyntaxError as e: print(json.dumps({"error":str(e)})); raise SystemExit(0)
+const PYTHON_AST_SCRIPT = String.raw`import ast,json,sys
 def name(n):
   if isinstance(n, ast.Name): return n.id
   if isinstance(n, ast.Attribute): return name(n.value)+"."+n.attr
   return ""
 def string(n): return n.value if isinstance(n, ast.Constant) and isinstance(n.value,str) else None
-for n in ast.walk(tree):
-  if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)):
-    out.append(["function",n.name,n.lineno])
-    for d in n.decorator_list:
-      if isinstance(d,ast.Call):
-        x=name(d.func); v=string(d.args[0]) if d.args else None
-        if x in ("app.get","app.post","app.put","app.patch","app.delete","router.get","router.post","router.put","router.patch","router.delete") and v:
-          out.append(["route",x,v,n.lineno,n.name])
-  if isinstance(n,ast.Call):
-    x=name(n.func)
-    if x.endswith(".delay") or x.endswith(".enqueue") or x.endswith(".add"):
-      out.append(["task",x,n.lineno])
-    if x in ("Depends","Security") and n.args: out.append(["auth",name(n.args[0]),n.lineno])
-  if isinstance(n,ast.ClassDef) and any(x in n.name.lower() for x in ("model","schema","entity")):
-    out.append(["data",n.name,n.lineno])
-print(json.dumps({"facts":out}))`;
-  return new Promise<{ facts?: unknown[][]; error?: string }>((resolve) => {
-    const child = spawn("python3", ["-c", script], { stdio: ["pipe", "pipe", "ignore"] });
+def scan(src):
+  out=[]
+  try: tree=ast.parse(src)
+  except SyntaxError as e: return {"error":str(e)}
+  for n in ast.walk(tree):
+    if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)):
+      out.append(["function",n.name,n.lineno])
+      for d in n.decorator_list:
+        if isinstance(d,ast.Call):
+          x=name(d.func); v=string(d.args[0]) if d.args else None
+          if x in ("app.get","app.post","app.put","app.patch","app.delete","router.get","router.post","router.put","router.patch","router.delete") and v:
+            out.append(["route",x,v,n.lineno,n.name])
+    if isinstance(n,ast.Call):
+      x=name(n.func)
+      if x.endswith(".delay") or x.endswith(".enqueue") or x.endswith(".add"):
+        out.append(["task",x,n.lineno])
+      if x in ("Depends","Security") and n.args: out.append(["auth",name(n.args[0]),n.lineno])
+    if isinstance(n,ast.ClassDef) and any(x in n.name.lower() for x in ("model","schema","entity")):
+      out.append(["data",n.name,n.lineno])
+  return {"facts":out}
+payload=json.loads(sys.stdin.read() or "[]")
+if isinstance(payload,dict): payload=[payload]
+print(json.dumps([scan(item.get("source","")) for item in payload]))`;
+
+function spawnPythonAst(payload: string) {
+  return new Promise<Array<{ facts?: unknown[][]; error?: string }>>((resolve) => {
+    const child = spawn("python3", ["-c", PYTHON_AST_SCRIPT], { stdio: ["pipe", "pipe", "ignore"] });
     let stdout = "";
     child.stdout.on("data", (chunk) => { stdout += String(chunk); });
-    child.once("error", () => resolve({ error: "python3_not_available" }));
+    child.once("error", () => resolve([{ error: "python3_not_available" }]));
     child.once("close", () => {
-      try { resolve(JSON.parse(stdout || "{}") as { facts?: unknown[][]; error?: string }); }
-      catch { resolve({ error: "python_ast_unavailable" }); }
+      try {
+        const parsed = JSON.parse(stdout || "[]") as Array<{ facts?: unknown[][]; error?: string }>;
+        resolve(Array.isArray(parsed) && parsed.length ? parsed : [{ error: "python_ast_unavailable" }]);
+      } catch { resolve([{ error: "python_ast_unavailable" }]); }
     });
-    child.stdin.end(source);
+    child.stdin.end(payload);
   });
 }
 
-async function parseFastApi(file: ParserSourceFile): Promise<ParsedBusinessFile> {
-  const parsed = await runPythonAst(file.source);
+function fastApiFromFacts(file: ParserSourceFile, parsed: { facts?: unknown[][]; error?: string }): ParsedBusinessFile {
   const facts: ParsedBusinessFact[] = [];
   const relations: ParsedBusinessRelation[] = [];
   const functionKeys = new Map<string, string>();
@@ -300,6 +327,30 @@ async function parseFastApi(file: ParserSourceFile): Promise<ParsedBusinessFile>
     if (kind === "data" && typeof first === "string" && typeof second === "number") add({ key: `data:${second}:${first}`, kind: "data-entity", label: first, line: second, confidence: "medium", metadata: { framework: "fastapi" } });
   }
   return { adapter: "fastapi-python-ast", facts, relations, diagnostics: parsed.error ? [parsed.error] : [] };
+}
+
+async function parseFastApi(file: ParserSourceFile): Promise<ParsedBusinessFile> {
+  const [parsed] = await spawnPythonAst(JSON.stringify([{ source: file.source }]));
+  return fastApiFromFacts(file, parsed ?? { error: "python_ast_unavailable" });
+}
+
+/**
+ * Python-heavy repositories used to spawn one `python3 -c` process per file —
+ * hundreds of spawns turned a full scan into the slowest stage of planning.
+ * Batch the whole repository through a single AST process instead.
+ */
+export async function parsePythonSourcesBatch(files: ParserSourceFile[]): Promise<Map<string, ParsedBusinessFile>> {
+  const result = new Map<string, ParsedBusinessFile>();
+  if (!files.length) return result;
+  const chunkSize = 40;
+  for (let offset = 0; offset < files.length; offset += chunkSize) {
+    const chunk = files.slice(offset, offset + chunkSize);
+    const parsedList = await spawnPythonAst(JSON.stringify(chunk.map((file) => ({ source: file.source }))));
+    chunk.forEach((file, index) => {
+      result.set(file.relative, fastApiFromFacts(file, parsedList[index] ?? { error: "python_ast_unavailable" }));
+    });
+  }
+  return result;
 }
 
 export async function parseBusinessSource(file: ParserSourceFile): Promise<ParsedBusinessFile> {

@@ -4551,8 +4551,8 @@ export function App() {
               <section className="planning-draft">
                 <div className="planning-coverage">
                   <article><strong>{planningResult.coverage.discovered}</strong><span>识别流程</span></article>
-                  <article><strong>{planningResult.coverage.executable}</strong><span>可直接执行</span></article>
-                  <article><strong>{planningResult.coverage.autoBindable ?? 0}</strong><span>可自动绑定</span></article>
+                  <article><strong>{planningResult.coverage.executable + (planningResult.coverage.autoBindable ?? 0)}</strong><span>确认后可执行</span></article>
+                  <article><strong>{planningResult.coverage.autoBindable ?? 0}</strong><span>其中自动绑定</span></article>
                   <article><strong>{planningResult.coverage.gaps}</strong><span>覆盖缺口</span></article>
                 </div>
                 {planningResult.businessGraph ? (
@@ -4607,7 +4607,9 @@ export function App() {
                 >
                   {planningAutomationBusy
                     ? "正在自动准备并执行"
-                    : planningConfirmed ? "计划已确认" : planningHasBlockingQuestions ? "回答问题后确认" : "确认并自动执行"}
+                    : planningConfirmed
+                      ? (isRunning ? "测试执行中" : "计划已确认 · 等待执行启动")
+                      : planningHasBlockingQuestions ? "回答问题后确认" : "确认并自动执行"}
                 </button>
                 {planningConfirmed && planningAutomation.phase !== "idle" && (
                   <section className={`planning-next-step ${planningAutomation.phase === "blocked" || planningAutomation.phase === "needs-permission" ? "planning-next-step--blocked" : ""}`} aria-live="polite">
@@ -5252,8 +5254,8 @@ export function App() {
                                 ? <small>已从 {planningResult.coverage.sourceCandidates} 个代码候选归并，原始候选仍可审计。</small>
                                 : null}
                               <div className="assistant-plan-summary">
-                                <span>{planningResult.coverage.executable} 条可直接执行</span>
-                                <span>{planningResult.coverage.autoBindable ?? 0} 条自动绑定页面</span>
+                                <span>{planningResult.coverage.executable + (planningResult.coverage.autoBindable ?? 0)} 条确认后自动执行</span>
+                                <span>其中 {planningResult.coverage.autoBindable ?? 0} 条由 AI 绑定真实页面</span>
                                 {(planningResult.coverage.needsInput + planningResult.coverage.gaps) > 0
                                   ? <span>{planningResult.coverage.needsInput + planningResult.coverage.gaps} 条需补充或阻塞</span>
                                   : null}
@@ -5345,7 +5347,7 @@ export function App() {
               ) : null}
               {planningResult && discoveryAllowsPlanning ? (
                 <div className="sidebar-planning-result">
-                  <span>{planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径 · {planningResult.coverage.executable} 条可直接执行 · {planningResult.coverage.autoBindable ?? 0} 条由 AI 动态绑定</span>
+                  <span>{planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径 · {planningResult.coverage.executable + (planningResult.coverage.autoBindable ?? 0)} 条确认后可执行（含 {planningResult.coverage.autoBindable ?? 0} 条 AI 动态绑定）</span>
                   <ProgressiveDetailsList
                     className="sidebar-flow-list"
                     items={planningResult.businessFlows}
@@ -5554,7 +5556,7 @@ export function App() {
                 <button type="button" role="tab" aria-selected={centreSurface === "code"} className={centreSurface === "code" ? "active" : ""} onClick={() => void openProjectCodeWorkspace()}><Code2 size={14} />代码</button>
               </div>
               <span className="live-view-mode">
-                {centreSurface === "code" ? "项目代码（沙盒副本）" : latestScreenshot ? "沙盒执行画面" : projectPreviewReady ? "内置项目画面" : "沙盒测试现场"}
+                {centreSurface === "code" ? "项目代码（沙盒副本）" : activeRunId && browserSession ? "AI 共享浏览器现场" : latestScreenshot ? "沙盒执行画面" : projectPreviewReady ? "项目被动预览 · 非 AI 操作现场" : "沙盒测试现场"}
               </span>
               {centreSurface === "preview" ? <code title={previewUrl}>{previewUrl || "尚未启动项目"}</code> : <code>{selectedProjectName || "未选择项目"}</code>}
               {centreSurface === "preview" && projectPreviewReady && !latestScreenshot && (
@@ -5647,6 +5649,7 @@ export function App() {
                   }}
                 />
                 {isRunning && <span className="live-capture-badge waiting"><Activity size={13} /> 等待第一帧执行证据</span>}
+                {!isRunning && <span className="live-capture-badge waiting">被动预览 · AI 测试在独立沙盒浏览器中进行</span>}
               </div>
             ) : (
               <div className="live-view-placeholder">

@@ -1,10 +1,11 @@
 import path from "node:path";
 import type { ProjectConfig } from "./types.js";
+import type { DiscoveryScanResult } from "./types.js";
 import { buildCodeImpactGraph, changedFilesFromDiff } from "./codeImpactGraph.js";
 import { buildBusinessCapabilityGraph, readBusinessSourceSlices } from "./businessCapabilityGraph.js";
 import { analyzeIntake } from "./intakeAnalyzer.js";
 import { createLlmPlanningAdvice } from "./llmPlanningAdvisor.js";
-import { buildPlanningConversation, type PlanningMessage } from "./planningConversation.js";
+import { buildPlanningConversation, type PlannedBusinessFlow, type PlanningConversationResult, type PlanningMessage } from "./planningConversation.js";
 import { getPlanningFlowPage, savePlanningInventory } from "./planningInventoryStore.js";
 import { listScenarios } from "./scenarios.js";
 import { probeDiscoveryConnectivity, runSmokeFirstDiscovery } from "./smokeFirstDiscovery.js";
@@ -17,6 +18,81 @@ export interface PlanningConversationRequest {
   planningMode: "llm-guided" | "scan-only";
   credentialId?: string;
   history: PlanningMessage[];
+}
+
+/**
+ * The runtime login machinery (credential interrupt, deterministic form fill)
+ * only engages when the confirmed plan actually contains a login step. When
+ * Discovery observed a real authentication wall, pin it as the FIRST business
+ * flow so the pre-run credential gate reliably asks for the test account
+ * before any browser session starts — instead of stalling at /signin.
+ */
+function discoveryAuthGate(discovery?: DiscoveryScanResult) {
+  if (!discovery) return undefined;
+  // The auth suggestion is only emitted when the browser actually observed a
+  // password + identity + submit form, so its presence is hard runtime
+  // evidence of a login wall — regardless of how the scan status was rolled up.
+  const loginSuggestion = discovery.suggestions.find((suggestion) =>
+    suggestion.actions.some((action) => /login_as_test_user|login_invalid_user/.test(action))
+  );
+  if (discovery.status === "waiting-auth" || discovery.requiredAction === "credential_required" || loginSuggestion) {
+    return discovery.observation.finalUrl || discovery.target.frontendUrl;
+  }
+  return undefined;
+}
+
+function injectLoginGateFlow(
+  planning: PlanningConversationResult,
+  discovery: DiscoveryScanResult | undefined,
+  project: ProjectConfig
+) {
+  const gateUrl = discoveryAuthGate(discovery);
+  if (!gateUrl) return;
+  if (planning.businessFlows.some((flow) => flow.id === "flow_login_gate")) return;
+  const hasCredential = Boolean(project.login?.credentialId);
+  const loginFlow: PlannedBusinessFlow = {
+    id: "flow_login_gate",
+    title: "登录并进入应用（页面 Discovery 已确认登录入口）",
+    kind: "page",
+    target: gateUrl,
+    status: "auto-bindable",
+    confidence: "high",
+    reason: `页面 Discovery 在 ${gateUrl} 真实观测到账号、密码与登录按钮；执行时会先使用已保存的沙盒测试账号完成登录，再进入登录后的业务流程。账号内容不会展示或写入报告。`,
+    requiredInformation: hasCredential ? [] : ["需要配置仅用于沙盒的测试账号（执行前会请求确认）"],
+    pathVersion: "2.0",
+    summary: "页面：登录、认证、进入应用",
+    surfaces: ["page"],
+    risk: "high",
+    roles: ["沙盒测试账号"],
+    actionCandidates: ["login_as_test_user"],
+    oracleCandidates: ["登录成功后离开登录页 URL，登录表单不再显示"],
+    requiredEvidenceKinds: ["screenshot", "dom", "network"],
+    sourceNodeIds: [],
+    sourceCount: 0,
+    sourceLocations: []
+  };
+  planning.businessFlows = [loginFlow, ...planning.businessFlows];
+  planning.plan = {
+    ...planning.plan,
+    levels: planning.plan.levels.map((level, index) => index === 0
+      ? {
+        ...level,
+        paths: [{
+          id: loginFlow.id,
+          title: loginFlow.title,
+          riskReason: loginFlow.reason,
+          expectedFrom: "existing_test" as const,
+          retry: 0,
+          // These strings are the machine-checked login contract: the pre-run
+          // credential gate (loginPlan) matches this exact action vocabulary.
+          steps: ["打开登录页", "login_as_test_user 使用沙盒测试账号登录", "验证已离开登录页", "采集登录证据"]
+        }, ...level.paths]
+      }
+      : level)
+  };
+  planning.coverage.discovered += 1;
+  planning.coverage.autoBindable += 1;
+  planning.reply = `页面 Discovery 确认项目有登录入口，已把“登录并进入应用”固定为第一条业务路径；${hasCredential ? "已保存的测试账号会在执行前请求你确认后使用。" : "确认计划时会先请你配置仅用于沙盒的测试账号。"}\n\n${planning.reply}`;
 }
 
 /** Planning orchestration is kept outside HTTP routing so it can be reused by
@@ -44,7 +120,15 @@ export async function createPlanningConversation(input: {
   const capabilityGraph = await buildBusinessCapabilityGraph({ repositoryRoot: targetRoot, codeGraph: graph, manifest: project.manifest });
   const analysis = analyzeIntake({ projectId: project.id, requirement: request.message, diff: request.diff, bugTicket: request.bugTicket, codeGraph: graph });
   const discovery = requiresPageSmoke && discoveryReadiness.status === "ready"
-    ? await runSmokeFirstDiscovery({ projectId: project.id, sourceContexts: analysis.sourceContexts, goal: request.message, discoveryAttempts: 2 })
+    ? await runSmokeFirstDiscovery({
+      projectId: project.id,
+      sourceContexts: analysis.sourceContexts,
+      goal: request.message,
+      discoveryAttempts: 2,
+      // A saved test account turns the auth wall into a legitimate login test
+      // point instead of a permanent "waiting-auth" block on every rescan.
+      credentialId: project.login?.credentialId
+    })
     : undefined;
   if (discovery?.orchestration) discoveryReadiness = discovery.orchestration;
   const planning = buildPlanningConversation({
@@ -56,6 +140,7 @@ export async function createPlanningConversation(input: {
     analysis,
     discoveryReadiness
   });
+  injectLoginGateFlow(planning, discovery, project);
   if (request.planningMode === "llm-guided") {
     const advice = await createLlmPlanningAdvice({
       project,

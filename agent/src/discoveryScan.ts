@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page, type Request } from "playwright";
 import type {
   DiscoveryPageObservation,
   DiscoveryScanResult,
@@ -26,6 +26,11 @@ const DISCOVERY_NO_PROGRESS_TIMEOUT_MS = 20_000;
 const DISCOVERY_LIFECYCLE_GRACE_MS = 1_000;
 const DISCOVERY_STABLE_WINDOW_MS = 600;
 const DISCOVERY_POLL_INTERVAL_MS = 200;
+// A readiness request (document/fetch/xhr) that has not completed within this
+// window is a long-lived probe or stream, not page load work. It must not
+// hold the readiness barrier open — otherwise one hanging auth probe turns a
+// finished login page into a 20-60s stall.
+const DISCOVERY_READINESS_STALE_MS = 4_000;
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
 function affectsDiscoveryReadiness(resourceType: string) {
@@ -770,9 +775,19 @@ export async function runDiscoveryScan(input: {
   let failedNetworkRequests = 0;
   let peakActiveNetworkRequests = 0;
   let lastNetworkActivityAt = Date.now();
-  let activeReadinessRequests = 0;
+  let readinessNetworkRequests = 0;
   let readinessRequestSequence = 0;
   let lastReadinessNetworkActivityAt = Date.now();
+  // Readiness traffic is tracked per request so stale long-lived probes can be
+  // evicted from the barrier without touching the evidence counters above.
+  const readinessRequestsStartedAt = new Map<Request, number>();
+  const pruneStaleReadinessRequests = () => {
+    const now = Date.now();
+    for (const [request, started] of readinessRequestsStartedAt) {
+      if (now - started > DISCOVERY_READINESS_STALE_MS) readinessRequestsStartedAt.delete(request);
+    }
+    return readinessRequestsStartedAt.size;
+  };
   let documentObservation: DiscoveryPageObservation["document"] = {
     interactiveElementCount: 0,
     controls: []
@@ -977,7 +992,8 @@ export async function runDiscoveryScan(input: {
       const networkProgressed = readinessRequestSequence !== previousReadinessSequence;
       const domProgressed = signature !== lastSignature;
       if (networkProgressed || domProgressed) lastProgressAt = Date.now();
-      const networkQuiet = activeReadinessRequests === 0
+      const activeReadiness = pruneStaleReadinessRequests();
+      const networkQuiet = activeReadiness === 0
         && Date.now() - lastReadinessNetworkActivityAt >= DISCOVERY_STABLE_WINDOW_MS;
       if (usable && networkQuiet && signature === lastSignature) {
         stableSince ||= Date.now();
@@ -988,7 +1004,7 @@ export async function runDiscoveryScan(input: {
         stableSince = 0;
       }
       if (
-        activeReadinessRequests === 0
+        activeReadiness === 0
         && Date.now() - lastProgressAt >= noProgressTimeoutMs
       ) {
         return "no_progress" satisfies WaitOutcome;
@@ -1025,6 +1041,7 @@ export async function runDiscoveryScan(input: {
       failedRequests: failedNetworkRequests,
       activeRequests: activeNetworkRequests,
       peakActiveRequests: peakActiveNetworkRequests,
+      readinessRequests: readinessNetworkRequests,
       lastActivityAt: totalNetworkRequests > 0
         ? new Date(lastNetworkActivityAt).toISOString()
         : undefined
@@ -1067,7 +1084,8 @@ export async function runDiscoveryScan(input: {
       peakActiveNetworkRequests = Math.max(peakActiveNetworkRequests, activeNetworkRequests);
       lastNetworkActivityAt = Date.now();
       if (affectsDiscoveryReadiness(request.resourceType())) {
-        activeReadinessRequests += 1;
+        readinessNetworkRequests += 1;
+        readinessRequestsStartedAt.set(request, Date.now());
         readinessRequestSequence += 1;
         lastReadinessNetworkActivityAt = Date.now();
       }
@@ -1078,7 +1096,7 @@ export async function runDiscoveryScan(input: {
       activeNetworkRequests = Math.max(0, activeNetworkRequests - 1);
       lastNetworkActivityAt = Date.now();
       if (affectsDiscoveryReadiness(request.resourceType())) {
-        activeReadinessRequests = Math.max(0, activeReadinessRequests - 1);
+        readinessRequestsStartedAt.delete(request);
         readinessRequestSequence += 1;
         lastReadinessNetworkActivityAt = Date.now();
       }
@@ -1096,7 +1114,7 @@ export async function runDiscoveryScan(input: {
         activeNetworkRequests = Math.max(0, activeNetworkRequests - 1);
         lastNetworkActivityAt = Date.now();
         if (affectsDiscoveryReadiness(request.resourceType())) {
-          activeReadinessRequests = Math.max(0, activeReadinessRequests - 1);
+          readinessRequestsStartedAt.delete(request);
           readinessRequestSequence += 1;
           lastReadinessNetworkActivityAt = Date.now();
         }
@@ -1139,6 +1157,16 @@ export async function runDiscoveryScan(input: {
         });
       }
     });
+    // Observation does not need sourcemaps or third-party telemetry. Blocking
+    // them here keeps a dev-server module graph from inflating the request
+    // evidence and removes a common class of hanging tracker requests. The
+    // patterns are matched by Playwright itself, so unrelated requests pay no
+    // routing overhead.
+    await page.route(/\.map($|\?)/, (route) => route.abort().catch(() => undefined));
+    await page.route(
+      /(?:googletagmanager|google-analytics|googlesyndication|doubleclick|sentry\.io|hotjar|mixpanel|amplitude|segment\.io|clarity\.ms)/i,
+      (route) => route.abort().catch(() => undefined)
+    );
     // A number of real-world SPAs stream their document, inject boot scripts
     // or keep the initial response open. In those cases the page is already
     // visible and inspectable while the global DOMContentLoaded lifecycle

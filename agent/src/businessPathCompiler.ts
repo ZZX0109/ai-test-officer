@@ -52,30 +52,87 @@ function titleFor(entry: BusinessCapabilityNode) {
   return `${display(entry.label)} 业务流程`;
 }
 
+function normalizedRoute(value: string) {
+  return value
+    .replace(/^https?:\/\/[^/]+/i, "")
+    .replace(/[?#].*$/, "")
+    .replace(/\/(?:\$?\{[^}]+\}|:[A-Za-z0-9_{}-]+|\[[^\]]+\])/g, "/:param")
+    .replace(/\/+/g, "/")
+    .replace(/\/$/, "")
+    .toLowerCase() || "/";
+}
+
 function entryKey(entry: BusinessCapabilityNode) {
-  if (entry.kind === "page") return `page:${entry.source?.file ?? entry.metadata?.route ?? entry.label}`;
-  if (entry.kind === "api-route") return `api:${entry.metadata?.method ?? ""}:${entry.metadata?.route ?? entry.label.replace(/^[A-Z]+\s+/, "")}`;
+  // The same route is re-discovered by every file that navigates to it. The
+  // route — not the discovering file — is the business entry identity,
+  // otherwise one real page becomes one pseudo path per referencing file.
+  if (entry.kind === "page") return `page:${normalizedRoute(entry.metadata?.route ?? entry.source?.file ?? entry.label)}`;
+  if (entry.kind === "api-route") return `api:${(entry.metadata?.method ?? "").toUpperCase()}:${normalizedRoute(entry.metadata?.route ?? entry.label.replace(/^[A-Z]+\s+/, ""))}`;
   return `${entry.kind}:${entry.source?.file ?? entry.label}`;
 }
 
-function connectedNodeIds(graph: BusinessCapabilityGraph, entryId: string) {
+interface GraphAdjacency {
+  outgoing: Map<string, string[]>;
+  guarding: Map<string, string[]>;
+}
+
+/**
+ * Follow only outgoing edges (entry → interaction → call → route → handler).
+ * Incoming expansion is what used to glue every page onto shared components,
+ * credential definitions and route params, turning one API node into a fake
+ * "接口 → 页面" business flow per referrer. The single exception is `guards`:
+ * a guard points at the route it protects, so the route's flow legitimately
+ * includes its authentication boundary.
+ */
+function buildAdjacency(graph: BusinessCapabilityGraph): GraphAdjacency {
   const outgoing = new Map<string, string[]>();
-  const incoming = new Map<string, string[]>();
+  const guarding = new Map<string, string[]>();
   for (const edge of graph.edges) {
     outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
-    incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge.from]);
+    if (edge.kind === "guards") guarding.set(edge.to, [...(guarding.get(edge.to) ?? []), edge.from]);
   }
+  return { outgoing, guarding };
+}
+
+function connectedNodeIds(adjacency: GraphAdjacency, entryId: string, limit = 64) {
   const queue = [entryId];
   const visited = new Set<string>();
-  while (queue.length && visited.size < 64) {
+  while (queue.length && visited.size < limit) {
     const current = queue.shift()!;
     if (visited.has(current)) continue;
     visited.add(current);
-    for (const target of [...(outgoing.get(current) ?? []), ...(incoming.get(current) ?? [])]) {
+    for (const target of [...(adjacency.outgoing.get(current) ?? []), ...(adjacency.guarding.get(current) ?? [])]) {
       if (!visited.has(target)) queue.push(target);
     }
   }
   return visited;
+}
+
+function apiGroupKey(node: BusinessCapabilityNode) {
+  const route = normalizedRoute(node.metadata?.route ?? node.label.replace(/^[A-Z]+\s+/, ""));
+  const parts = route.split("/").filter(Boolean).filter((part) => !/^v\d+$/i.test(part) && part !== ":param");
+  return parts.slice(0, 2).join("/") || "root";
+}
+
+/** Prefer the declaration page (the routed file) over navigation re-discoveries. */
+function preferredPageEntry(current: BusinessCapabilityNode, candidate: BusinessCapabilityNode) {
+  const score = (node: BusinessCapabilityNode) =>
+    (/(^|\/)(pages?|views?|app)\//i.test(node.source?.file ?? "") ? 2 : 0)
+    + (node.confidence === "high" ? 1 : 0);
+  return score(candidate) > score(current) ? candidate : current;
+}
+
+/**
+ * A page node only represents a user-testable business entry when it is a
+ * routed/declared surface — not a shared component file that the convention
+ * scanner optimistically tagged as a page.
+ */
+function isUserFacingPage(node: BusinessCapabilityNode) {
+  if (node.metadata?.route) return true;
+  const file = node.source?.file ?? "";
+  return /(^|\/)(pages?|views?|app)\//i.test(file)
+    || /(?:^|\/)(?:App|main|index)\.[cm]?[jt]sx$/i.test(file)
+    || node.metadata?.entry === "spa";
 }
 
 function relevance(path: BusinessPath, goal: string) {
@@ -89,6 +146,11 @@ function relevance(path: BusinessPath, goal: string) {
  * Compile a connected, inspectable business-path inventory. Execution is
  * intentionally separate: a static path becomes executable only after the
  * runtime binder can attach real controls/API fixtures/oracles.
+ *
+ * Entry discipline: a user-testable business function starts at a real page
+ * (or, for API-only projects, at an API surface group). API routes, data
+ * entities, credential definitions and route params are folded INTO the page
+ * flows that exercise them — they never become standalone pseudo flows.
  */
 export function compileBusinessPaths(input: {
   graph: BusinessCapabilityGraph;
@@ -97,13 +159,22 @@ export function compileBusinessPaths(input: {
   browserEnabled: boolean;
 }) : BusinessPath[] {
   const nodesById = new Map(input.graph.nodes.map((node) => [node.id, node]));
-  const entryKinds = new Set<BusinessCapabilityNode["kind"]>(["page", "api-route", "background-task", "data-entity"]);
+  const adjacency = buildAdjacency(input.graph);
   // The compatibility graph and the semantic scanner can both report the
   // same page/route. Use one canonical entry while retaining both nodes in
   // the compiled path's source set.
-  const entries = [...new Map(input.graph.nodes
-    .filter((node) => entryKinds.has(node.kind))
-    .map((node) => [entryKey(node), node])).values()];
+  const pageEntryMap = new Map<string, BusinessCapabilityNode>();
+  const allPages = input.graph.nodes.filter((item) => item.kind === "page");
+  const userFacingPages = allPages.filter(isUserFacingPage);
+  // Unconventional projects may have only convention-tagged pages; never let
+  // the facing-page filter erase the whole inventory.
+  const entryPages = userFacingPages.length ? userFacingPages : allPages;
+  for (const node of entryPages) {
+    const key = entryKey(node);
+    const existing = pageEntryMap.get(key);
+    pageEntryMap.set(key, existing ? preferredPageEntry(existing, node) : node);
+  }
+  const pageEntries = [...pageEntryMap.values()];
   const represented = new Set<string>();
   const paths: BusinessPath[] = [];
   const makePath = (entry: BusinessCapabilityNode, nodeIds: Set<string>) => {
@@ -167,9 +238,82 @@ export function compileBusinessPaths(input: {
     nodes.forEach((node) => represented.add(node.id));
   };
 
-  for (const entry of entries) makePath(entry, connectedNodeIds(input.graph, entry.id));
-  for (const node of input.graph.nodes.filter((node) => surfaceFor(node.kind) && !represented.has(node.id))) {
-    makePath(node, new Set([node.id]));
+  if (pageEntries.length) {
+    // Page-first inventory: every real page becomes one auditable business
+    // flow, carrying the controls, calls, routes and handlers it reaches.
+    for (const entry of pageEntries) makePath(entry, connectedNodeIds(adjacency, entry.id));
+
+    // Backend surface not exercised by any page stays auditable, but grouped
+    // by API prefix — one row per resource group, never one pseudo flow per
+    // internal route. Owner-less frontend calls join the same groups.
+    const orphanRoutes = input.graph.nodes.filter((node) =>
+      (node.kind === "api-route" || node.kind === "frontend-call") && !represented.has(node.id));
+    const routeGroups = new Map<string, BusinessCapabilityNode[]>();
+    for (const node of orphanRoutes) {
+      const key = apiGroupKey(node);
+      routeGroups.set(key, [...(routeGroups.get(key) ?? []), node]);
+    }
+    for (const [group, members] of [...routeGroups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const nodeIds = new Set<string>();
+      for (const member of members) {
+        for (const id of connectedNodeIds(adjacency, member.id, 24)) nodeIds.add(id);
+      }
+      const synthetic: BusinessCapabilityNode = {
+        id: stableId(`api-group:${group}`),
+        kind: "api-route",
+        label: `${group} 接口组（${members.length} 个操作）`,
+        confidence: members.some((node) => node.confidence === "high") ? "high" : "medium",
+        source: members[0]?.source
+      };
+      makePath(synthetic, nodeIds);
+    }
+
+    // Background tasks are user-relevant when nothing else triggers them.
+    const taskGroups = new Map<string, BusinessCapabilityNode[]>();
+    for (const node of input.graph.nodes.filter((item) => item.kind === "background-task" && !represented.has(item.id))) {
+      taskGroups.set(node.label, [...(taskGroups.get(node.label) ?? []), node]);
+    }
+    for (const members of taskGroups.values()) {
+      makePath(members[0]!, new Set(members.map((node) => node.id)));
+    }
+
+    // Data entities alone are verification targets, not business entries.
+    const orphanData = input.graph.nodes.filter((node) => node.kind === "data-entity" && !represented.has(node.id));
+    if (orphanData.length) {
+      const synthetic: BusinessCapabilityNode = {
+        id: stableId("data-group:all"),
+        kind: "data-entity",
+        label: `数据实体（${orphanData.length} 项）`,
+        confidence: "medium",
+        source: orphanData[0]?.source
+      };
+      makePath(synthetic, new Set(orphanData.map((node) => node.id)));
+    }
+  } else {
+    // API-only project: the API surface IS the business inventory. Group by
+    // resource prefix so large backends stay reviewable.
+    const routeGroups = new Map<string, BusinessCapabilityNode[]>();
+    for (const node of input.graph.nodes.filter((item) => item.kind === "api-route")) {
+      const key = apiGroupKey(node);
+      routeGroups.set(key, [...(routeGroups.get(key) ?? []), node]);
+    }
+    for (const [group, members] of [...routeGroups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const nodeIds = new Set<string>();
+      for (const member of members) {
+        for (const id of connectedNodeIds(adjacency, member.id)) nodeIds.add(id);
+      }
+      const synthetic: BusinessCapabilityNode = {
+        id: stableId(`api-group:${group}`),
+        kind: "api-route",
+        label: `${group} 接口组（${members.length} 个操作）`,
+        confidence: members.some((node) => node.confidence === "high") ? "high" : "medium",
+        source: members[0]?.source
+      };
+      makePath(synthetic, nodeIds);
+    }
+    for (const node of input.graph.nodes.filter((item) => item.kind === "background-task" && !represented.has(item.id))) {
+      makePath(node, new Set([node.id]));
+    }
   }
   const unique = new Map(paths.map((path) => [path.id, path]));
   const values = [...unique.values()];

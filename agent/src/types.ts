@@ -660,6 +660,10 @@ export interface DiscoveryPageObservation {
     failedRequests: number;
     activeRequests: number;
     peakActiveRequests: number;
+    /** Subset of totalRequests that participates in the readiness barrier
+     * (document/fetch/xhr). Static module-graph traffic is reported in the
+     * totals but never blocks observation. */
+    readinessRequests?: number;
     lastActivityAt?: string;
   };
   document: {

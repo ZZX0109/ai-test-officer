@@ -3,7 +3,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { ProjectManifest } from "@ai-test-officer/contracts";
 import type { CodeGraphEdge, CodeGraphNode, CodeImpactGraph } from "./codeImpactGraph.js";
-import { parseBusinessSource } from "./businessParserAdapters.js";
+import { parseBusinessSource, parsePythonSourcesBatch, type ParsedBusinessFile } from "./businessParserAdapters.js";
 
 export type BusinessCapabilityNodeKind =
   | "file"
@@ -211,7 +211,8 @@ async function scanSourceFile(
   file: SourceFile,
   nodes: Map<string, BusinessCapabilityNode>,
   edges: Map<string, BusinessCapabilityEdge>,
-  diagnostics: string[]
+  diagnostics: string[],
+  preParsed?: ParsedBusinessFile
 ) {
   const fileNodeId = addNode(nodes, {
     id: stableId("file", file.relative),
@@ -220,7 +221,7 @@ async function scanSourceFile(
     confidence: "high",
     source: { file: file.relative, line: 1, parser: file.parser, sourceHash: file.sourceHash }
   });
-  const parsed = await parseBusinessSource(file);
+  const parsed = preParsed ?? await parseBusinessSource(file);
   diagnostics.push(...parsed.diagnostics.map((diagnostic) => `${file.relative}: ${diagnostic}`));
   const keys = new Map<string, string>();
   const addLocal = (key: string, node: BusinessCapabilityNode) => {
@@ -266,12 +267,16 @@ export async function buildBusinessCapabilityGraph(input: {
   const legacyMapping = new Map<string, string>();
   for (const legacy of input.codeGraph.nodes) {
     const source = legacy.file ? sourceByFile.get(legacy.file) : undefined;
+    const mappedKind = mapLegacyKind(legacy.kind);
     const node: BusinessCapabilityNode = {
       id: stableId("legacy", legacy.id),
-      kind: mapLegacyKind(legacy.kind),
+      kind: mappedKind,
       label: legacy.label,
       confidence: legacy.confidence,
-      source: source && legacy.file ? { file: legacy.file, line: legacy.line, parser: source.parser, sourceHash: source.sourceHash } : undefined
+      source: source && legacy.file ? { file: legacy.file, line: legacy.line, parser: source.parser, sourceHash: source.sourceHash } : undefined,
+      // Router-declared pages carry their route as the label; preserving it as
+      // metadata lets the path compiler dedupe them with scanner-found pages.
+      ...(mappedKind === "page" && legacy.label.startsWith("/") ? { metadata: { route: legacy.label } } : {})
     };
     legacyMapping.set(legacy.id, addNode(nodes, node));
   }
@@ -280,15 +285,33 @@ export async function buildBusinessCapabilityGraph(input: {
     const to = legacyMapping.get(edge.to);
     if (from && to) addEdge(edges, { from, to, kind: mapLegacyEdge(edge.kind), confidence: "high", reason: edge.reason });
   }
-  for (const source of sources) await scanSourceFile(source, nodes, edges, diagnostics);
+  // Python files are parsed in one batched AST process (see parser adapters);
+  // the remaining adapters are CPU-local. A small pool keeps large
+  // repositories from scanning strictly file-by-file while shared map writes
+  // stay synchronous and race-free.
+  const pythonParsed = await parsePythonSourcesBatch(sources.filter((file) => /\.py$/i.test(file.relative)));
+  const scanQueue = [...sources];
+  const scanWorkers = Array.from({ length: Math.min(8, scanQueue.length) }, async () => {
+    for (let source = scanQueue.shift(); source; source = scanQueue.shift()) {
+      await scanSourceFile(source, nodes, edges, diagnostics, pythonParsed.get(source.relative));
+    }
+  });
+  await Promise.all(scanWorkers);
 
-  const routeNodes = [...nodes.values()].filter((node) => node.kind === "api-route" || node.kind === "frontend-call");
-  for (const call of routeNodes.filter((node) => node.kind === "frontend-call")) {
+  // Index API routes by normalized route once. Matching every frontend call
+  // against every route used to be O(calls x routes) string normalization —
+  // the single hottest loop on backend-heavy uploads.
+  const apiRoutesByNormalized = new Map<string, BusinessCapabilityNode[]>();
+  for (const node of nodes.values()) {
+    if (node.kind !== "api-route") continue;
+    const key = normalizedRoute(node.metadata?.route ?? node.label.replace(/^[A-Z]+\s+/, ""));
+    apiRoutesByNormalized.set(key, [...(apiRoutesByNormalized.get(key) ?? []), node]);
+  }
+  for (const call of nodes.values()) {
+    if (call.kind !== "frontend-call") continue;
     const route = call.metadata?.route ?? call.label;
-    for (const endpoint of routeNodes.filter((node) => node.kind === "api-route")) {
-      const endpointRoute = endpoint.metadata?.route ?? endpoint.label.replace(/^[A-Z]+\s+/, "");
-      if (normalizedRoute(route) !== normalizedRoute(endpointRoute)) continue;
-      addEdge(edges, { from: call.id, to: endpoint.id, kind: "calls", confidence: "high", reason: `前端请求 ${route} 与后端路由 ${endpointRoute} 的规范化路径一致。` });
+    for (const endpoint of apiRoutesByNormalized.get(normalizedRoute(route)) ?? []) {
+      addEdge(edges, { from: call.id, to: endpoint.id, kind: "calls", confidence: "high", reason: `前端请求 ${route} 与后端路由 ${endpoint.metadata?.route ?? endpoint.label} 的规范化路径一致。` });
     }
   }
   for (const operation of input.manifest?.apiOperations ?? []) {
@@ -299,10 +322,8 @@ export async function buildBusinessCapabilityGraph(input: {
       confidence: "high",
       metadata: { route: operation.pathTemplate, method: operation.method, operationId: operation.operationId }
     });
-    for (const route of routeNodes.filter((node) => node.kind === "api-route")) {
-      if (normalizedRoute(route.metadata?.route ?? route.label) === normalizedRoute(operation.pathTemplate)) {
-        addEdge(edges, { from: route.id, to: operationNode, kind: "asserts", confidence: "high", reason: `Manifest OpenAPI operation ${operation.operationId} confirms the route contract.` });
-      }
+    for (const route of apiRoutesByNormalized.get(normalizedRoute(operation.pathTemplate)) ?? []) {
+      addEdge(edges, { from: route.id, to: operationNode, kind: "asserts", confidence: "high", reason: `Manifest OpenAPI operation ${operation.operationId} confirms the route contract.` });
     }
   }
   for (const task of input.manifest?.backgroundTasks ?? []) {

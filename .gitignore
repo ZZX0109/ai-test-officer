@@ -42,3 +42,6 @@ data/projects/psyexpgen_2.json
 data/scenarios/discovered_*.json
 # Fixture targets may be bootstrapped with npm during isolated benchmark runs.
 fixtures/*/package-lock.json
+
+# Runtime scan caches written into scanned project roots
+.ai-test-officer/

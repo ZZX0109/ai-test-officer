@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import ts from "typescript";
 
@@ -190,7 +191,7 @@ export async function buildCodeImpactGraph(input: { repositoryRoot: string; file
     else if (/\.py$/.test(relative)) pythonFiles.push(relative);
   }
   if (pythonFiles.length) {
-    const script = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../scripts/python_ast_index.py");
+    const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../scripts/python_ast_index.py");
     Object.assign(nextCache.files, await indexPython(script, root, pythonFiles));
   }
   await mkdir(path.dirname(cacheFile), { recursive: true });

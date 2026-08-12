@@ -37,6 +37,7 @@ export const discoveryPageObservationSchema = z.object({
     failedRequests: z.number().int().nonnegative(),
     activeRequests: z.number().int().nonnegative(),
     peakActiveRequests: z.number().int().nonnegative(),
+    readinessRequests: z.number().int().nonnegative().optional(),
     lastActivityAt: z.string().optional()
   }).optional(),
   document: z.object({
