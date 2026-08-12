@@ -19,7 +19,11 @@ function ensureAcceptanceSecrets() {
   const generated = [];
   for (const name of ["POSTGRES_PASSWORD", "REDIS_PASSWORD", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "KEYCLOAK_ADMIN_PASSWORD", "INTERNAL_WORKER_TOKEN"]) {
     if (!process.env[name]) {
-      process.env[name] = randomBytes(24).toString("base64url");
+      // These values are interpolated into a shell command for `mc alias set`.
+      // Base64url may legally begin with `-`, which `mc` then interprets as an
+      // option instead of the MinIO access key. Hex is URL/shell-safe and still
+      // supplies more than enough entropy for this disposable acceptance stack.
+      process.env[name] = randomBytes(24).toString("hex");
       generated.push(name);
     }
   }
@@ -127,7 +131,12 @@ try {
         const payload = await response.json().catch(() => ({}));
         if (response.ok) return payload;
         if (![502, 503, 504].includes(response.status)) {
-          throw new Error(`acceptance_api_${response.status}:${pathname}`);
+          // Keep the report secret-safe, but include an API error code so a
+          // failed workflow can be diagnosed without preserving whole bodies.
+          const detail = [payload?.error, payload?.runState]
+            .filter((value) => typeof value === "string" && /^[a-z0-9_-]+$/i.test(value))
+            .join(":");
+          throw new Error(`acceptance_api_${response.status}:${pathname}${detail ? `:${detail}` : ""}`);
         }
         lastError = new Error(`acceptance_api_${response.status}:${pathname}`);
       } catch (error) {
@@ -139,7 +148,12 @@ try {
     throw new Error(`acceptance_api_transport_exhausted:${pathname}:${lastError instanceof Error ? lastError.message : "unknown"}`);
   }
   function newPayload(suffix) {
-    return { organizationId: "benchmark", actor: "acceptance-runner", idempotencyKey: `acceptance:${suffix}:${Date.now()}`, input: { appUrl: "http://customer-portal-lite:7103", scenarioId: "generic_table_sort_filter_pagination", plannerMode: "deterministic", judgeMode: "deterministic", executionMode: "oci", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false } } };
+    // A production run must include a requirement: active Graph planning
+    // deliberately fail-closes ambiguous requests into human review. Supplying
+    // the same real goal as the registered scenario lets this acceptance test
+    // exercise planning, approval, execution and recovery rather than bypass
+    // that safety policy.
+    return { organizationId: "benchmark", actor: "acceptance-runner", idempotencyKey: `acceptance:${suffix}:${Date.now()}`, input: { appUrl: "http://customer-portal-lite:7103", requirement: "验证客户门户表格的排序、筛选和分页功能", diff: "客户门户列表筛选与分页逻辑变更", scenarioId: "generic_table_sort_filter_pagination", plannerMode: "deterministic", judgeMode: "deterministic", executionMode: "oci", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false } } };
   }
   async function createApprovedRun(suffix, options = {}) {
     const payload = newPayload(suffix);
@@ -161,16 +175,42 @@ try {
     return granted;
   }
   async function control(run, action, suffix, payload) {
-    return (await api(`/v1/runs/${run.id}/${action}`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "acceptance-runner", idempotencyKey: `${run.id}:${action}:${suffix}`, ...(payload ? { payload } : {}) }) })).run;
+    // Graph nodes can persist a progress projection between the caller reading
+    // a Run and submitting a control command. The Workbench follows the same
+    // optimistic-concurrency protocol: refresh once on a version conflict and
+    // retry the *same idempotency key*, never blindly duplicate the action.
+    let current = run;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return (await api(`/v1/runs/${current.id}/${action}`, {
+          method: "POST",
+          body: JSON.stringify({
+            expectedVersion: current.version,
+            actor: "acceptance-runner",
+            idempotencyKey: `${current.id}:${action}:${suffix}`,
+            ...(payload ? { payload } : {})
+          })
+        })).run;
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes("run_version_conflict") || attempt === 1) throw error;
+        current = (await api(`/v1/runs/${current.id}`)).run;
+        if (terminalStates.has(current.state)) return current;
+      }
+    }
+    throw new Error(`control_retry_exhausted:${action}`);
   }
   async function waitForTerminal(runId, timeoutMs = 45_000) {
     const deadline = Date.now() + timeoutMs;
+    let lastState = "unknown";
+    let lastVersion = "unknown";
     while (Date.now() < deadline) {
       const current = (await api(`/v1/runs/${runId}`)).run;
+      lastState = String(current.state ?? "unknown");
+      lastVersion = String(current.version ?? "unknown");
       if (terminalStates.has(current.state)) return current;
       await sleep(500);
     }
-    throw new Error(`run_terminal_timeout:${runId}`);
+    throw new Error(`run_terminal_timeout:${runId}:${lastState}:v${lastVersion}`);
   }
   async function assertCommittedArtifacts(runId) {
     const artifacts = (await api(`/v1/runs/${runId}/artifacts`)).artifacts;

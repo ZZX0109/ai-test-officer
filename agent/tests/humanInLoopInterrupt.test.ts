@@ -289,7 +289,30 @@ async function testDeveloperConfirmsCodeRepair() {
   assert.equal(final?.status, "completed");
 }
 
-/** 5. 用户拒绝修复 → 保留失败结论。 */
+/** 5. 即使是 agent-owned 的 selector/harness 问题，也必须由用户授权沙盒写入。 */
+async function testAgentOwnedRepairStillRequiresConsent() {
+  const harness = buildHarness({
+    owner: "agent",
+    failureClass: "test-script",
+    options: [
+      { value: "repair", label: "在沙盒中生成补丁" },
+      { value: "dismiss", label: "仅保留失败结论" }
+    ]
+  });
+  const runner = makeGraph(harness, new MemorySaver());
+  const runId = "hil_agent_owned";
+
+  const paused = await startToInterrupt(runner, runId, { sandboxWrite: true });
+  assert.equal(paused?.status, "interrupted", "agent-owned repair must not write a sandbox automatically");
+  assert.equal(paused?.interruptOwner, "agent");
+  assert.equal(harness.applied.length, 0, "no patch decision may be applied before user consent");
+
+  await runner.resume(runId, { decision: "repair" });
+  assert.equal(harness.applied[0]?.decision, "repair");
+  assert.equal((await runner.state(runId))?.status, "completed");
+}
+
+/** 6. 用户拒绝修复 → 保留失败结论。 */
 async function testUserRejectionKeepsFailure() {
   const harness = buildHarness({
     owner: "user",
@@ -315,7 +338,7 @@ async function testUserRejectionKeepsFailure() {
 }
 
 /**
- * 6. 服务重启后仍能恢复 pending interrupt。
+ * 7. 服务重启后仍能恢复 pending interrupt。
  *
  * Simulated by discarding the graph object and rebuilding it against the same
  * checkpointer — exactly what a process restart does with PostgresSaver.
@@ -367,6 +390,7 @@ export async function testHumanInLoopInterrupt() {
   await testMissingCredentialResumesSameGraph();
   await testEnvironmentFailureUserConfirmsRecovery();
   await testDeveloperConfirmsCodeRepair();
+  await testAgentOwnedRepairStillRequiresConsent();
   await testUserRejectionKeepsFailure();
   await testPendingInterruptSurvivesRestart();
   console.log("HUMAN_IN_LOOP_INTERRUPT_OK");

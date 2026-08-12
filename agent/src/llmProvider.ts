@@ -12,7 +12,7 @@ import { finalizeLlmBudget, reserveLlmBudget, type LlmBudgetReservation } from "
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
 export interface LlmCallContext {
-  purpose: "planning" | "judging" | "triage" | "repairing" | "assistant";
+  purpose: "planning" | "browser-action" | "judging" | "triage" | "repairing" | "assistant";
   runId?: string;
   experimentId?: string;
   modelProfileId?: string;
@@ -337,7 +337,13 @@ async function executeTransportAttempt(input: ExecuteLlmCallInput, timeoutMs: nu
         model: input.credential.model, instructions: input.system, input: `${input.prompt}\nReturn a JSON object.`,
         max_output_tokens: input.maxTokens,
         stream: mode === "stream",
-        text: { format: responsesTextFormat(input) }
+        text: { format: responsesTextFormat(input) },
+        // Codex-compatible gateways may spend most of a small completion
+        // budget on hidden reasoning before emitting the required JSON. Keep
+        // the Judge/Planner wire contract bounded while requesting the lowest
+        // supported reasoning effort. Other Responses providers are left
+        // unchanged because not all of them accept this extension.
+        ...(/api\.sophnet\.com/i.test(input.credential.baseUrl) ? { reasoning: { effort: "low" } } : {})
       } : {
         model: input.credential.model, temperature: input.temperature ?? 0, response_format: { type: "json_object" },
         max_tokens: input.maxTokens, messages: [{ role: "system", content: input.system }, { role: "user", content: input.prompt }]
@@ -475,7 +481,7 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
           totalMs: durationMs
         },
         status: "passed",
-        transportMode: usedFallback ? "non-stream-fallback" : "stream",
+        transportMode: streamFailedBeforeFallback ? "non-stream-fallback" : usedFallback ? "non-stream" : "stream",
         fallbackReason: streamFailedBeforeFallback ? "stream_incomplete" : undefined,
         fallbackImpact: "none",
         finalStatusImpact: "none",
@@ -569,7 +575,7 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
     durationMs,
     timing: { queueMs: 0, generationMs: durationMs, totalMs: durationMs },
     status: "failed",
-    transportMode: usedFallback ? "non-stream-fallback" : "stream",
+    transportMode: streamFailedBeforeFallback ? "non-stream-fallback" : usedFallback ? "non-stream" : "stream",
     fallbackReason: streamFailedBeforeFallback ? "stream_incomplete" : undefined,
     fallbackImpact,
     finalStatusImpact,

@@ -1,4 +1,6 @@
 import type { CodeImpactGraph, CodeGraphNode } from "./codeImpactGraph.js";
+import type { BusinessCapabilityGraph, BusinessSourceLocation } from "./businessCapabilityGraph.js";
+import { compileBusinessPaths } from "./businessPathCompiler.js";
 import type { GrayPlan, IntakeAnalysis, ProjectConfig } from "./types.js";
 import { getScenario, hasScenario } from "./scenarios.js";
 import type { LlmPlanningAdvice } from "./llmPlanningAdvisor.js";
@@ -17,13 +19,29 @@ export interface PlanningMessage {
 export interface PlannedBusinessFlow {
   id: string;
   title: string;
-  kind: "page" | "component" | "api" | "scenario";
+  kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
   target: string;
   status: BusinessFlowStatus;
   confidence: "high" | "medium" | "low";
   reason: string;
   scenarioId?: string;
   requiredInformation: string[];
+  /** Code-graph nodes represented by this business flow. Large repositories
+   * are grouped into auditable feature flows instead of presenting every
+   * component symbol as an independently executable test. */
+  sourceNodeIds?: string[];
+  sourceCount?: number;
+  /** BusinessCapabilityGraph v2 details. The old fields remain so saved plans
+   * and older Workbench clients can continue reading this response. */
+  pathVersion?: "2.0";
+  summary?: string;
+  surfaces?: Array<"page" | "api" | "data" | "background-task">;
+  risk?: "low" | "medium" | "high";
+  roles?: string[];
+  actionCandidates?: string[];
+  oracleCandidates?: string[];
+  requiredEvidenceKinds?: string[];
+  sourceLocations?: BusinessSourceLocation[];
 }
 
 export interface PlanningConversationResult {
@@ -32,20 +50,88 @@ export interface PlanningConversationResult {
   reply: string;
   clarificationQuestions: string[];
   businessFlows: PlannedBusinessFlow[];
+  /** Initial page only. The complete immutable inventory is persisted by the
+   * planning route and fetched through the cursor endpoint. */
+  businessFlowPage?: {
+    cursor?: string;
+    nextCursor?: string;
+    total: number;
+    limit: number;
+  };
   coverage: {
     discovered: number;
     executable: number;
     autoBindable: number;
     needsInput: number;
     gaps: number;
+    /** Raw code-graph candidates represented by the grouped business flows. */
+    sourceCandidates?: number;
     confidence: "high" | "medium" | "low";
     scope: "targeted" | "comprehensive";
   };
   plan: GrayPlan;
   analysis: IntakeAnalysis;
   recommendedScenarioId?: string;
+  businessGraph?: {
+    version: "2.0";
+    sourceFileCount: number;
+    projectSnapshotHash: string;
+    diagnostics: string[];
+  };
   llmPlanning?: LlmPlanningAdvice;
   discoveryReadiness?: DiscoveryConnectivityResult;
+}
+
+const MAX_UNGROUPED_COVERAGE_NODES = 80;
+const MAX_SOURCE_NODES_PER_GROUP = 24;
+
+function featureKey(node: CodeGraphNode) {
+  if (node.kind === "api-route") {
+    const route = node.label.replace(/^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+/i, "");
+    const parts = route.split(/[/?#]/).filter(Boolean).filter((part) => !/^v\d+$/i.test(part));
+    return `api:${parts.slice(0, 2).join("/") || "root"}`;
+  }
+  const file = (node.file ?? node.label).replace(/\\/g, "/");
+  const parts = file.split("/").filter(Boolean);
+  const anchor = parts.findIndex((part) => /^(pages?|views?|components?|routes?|controllers?)$/i.test(part));
+  if (anchor >= 0) {
+    const next = parts[anchor + 1];
+    const feature = next && !/\.[a-z0-9]+$/i.test(next) ? next : "root";
+    return `${node.kind}:${parts[anchor]}/${feature}`;
+  }
+  return `${node.kind}:${parts.slice(0, -1).slice(-2).join("/") || "root"}`;
+}
+
+function groupCoverageNodes(nodes: CodeGraphNode[]) {
+  if (nodes.length <= MAX_UNGROUPED_COVERAGE_NODES) return nodes.map((node) => [node]);
+  const byFeature = new Map<string, CodeGraphNode[]>();
+  for (const node of nodes) {
+    const key = featureKey(node);
+    byFeature.set(key, [...(byFeature.get(key) ?? []), node]);
+  }
+  const groups: CodeGraphNode[][] = [];
+  for (const entries of [...byFeature.values()].sort((left, right) => featureKey(left[0]!).localeCompare(featureKey(right[0]!)))) {
+    const sorted = [...entries].sort((left, right) => left.label.localeCompare(right.label));
+    for (let index = 0; index < sorted.length; index += MAX_SOURCE_NODES_PER_GROUP) {
+      groups.push(sorted.slice(index, index + MAX_SOURCE_NODES_PER_GROUP));
+    }
+  }
+  if (groups.length <= MAX_UNGROUPED_COVERAGE_NODES) return groups;
+  // Extremely fragmented repositories can have hundreds of one-file feature
+  // folders. Preserve every source node, but combine them into a bounded
+  // number of execution units so confirmation does not create hundreds of
+  // synchronous browser/LLM loops.
+  const compacted: CodeGraphNode[][] = [];
+  for (const kind of ["page", "symbol", "api-route"] as const) {
+    const entries = nodes
+      .filter((node) => node.kind === kind)
+      .sort((left, right) => `${featureKey(left)}:${left.label}`.localeCompare(`${featureKey(right)}:${right.label}`));
+    if (!entries.length) continue;
+    const quota = Math.max(1, Math.floor(MAX_UNGROUPED_COVERAGE_NODES * (entries.length / nodes.length)));
+    const chunkSize = Math.ceil(entries.length / quota);
+    for (let index = 0; index < entries.length; index += chunkSize) compacted.push(entries.slice(index, index + chunkSize));
+  }
+  return compacted;
 }
 
 function flowId(kind: string, value: string) {
@@ -74,25 +160,32 @@ function uniqueNodes(nodes: CodeGraphNode[], kind: CodeGraphNode["kind"]) {
 function buildFlows(input: {
   project: ProjectConfig;
   graph: CodeImpactGraph;
+  capabilityGraph?: BusinessCapabilityGraph;
   analysis: IntakeAnalysis;
+  goal: string;
   comprehensive: boolean;
   discoveryReadiness?: DiscoveryConnectivityResult;
 }): PlannedBusinessFlow[] {
-  if (input.discoveryReadiness && input.discoveryReadiness.status !== "ready") {
-    const blocked = input.discoveryReadiness.status === "blocked";
-    const failed = input.discoveryReadiness.status === "failed";
+  const runtimeBlocked = Boolean(input.discoveryReadiness && input.discoveryReadiness.status !== "ready");
+  // A full scan is a code-derived inventory first. Runtime readiness decides
+  // whether the inventory may execute, not whether users can see the flows
+  // discovered from their uploaded project.
+  if (runtimeBlocked && !input.comprehensive && !input.capabilityGraph) {
+    const readiness = input.discoveryReadiness!;
+    const blocked = readiness.status === "blocked";
+    const failed = readiness.status === "failed";
     return [{
-      id: flowId("smoke", input.discoveryReadiness.checkedUrl),
+      id: flowId("smoke", readiness.checkedUrl),
       title: "项目连通性与页面基线",
       kind: "page",
-      target: input.discoveryReadiness.checkedUrl,
+      target: readiness.checkedUrl,
       status: "needs-input",
       confidence: "high",
       reason: blocked
-        ? `运行前置条件尚未满足：${input.discoveryReadiness.reason}`
+        ? `运行前置条件尚未满足：${readiness.reason}`
         : failed
-          ? `连通性 smoke 已完成有限重试但仍失败：${input.discoveryReadiness.reason}`
-          : `项目仍在启动或恢复：${input.discoveryReadiness.reason}`,
+          ? `连通性 smoke 已完成有限重试但仍失败：${readiness.reason}`
+          : `项目仍在启动或恢复：${readiness.reason}`,
       requiredInformation: blocked
         ? ["解决项目运行、凭据或权限前置条件后重新检查"]
         : failed
@@ -102,6 +195,50 @@ function buildFlows(input: {
   }
   const flows: PlannedBusinessFlow[] = [];
   const supportsBrowserDiscovery = input.project.manifest?.capabilities.browser !== false;
+  const runtimeReason = runtimeBlocked
+    ? `运行时页面预检尚未完成（${input.discoveryReadiness?.reason ?? "等待页面状态"}）；该代码路径已列入清单，确认执行时会先恢复页面状态再绑定动作与 oracle。`
+    : undefined;
+  if (input.capabilityGraph) {
+    const compiled = compileBusinessPaths({
+      graph: input.capabilityGraph,
+      goal: input.goal,
+      comprehensive: input.comprehensive,
+      browserEnabled: supportsBrowserDiscovery
+    });
+    for (const path of compiled) {
+      const primarySurface = path.surfaces.includes("page") ? "page"
+        : path.surfaces.includes("api") ? "api"
+          : path.surfaces.includes("data") ? "data"
+            : "background-task";
+      const status: BusinessFlowStatus = runtimeBlocked && path.status === "auto-bindable"
+        ? "auto-bindable"
+        : path.status;
+      flows.push({
+        id: path.id,
+        title: path.title,
+        kind: primarySurface,
+        target: path.sourceLocations[0]?.file ?? path.id,
+        status,
+        confidence: path.confidence,
+        reason: runtimeBlocked && path.status === "auto-bindable" ? `${path.reason} ${runtimeReason}` : path.reason,
+        requiredInformation: path.preconditions,
+        pathVersion: "2.0",
+        summary: path.summary,
+        surfaces: path.surfaces,
+        risk: path.risk,
+        roles: path.roles,
+        actionCandidates: path.actionCandidates,
+        oracleCandidates: path.oracleCandidates,
+        requiredEvidenceKinds: path.requiredEvidenceKinds,
+        sourceNodeIds: path.sourceNodeIds,
+        sourceCount: path.sourceNodeIds.length,
+        sourceLocations: path.sourceLocations
+      });
+    }
+    // Existing verified scenarios are retained as separate executable
+    // contracts. They complement the discovered inventory instead of hiding
+    // it behind a scenario-registry-only plan.
+  }
   for (const candidate of input.analysis.scenarioCandidates.filter((item) => item.source !== "patrol" && item.mappedScenarioId)) {
     const scenario = candidate.mappedScenarioId && hasScenario(candidate.mappedScenarioId)
       ? getScenario(candidate.mappedScenarioId)
@@ -111,17 +248,17 @@ function buildFlows(input: {
       || scenario.matcher?.projectIds?.includes(input.project.id)
     ));
     if (scenario && !targetCompatible) continue;
-    const executable = candidate.executable && targetCompatible;
+    const executable = candidate.executable && targetCompatible && !runtimeBlocked;
     flows.push({
       id: flowId("scenario", candidate.mappedScenarioId ?? candidate.id),
       title: candidate.title,
       kind: "scenario",
       target: candidate.mappedScenarioId ?? candidate.id,
-      status: executable ? "executable" : "coverage-gap",
+      status: executable ? "executable" : runtimeBlocked && targetCompatible ? "auto-bindable" : "coverage-gap",
       confidence: executable ? "high" : "medium",
-      reason: executable ? candidate.reason : `${candidate.reason} 该场景尚未验证与当前项目的页面合同兼容。`,
+      reason: executable ? candidate.reason : runtimeBlocked && targetCompatible ? runtimeReason! : `${candidate.reason} 该场景尚未验证与当前项目的页面合同兼容。`,
       scenarioId: candidate.mappedScenarioId,
-      requiredInformation: executable ? [] : ["需要生成并验证该功能的页面动作与断言"]
+      requiredInformation: executable || (runtimeBlocked && targetCompatible) ? [] : ["需要生成并验证该功能的页面动作与断言"]
     });
   }
 
@@ -138,13 +275,18 @@ function buildFlows(input: {
       title: scenario.title,
       kind: "scenario",
       target: scenario.id,
-      status: "executable",
+      status: runtimeBlocked ? "auto-bindable" : "executable",
       confidence: node.confidence,
-      reason: `代码图中的页面、接口或符号命中了经过验证的场景 ${scenario.id}。`,
+      reason: runtimeBlocked ? runtimeReason! : `代码图中的页面、接口或符号命中了经过验证的场景 ${scenario.id}。`,
       scenarioId: scenario.id,
       requiredInformation: []
     });
   }
+
+  // BusinessCapabilityGraph v2 already represents all static entries and
+  // their transitive code links. Do not append the old page/component/API
+  // directory heuristic on top of it, or every source is shown twice.
+  if (input.capabilityGraph) return flows;
 
   const pageNodes = uniqueNodes(input.graph.nodes, "page");
   const apiNodes = uniqueNodes(input.graph.nodes, "api-route");
@@ -156,22 +298,40 @@ function buildFlows(input: {
     ? [...pageNodes, ...componentNodes, ...apiNodes]
     : [...pageNodes.slice(0, 12), ...componentNodes.slice(0, 12), ...apiNodes.slice(0, 12)];
 
-  for (const node of selectedNodes) {
+  for (const nodes of groupCoverageNodes(selectedNodes)) {
+    const node = nodes[0]!;
     const kind = node.kind === "page" ? "page" : node.kind === "symbol" ? "component" : "api";
-    const duplicate = flows.some((flow) => flow.kind === kind && flow.target === node.label);
+    const grouped = nodes.length > 1;
+    const groupBaseTarget = grouped ? featureKey(node) : node.label;
+    // A large feature may be split into several bounded execution units.  The
+    // human-facing feature name is shared, but every chunk needs a stable,
+    // distinct target; otherwise the duplicate guard silently discards all
+    // chunks after the first and the coverage inventory loses source nodes.
+    const groupTarget = grouped
+      ? `${groupBaseTarget}#${Buffer.from(nodes.map((item) => item.id).join("|")).toString("base64url").slice(0, 12)}`
+      : groupBaseTarget;
+    const duplicate = flows.some((flow) => flow.kind === kind && flow.target === groupTarget);
     if (duplicate) continue;
+    const sampleTargets = nodes.slice(0, 3).map((item) => humanize(item.label)).join("、");
+    const groupTitle = kind === "page" ? "页面与导航"
+      : kind === "component" ? "界面功能"
+        : "接口功能";
     flows.push({
-      id: flowId(kind, node.label),
-      title: kind === "page"
+      id: flowId(kind, groupTarget),
+      title: grouped
+        ? `${humanize(groupBaseTarget.replace(/^[^:]+:/, ""))} ${groupTitle}（${nodes.length} 项）`
+        : kind === "page"
         ? `${/(^|\/)App$/i.test(node.label) ? "应用主界面" : humanize(node.label)} 页面流程`
         : kind === "component"
           ? `${humanize(node.label)} 功能`
           : `${node.label} 接口流程`,
       kind,
-      target: node.label,
+      target: groupTarget,
       status: supportsBrowserDiscovery ? "auto-bindable" : "coverage-gap",
       confidence: node.confidence,
-      reason: kind === "page"
+      reason: runtimeReason ?? (grouped
+        ? `代码扫描发现 ${nodes.length} 个属于同一功能域的${groupTitle}候选（如 ${sampleTargets}）；系统将它们作为一条可审计业务路径，在真实页面中继续拆解动作和 oracle。`
+        : kind === "page"
         ? supportsBrowserDiscovery
           ? `代码扫描发现页面入口 ${node.label}；确认计划后会在内置浏览器中自动发现控件、绑定动作并验证断言。`
           : `代码扫描发现页面入口 ${node.label}，但当前项目未开放浏览器 Discovery。`
@@ -181,15 +341,23 @@ function buildFlows(input: {
             : `代码扫描发现业务界面组件 ${node.label}，但当前项目未开放浏览器 Discovery。`
           : supportsBrowserDiscovery
             ? `代码扫描发现接口 ${node.label}；系统会结合运行时 Network 与页面结果生成受控接口场景。`
-            : `代码扫描发现接口 ${node.label}，但尚未绑定输入数据、预期状态和页面结果。`,
+            : `代码扫描发现接口 ${node.label}，但尚未绑定输入数据、预期状态和页面结果。`),
       requiredInformation: supportsBrowserDiscovery
         ? []
         : kind === "page" || kind === "component"
           ? ["需要开放浏览器 Discovery 或手工提供页面入口和验收结果"]
-          : ["需要确认请求前置条件、测试数据和预期响应"]
+          : ["需要确认请求前置条件、测试数据和预期响应"],
+      sourceNodeIds: nodes.map((item) => item.id),
+      sourceCount: nodes.length
     });
   }
-  return flows.slice(0, 200);
+  // A comprehensive scan is an inventory, not an execution batch.  Truncating
+  // the inventory made a large uploaded project look fully scanned while any
+  // flow after the 200th code-graph node silently disappeared.  Later stages
+  // can apply concurrency and execution budgets, but every discovered flow
+  // must be shown and receive an explicit executed/excluded/blocked
+  // disposition in the parent run.
+  return flows;
 }
 
 function buildPlan(project: ProjectConfig, flows: PlannedBusinessFlow[], comprehensive: boolean): GrayPlan {
@@ -245,6 +413,7 @@ export function buildPlanningConversation(input: {
   message: string;
   history: PlanningMessage[];
   graph: CodeImpactGraph;
+  capabilityGraph?: BusinessCapabilityGraph;
   analysis: IntakeAnalysis;
   discoveryReadiness?: DiscoveryConnectivityResult;
 }): PlanningConversationResult {
@@ -253,7 +422,9 @@ export function buildPlanningConversation(input: {
   const flows = buildFlows({
     project: input.project,
     graph: input.graph,
+    capabilityGraph: input.capabilityGraph,
     analysis: input.analysis,
+    goal: fullText,
     comprehensive,
     discoveryReadiness: input.discoveryReadiness
   });
@@ -270,7 +441,9 @@ export function buildPlanningConversation(input: {
         ? `项目存在必须先处理的运行前置条件：${input.discoveryReadiness.reason}`
         : `项目连通性 smoke 已有限重试但仍失败：${input.discoveryReadiness.reason}`;
     clarificationQuestions.push(question);
-    blockingQuestions.push(question);
+    // The runtime gate blocks execution, but a comprehensive scan still has a
+    // useful, auditable code plan to show and confirm.
+    if (!comprehensive) blockingQuestions.push(question);
   }
   if (loginSignals && (!input.project.login || input.project.login.method === "none") && !loginAnswered) {
     clarificationQuestions.push("项目包含登录或权限功能：是否提供测试账号，还是只验证未登录状态？");
@@ -289,17 +462,22 @@ export function buildPlanningConversation(input: {
   const autoBindable = flows.filter((flow) => flow.status === "auto-bindable").length;
   const needsInput = flows.filter((flow) => flow.status === "needs-input").length;
   const gaps = flows.filter((flow) => flow.status === "coverage-gap").length;
+  const sourceCandidates = input.capabilityGraph
+    ? new Set(flows.flatMap((flow) => flow.sourceNodeIds ?? [])).size
+    : flows.reduce((total, flow) => total + (flow.sourceCount ?? 1), 0);
   const phase: PlanningPhase = blockingQuestions.length ? "clarifying" : "draft-ready";
   const scope = comprehensive ? "comprehensive" as const : "targeted" as const;
-  const reply = input.discoveryReadiness && input.discoveryReadiness.status !== "ready"
+  const reply = input.discoveryReadiness && input.discoveryReadiness.status !== "ready" && !comprehensive && !input.capabilityGraph
     ? input.discoveryReadiness.status === "waiting"
       ? `正在等待 ${input.project.name} 通过连通性 smoke。系统暂不展开大量候选流程，避免生成无法执行的阻塞清单。`
       : input.discoveryReadiness.status === "blocked"
         ? `${input.project.name} 的连通性 smoke 被前置条件阻塞。系统只保留一个启动基线，不会先生成大量流程再全部标记阻塞。`
         : `${input.project.name} 的连通性 smoke 在有限重试后仍失败。系统已停止 Coverage 展开，并保留具体失败原因供诊断。`
+    : input.discoveryReadiness && input.discoveryReadiness.status !== "ready" && (comprehensive || input.capabilityGraph)
+      ? `${comprehensive ? "代码全面扫描" : "代码定向分析"}已完成：${sourceCandidates} 个代码候选已归并为 ${flows.length} 条业务路径并显示在计划中。运行时页面预检尚未完成，因此这些路径会在确认执行后先恢复登录或页面状态，再绑定真实控件、动作和 oracle；它们没有被算作已测试或已通过。`
     : phase === "clarifying"
-      ? `我扫描了 ${input.project.name}，识别到 ${flows.length} 条业务或技术流程，其中 ${executable} 条已有可执行场景、${autoBindable} 条可由内置浏览器自动绑定、${gaps} 条仍需补充。开始制定最终计划前还需要确认 ${clarificationQuestions.length} 个问题。`
-    : `测试计划已生成：共识别 ${flows.length} 条流程，${executable} 条可以直接执行，${autoBindable} 条会在确认后进入页面 Discovery 和受控场景绑定；只有经过真实页面探测仍无法形成动作与断言的项目才会转为覆盖缺口。当前已有 ${gaps} 条明确缺口。${clarificationQuestions.length ? "仍有可选信息可以补充，但不影响确认计划。" : ""}`;
+      ? `我扫描了 ${input.project.name}，将 ${sourceCandidates} 个代码候选归并为 ${flows.length} 条业务路径，其中 ${executable} 条已有可执行场景、${autoBindable} 条可由内置浏览器自动绑定、${gaps} 条仍需补充。开始制定最终计划前还需要确认 ${clarificationQuestions.length} 个问题。`
+    : `测试计划已生成：${sourceCandidates} 个代码候选已归并为 ${flows.length} 条业务路径，${executable} 条可以直接执行，${autoBindable} 条会在确认后交给 LangGraph 页面观测与受控动作循环；只有经过真实页面探测仍无法形成动作与断言的路径才会转为覆盖缺口。当前已有 ${gaps} 条明确缺口。${clarificationQuestions.length ? "仍有可选信息可以补充，但不影响确认计划。" : ""}`;
   return {
     id: `planning_${Date.now()}`,
     phase,
@@ -312,11 +490,18 @@ export function buildPlanningConversation(input: {
       autoBindable,
       needsInput,
       gaps,
+      sourceCandidates,
       confidence: flows.length && gaps === 0 && autoBindable === 0 ? "high" : flows.length ? "medium" : "low",
       scope
     },
     plan: buildPlan(input.project, flows, comprehensive),
     analysis: input.analysis,
+    businessGraph: input.capabilityGraph ? {
+      version: input.capabilityGraph.version,
+      sourceFileCount: input.capabilityGraph.sourceFileCount,
+      projectSnapshotHash: input.capabilityGraph.projectSnapshotHash,
+      diagnostics: input.capabilityGraph.diagnostics
+    } : undefined,
     recommendedScenarioId: flows.find((flow) => flow.status === "executable")?.scenarioId,
     discoveryReadiness: input.discoveryReadiness
   };

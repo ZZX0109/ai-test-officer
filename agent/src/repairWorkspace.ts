@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, opendir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { copyFile, lstat, mkdir, opendir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { zipSync, strToU8 } from "fflate";
 import { Pool } from "pg";
@@ -9,10 +10,12 @@ import {
   repairExportSchema,
   repairFileChangeSchema,
   repairSessionSchema,
+  repairWorkspaceFileSchema,
   repairValidationSchema,
   type ArtifactV2,
   type RepairExport,
   type RepairFileChange,
+  type RepairWorkspaceFile,
   type RepairSession
 } from "@ai-test-officer/contracts";
 import { AttemptClock, commitCapturedFile } from "@ai-test-officer/playwright-runtime";
@@ -28,10 +31,10 @@ import { prepareSandboxDependencyCache } from "./projectAdapter.js";
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const repairsRoot = path.join(rootDir, "reports", "repairs");
 const ignoredDirectories = new Set([
-  ".git", ".next", ".nuxt", ".cache", ".turbo", "node_modules", "vendor",
+  ".git", ".next", ".nuxt", ".cache", ".cursor", ".flowise", ".turbo", "node_modules", "vendor",
   "dist", "build", "coverage", "reports", "__pycache__", ".venv", "venv"
 ]);
-const forbiddenNames = /(^|\/)(\.env(?:\.|$)|\.git(?:\/|$)|id_rsa$|id_ed25519$|.*\.(?:pem|p12|pfx|key|crt))|(^|\/)(node_modules|vendor)(\/|$)/i;
+const forbiddenNames = /(^|\/)(\.DS_Store$|\.env(?:\.|$)|\.git(?:\/|$)|id_rsa$|id_ed25519$|.*\.(?:pem|p12|pfx|key|crt))|(^|\/)(node_modules|vendor)(\/|$)/i;
 const binaryExtensions = /\.(?:png|jpe?g|gif|webp|ico|pdf|zip|gz|tar|woff2?|ttf|eot|mp4|mov|sqlite3?|db)$/i;
 const highRiskPaths = /(^|\/)(migrations?|auth|payments?|billing|infra|deploy|terraform|\.github)(\/|$)|(^|\/)(dockerfile|package\.json)$/i;
 const dependencyDescriptorPaths = /(^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|\.yarnrc\.yml|requirements\.txt|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile\.lock|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|Gemfile|Gemfile\.lock|composer\.json|composer\.lock|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.lockfile)$/i;
@@ -137,11 +140,23 @@ async function walk(root: string, relative = ""): Promise<string[]> {
 
 async function copyTree(source: string, destination: string) {
   await mkdir(destination, { recursive: true });
-  for (const relative of await walk(source)) {
-    const from = resolveInside(source, relative).resolved;
-    const to = resolveInside(destination, relative).resolved;
-    await mkdir(path.dirname(to), { recursive: true });
-    await writeFile(to, await readFile(from));
+  const paths = await walk(source);
+  const concurrency = 24;
+  for (let offset = 0; offset < paths.length; offset += concurrency) {
+    await Promise.all(paths.slice(offset, offset + concurrency).map(async (relative) => {
+      const from = resolveInside(source, relative).resolved;
+      const to = resolveInside(destination, relative).resolved;
+      await mkdir(path.dirname(to), { recursive: true });
+      try {
+        // APFS and supported Linux filesystems create an independent
+        // copy-on-write clone. Editing the workspace cannot mutate the source
+        // snapshot, while large repositories no longer require two full byte
+        // copies before the editor can open.
+        await copyFile(from, to, fsConstants.COPYFILE_FICLONE);
+      } catch {
+        await copyFile(from, to);
+      }
+    }));
   }
 }
 
@@ -290,6 +305,47 @@ export async function listRepairSessions(runId: string) {
   }
 }
 
+/**
+ * Reuse the latest project code surface instead of copying a large repository
+ * every time the operator switches Preview/Code. Automated repair always asks
+ * for a fresh session; this helper is only for the ordinary editable sandbox.
+ */
+export async function findReusableProjectCodeSession(projectId: string) {
+  const candidates: RepairSession[] = [];
+  const database = pool();
+  if (database) {
+    const result = await database.query<{ session_json: unknown }>(
+      "SELECT session_json FROM repair_sessions_v1 WHERE project_id=$1 AND run_id LIKE 'code-session:%' ORDER BY updated_at DESC LIMIT 5",
+      [projectId]
+    );
+    for (const row of result.rows) {
+      const parsed = repairSessionSchema.safeParse(row.session_json);
+      if (parsed.success) candidates.push(parsed.data);
+    }
+  } else {
+    try {
+      const entries = await opendir(repairsRoot);
+      for await (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const session = await readRepairSession(entry.name);
+        if (session?.projectId === projectId && session.runId.startsWith("code-session:")) candidates.push(session);
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  for (const session of candidates.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
+    if (["cancelled", "failed"].includes(session.status)) continue;
+    try {
+      const [source, workspace] = await Promise.all([lstat(sourceSnapshotDir(session.id)), lstat(workspaceDir(session.id))]);
+      if (source.isDirectory() && !source.isSymbolicLink() && workspace.isDirectory() && !workspace.isSymbolicLink()) return session;
+    } catch {
+      // A stale database/file record is ignored and a fresh sandbox is built.
+    }
+  }
+  return undefined;
+}
+
 export async function createRepairSession(input: {
   runId: string;
   project: ProjectConfig;
@@ -322,6 +378,29 @@ export async function createRepairSession(input: {
     createdAt: timestamp,
     updatedAt: timestamp
   });
+}
+
+/**
+ * Lists the safe source files in a repair sandbox. This intentionally reads the
+ * immutable source snapshot instead of the host project so a workbench editor
+ * never becomes a hidden host-file browser. `walk` already excludes secrets,
+ * VCS data, dependencies, build products, symlinks and binary-only paths.
+ */
+export async function listRepairWorkspaceFiles(id: string): Promise<RepairWorkspaceFile[]> {
+  const session = await readRepairSession(id);
+  if (!session) throw new Error("repair_session_not_found");
+  const changed = new Set(session.files.map((file) => file.path));
+  const sourceFiles = (await walk(sourceSnapshotDir(id))).filter((relative) => !binaryExtensions.test(relative));
+  const addedFiles = session.files
+    .filter((file) => file.status === "added" && !sourceFiles.includes(file.path))
+    .map((file) => file.path);
+  return [...new Set([...sourceFiles, ...addedFiles])]
+    .sort()
+    .map((relative) => repairWorkspaceFileSchema.parse({
+      path: relative,
+      changed: changed.has(relative),
+      ...riskForPath(relative)
+    }));
 }
 
 export async function readRepairFile(id: string, requestedPath: string) {
@@ -769,7 +848,11 @@ async function persistRepairValidationRun(input: {
   return { result, verdict: proofVerdict, issues, gateEligible };
 }
 
-export async function validateRepairSession(id: string, project: ProjectConfig) {
+export async function validateRepairSession(
+  id: string,
+  project: ProjectConfig,
+  options: { allowNetworkInstall?: boolean } = {}
+) {
   const session = await readRepairSession(id);
   if (!session) throw new Error("repair_session_not_found");
   const files = await scanChanges(session);
@@ -795,7 +878,7 @@ export async function validateRepairSession(id: string, project: ProjectConfig) 
     workspaceDir(id)
   );
   const dependencyDescriptorsChanged = files.some((item) => dependencyDescriptorPaths.test(item.path));
-  if (dependencyDescriptorsChanged) {
+  if (dependencyDescriptorsChanged && !options.allowNetworkInstall) {
     const timestamp = new Date().toISOString();
     const validation = repairValidationSchema.parse({
       id: `repair_validation_${randomUUID()}`,
@@ -810,7 +893,9 @@ export async function validateRepairSession(id: string, project: ProjectConfig) 
     return persistSession({ ...session, status: "blocked", files, validation, updatedAt: timestamp });
   }
   const dependencyCache = await prepareSandboxDependencyCache(project, workspaceDir(id), {
-    dependencyDescriptorRoot: path.resolve(project.projectPath),
+    dependencyDescriptorRoot: options.allowNetworkInstall && dependencyDescriptorsChanged
+      ? workspaceDir(id)
+      : path.resolve(project.projectPath),
     workspaceNamespace: `repair-validation-${id}`
   });
   const installCommand = project.installCommandSpec ?? project.manifest.commands.install;

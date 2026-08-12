@@ -6,6 +6,10 @@ import {
   agentGraphProjectionSchema,
   apiErrorSchema,
   artifactV2Schema,
+  browserActionDecisionSchema,
+  browserActionResultSchema,
+  browserObservationSchema,
+  browserSessionSchema,
   conclusionSchema,
   coverageItemSchema,
   createRunRequestSchema,
@@ -43,9 +47,34 @@ const KnowledgeDecision = registry.register("KnowledgeDecision", knowledgeDecisi
 const KnowledgeConflict = registry.register("KnowledgeConflict", knowledgeConflictSchema);
 const KnowledgeToolExecution = registry.register("KnowledgeToolExecution", knowledgeToolExecutionSchema);
 const AgentMessage = registry.register("AgentMessage", agentMessageSchema);
+const BrowserSession = registry.register("BrowserSession", browserSessionSchema);
+const BrowserObservation = registry.register("BrowserObservation", browserObservationSchema);
+const BrowserActionDecision = registry.register("BrowserActionDecision", browserActionDecisionSchema);
+const BrowserActionResult = registry.register("BrowserActionResult", browserActionResultSchema);
 registry.registerPath({ method: "post", path: "/v1/runs", request: { body: { content: { "application/json": { schema: CreateRun } } } }, responses: { 201: { description: "Created", content: { "application/json": { schema: z.object({ run: Run }) } } }, 400: { description: "Invalid request", content: { "application/json": { schema: ApiError } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Run", content: { "application/json": { schema: z.object({ run: Run }) } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/agent", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Agent graph projection", content: { "application/json": { schema: z.object({ agent: AgentGraphProjection.nullable() }) } } } } });
+registry.registerPath({ method: "get", path: "/v1/runs/{id}/browser-session", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Shared Playwright browser session", content: { "application/json": { schema: z.object({ session: BrowserSession.nullable() }) } } } } });
+registry.registerPath({ method: "get", path: "/v1/runs/{id}/browser-observations", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Structured browser observations", content: { "application/json": { schema: z.object({ observations: z.array(BrowserObservation) }) } } } } });
+registry.registerPath({ method: "get", path: "/v1/runs/{id}/browser-actions", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "LLM browser decisions and deterministic results", content: { "application/json": { schema: z.object({ decisions: z.array(BrowserActionDecision), actions: z.array(BrowserActionResult) }) } } } } });
+registry.registerPath({ method: "post", path: "/v1/runs/{id}/browser-control/acquire", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Acquire the shared browser for user input", content: { "application/json": { schema: z.object({ session: BrowserSession }) } } } } });
+registry.registerPath({ method: "post", path: "/v1/runs/{id}/browser-control/release", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Return the shared browser to the Agent", content: { "application/json": { schema: z.object({ session: BrowserSession }) } } } } });
+registry.registerPath({
+  method: "post",
+  path: "/v1/runs/{id}/browser-input",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: { content: { "application/json": { schema: z.object({
+      kind: z.enum(["click", "type", "press", "scroll"]),
+      x: z.number().nonnegative().optional(),
+      y: z.number().nonnegative().optional(),
+      text: z.string().max(4_000).optional(),
+      key: z.enum(["Enter", "Tab", "Escape", "ArrowUp", "ArrowDown", "Space"]).optional(),
+      deltaY: z.number().min(-5_000).max(5_000).optional()
+    }).strict() } } }
+  },
+  responses: { 200: { description: "User input applied to the shared Playwright page", content: { "application/json": { schema: z.object({ observation: BrowserObservation }) } } } }
+});
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/coverage", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Coverage disposition", content: { "application/json": { schema: z.object({ coverage: z.array(CoverageItem), complete: z.boolean() }) } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/llm-calls", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Versioned LLM invocations", content: { "application/json": { schema: z.object({ calls: z.array(LlmInvocation) }) } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/conclusions", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Verified conclusions", content: { "application/json": { schema: z.object({ conclusions: z.array(Conclusion) }) } } } } });
@@ -151,12 +180,34 @@ registry.registerPath({
   responses: { 201: { description: "Repair session", content: { "application/json": { schema: z.object({ repair: RepairSession }) } } } }
 });
 registry.registerPath({
+  method: "post",
+  path: "/v1/projects/{id}/code-sessions",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: { content: { "application/json": { schema: z.object({
+      summary: z.string().optional(),
+      autoAnalyze: z.boolean().optional(),
+      credentialId: z.string().optional()
+    }) } } }
+  },
+  responses: { 201: { description: "Project sandbox code session", content: { "application/json": { schema: z.object({ repair: RepairSession }) } } } }
+});
+registry.registerPath({
   method: "get",
   path: "/v1/runs/{id}/repairs",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: { description: "Repair sessions for a run", content: { "application/json": { schema: z.object({ repairs: z.array(RepairSession) }) } } } }
 });
 registry.registerPath({ method: "get", path: "/v1/repair-sessions/{id}", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Repair session", content: { "application/json": { schema: z.object({ repair: RepairSession }) } } } } });
+registry.registerPath({
+  method: "post",
+  path: "/v1/repair-sessions/{id}/validate",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ allowNetworkInstall: z.boolean().optional() }) } } }
+  },
+  responses: { 200: { description: "Repair validation", content: { "application/json": { schema: z.object({ repair: RepairSession }) } } } }
+});
 registry.registerPath({
   method: "get",
   path: "/v1/repair-sessions/{id}/files/{filePath}",
@@ -175,7 +226,6 @@ registry.registerPath({
     409: { description: "File version conflict", content: { "application/json": { schema: ApiError } } }
   }
 });
-registry.registerPath({ method: "post", path: "/v1/repair-sessions/{id}/validate", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Validated repair", content: { "application/json": { schema: z.object({ repair: RepairSession }) } } } } });
 registry.registerPath({
   method: "post",
   path: "/v1/repair-sessions/{id}/export",

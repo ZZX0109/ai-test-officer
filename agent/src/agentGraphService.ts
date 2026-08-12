@@ -5,7 +5,15 @@ import {
   type MachineGate,
   type AgentGraphProjection,
   type AgentInterrupt,
-  type RepairDecisionAnswer
+  browserActionDecisionSchema,
+  runOutcomeSummaryV2Schema,
+  type BrowserActionDecision,
+  type BrowserAgentAction,
+  type BrowserObservation,
+  type RepairDecisionAnswer,
+  type RecoveryActionResult,
+  type RecoveryDecision,
+  recoveryActionResultSchema
 } from "@ai-test-officer/contracts";
 import { randomUUID } from "node:crypto";
 import {
@@ -16,13 +24,14 @@ import {
 import { readAgentGraphProjection, saveAgentGraphProjection } from "./agentGraphProjectionStore.js";
 import { appendSystemRunEvent, runEventStore, type RunProjection } from "./runEventStore.js";
 import { executeAgentNodeIdempotently } from "./agentNodeExecutionStore.js";
-import { readEvidence, readRunBundle, writeRunBundle } from "./evidenceStore.js";
-import { getProject, getProjectRuntimeStatusWithRecovery } from "./projectAdapter.js";
+import { appendEvidence, readEvidence, readRunBundle, writeRunBundle } from "./evidenceStore.js";
+import { getProject, getProjectRuntimeStatusWithRecovery, startProject } from "./projectAdapter.js";
 import { createRepairSession, validateRepairSession } from "./repairWorkspace.js";
 import { planRunFromDurableInput } from "./runPlanningService.js";
 import { proposeCodeRepair } from "./llmCodeRepair.js";
 import {
   createCoverageItems,
+  createDynamicBrowserCoverageItems,
   createManifestCoverageItems,
   readCoverageItems,
   saveCoverageItems
@@ -31,15 +40,204 @@ import { buildProofGraph, readProofArtifacts, writeProofArtifacts } from "./proo
 import { persistParentAggregateEvidence } from "./parentRunEvidence.js";
 import { buildLlmJudgeReport } from "./llmJudge.js";
 import { persistExecutionResult, revalidatePersistedMachineGate } from "./executionPersistence.js";
-import { finalizeProofBundle, type MachineGateDraft, type VerifiedMachineGate } from "./proof/proofBundleService.js";
+import { finalizeProofBundle, proofContributorCredibility, proofCredibility, type MachineGateDraft, type VerifiedMachineGate } from "./proof/proofBundleService.js";
 import type { ProofBundleInput } from "./proof/proofBundleValidator.js";
 import { decideRepairFromDeterministic, mapDeterministicClassToFailureClass } from "./repairDecision.js";
 import { persistRepairPlan } from "./repairPlan.js";
 import type { RepairDecision, RepairOwner, EvidenceItem } from "./types.js";
 import { runSmokeFirstDiscovery } from "./smokeFirstDiscovery.js";
+import { getScenario } from "./scenarios.js";
 import type { SourceReadEnvelope } from "./types.js";
 import { getAgentSustainability } from "./agentSustainability.js";
 import { withGraphExecutionScope } from "./graphSideEffects.js";
+import { persistAgentObservation, persistRecoveryAction, persistRecoveryDecision } from "./recoveryStore.js";
+import { chooseLlmRecoveryDecision } from "./llmRecoveryDecision.js";
+import {
+  ensureBrowserAgentSession,
+  observeManagedBrowserSession,
+  updateManagedBrowserSession,
+  finalizeBrowserAgentTrace,
+  dynamicBrowserScenarioId,
+  closeBrowserAgentSession
+} from "./browser-agent/sessionManager.js";
+import { decideNextBrowserActions } from "./browser-agent/llmDecision.js";
+import { browserActionPolicy, executeBrowserAgentAction } from "./browser-agent/actionBroker.js";
+import { appendBrowserDecision, readBrowserActionResults, readBrowserArtifacts, readBrowserDecisions } from "./browser-agent/store.js";
+import { persistDynamicBrowserResult } from "./browser-agent/resultBundle.js";
+import { getProjectLoginSecret } from "./projectLoginStore.js";
+import { listCredentials } from "./credentialStore.js";
+import { artifactKindToIntegrityKind } from "./artifactIntegrity.js";
+import { credentialInterruptDecision } from "./browser-agent/login.js";
+
+type InteractiveCoverageInventoryItem = {
+  id: string;
+  surfaces?: Array<"page" | "api" | "data" | "background-task">;
+  preconditions?: string[];
+  requiredEvidenceKinds?: Array<"screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log">;
+};
+
+function interactiveCoverageInventory(value: unknown): InteractiveCoverageInventoryItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const candidate = item as Record<string, unknown>;
+    if (typeof candidate.id !== "string") return [];
+    const surfaces = Array.isArray(candidate.surfaces)
+      ? candidate.surfaces.filter((surface): surface is NonNullable<InteractiveCoverageInventoryItem["surfaces"]>[number] => surface === "page" || surface === "api" || surface === "data" || surface === "background-task")
+      : undefined;
+    const preconditions = Array.isArray(candidate.preconditions)
+      ? candidate.preconditions.filter((value): value is string => typeof value === "string")
+      : undefined;
+    const requiredEvidenceKinds = Array.isArray(candidate.requiredEvidenceKinds)
+      ? candidate.requiredEvidenceKinds.filter((kind): kind is NonNullable<InteractiveCoverageInventoryItem["requiredEvidenceKinds"]>[number] => ["screenshot", "dom", "network", "console", "trace", "video", "download", "operation-log", "report", "attachment", "source-patch", "changed-files-archive", "repair-validation-log"].includes(String(kind)))
+      : undefined;
+    return [{ id: candidate.id, surfaces, preconditions, requiredEvidenceKinds }];
+  });
+}
+
+/**
+ * Persist the browser part of a mixed parent run before the Worker aggregates
+ * API/data/job children.  The parent aggregate will replace the top-level run
+ * bundle, but it must first have an immutable, verified browser evidence root
+ * to include as one of its contributors.
+ *
+ * This deliberately does not advance the Run event state: when it is called
+ * the Worker has already moved the parent to `collecting`, and only the final
+ * aggregate may publish `run_judging`.
+ */
+async function persistBrowserPhaseForAggregate(state: AgentGraphState) {
+  const traceArtifact = await finalizeBrowserAgentTrace(state.runId).catch(() => undefined);
+  if (traceArtifact) {
+    await appendEvidence(state.runId, {
+      type: "trace",
+      title: "Dynamic browser attempt trace",
+      scenarioId: dynamicBrowserScenarioId(state.runId),
+      attemptId: state.currentAttemptId,
+      attempt: 1,
+      artifactIds: [traceArtifact.id],
+      file: traceArtifact.storageUri,
+      payload: { browserAgent: true, mixedParentPhase: true }
+    });
+  }
+  const [coverage, decisions, results, evidence, artifacts] = await Promise.all([
+    readCoverageItems(state.runId),
+    readBrowserDecisions(state.runId),
+    readBrowserActionResults(state.runId),
+    readEvidence(state.runId),
+    readBrowserArtifacts(state.runId)
+  ]);
+  const browserCoverage = coverage.filter((item) => item.surface === "page");
+  const browserComplete = browserCoverage.length > 0 && browserCoverage.every((item) => item.disposition !== "pending");
+  const blockedCoverage = browserCoverage.filter((item) => item.disposition === "blocked");
+  const executedResults = results.filter((item) => item.status === "completed");
+  const failedOracles = executedResults.flatMap((item) => item.oracleResults.filter((oracle) => !oracle.passed));
+  const executionSucceeded = results.length > 0 && results.every((item) => item.status === "completed");
+  const requirementCovered = browserComplete && blockedCoverage.length === 0
+    && browserCoverage.every((item) => item.disposition === "executed");
+  const artifactKinds = new Set(artifacts.map((artifact) => artifact.kind));
+  const requiredKinds = ["screenshot", "dom", "trace", "operation-log"] as const;
+  const missingKinds = requiredKinds.filter((kind) => !artifactKinds.has(kind));
+  const evidenceByArtifact = new Map<string, string>();
+  for (const item of evidence) for (const artifactId of item.artifactIds ?? []) evidenceByArtifact.set(artifactId, item.id);
+  const artifactIntegrity = {
+    id: `${state.runId}_browser_phase_artifact_integrity`,
+    runId: state.runId,
+    generatedAt: new Date().toISOString(),
+    artifactRoot: "/artifacts" as const,
+    summary: { total: artifacts.length, present: artifacts.length, missing: 0, unreadable: 0, pathEscapes: 0, selfReferences: 0, hashMismatches: 0, hashed: artifacts.length },
+    items: artifacts.map((artifact) => ({
+      id: artifact.id,
+      artifactUri: artifact.storageUri,
+      kind: artifactKindToIntegrityKind(artifact.kind),
+      evidenceId: evidenceByArtifact.get(artifact.id),
+      status: "present" as const,
+      origin: artifact.origin,
+      sizeBytes: artifact.integrity.sizeBytes,
+      sha256: artifact.integrity.sha256
+    }))
+  };
+  const status: MachineGate["status"] = !browserComplete || blockedCoverage.length > 0 || !executionSucceeded || missingKinds.length > 0
+    ? "blocked"
+    : failedOracles.length > 0 ? "fail" : "pass";
+  const failedEvidenceRefs = results
+    .filter((item) => item.status !== "completed" || item.oracleResults.some((oracle) => !oracle.passed))
+    .flatMap((item) => item.evidenceRefs);
+  const fallbackEvidence = evidence.slice(-4).map((item) => item.id);
+  const reasonEvidence = [...new Set([...failedEvidenceRefs, ...fallbackEvidence])].slice(0, 8);
+  const reasons = [
+    ...(!browserComplete ? ["browser_coverage_disposition_incomplete"] : []),
+    ...blockedCoverage.map((item) => `browser_coverage_blocked:${item.flowId}`),
+    ...(!executionSucceeded ? ["browser_action_execution_incomplete"] : []),
+    ...missingKinds.map((kind) => `required_artifact_missing:${kind}`),
+    ...failedOracles.map((oracle) => `oracle_failed:${oracle.oracleId}`)
+  ];
+  const draft: MachineGateDraft = {
+    status,
+    reasons,
+    reasonDetails: reasons.map((reason) => ({
+      code: reason.split(":")[0],
+      summary: reason,
+      evidenceRefs: reasonEvidence.length ? reasonEvidence : evidence.map((item) => item.id).slice(-1)
+    })).filter((item) => item.evidenceRefs.length > 0),
+    assertionFailures: failedOracles.map((oracle) => oracle.oracleId)
+  };
+  const finalized = finalizeProofBundle({
+    draft,
+    runId: state.runId,
+    scenarioId: artifacts[0]?.scenarioId,
+    attemptId: state.currentAttemptId,
+    evidence,
+    artifactsV2: artifacts,
+    artifactIntegrity,
+    requiredArtifactKinds: [...requiredKinds],
+    machineGate: draft,
+    gateEligibleFacts: { executionSucceeded, requirementCovered }
+  });
+  const outcomeSummary = runOutcomeSummaryV2Schema.parse({
+    schemaVersion: "2.0",
+    schedulingCompleted: true,
+    executionStarted: results.length > 0,
+    executionSucceeded,
+    requirementCovered,
+    requirementPassed: requirementCovered && failedOracles.length === 0,
+    ...proofCredibility(finalized.verdict, finalized.machineGate, finalized.gateEligible),
+    finalStatus: finalized.machineGate.status
+  });
+  const currentRun = await runEventStore.get(state.runId);
+  const currentProject = state.projectId ? await getProject(state.projectId) : undefined;
+  const attemptId = state.currentAttemptId ?? artifacts[0]?.attemptId;
+  if (!attemptId) throw new Error("browser_agent_attempt_missing");
+  await persistDynamicBrowserResult({
+    runId: state.runId,
+    projectId: state.projectId,
+    requirement: state.requirement,
+    appUrl: currentProject?.frontendUrl ?? (typeof currentRun?.input.appUrl === "string" ? currentRun.input.appUrl : undefined),
+    rawRunInput: currentRun?.input ?? {},
+    startedAt: state.browserSession?.startedAt ?? currentRun?.createdAt ?? new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    scenarioId: dynamicBrowserScenarioId(state.runId),
+    attemptId,
+    coverage: browserCoverage,
+    decisions,
+    actionResults: results,
+    evidence,
+    artifacts,
+    artifactIntegrity,
+    machineGate: finalized.machineGate,
+    outcomeSummary,
+    proof: finalized
+  });
+  const proof = await readProofArtifacts(state.runId);
+  return {
+    id: `${state.runId}:browser-phase`,
+    state: "completed",
+    finalStatus: finalized.machineGate.status,
+    evidenceSetRoot: proof.manifest?.evidenceSetRoot,
+    ...proofContributorCredibility(outcomeSummary),
+    machineGate: finalized.machineGate,
+    executionSucceeded
+  };
+}
 
 async function machineGateFromResult(bundle: Awaited<ReturnType<typeof readRunBundle>>): Promise<MachineGate> {
   const result = bundle.result;
@@ -105,15 +303,23 @@ function recommendationFromResult(result: Awaited<ReturnType<typeof readRunBundl
 
 type GraphService = Awaited<ReturnType<typeof buildService>>;
 let servicePromise: Promise<GraphService> | undefined;
+// A run can be started from the POST /v1/runs background hand-off and, almost
+// immediately afterwards, from a control endpoint which needs to synchronise
+// the graph to an approval checkpoint. LangGraph persists checkpoints, but it
+// does not serialize concurrent invokes for the same thread. Merge local
+// callers before they contend for a durable node lease.
+const inFlightGraphStarts = new Map<string, Promise<unknown>>();
 
 export function agentOrchestrationMode(projectId?: string): "shadow" | "active" {
-  if (process.env.AGENT_ORCHESTRATION_MODE !== "active") return "shadow";
-  const allowlist = (process.env.AGENT_GRAPH_ACTIVE_PROJECTS ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (!allowlist.length) return "active";
-  return projectId && allowlist.includes(projectId) ? "active" : "shadow";
+  if (process.env.AGENT_ORCHESTRATION_MODE === "shadow") return "shadow";
+  // Active is the production/default path. Set AGENT_ORCHESTRATION_MODE=shadow
+  // only for explicit comparison runs or an emergency rollback.
+  // The former allowlist made a newly uploaded project silently fall back to
+  // the legacy executor. Keep the variable for observability/rollback notes,
+  // but do not let it downgrade normal projects; an explicit `shadow` mode is
+  // the only supported rollback switch.
+  void projectId;
+  return "active";
 }
 
 function requiresFullCoverage(run: RunProjection) {
@@ -133,6 +339,99 @@ export function requiresActiveBrowserDiscovery(
   return requiresFullCoverage(run)
     && requestedCapabilities.includes("browser")
     && manifestBrowserCapability;
+}
+
+const MAX_RECOVERY_ATTEMPTS = {
+  "retry-runtime": 2,
+  "retry-discovery": 2,
+  "retry-path": 2
+} as const;
+
+function recoveryEvidenceRefs(state: AgentGraphState): string[] {
+  const refs = new Set<string>();
+  const discovery = state.coverageMap?.discovery;
+  if (discovery && typeof discovery === "object" && Array.isArray((discovery as Record<string, unknown>).evidence)) {
+    for (const item of (discovery as { evidence: Array<{ id?: string }> }).evidence) {
+      if (item.id) refs.add(item.id);
+    }
+  }
+  const failureRefs = state.failure && Array.isArray(state.failure.evidenceRefs) ? state.failure.evidenceRefs : [];
+  for (const ref of failureRefs) if (typeof ref === "string") refs.add(ref);
+  return [...refs].slice(0, 20);
+}
+
+function deterministicRecoveryDecision(state: AgentGraphState): RecoveryDecision {
+  const now = new Date().toISOString();
+  const discovery = state.coverageMap?.discovery;
+  const discoveryReason = discovery && typeof discovery === "object"
+    ? String((discovery as Record<string, unknown>).reason ?? "")
+    : "";
+  const failureReason = Array.isArray(state.failure?.reasons)
+    ? state.failure.reasons.filter((item): item is string => typeof item === "string" && item.trim().length > 0).join("; ")
+    : "";
+  // A product assertion can fail without a machine-gate reason. Never emit an
+  // empty RecoveryDecision.reason: it violates the contract and used to strand
+  // the Graph in `judging` with no user-visible recovery action.
+  const reason = (discoveryReason.trim() || failureReason.trim() || "测试路径未完成，已保留失败证据并等待下一步处理");
+  const lower = reason.toLowerCase();
+  const evidenceRefs = recoveryEvidenceRefs(state);
+  let action: RecoveryDecision["action"] = "blocked";
+  let userQuestion: string | undefined;
+  // Fault-injection scenarios deliberately create a 5xx/failed network
+  // observation.  Treating that expected observation as a broken sandbox
+  // caused the Graph to restart the runtime, overwrite the attempt lifecycle,
+  // and loop instead of preserving the intended `needs_review` conclusion.
+  // The flag is derived from the public scenario contract, never evaluator
+  // labels, and only suppresses recovery after the expected action ran.
+  const expectedFixtureFault = state.failure?.expectedFixtureFault === true;
+  // Object-store failures happen after an executor has already produced local
+  // evidence. They are an infrastructure block, never a reason to repair the
+  // target project or loop through browser discovery. The persisted temporary
+  // evidence remains available for diagnosis, while formal publication stays
+  // fail-closed until MinIO/S3 is healthy again.
+  if (expectedFixtureFault) {
+    action = "blocked";
+    userQuestion = "已按测试场景触发接口故障并采集网络与页面证据；这不是沙盒启动故障，因此不会重启项目或覆盖该 Attempt。";
+  } else if (/artifact[_-]?object|object[ _-]?store|minio|\bs3\b|econnrefused|fetch failed/i.test(lower)) {
+    action = "blocked";
+    userQuestion = "测试步骤已执行，但证据对象存储当前不可用；系统已阻止正式提交，不会将此问题归为被测项目缺陷。请恢复对象存储后新建或重试该路径。";
+  } else if (/login|sign in|登录|credential|凭据|401|403|unauthorized|未登录/i.test(lower)) {
+    action = "request-credentials";
+    userQuestion = "页面要求登录，请配置测试账号后继续 Discovery。";
+  } else if (state.discoveryTerminal === true) {
+    action = /port|health|docker|sandbox|启动|连接|unreachable|timeout/i.test(lower)
+      ? "retry-runtime"
+      : "retry-discovery";
+  } else if (state.failure?.status && state.failure.status !== "pass") {
+    if (state.failure.failureClass === "evidence") {
+      action = "blocked";
+      userQuestion = "测试步骤已完成，但 AI 测试官自身的证据账本校验异常；系统不会把它当作外部项目缺陷，也不会修改你的项目。";
+    } else action = state.failure.failureClass === "environment" ? "retry-runtime"
+      : state.failure.failureClass === "test-script" ? "repair-harness"
+        : state.failure.failureClass === "product-bug" ? "repair-product"
+          : "retry-path";
+  }
+  const attempts = state.recoveryAttempts?.[action] ?? 0;
+  const max = action in MAX_RECOVERY_ATTEMPTS ? MAX_RECOVERY_ATTEMPTS[action as keyof typeof MAX_RECOVERY_ATTEMPTS] : 1;
+  if (attempts >= max && action !== "blocked") {
+    action = "blocked";
+    userQuestion = `恢复动作已达到上限（${max} 次），请查看运行详情后决定下一步。`;
+  }
+  return {
+    schemaVersion: "1.0",
+    id: `recovery_${randomUUID()}`,
+    runId: state.runId,
+    attemptId: state.currentAttemptId,
+    action,
+    reason,
+    confidence: evidenceRefs.length ? "high" : "low",
+    evidenceRefs,
+    preconditions: action === "retry-runtime" ? ["项目路径和启动配置存在"] : [],
+    expectedState: action === "request-credentials" ? "等待用户配置测试账号" : action === "blocked" ? "等待人工处理" : "重新进入可执行测试阶段",
+    ...(userQuestion ? { userQuestion } : {}),
+    createdAt: now,
+    policyVersion: "recovery-policy-v1"
+  };
 }
 
 function discoverySourceContexts(run: RunProjection): SourceReadEnvelope[] {
@@ -351,6 +650,208 @@ async function buildService() {
         const run = await runEventStore.get(state.runId);
         return { requirement: typeof run?.input.requirement === "string" ? run.input.requirement : state.requirement };
       }),
+      diagnoseRuntime: node("diagnose-runtime", async (state) => {
+        const run = await runEventStore.get(state.runId);
+        const projectId = state.projectId;
+        const runtime = projectId ? await getProjectRuntimeStatusWithRecovery(projectId) : undefined;
+        const discovery = state.coverageMap?.discovery;
+        const summary = discovery && typeof discovery === "object"
+          ? String((discovery as Record<string, unknown>).reason ?? "Discovery 未完成")
+          : runtime?.message ?? "缺少运行时观测。";
+        const observation = {
+          schemaVersion: "1.0" as const,
+          id: `observation_${randomUUID()}`,
+          runId: state.runId,
+          stage: "recovery" as const,
+          status: runtime?.status === "running" ? "degraded" as const : "failed" as const,
+          ...(typeof run?.input.appUrl === "string" ? { requestedUrl: run.input.appUrl } : {}),
+          summary,
+          evidenceRefs: recoveryEvidenceRefs(state),
+          retryable: true,
+          userActionRequired: /login|sign in|登录|credential|凭据|401|403/i.test(summary),
+          createdAt: new Date().toISOString()
+        };
+        await persistAgentObservation(observation);
+        return {
+          observation: { ...observation, runtime, discovery },
+          recoveryResult: undefined
+        };
+      }),
+      chooseRecovery: node("choose-recovery", async (state) => {
+        const baseline = deterministicRecoveryDecision(state);
+        const run = await runEventStore.get(state.runId);
+        const decision = await chooseLlmRecoveryDecision({
+          baseline,
+          credentialId: typeof run?.input.modelProfileId === "string" ? run.input.modelProfileId : undefined,
+          projectId: state.projectId,
+          failureClass: typeof state.failure?.failureClass === "string" ? state.failure.failureClass : undefined,
+          observation: state.observation
+        });
+        await persistRecoveryDecision(decision);
+        return {
+          recoveryDecision: decision,
+          recoveryAttempts: {
+            ...(state.recoveryAttempts ?? {})
+          }
+        };
+      }),
+      recover: async (state) => {
+        const decision = state.recoveryDecision ?? deterministicRecoveryDecision(state);
+        const answer = (state as AgentGraphState & { interruptAnswer?: Record<string, unknown> }).interruptAnswer;
+        if (decision.action === "request-credentials" && !answer) {
+          const pending: AgentInterrupt = {
+            id: `interrupt_${randomUUID()}`,
+            runId: state.runId,
+            kind: "credential",
+            status: "pending",
+            title: "需要测试账号",
+            detail: decision.userQuestion ?? "当前页面需要登录凭据后才能继续 Discovery。",
+            requestedCapabilities: ["credential"],
+            payload: { action: "provide-credentials" },
+            owner: "user",
+            context: { recoveryDecision: decision },
+            options: [{ value: "approved", label: "已配置测试账号" }, { value: "dismiss", label: "暂不配置" }],
+            evidenceRefs: decision.evidenceRefs,
+            createdAt: new Date().toISOString()
+          };
+          return { recoveryDecision: decision, recoveryInterrupt: pending };
+        }
+        if (decision.action === "request-credentials" && answer?.approved !== true) {
+          return {
+            recoveryDecision: decision,
+            recoveryResult: recoveryActionResultSchema.parse({
+              schemaVersion: "1.0", actionId: `action_${randomUUID()}`, runId: state.runId,
+              action: decision.action, status: "blocked", evidenceRefs: decision.evidenceRefs,
+              nextState: "blocked", userMessage: "用户未确认测试账号配置。", startedAt: new Date().toISOString(), completedAt: new Date().toISOString()
+            })
+          };
+        }
+        // Once credentials are confirmed, the next concrete action is a fresh
+        // Discovery probe. Keeping `request-credentials` as the action would
+        // otherwise make verifyRecovery finalize immediately after the user
+        // did exactly what we asked.
+        const decisionForExecution: RecoveryDecision = decision.action === "request-credentials"
+          ? { ...decision, id: `recovery_${randomUUID()}`, action: "retry-discovery", reason: "测试账号已确认，重新执行页面 Discovery。", expectedState: "重新进入可执行测试阶段", userQuestion: undefined }
+          : decision;
+        if (decisionForExecution.id !== decision.id) await persistRecoveryDecision(decisionForExecution);
+        const attempts = { ...(state.recoveryAttempts ?? {}), [decisionForExecution.action]: (state.recoveryAttempts?.[decisionForExecution.action] ?? 0) + 1 };
+        const startedAt = new Date().toISOString();
+        let status: "completed" | "failed" | "blocked" = "completed";
+        let message = "恢复动作已完成。";
+        let discoveryUpdate: Record<string, unknown> | undefined;
+        if (decisionForExecution.action === "retry-runtime" && state.projectId) {
+          const runtime = await startProject(state.projectId);
+          status = runtime.status === "running" ? "completed" : "failed";
+          message = runtime.message;
+        } else if (decisionForExecution.action === "retry-discovery" && state.projectId) {
+          const scan = await runSmokeFirstDiscovery({ projectId: state.projectId, goal: state.requirement ?? "重新扫描页面", smokeAttempts: 2, discoveryAttempts: 2 });
+          const discovered = discoveryState(scan);
+          discoveryUpdate = { ...discovered, evidence: buildDiscoveryEvidence(scan, state.runId) };
+          status = discovered.status === "ready" ? "completed" : "failed";
+          message = scan.message;
+        } else if (decisionForExecution.action === "retry-path") {
+          status = "completed";
+          message = "已创建新的路径 Attempt，准备重新执行。";
+        } else if (decisionForExecution.action === "repair-harness" || decisionForExecution.action === "repair-product") {
+          status = "blocked";
+          message = "该恢复动作需要进入修复工作区并由用户确认。";
+        } else if (decisionForExecution.action === "blocked") {
+          status = "blocked";
+          message = decision.userQuestion ?? "没有可执行的恢复动作。";
+        }
+        const result = recoveryActionResultSchema.parse({
+          schemaVersion: "1.0", actionId: `action_${randomUUID()}`, runId: state.runId,
+          action: decisionForExecution.action, status, evidenceRefs: decisionForExecution.evidenceRefs,
+          nextState: status === "completed" ? "verify-recovery" : "blocked",
+          ...(status !== "completed" ? { errorCode: "recovery_failed", userMessage: message } : {}),
+          startedAt, completedAt: new Date().toISOString()
+        });
+        await persistRecoveryAction(result, decision.id);
+        return {
+          recoveryDecision: decisionForExecution,
+          recoveryAttempts: attempts,
+          recoveryResult: result,
+          ...(discoveryUpdate ? { coverageMap: { ...(state.coverageMap ?? {}), discovery: discoveryUpdate }, discoveryTerminal: false } : {})
+        };
+      },
+      verifyRecovery: node("verify-recovery", async (state) => {
+        const result = state.recoveryResult;
+        if (!result) return { recoveryResult: undefined };
+        return {
+          observation: {
+            ...(state.observation ?? {}),
+            stage: "recovery",
+            status: result.status === "completed" ? "ready" : "failed",
+            summary: result.userMessage ?? result.nextState,
+            evidenceRefs: result.evidenceRefs
+          }
+        };
+      }),
+      retryPath: node("retry-path", async (state) => {
+        const run = await runEventStore.get(state.runId);
+        // A retry is valid only before Graph finalization.  Requeueing a
+        // terminal Run would overwrite its provenance, so callers must create
+        // a linked validation run instead.
+        if (!run || run.state !== "judging") {
+          return {
+            recoveryResult: recoveryActionResultSchema.parse({
+              schemaVersion: "1.0",
+              actionId: `action_${randomUUID()}`,
+              runId: state.runId,
+              action: "retry-path",
+              status: "blocked",
+              evidenceRefs: state.recoveryDecision?.evidenceRefs ?? [],
+              nextState: "blocked",
+              errorCode: "retry_path_not_available",
+              userMessage: "当前运行没有处于可重试的判定阶段；原始证据保持不变。",
+              startedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString()
+            })
+          };
+        }
+        const retried = await appendSystemRunEvent(state.runId, "run_retrying", {
+          recoveryActionId: state.recoveryResult?.actionId,
+          previousAttemptId: state.currentAttemptId,
+          reason: state.recoveryDecision?.reason ?? "retry_failed_path"
+        });
+        // `runOrchestrator` imports this service, so use a lazy import to keep
+        // the Graph module acyclic during initialisation. This creates a real
+        // BullMQ/in-process delivery; it is never merely a UI status change.
+        const { enqueueRun } = await import("./runOrchestrator.js");
+        // Let LangGraph commit the following execution-result interrupt before
+        // the new Worker delivery starts. With an in-process worker an eager
+        // enqueue can otherwise complete between `run_retrying` and the graph
+        // checkpoint, recreating the old-result race this node exists to fix.
+        const schedule = setTimeout(() => void enqueueRun(retried.id, retried.version).catch(() => undefined), 0);
+        schedule.unref?.();
+        return {
+          currentAttemptId: `attempt_${randomUUID()}`,
+          recoveryResult: state.recoveryResult,
+          observation: {
+            ...(state.observation ?? {}),
+            stage: "recovery",
+            status: "ready",
+            summary: "已创建新的执行 Attempt 并重新投递 Worker；原失败 Attempt 保持可追溯。"
+          }
+        };
+      }),
+      continuePaths: node("continue-paths", async (state) => {
+        const coverage = await readCoverageItems(state.runId).catch(() => []);
+        const pending = coverage.filter((item) => item.disposition === "pending").length;
+        const continuationPasses = state.continuationPasses ?? 0;
+        return {
+          remainingPathCount: pending,
+          continuationPasses: pending > 0 ? continuationPasses + 1 : continuationPasses,
+          observation: {
+            ...(state.observation ?? {}),
+            stage: "recovery",
+            status: "ready",
+            summary: pending
+              ? `父 Run 将继续投递 ${pending} 条独立待执行路径（第 ${continuationPasses + 1} 次恢复继续）。`
+              : "没有独立待执行路径；已保留失败路径与其证据。"
+          }
+        };
+      }),
       // Discovery is intentionally not wrapped in the durable node-result
       // cache. A waiting runtime resumes the same LangGraph node and must make
       // a fresh bounded probe instead of replaying the cached waiting result.
@@ -377,9 +878,54 @@ async function buildService() {
           discoveryAttempts: 2
         });
         const discovery = discoveryState(result);
+        // Build the immutable run evidence before publishing the graph-level
+        // observation so its references point to real Evidence IDs rather than
+        // the page observation record itself.
+        const discoveryEvidence = buildDiscoveryEvidence(result, state.runId);
+        // Promote the complete browser observation into the graph-level
+        // observation ledger. The assistant must receive facts (URL, DOM,
+        // console and network) rather than a generic "control not found"
+        // string, while the original observation remains immutable in its own
+        // store and is referenced by evidence IDs.
+        if (result.observation) {
+          const page = result.observation;
+          await persistAgentObservation({
+            schemaVersion: "1.0",
+            id: `agent_observation_${page.id}`,
+            runId: state.runId,
+            stage: page.stage === "launch" ? "runtime" : page.stage === "completed" ? "dom" : "navigation",
+            status: page.status === "ready" ? "ready" : page.status === "degraded" ? "degraded" : "failed",
+            requestedUrl: page.requestedUrl,
+            finalUrl: page.finalUrl,
+            httpStatus: page.navigation.httpStatus,
+            title: result.page.title,
+            readyState: ["loading", "interactive", "complete", "unknown"].includes(page.document.readyState ?? "unknown")
+              ? page.document.readyState as "loading" | "interactive" | "complete" | "unknown"
+              : "unknown",
+            accessibilityTree: page.document.accessibilityTree,
+            controls: page.document.controls.map((control) => ({
+              role: control.role,
+              name: control.accessibleName,
+              visible: control.visible,
+              disabled: control.disabled,
+              selector: control.testId ? `[data-testid=\"${control.testId}\"]` : undefined
+            })),
+            consoleErrors: page.console.filter((item) => item.type === "error").map((item) => item.text),
+            pageErrors: page.pageErrors,
+            failedRequests: page.failedRequests.map((item) => ({ method: item.method, url: item.url, status: item.status, failure: item.failure })),
+            // The immutable discovery record is the screenshot/evidence
+            // anchor; Artifact v2 IDs are attached later by the bundle writer.
+            screenshotArtifactId: undefined,
+            lifecycle: (page.browserLifecycle ?? []).map((item) => ({ event: item.type, at: item.at, detail: item.status })),
+            summary: page.diagnosis.summary,
+            evidenceRefs: discoveryEvidence.map((item) => item.id),
+            retryable: page.diagnosis.retryable,
+            userActionRequired: page.diagnosis.userActionRequired,
+            createdAt: page.capturedAt
+          }).catch(() => undefined);
+        }
         // Promote the scan's real observations into evidence so the blocked gate
         // below is grounded rather than an evidence-free assertion.
-        const discoveryEvidence = buildDiscoveryEvidence(result, state.runId);
         if (discovery.status === "ready") {
           return {
             coverageMap: { ...baseCoverageMap, discovery: { ...discovery, evidence: discoveryEvidence } },
@@ -408,7 +954,10 @@ async function buildService() {
           }).catch(() => undefined);
           return {
             coverageMap: { ...baseCoverageMap, discovery: { ...discovery, evidence: discoveryEvidence } },
-            discoveryTerminal: false
+            // Preserve and show the static plan, but do not prepare the
+            // sandbox or execute browser actions until the credential/runtime
+            // recovery loop has produced a fresh ready observation.
+            discoveryTerminal: true
           };
         }
         const machineGate = discoveryBlockedGate(discovery, state.runId, discoveryEvidence);
@@ -501,14 +1050,50 @@ async function buildService() {
         const planningTerminal = Boolean(run && ["awaiting-human-review", "blocked", "failed", "cancelled"].includes(run.state));
         if (state.mode === "active" && run && !planningTerminal) {
           const existing = await readCoverageItems(run.id);
-          if (!existing.length) {
+          if (run.plan && run.planProvenance?.source === "dynamic-browser-agent") {
+            const inventory = interactiveCoverageInventory(run.input.coverageInventory);
+            const dynamicItems = createDynamicBrowserCoverageItems({
+              runId: run.id,
+              paths: run.plan.levels.flatMap((level) => level.paths).map((path) => ({
+                id: path.id,
+                title: path.title,
+                riskReason: `由动态浏览器 Agent 执行：${path.riskReason || path.steps.join(" → ")}`,
+                surface: inventory.find((item) => item.id === path.id)?.surfaces?.includes("page")
+                  ? "page"
+                  : inventory.find((item) => item.id === path.id)?.surfaces?.includes("api")
+                    ? "api"
+                    : inventory.find((item) => item.id === path.id)?.surfaces?.includes("data")
+                      ? "data"
+                      : inventory.find((item) => item.id === path.id)?.surfaces?.includes("background-task")
+                        ? "background-task"
+                        : "page",
+                preconditions: inventory.find((item) => item.id === path.id)?.preconditions,
+                requiredEvidenceKinds: inventory.find((item) => item.id === path.id)?.requiredEvidenceKinds
+              }))
+            });
+            // Dynamic browser plans are the execution contract for uploaded
+            // projects.  Do not retain a page Scenario Registry candidate
+            // merely because impact analysis mentioned it: that stale item
+            // can otherwise become the first executable coverage path and
+            // silently replace the user's grouped inventory.  Non-page
+            // manifest work remains eligible for its dedicated executor.
+            const nonPageItems = existing.filter((item) => item.surface !== "page");
+            const merged = new Map([...nonPageItems, ...dynamicItems].map((item) => [item.flowId, item]));
+            await saveCoverageItems(run.id, [...merged.values()]);
+          } else if (!existing.length) {
             const requested = Array.isArray(run.input.coverageScenarioIds)
               ? run.input.coverageScenarioIds.filter((item): item is string => typeof item === "string")
               : [];
             const recommended = run.impactAnalysis?.recommendedScenarios
               .filter((item) => item.confidence !== "low")
               .map((item) => item.scenarioId) ?? [];
-            const scenarioIds = [...requested, ...recommended, ...(run.selectedScenarioId ? [run.selectedScenarioId] : [])];
+            // A benchmark lane measures one planned path. The selected scenario
+            // still comes from the rule or LLM planner, but impact-analysis
+            // candidates must remain candidates rather than silently becoming
+            // additional child runs with unrelated outcomes.
+            const scenarioIds = run.input.executionProfile === "benchmark"
+              ? (run.selectedScenarioId ? [run.selectedScenarioId] : [])
+              : [...requested, ...recommended, ...(run.selectedScenarioId ? [run.selectedScenarioId] : [])];
             if (scenarioIds.length) {
               await saveCoverageItems(run.id, createCoverageItems({ runId: run.id, scenarioIds }));
             }
@@ -516,17 +1101,35 @@ async function buildService() {
         }
         return {
           planData: run?.plan ? { plan: run.plan, provenance: run.planProvenance } : {},
-          planningTerminal
+          tokenUsage: run?.plannerCalls?.reduce((total, call) => total + (call.usage.totalTokens ?? 0), 0)
+            ?? (run?.plannerCall?.usage.totalTokens ?? 0),
+          planningTerminal,
+          browserAgentRequired: run?.planProvenance?.source === "dynamic-browser-agent"
         };
       }),
       compile: node("compile", async (state) => {
         const run = await runEventStore.get(state.runId);
-        if (!run?.compiledPlan && state.mode === "active") throw new Error("compiled_plan_missing");
+        if (!run?.compiledPlan && state.mode === "active" && run?.planProvenance?.source !== "dynamic-browser-agent") {
+          throw new Error("compiled_plan_missing");
+        }
+        if (run?.planProvenance?.source === "dynamic-browser-agent") {
+          return { compiledPlan: {}, browserAgentRequired: true };
+        }
         return { compiledPlan: run?.compiledPlan ? { compiledPlan: run.compiledPlan } : {} };
       }),
       prepareSandbox: node("prepare-sandbox", async (state) => {
         if (!state.projectId) return { execution: { ...(state.execution ?? {}), sandbox: "blocked", reason: "project_missing" } };
-        const runtime = await getProjectRuntimeStatusWithRecovery(state.projectId);
+        let runtime = await getProjectRuntimeStatusWithRecovery(state.projectId);
+        // The Graph owns the runnable state of an uploaded project.  An Agent
+        // restart clears the in-memory runtime cache, so treating `idle` as a
+        // passive "preparing" state made the following browser node fail with
+        // browser_agent_runtime_idle and forced users to manually start the
+        // project first.  Starting an OCI sandbox is a safe, bounded action;
+        // credentials, network installation and source changes still go
+        // through their own interrupts inside startProject.
+        if (runtime.status !== "running") {
+          runtime = await startProject(state.projectId);
+        }
         return {
           execution: {
             ...(state.execution ?? {}),
@@ -535,10 +1138,423 @@ async function buildService() {
           }
         };
       }),
+      observeBrowser: node("observe-browser", async (state) => {
+        const run = await runEventStore.get(state.runId);
+        if (!run) throw new Error("browser_agent_run_missing");
+        const project = state.projectId ? await getProject(state.projectId) : undefined;
+        const runtime = state.projectId ? await getProjectRuntimeStatusWithRecovery(state.projectId) : undefined;
+        const url = runtime?.frontendUrl
+          ?? project?.frontendUrl
+          ?? (typeof run.input.appUrl === "string" ? run.input.appUrl : undefined);
+        if (!url) throw new Error("browser_agent_target_url_missing");
+        if (runtime && runtime.status !== "running") throw new Error(`browser_agent_runtime_${runtime.status}`);
+        const coverage = await readCoverageItems(state.runId);
+        const current = coverage.find((item) => item.id === state.currentCoverageItemId && item.surface === "page")
+          ?? coverage.find((item) => item.disposition === "pending" && item.surface === "page")
+          ?? coverage.find((item) => item.surface === "page");
+        if (!current) throw new Error("browser_agent_coverage_missing");
+        const attemptId = state.currentAttemptId ?? `attempt_${randomUUID()}`;
+        const routes = [
+          { id: "project-root", path: url }
+        ];
+        const session = await ensureBrowserAgentSession({
+          runId: state.runId,
+          attemptId,
+          projectId: state.projectId,
+          url,
+          allowedOrigins: project?.allowedOrigins,
+          routes,
+          headless: true
+        });
+        const observation = await observeManagedBrowserSession({
+          runId: state.runId,
+          coverageItemId: current.id
+        });
+        return {
+          currentCoverageItemId: current.id,
+          currentAttemptId: attemptId,
+          browserSession: session,
+          browserObservation: observation,
+          browserActionAuthorized: false,
+          browserLoopComplete: false
+        };
+      }),
+      decideBrowserAction: node("decide-browser-action", async (state) => {
+        const observation = state.browserObservation;
+        const session = state.browserSession;
+        if (!observation || !session || !state.currentCoverageItemId) throw new Error("browser_agent_observation_missing");
+        if (session.actionCount >= 20 || session.decisionCount >= 6 || session.rebindCount > 2) {
+          const decision = browserActionDecisionSchema.parse({
+            schemaVersion: "1.0", decisionId: `browser_decision_${randomUUID()}`,
+            runId: state.runId, attemptId: observation.attemptId, observationId: observation.observationId,
+            status: "blocked", summary: "动态浏览器 Agent 已达到动作或重新绑定预算，停止循环以避免误操作。",
+            actions: [], oracles: [], evidenceRefs: observation.evidenceRefs,
+            userQuestion: "请查看当前页面和失败证据后决定是否继续。", createdAt: new Date().toISOString()
+          });
+          await appendBrowserDecision(decision);
+          return { browserDecision: decision, browserLoopComplete: true };
+        }
+        const run = await runEventStore.get(state.runId);
+        if (!run) throw new Error("browser_agent_run_missing");
+        const project = state.projectId ? await getProject(state.projectId) : undefined;
+        const detectedLoginDecision = credentialInterruptDecision({
+          runId: state.runId,
+          coverageItemId: state.currentCoverageItemId,
+          observation,
+          configured: Boolean(project?.login?.credentialId)
+        });
+        const loginDecision = detectedLoginDecision
+          && state.browserCredentialAuthorized === true
+          && detectedLoginDecision.actions[0]?.action === "fill-control"
+          && detectedLoginDecision.actions[0].valueRef.startsWith("credential.")
+          ? { ...detectedLoginDecision, status: "act" as const, userQuestion: undefined }
+          : detectedLoginDecision;
+        if (loginDecision) {
+          await appendBrowserDecision(loginDecision);
+          // No LLM call is necessary: password + account field + a visible
+          // submit control is direct runtime evidence of an authentication
+          // boundary.  Preserve the model budget for the page after login.
+          return { browserDecision: loginDecision, browserSession: session, browserActionAuthorized: false };
+        }
+        const credentials = await listCredentials();
+        const modelProfileId = typeof run.input.modelProfileId === "string"
+          ? run.input.modelProfileId
+          : credentials.find((item) => item.isDefault)?.id;
+        const coverage = await readCoverageItems(state.runId);
+        const item = coverage.find((entry) => entry.id === state.currentCoverageItemId);
+        const prior = await readBrowserActionResults(state.runId);
+        let decision: BrowserActionDecision;
+        try {
+          decision = await decideNextBrowserActions({
+            observation,
+            coverageItemId: state.currentCoverageItemId,
+            goal: [run.input.requirement, item?.module, item?.dispositionReason].filter(Boolean).join("\n"),
+            credentialId: modelProfileId,
+            allowedRouteIds: ["project-root"],
+            previousResults: prior.map((result) => ({ action: result.actionId, status: result.status, summary: result.summary }))
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : "browser_llm_decision_failed";
+          decision = browserActionDecisionSchema.parse({
+            schemaVersion: "1.0",
+            decisionId: `browser_decision_${randomUUID()}`,
+            runId: state.runId,
+            attemptId: observation.attemptId,
+            observationId: observation.observationId,
+            status: "blocked",
+            summary: code.startsWith("llm_budget_exceeded")
+              ? `浏览器 AI 已达到本次运行预算（${code}），剩余路径将明确标记为阻塞，不会伪装成已测试。`
+              : `浏览器 AI 决策失败：${code}`,
+            actions: [],
+            oracles: [],
+            evidenceRefs: observation.evidenceRefs,
+            userQuestion: code.startsWith("llm_budget_exceeded")
+              ? "如需继续，可新建一次定向测试运行，缩小测试范围。"
+              : "系统已保留页面观测，请查看模型调用错误后重试。",
+            createdAt: new Date().toISOString()
+          });
+        }
+        await appendBrowserDecision(decision);
+        const updated = await updateManagedBrowserSession(state.runId, { decisionCount: session.decisionCount + 1 });
+        return { browserDecision: decision, browserSession: updated, browserActionAuthorized: false };
+      }),
+      authorizeBrowserAction: async (state: AgentGraphState, answer?: Record<string, unknown>) => {
+        const decision = state.browserDecision;
+        const observation = state.browserObservation;
+        const action = decision?.actions[0];
+        if (!decision || !observation || !action) return { browserActionAuthorized: false };
+        const controlId = "controlId" in action ? action.controlId : undefined;
+        const control = controlId ? observation.controls.find((item) => item.controlId === controlId) : undefined;
+        const policy = browserActionPolicy(action, control);
+        const credentialAction = action.action === "fill-control" && "valueRef" in action && action.valueRef.startsWith("credential.");
+        if (answer) {
+          const approved = answer.approved === true || answer.decision === "approved";
+          return {
+            browserActionAuthorized: approved,
+            ...(credentialAction ? { browserCredentialAuthorized: approved } : {}),
+            browserDecision: approved ? { ...decision, status: "act" } : { ...decision, status: "blocked", actions: [], userQuestion: "用户未批准该浏览器动作。" }
+          };
+        }
+        if (credentialAction && state.browserCredentialAuthorized === true) {
+          return { browserActionAuthorized: true, browserDecision: { ...decision, status: "act" } };
+        }
+        if (policy.allowed && decision.status !== "needs-confirmation") return { browserActionAuthorized: false };
+        if (!policy.confirmation && decision.status !== "needs-confirmation") {
+          return { browserActionAuthorized: false, browserDecision: { ...decision, status: "blocked", actions: [], summary: "浏览器动作被安全策略拒绝。" } };
+        }
+        const interrupt: AgentInterrupt = {
+          id: `interrupt_${randomUUID()}`,
+          runId: state.runId,
+          kind: credentialAction ? "credential" : "dangerous-operation",
+          status: "pending",
+          title: credentialAction ? "需要测试账号" : "需要确认浏览器操作",
+          detail: credentialAction
+            ? "已识别登录页面。请先保存此项目的测试账号，然后授权系统仅在当前沙盒会话中使用它；账号和密码不会显示或写入报告。"
+            : `${action.purpose}。预期变化：${action.expectedChange}`,
+          requestedCapabilities: [credentialAction ? "credential" : "browserControl"],
+          payload: { actionId: action.actionId, action: action.action, policyCode: policy.code },
+          owner: "user",
+          context: { browserDecisionId: decision.decisionId, actionId: action.actionId },
+          options: credentialAction
+            ? [{ value: "approved", label: "已配置并允许使用" }, { value: "dismiss", label: "暂不配置" }]
+            : [{ value: "approved", label: "允许本次操作" }, { value: "dismiss", label: "拒绝" }],
+          evidenceRefs: decision.evidenceRefs,
+          createdAt: new Date().toISOString()
+        };
+        return { browserActionAuthorized: false, browserInterrupt: interrupt };
+      },
+      executeBrowserAction: node("execute-browser-action", async (state) => {
+        const decision = state.browserDecision;
+        const action = decision?.actions[0];
+        if (!decision || !action) throw new Error("browser_agent_action_missing");
+        const project = state.projectId ? await getProject(state.projectId) : undefined;
+        const result = await executeBrowserAgentAction({
+          action,
+          oracles: decision.oracles,
+          userAuthorized: state.browserActionAuthorized === true || state.browserCredentialAuthorized === true,
+          resolveValue: async (valueRef) => {
+            if (valueRef.startsWith("testData.")) return `ato-${valueRef.slice("testData.".length).replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+            if (valueRef.startsWith("credential.")) {
+              const secretId = project?.login?.credentialId;
+              if (!secretId) throw new Error("browser_credential_missing");
+              const secret = await getProjectLoginSecret(secretId);
+              if (!secret) throw new Error("browser_credential_missing");
+              const field = valueRef.slice("credential.".length).toLowerCase();
+              if (/user|email|account/.test(field)) return secret.username;
+              if (/pass/.test(field)) return secret.password;
+              throw new Error("browser_credential_field_not_allowed");
+            }
+            throw new Error("browser_value_ref_not_supported");
+          }
+        });
+        return { browserActionResult: result, browserActionAuthorized: false };
+      }),
+      verifyBrowserAction: node("verify-browser-action", async (state) => {
+        const result = state.browserActionResult;
+        if (!result) throw new Error("browser_agent_action_result_missing");
+        const hasFailedOracle = result.oracleResults.some((oracle) => !oracle.passed);
+        return {
+          browserLoopComplete: result.status !== "completed" || hasFailedOracle,
+          failure: result.status === "completed" && !hasFailedOracle ? undefined : {
+            status: result.status === "failed" ? "fail" : "blocked",
+            reasons: [result.errorCode ?? result.summary],
+            evidenceRefs: result.evidenceRefs,
+            repairable: result.errorCode === "browser_control_binding_stale"
+          }
+        };
+      }),
+      decideNextStep: node("decide-next-step", async (state) => {
+        const result = state.browserActionResult;
+        const decision = state.browserDecision;
+        const coverage = await readCoverageItems(state.runId);
+        const currentIndex = coverage.findIndex((item) => item.id === state.currentCoverageItemId);
+        if (currentIndex < 0) return { browserLoopComplete: true };
+        const priorResults = (await readBrowserActionResults(state.runId))
+          .filter((item) => item.coverageItemId === state.currentCoverageItemId && (decision ? item.attemptId === decision.attemptId : true));
+        const pathResults = priorResults;
+        let terminalDisposition: "executed" | "blocked" | undefined;
+        let dispositionReason: string | undefined;
+        if (decision?.status === "complete") {
+          const grounded = pathResults.length > 0
+            && pathResults.some((item) => item.oracleResults.length > 0)
+            && pathResults.every((item) => item.status === "completed" && item.oracleResults.every((oracle) => oracle.passed));
+          terminalDisposition = grounded ? "executed" : "blocked";
+          dispositionReason = grounded ? "动态浏览器动作和确定性 Oracle 已完成" : "浏览器 Agent 宣布完成，但缺少通过的确定性 Oracle";
+        } else if (result?.status === "completed" && result.oracleResults.some((oracle) => !oracle.passed)) {
+          // Coverage means the path and oracle were actually executed. A
+          // business assertion failure is an executed path with a fail gate,
+          // not an infrastructure coverage gap.
+          terminalDisposition = "executed";
+          dispositionReason = result.summary;
+        } else if (decision?.status === "blocked") {
+          terminalDisposition = "blocked";
+          dispositionReason = decision.summary;
+        } else if (result && result.status !== "completed") {
+          terminalDisposition = "blocked";
+          dispositionReason = result.summary;
+        }
+        if (!terminalDisposition) return { browserLoopComplete: false };
+        coverage[currentIndex] = {
+          ...coverage[currentIndex],
+          disposition: terminalDisposition,
+          dispositionReason,
+          scenarioId: dynamicBrowserScenarioId(state.runId),
+          attemptId: state.currentAttemptId,
+          updatedAt: new Date().toISOString()
+        };
+        if (decision?.status === "blocked" && /llm_budget_exceeded|达到本次运行预算/.test(decision.summary)) {
+          for (let index = 0; index < coverage.length; index += 1) {
+            if (coverage[index]?.disposition !== "pending" || coverage[index]?.surface !== "page") continue;
+            coverage[index] = {
+              ...coverage[index]!,
+              disposition: "blocked",
+              dispositionReason: "browser_agent_budget_exhausted",
+              scenarioId: dynamicBrowserScenarioId(state.runId),
+              attemptId: state.currentAttemptId,
+              updatedAt: new Date().toISOString()
+            };
+          }
+        }
+        await saveCoverageItems(state.runId, coverage);
+        // API/data/background items belong to their deterministic executors;
+        // never ask the browser model to fake those checks through UI clicks.
+        const next = coverage.find((item) => item.disposition === "pending" && item.surface === "page");
+        if (next) {
+          const session = await updateManagedBrowserSession(state.runId, { actionCount: 0, decisionCount: 0, rebindCount: 0 });
+          return {
+            currentCoverageItemId: next.id,
+            browserSession: session,
+            browserDecision: undefined,
+            browserActionResult: undefined,
+            browserLoopComplete: false
+          };
+        }
+        const remainingStructuredPaths = coverage.filter((item) =>
+          item.disposition === "pending"
+          && item.surface !== "page"
+          && Boolean(item.structuredPlan)
+        ).length;
+        return {
+          browserLoopComplete: true,
+          remainingPathCount: remainingStructuredPaths
+        };
+      }),
       collectAndGate: node("collect-and-gate", async (state) => {
         if (state.mode === "shadow") {
           const run = await runEventStore.get(state.runId);
           return { gate: run?.machineGate ? { machineGate: run.machineGate, outcomeSummary: run.outcomeSummary } : {} };
+        }
+        if (state.browserAgentRequired && state.execution?.aggregate !== true) {
+          const traceArtifact = await finalizeBrowserAgentTrace(state.runId).catch(() => undefined);
+          if (traceArtifact) {
+            await appendEvidence(state.runId, {
+              type: "trace",
+              title: "Dynamic browser attempt trace",
+              scenarioId: dynamicBrowserScenarioId(state.runId),
+              attemptId: state.currentAttemptId,
+              attempt: 1,
+              artifactIds: [traceArtifact.id],
+              file: traceArtifact.storageUri,
+              payload: { browserAgent: true }
+            });
+          }
+          const [coverage, decisions, results, evidence, artifacts] = await Promise.all([
+            readCoverageItems(state.runId),
+            readBrowserDecisions(state.runId),
+            readBrowserActionResults(state.runId),
+            readEvidence(state.runId),
+            readBrowserArtifacts(state.runId)
+          ]);
+          const coverageComplete = coverage.length > 0 && coverage.every((item) => item.disposition !== "pending");
+          const blockedCoverage = coverage.filter((item) => item.disposition === "blocked");
+          const executedResults = results.filter((item) => item.status === "completed");
+          const failedOracles = executedResults.flatMap((item) => item.oracleResults.filter((oracle) => !oracle.passed));
+          const executionSucceeded = results.length > 0 && results.every((item) => item.status === "completed");
+          const requirementCovered = coverageComplete && blockedCoverage.length === 0
+            && coverage.every((item) => item.disposition === "executed");
+          const artifactKinds = new Set(artifacts.map((artifact) => artifact.kind));
+          const requiredKinds = ["screenshot", "dom", "trace", "operation-log"] as const;
+          const missingKinds = requiredKinds.filter((kind) => !artifactKinds.has(kind));
+          const evidenceByArtifact = new Map<string, string>();
+          for (const item of evidence) for (const artifactId of item.artifactIds ?? []) evidenceByArtifact.set(artifactId, item.id);
+          const artifactIntegrity = {
+            id: `${state.runId}_dynamic_artifact_integrity`,
+            runId: state.runId,
+            generatedAt: new Date().toISOString(),
+            artifactRoot: "/artifacts" as const,
+            summary: { total: artifacts.length, present: artifacts.length, missing: 0, unreadable: 0, pathEscapes: 0, selfReferences: 0, hashMismatches: 0, hashed: artifacts.length },
+            items: artifacts.map((artifact) => ({
+              id: artifact.id,
+              artifactUri: artifact.storageUri,
+              kind: artifactKindToIntegrityKind(artifact.kind),
+              evidenceId: evidenceByArtifact.get(artifact.id),
+              status: "present" as const,
+              origin: artifact.origin,
+              sizeBytes: artifact.integrity.sizeBytes,
+              sha256: artifact.integrity.sha256
+            }))
+          };
+          const status: MachineGate["status"] = !coverageComplete || blockedCoverage.length > 0 || !executionSucceeded || missingKinds.length > 0
+            ? "blocked"
+            : failedOracles.length > 0 ? "fail" : "pass";
+          const failedEvidenceRefs = results
+            .filter((item) => item.status !== "completed" || item.oracleResults.some((oracle) => !oracle.passed))
+            .flatMap((item) => item.evidenceRefs);
+          const fallbackEvidence = evidence.slice(-4).map((item) => item.id);
+          const reasonEvidence = [...new Set([...failedEvidenceRefs, ...fallbackEvidence])].slice(0, 8);
+          const reasons = [
+            ...(!coverageComplete ? ["coverage_disposition_incomplete"] : []),
+            ...blockedCoverage.map((item) => `coverage_blocked:${item.flowId}`),
+            ...(!executionSucceeded ? ["browser_action_execution_incomplete"] : []),
+            ...missingKinds.map((kind) => `required_artifact_missing:${kind}`),
+            ...failedOracles.map((oracle) => `oracle_failed:${oracle.oracleId}`)
+          ];
+          const draft: MachineGateDraft = {
+            status,
+            reasons,
+            reasonDetails: reasons.map((reason) => ({
+              code: reason.split(":")[0],
+              summary: reason,
+              evidenceRefs: reasonEvidence.length ? reasonEvidence : evidence.map((item) => item.id).slice(-1)
+            })).filter((item) => item.evidenceRefs.length > 0),
+            assertionFailures: failedOracles.map((oracle) => oracle.oracleId)
+          };
+          const finalized = finalizeProofBundle({
+            draft,
+            runId: state.runId,
+            scenarioId: artifacts[0]?.scenarioId,
+            attemptId: state.currentAttemptId,
+            evidence,
+            artifactsV2: artifacts,
+            artifactIntegrity,
+            requiredArtifactKinds: [...requiredKinds],
+            machineGate: draft,
+            gateEligibleFacts: { executionSucceeded, requirementCovered }
+          });
+          const finalStatus = finalized.machineGate.status;
+          const outcomeSummary = runOutcomeSummaryV2Schema.parse({
+            schemaVersion: "2.0",
+            schedulingCompleted: true,
+            executionStarted: results.length > 0,
+            executionSucceeded,
+            requirementCovered,
+            requirementPassed: requirementCovered && failedOracles.length === 0,
+            ...proofCredibility(finalized.verdict, finalized.machineGate, finalized.gateEligible),
+            finalStatus
+          });
+          const currentRun = await runEventStore.get(state.runId);
+          const currentProject = state.projectId ? await getProject(state.projectId) : undefined;
+          const attemptId = state.currentAttemptId ?? artifacts[0]?.attemptId;
+          if (!attemptId) throw new Error("browser_agent_attempt_missing");
+          await persistDynamicBrowserResult({
+            runId: state.runId,
+            projectId: state.projectId,
+            requirement: state.requirement,
+            appUrl: currentProject?.frontendUrl ?? (typeof currentRun?.input.appUrl === "string" ? currentRun.input.appUrl : undefined),
+            rawRunInput: currentRun?.input ?? {},
+            startedAt: state.browserSession?.startedAt ?? currentRun?.createdAt ?? new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            scenarioId: dynamicBrowserScenarioId(state.runId),
+            attemptId,
+            coverage,
+            decisions,
+            actionResults: results,
+            evidence,
+            artifacts,
+            artifactIntegrity,
+            machineGate: finalized.machineGate,
+            outcomeSummary,
+            proof: finalized
+          });
+          let run = await runEventStore.get(state.runId);
+          if (run?.state === "queued") run = await appendSystemRunEvent(state.runId, "run_preparing", { browserAgent: true });
+          if (run?.state === "preparing") run = await appendSystemRunEvent(state.runId, "run_started", { attemptId: state.currentAttemptId, browserAgent: true });
+          if (run?.state === "running") run = await appendSystemRunEvent(state.runId, "evidence_collecting", { artifactIds: artifacts.map((item) => item.id) });
+          if (run?.state === "collecting") await appendSystemRunEvent(state.runId, "run_judging", { machineGate: finalized.machineGate, outcomeSummary });
+          return {
+            gate: { machineGate: finalized.machineGate, finalStatus, outcomeSummary },
+            execution: { ...(state.execution ?? {}), dynamicBrowserAgent: true, resultRunId: state.runId, artifactIds: artifacts.map((item) => item.id) }
+          };
         }
         const resultRunId = typeof state.execution?.resultRunId === "string" ? state.execution.resultRunId : state.runId;
         if (state.execution?.error && !state.execution.resultRunId) {
@@ -569,14 +1585,22 @@ async function buildService() {
             child,
             proof: await readProofArtifacts(child.resultRunId ?? child.id)
           })));
+          const browserPhase = state.browserAgentRequired
+            ? await persistBrowserPhaseForAggregate(state)
+            : undefined;
           const coverage = await readCoverageItems(state.runId);
           const coverageComplete = coverage.length > 0 && coverage.every((item) => item.disposition !== "pending");
           const blockedCoverage = coverage.filter((item) => item.disposition === "blocked");
-          const evidenceComplete = children.length === childRunIds.length && children.every((child) =>
+          const childEvidenceComplete = children.length === childRunIds.length && children.every((child) =>
             child.outcomeSummary?.artifactIntegrityVerified === true
             && child.outcomeSummary?.evidenceGrounded === true
           );
-          const statuses = children.map((child) => child.gateStatus ?? "needs-human-review");
+          const evidenceComplete = childEvidenceComplete
+            && (!browserPhase || (browserPhase.artifactIntegrityVerified && browserPhase.evidenceGrounded));
+          const statuses = [
+            ...children.map((child) => child.gateStatus ?? "needs-human-review"),
+            ...(browserPhase ? [browserPhase.finalStatus as MachineGate["status"]] : [])
+          ];
           const status: MachineGate["status"] = !coverageComplete || blockedCoverage.length > 0 || statuses.includes("blocked") ? "blocked"
             : statuses.includes("fail") ? "fail"
               : statuses.includes("needs-human-review") ? "needs-human-review"
@@ -597,32 +1621,120 @@ async function buildService() {
             reasonDetails: [],
             assertionFailures: children.flatMap((child) => child.machineGate?.assertionFailures ?? [])
           };
-          const executionSucceeded = children.length > 0 && children.every((child) =>
-            ["completed", "failed", "blocked", "awaiting-human-review"].includes(child.state)
-          );
+          const executionSucceeded = children.length > 0
+            && children.every((child) => ["completed", "failed", "blocked", "awaiting-human-review"].includes(child.state))
+            && (!browserPhase || browserPhase.executionSucceeded);
           let judgeRecommendation: JudgeRecommendation = {
             status: status === "pass" ? "pass" : status === "fail" ? "fail" : "needs-human-review",
             summary: `Aggregated ${children.length} path runs with ${coverage.length} coverage dispositions.`,
             evidenceRefs: []
           };
-          const aggregate = await persistParentAggregateEvidence({
-            runId: state.runId,
-            projectId: state.projectId,
-            requirement: state.requirement,
-            coverage,
-            children: childProof.map(({ child, proof }) => ({
-              id: child.id,
-              state: child.state,
-              finalStatus: child.gateStatus,
-              evidenceSetRoot: proof.manifest?.evidenceSetRoot,
-              artifactIntegrityVerified: child.outcomeSummary?.artifactIntegrityVerified === true,
-              evidenceGrounded: child.outcomeSummary?.evidenceGrounded === true,
-              machineGate: child.machineGate
-            })),
-            machineGateDraft: aggregateDraft,
-            gateEligibleFacts: { executionSucceeded, requirementCovered: coverageComplete },
-            judgeRecommendation
-          });
+          let aggregate;
+          try {
+            aggregate = await persistParentAggregateEvidence({
+              runId: state.runId,
+              projectId: state.projectId,
+              requirement: state.requirement,
+              coverage,
+              children: [
+                ...childProof.map(({ child, proof }) => ({
+                  id: child.id,
+                  state: child.state,
+                  finalStatus: child.gateStatus,
+                  evidenceSetRoot: proof.manifest?.evidenceSetRoot,
+                  artifactIntegrityVerified: child.outcomeSummary?.artifactIntegrityVerified === true,
+                  evidenceGrounded: child.outcomeSummary?.evidenceGrounded === true,
+                  machineGate: child.machineGate
+                })),
+                ...(browserPhase ? [browserPhase] : [])
+              ],
+              machineGateDraft: aggregateDraft,
+              gateEligibleFacts: { executionSucceeded, requirementCovered: coverageComplete },
+              judgeRecommendation
+            });
+          } catch (error) {
+            // A parent aggregate is also required to publish its own Artifact
+            // v2. If that publish fails (for example MinIO/S3 is offline), the
+            // individual path has already retained its local diagnostics but
+            // the parent must still reach a durable, fail-closed terminal
+            // state. Letting this exception escape used to leave the business
+            // Run in `collecting` even though the Graph projection said failed.
+            const message = error instanceof Error ? error.message : String(error);
+            let evidence: EvidenceItem[] = [];
+            try {
+              evidence = [await appendEvidence(state.runId, {
+                type: "console",
+                title: "Parent aggregate artifact publication failed",
+                scenarioId: "parent-coverage-aggregate",
+                attemptId: `${state.runId}_aggregate_attempt_1`,
+                attempt: 1,
+                sequence: 1,
+                stepId: "aggregate-child-results",
+                payload: {
+                  errorCode: "artifact_object_store_unavailable",
+                  message
+                }
+              })];
+            } catch {
+              // The terminal event below still carries the original error. A
+              // local report-volume failure must never strand the Run either.
+            }
+            const evidenceRefs = evidence.map((item) => item.id);
+            const blockedGate = finalizeProofBundle({
+              draft: {
+                status: "blocked",
+                reasons: ["environment_unavailable", "artifact_object_store_unavailable"],
+                reasonDetails: evidenceRefs.length ? [
+                  {
+                    code: "environment_unavailable",
+                    summary: `Parent Artifact v2 publication failed: ${message}`,
+                    evidenceRefs
+                  },
+                  {
+                    code: "artifact_object_store_unavailable",
+                    summary: `Parent Artifact v2 publication failed: ${message}`,
+                    evidenceRefs
+                  }
+                ] : [],
+                assertionFailures: []
+              },
+              runId: state.runId,
+              scenarioId: "parent-coverage-aggregate",
+              attemptId: `${state.runId}_aggregate_attempt_1`,
+              evidence,
+              gateEligibleFacts: { executionSucceeded: false, requirementCovered: coverageComplete }
+            }).machineGate;
+            const current = await runEventStore.get(state.runId);
+            if (current?.state === "collecting") {
+              await appendSystemRunEvent(state.runId, "run_judging", {
+                machineGate: blockedGate,
+                judgeRecommendation: {
+                  status: "needs-human-review",
+                  summary: "证据对象存储不可用，正式聚合报告未提交。",
+                  evidenceRefs
+                },
+                finalStatus: "blocked",
+                childRunIds,
+                coverageComplete,
+                resultRunId: state.runId,
+                error: message
+              });
+            }
+            return {
+              gate: {
+                machineGate: blockedGate,
+                judgeRecommendation: {
+                  status: "needs-human-review",
+                  summary: "证据对象存储不可用，正式聚合报告未提交。",
+                  evidenceRefs
+                },
+                finalStatus: "blocked",
+                childRunIds,
+                coverageComplete,
+                resultRunId: state.runId
+              }
+            };
+          }
           const aggregateGate = aggregate.result.machineGate!;
           judgeRecommendation = aggregate.result.judgeRecommendation ?? judgeRecommendation;
           const finalStatus = resolveFinalStatus({ machineGate: aggregateGate, judgeRecommendation });
@@ -702,8 +1814,13 @@ async function buildService() {
             // conflict packet cannot be loaded.
           }
         }
-        const deterministicClass = reasons.some((reason) => /environment|health|command|dependency/.test(reason))
+        const selectedScenario = run?.selectedScenarioId ? getScenario(run.selectedScenarioId) : undefined;
+        const expectedFixtureFault = selectedScenario?.corePath?.action === "simulate_error_and_retry"
+          && reasons.some((reason) => /(?:5\d\d|environment|network|api)/i.test(reason));
+        const deterministicClass = reasons.some((reason) => /environment|health|command|dependency|artifact[_-]?object|object[ _-]?store|minio|\bs3\b|econnrefused|fetch failed/i.test(reason))
           ? "environment"
+          : reasons.some((reason) => /proof[_-]?bundle|proof[_-]?persistence|proof[_-]?revalidation|credibility|ledger/i.test(reason))
+            ? "evidence"
           : reasons.some((reason) => /selector|binding|script/.test(reason))
             ? "test-script"
             : status === "fail" ? "product-bug" : "unknown";
@@ -713,9 +1830,9 @@ async function buildService() {
           const projectId = typeof run?.input.projectId === "string"
             ? run.input.projectId
             : typeof state.projectId === "string" ? state.projectId : "local";
-          const existing = feedback.getProjectSessions(projectId)
+          const existing = (await feedback.getProjectSessions(projectId))
             .find((session) => session.detection?.runId === state.runId && !session.closed);
-          feedbackSessionId = existing?.sessionId ?? feedback.startSession(projectId, {
+          feedbackSessionId = existing?.sessionId ?? (await feedback.startSession(projectId, {
             runId: state.runId,
             scenarioId: run?.selectedScenarioId,
             failureType: deterministicClass === "environment" ? "environment_issue" : deterministicClass === "test-script" ? "selector_not_found" : "other",
@@ -723,7 +1840,7 @@ async function buildService() {
             description: reasons.join("; "),
             severity: status === "fail" ? "major" : "minor",
             artifactRefs: []
-          }).sessionId;
+          })).sessionId;
         }
         const repairDecision = decideRepairFromDeterministic(
           mapDeterministicClassToFailureClass(deterministicClass),
@@ -748,9 +1865,8 @@ async function buildService() {
             idempotencyKey: `triage:${state.runId}:${deterministicClass}`
           }).catch(() => undefined);
         }
-        return status && status !== "pass"
-          ? {
-              failure: {
+        if (status && status !== "pass") {
+          const failure = {
                 status,
                 reasons,
                 failureClass: deterministicClass,
@@ -758,17 +1874,47 @@ async function buildService() {
                 observedConflict,
                 repairable: ["product-bug", "test-script", "environment"].includes(deterministicClass)
                   && state.permissionProfile.sandboxWrite,
+                expectedFixtureFault,
                 repairDecision,
                 feedbackSessionId,
                 // Carried into the repair-decision interrupt so the human sees
                 // the exact attempt and evidence the decision is based on.
                 attemptId: derivedAttemptId,
                 evidenceRefs: failureEvidenceRefs
-              }
-            }
-          : { failure: {} };
+              };
+          let recoveryDecision = deterministicRecoveryDecision({ ...state, failure } as AgentGraphState);
+          // Parent aggregates own child outcomes; retrying the parent would
+          // re-enter the aggregate executor without creating a new path child
+          // and can strand the Graph at an execution-result interrupt. A failed
+          // child is already an auditable terminal disposition, so finalize the
+          // parent fail-closed and leave retry-path to the child run itself.
+          if (run?.runKind === "parent" && recoveryDecision.action === "retry-path") {
+            recoveryDecision = {
+              ...recoveryDecision,
+              id: `recovery_${randomUUID()}`,
+              action: "blocked",
+              reason: "父运行已汇总失败子路径；不会重复投递父运行，保留子路径证据供单独重试。",
+              expectedState: "等待人工查看失败子路径"
+            };
+          }
+          return {
+            failure,
+            recoveryDecision
+          };
+        }
+        return { failure: {}, recoveryDecision: undefined };
       }),
       selectiveJudge: node("selective-judge", async (state) => {
+        if (state.mode === "shadow") {
+          return {
+            judge: {
+              unavailable: true,
+              skipped: true,
+              reason: "shadow_mode_no_model_side_effects",
+              impact: "machine-gate-preserved"
+            }
+          };
+        }
         const run = await runEventStore.get(state.runId);
         const resultRunId = typeof state.gate?.resultRunId === "string"
           ? state.gate.resultRunId
@@ -802,6 +1948,8 @@ async function buildService() {
         });
         if (report.llmStatus !== "passed" || !report.modelRecommendation) {
           return {
+            tokenUsage: (run.plannerCalls?.reduce((total, call) => total + (call.usage.totalTokens ?? 0), 0) ?? 0)
+              + (report.llmCall?.usage.totalTokens ?? 0),
             judge: {
               unavailable: true,
               error: report.llmError ?? "llm_judge_unavailable",
@@ -846,6 +1994,8 @@ async function buildService() {
         await writeRunBundle(bundle);
         await persistExecutionResult(state.runId, completeResult);
         return {
+          tokenUsage: (run.plannerCalls?.reduce((total, call) => total + (call.usage.totalTokens ?? 0), 0) ?? 0)
+            + (report.llmCall?.usage.totalTokens ?? 0),
           gate: {
             ...(state.gate ?? {}),
             judgeRecommendation: recommendation,
@@ -906,6 +2056,7 @@ async function buildService() {
                 ? await appendSystemRunEvent(state.runId, "run_blocked", payload)
                 : await appendSystemRunEvent(state.runId, "human_review_requested", payload);
         }
+        if (state.browserAgentRequired) await closeBrowserAgentSession(state.runId).catch(() => undefined);
         return {
           status: "completed",
           execution: {
@@ -951,7 +2102,7 @@ function buildRepairOptions(owner: RepairOwner) {
       ];
     default:
       return [
-        { value: "repair", label: "由系统修复", description: "在沙盒中自动复现并修复。" },
+        { value: "repair", label: "授权 AI 生成沙盒补丁", description: "AI 会根据当前证据在隔离副本中生成补丁，并在修改后执行验证；不会写入原项目。" },
         { value: "dismiss", label: "保留失败结论", description: "不修复，保留当前失败结果。" }
       ];
   }
@@ -1140,15 +2291,14 @@ async function repairOperation(
   if (resume) {
     return applyRepairDecision(state, repairDecision, failureClass, resume, run);
   }
-  // ASSESSMENT pass: auto-repair agent-owned writable failures, otherwise raise
-  // a real interrupt carrying problem + diagnosis + options.
-  if (repairDecision.owner !== "agent") {
-    return { repairInterrupt: buildRepairInterrupt(state, repairDecision, failureClass, run) };
-  }
+  // Assessment is always human-gated. The model may diagnose and propose a
+  // sandbox patch, but creating/writing that patch is a user-approved action;
+  // neither agent-owned selector fixes nor product repair may silently modify
+  // a project copy in the background.
   if (!state.projectId || !state.permissionProfile.sandboxWrite) {
     return { repairInterrupt: buildRepairInterrupt(state, repairDecision, failureClass, run, "sandbox-write-required") };
   }
-  return performAgentAutoRepair(state, failureClass, run);
+  return { repairInterrupt: buildRepairInterrupt(state, repairDecision, failureClass, run) };
 }
 
 async function graphService() {
@@ -1165,39 +2315,86 @@ function permissionProfile(run: RunProjection) {
 }
 
 export async function startAgentGraphForRun(run: RunProjection) {
-  const service = await graphService();
-  const projectId = typeof run.input.projectId === "string" ? run.input.projectId : undefined;
-  return service.start({
-    runId: run.id,
-    mode: agentOrchestrationMode(projectId),
-    requirement: typeof run.input.requirement === "string" ? run.input.requirement : undefined,
-    projectId,
-    permissionProfile: permissionProfile(run),
-    planApproved: !["draft", "planning", "awaiting-plan-approval"].includes(run.state),
-    capabilitiesApproved: !["draft", "planning", "awaiting-plan-approval", "awaiting-permission"].includes(run.state)
-  });
+  const inFlight = inFlightGraphStarts.get(run.id);
+  if (inFlight) return inFlight;
+
+  const start = (async () => {
+    const service = await graphService();
+    const projectId = typeof run.input.projectId === "string" ? run.input.projectId : undefined;
+    return service.start({
+      runId: run.id,
+      mode: agentOrchestrationMode(projectId),
+      requirement: typeof run.input.requirement === "string" ? run.input.requirement : undefined,
+      projectId,
+      permissionProfile: permissionProfile(run),
+      planApproved: !["draft", "planning", "awaiting-plan-approval"].includes(run.state),
+      capabilitiesApproved: !["draft", "planning", "awaiting-plan-approval", "awaiting-permission"].includes(run.state)
+    });
+  })();
+  inFlightGraphStarts.set(run.id, start);
+  try {
+    return await start;
+  } finally {
+    if (inFlightGraphStarts.get(run.id) === start) inFlightGraphStarts.delete(run.id);
+  }
 }
 
 export function startAgentGraphInBackground(run: RunProjection) {
-  queueMicrotask(() => void startAgentGraphForRun(run).catch(async (error) => {
-    const existing = await readAgentGraphProjection(run.id);
-    await saveAgentGraphProjection({
+  queueMicrotask(() => void startAgentGraphForRun(run).catch((error) => recordBackgroundGraphFailure(run.id, error)));
+}
+
+async function recordBackgroundGraphFailure(runId: string, error: unknown) {
+  const existing = await readAgentGraphProjection(runId);
+  const message = error instanceof Error ? error.message : "Agent graph failed";
+  await saveAgentGraphProjection({
       schemaVersion: "1.0",
-      runId: run.id,
-      threadId: run.id,
-      mode: agentOrchestrationMode(typeof run.input.projectId === "string" ? run.input.projectId : undefined),
+      runId,
+      threadId: runId,
+      mode: existing?.mode ?? "active",
       status: "failed",
       currentNode: existing?.currentNode,
       completedNodes: existing?.completedNodes ?? [],
       progress: existing?.progress ?? 0,
       tokenUsage: existing?.tokenUsage ?? 0,
+      browserAgentRequired: existing?.browserAgentRequired ?? false,
+      browserLoopComplete: existing?.browserLoopComplete ?? false,
+      continuationPasses: existing?.continuationPasses ?? 0,
+      remainingPathCount: existing?.remainingPathCount ?? 0,
       lastError: {
         code: error instanceof Error ? error.message.split(":")[0] : "agent_graph_failed",
-        message: error instanceof Error ? error.message : "Agent graph failed"
+        message
       },
       updatedAt: new Date().toISOString()
-    });
-  }));
+  });
+  // A failed background continuation must also terminate the durable Run.
+  // Otherwise the projection says failed while /v1/runs remains queued and
+  // the Workbench waits forever for a report that can never be produced.
+  for (let retry = 0; retry < 3; retry += 1) {
+    const current = await runEventStore.get(runId);
+    if (!current || ["completed", "failed", "blocked", "cancelled"].includes(current.state)) return;
+    if (![
+      "planning", "awaiting-permission", "queued", "preparing", "running",
+      "paused", "collecting", "judging", "awaiting-human-review"
+    ].includes(current.state)) return;
+    try {
+      await runEventStore.append({
+        runId,
+        type: "run_blocked",
+        expectedVersion: current.version,
+        actor: "agent-graph",
+        idempotencyKey: `${runId}:graph-background-failure:${current.version}`,
+        payload: {
+          finalStatus: "blocked",
+          error: "agent_graph_background_failed",
+          errorMessage: message,
+          graphNode: existing?.currentNode
+        }
+      });
+      return;
+    } catch (appendError) {
+      if (!(appendError instanceof Error) || !appendError.message.startsWith("run_version_conflict:")) throw appendError;
+    }
+  }
 }
 
 export async function resumeAgentGraph(runId: string, value: Record<string, unknown>) {
@@ -1206,7 +2403,7 @@ export async function resumeAgentGraph(runId: string, value: Record<string, unkn
 }
 
 export async function resumeAgentGraphInBackground(runId: string, value: Record<string, unknown>) {
-  queueMicrotask(() => void resumeAgentGraph(runId, value).catch(() => undefined));
+  queueMicrotask(() => void resumeAgentGraph(runId, value).catch((error) => recordBackgroundGraphFailure(runId, error)));
 }
 
 export async function getAgentGraphProjection(runId: string): Promise<AgentGraphProjection | undefined> {

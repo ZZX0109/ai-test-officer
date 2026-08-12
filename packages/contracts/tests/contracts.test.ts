@@ -59,6 +59,7 @@ assert.deepEqual(validateEvidenceArtifactLinks({
 assert.equal(normalizeLegacyGateStatus("hold_for_review"), "needs-human-review");
 assert.equal(transitionRunState("awaiting-plan-approval", "plan_approved"), "awaiting-permission");
 assert.equal(transitionRunState("planning", "plan_generated"), "awaiting-plan-approval");
+assert.equal(transitionRunState("judging", "run_retrying"), "queued");
 assert.equal(resolveFinalStatus({
   machineGate: { status: "pass", reasons: [], assertionFailures: [], evidenceComplete: true },
   judgeRecommendation: { status: "needs-human-review", summary: "uncertain", evidenceRefs: [] }
@@ -94,6 +95,7 @@ assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "llm-without-
 assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "cached-benchmark", projectId: "demo", input: { experimentId: "exp", repetition: 1, cachePolicy: "auto" } }));
 const budgetedRun = createRunRequestSchema.parse({ idempotencyKey: "budgeted", projectId: "demo", input: {} });
 assert.equal(budgetedRun.input.llmBudget.maxPlannerCalls, 2);
+assert.equal(budgetedRun.input.llmBudget.maxBrowserActionCalls, 12);
 assert.equal(budgetedRun.input.llmBudget.maxJudgeCalls, 1);
 assert.equal(budgetedRun.input.llmBudget.maxTriageCalls, 1);
 assert.equal(budgetedRun.input.llmBudget.maxRepairCallsPerRound, 2);
@@ -101,6 +103,24 @@ assert.equal(budgetedRun.input.llmBudget.maxSemanticRepairAttempts, 1);
 assert.equal(budgetedRun.input.llmBudget.totalTimeoutMs, 120_000);
 assert.equal(budgetedRun.input.llmBudget.maxTotalTokens, 12_000);
 assert.equal(budgetedRun.input.llmBudget.requestTimeoutMs, 30_000);
+const dynamicBrowserRun = createRunRequestSchema.parse({
+  idempotencyKey: "dynamic-browser",
+  projectId: "external-project",
+  input: {
+    dynamicBrowser: true,
+    coverageMode: "full",
+    coverageInventory: [{
+      id: "flow-auth",
+      title: "登录业务路径",
+      kind: "page",
+      target: "pages/auth",
+      sourceNodeIds: ["node-login", "node-session"],
+      sourceCount: 2
+    }]
+  }
+});
+assert.equal(dynamicBrowserRun.input.dynamicBrowser, true);
+assert.equal(dynamicBrowserRun.input.coverageInventory[0]?.sourceCount, 2);
 assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "bad-budget", projectId: "demo", input: { llmBudget: { maxPlannerCalls: 3 } } }));
 assert.equal(fixtureVariantIdSchema.parse("fxv_0123456789abcdef"), "fxv_0123456789abcdef");
 assert.throws(() => fixtureVariantIdSchema.parse("wrong-status"));

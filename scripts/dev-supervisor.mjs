@@ -67,6 +67,15 @@ function startService(service) {
   });
 }
 
+async function serviceAlreadyHealthy(service) {
+  try {
+    const response = await fetch(service.healthUrl, { signal: AbortSignal.timeout(1_000) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function waitForHealthy(service, timeoutMs = 30_000) {
   const startedAt = Date.now();
   while (!shuttingDown && Date.now() - startedAt < timeoutMs) {
@@ -130,9 +139,24 @@ await mkdir(path.dirname(supervisorPidFile), { recursive: true });
 await writeFile(supervisorPidFile, `${process.pid}\n`);
 const backendServices = services.filter((service) => service.id === "agent" || service.id === "app-api");
 const frontendServices = services.filter((service) => service.id !== "agent" && service.id !== "app-api");
-for (const service of backendServices) startService(service);
+for (const service of backendServices) {
+  if (await serviceAlreadyHealthy(service)) {
+    // A user may already have started this local service (or an earlier
+    // supervisor may still own it).  Adopt the healthy endpoint instead of
+    // repeatedly spawning a second server which can only fail with EADDRINUSE.
+    console.log(`[supervisor] ${service.id} already healthy; adopting existing service`);
+  } else {
+    startService(service);
+  }
+}
 await Promise.all(backendServices.map((service) => waitForHealthy(service)));
-for (const service of frontendServices) startService(service);
+for (const service of frontendServices) {
+  if (await serviceAlreadyHealthy(service)) {
+    console.log(`[supervisor] ${service.id} already healthy; adopting existing service`);
+  } else {
+    startService(service);
+  }
+}
 
 setInterval(async () => {
   // Avoid overlapping sweeps. The old 2s interval could start another sweep

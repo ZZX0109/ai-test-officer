@@ -692,7 +692,7 @@ PostgreSQL/API/worker 重启恢复。验收报告位于本地 `reports/productio
 | `OIDC_JWKS_URL` | JWT key endpoint |
 | `ARTIFACT_S3_BUCKET` | Artifact bucket |
 | `ARTIFACT_S3_ENDPOINT` | S3/MinIO endpoint |
-| `AGENT_ORCHESTRATION_MODE` | `shadow`（默认）或 `active` |
+| `AGENT_ORCHESTRATION_MODE` | `active`（默认）；设置为 `shadow` 可紧急回退到旧执行链 |
 | `LANGGRAPH_POSTGRES_SCHEMA` | LangGraph checkpoint schema，默认 `langgraph` |
 | `REPAIR_SANDBOX_ENABLED` | 是否允许创建隔离修复会话 |
 | `REPAIR_HOST_APPLY_ENABLED` | 是否允许显式应用回宿主源码，生产默认关闭 |

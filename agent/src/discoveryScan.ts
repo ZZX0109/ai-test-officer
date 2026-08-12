@@ -221,6 +221,18 @@ function draftScenario(input: {
     "role_permission_matrix"
   ]);
   const buttonName = buttonDrivenActions.has(action) ? selector.role : undefined;
+  // `selector.text` is a useful text oracle for any suggestion, but is only
+  // an input label for actions that genuinely type.  In particular, a table
+  // control such as “按金额排序” must never be compiled into `fill(label)`:
+  // that turns a discovered button into a fictitious text field and makes a
+  // live-DOM probe fail before browser execution starts.
+  const inputDrivenActions = new Set([
+    "fill_and_submit",
+    "search_keyword",
+    "expect_empty_state",
+    "approval_flow_transition",
+    "authenticated_onboarding_workflow"
+  ]);
   const submitDrivenActions = new Set([
     "submit_empty_form",
     "fill_and_submit",
@@ -262,8 +274,12 @@ function draftScenario(input: {
       // as both caused the probe and the compiled runner to click the same
       // button twice, often returning to the original panel.
       submitButtonName: submitDrivenActions.has(action) ? buttonName : undefined,
-      inputLabel: typeof selector.text === "string" ? selector.text : undefined,
-      input: input.suggestion.riskKind === "form" ? "Discovery Probe" : undefined,
+      inputLabel: inputDrivenActions.has(action) && typeof selector.text === "string"
+        ? selector.text
+        : undefined,
+      input: inputDrivenActions.has(action) && input.suggestion.riskKind === "form"
+        ? "Discovery Probe"
+        : undefined,
       usernameLabel: selector.usernameLabel,
       passwordLabel: selector.passwordLabel,
       usernameLocator: selector.usernameLocator,
@@ -606,9 +622,18 @@ function buildSuggestions(input: {
         id: "discovered_table_dom",
         name: "列表状态可验证",
         type: "dom_text",
-        locator: input.page.testIds.find((id) => /table|list|row/i.test(id)) ? `[data-testid='${input.page.testIds.find((id) => /table|list|row/i.test(id))}']` : "body",
-        expectedTextIncludes: input.page.headings[0] ?? input.page.title,
-        expected: "列表操作后 DOM 状态必须可验证。"
+        // A toolbar control normally lives next to — rather than inside — the
+        // table.  Use the observed page surface for the first dry-run proof;
+        // a richer table-state oracle is only emitted once we observe a
+        // concrete row/header transition.  Binding a button-text assertion to
+        // the table element itself creates a self-contradictory contract.
+        locator: "body",
+        // The action can legitimately change the active panel and remove the
+        // original page heading.  Bind the dry-run oracle to the observed
+        // table control instead of assuming that the initial heading survives
+        // a sort/filter/page transition.
+        expectedTextIncludes: tableControl.text,
+        expected: `执行“${tableControl.text}”后，列表相关控件仍必须可验证。`
       }],
       evidenceRequirements: ["screenshot", "dom", "network"]
     });
@@ -635,7 +660,12 @@ function buildSuggestions(input: {
       evidenceRequirements: ["network", "dom", "screenshot"]
     });
   }
-  return suggestions.slice(0, 12);
+  // These are the browser-observed candidates for a comprehensive scan.  Do
+  // not silently truncate them here: the execution scheduler, rather than
+  // discovery, owns resource limits.  Keeping the complete list is what lets
+  // the parent run prove that every discovered path was either executed,
+  // explicitly excluded, or blocked with evidence.
+  return suggestions;
 }
 
 /**
@@ -1204,11 +1234,23 @@ export async function runDiscoveryScan(input: {
     const priorAuthHint = priorAuthExperience[0]
       ? `历史经验：该项目此前通过“${priorAuthExperience[0].repairDescription}”解决过同类阻塞（成功率 ${Math.round(priorAuthExperience[0].successRate * 100)}%）。`
       : "";
-    const observation = sanitizeDiscoveryPageObservation(buildObservation(
+    const baseObservation = sanitizeDiscoveryPageObservation(buildObservation(
       navigationWarning || consoleEvents.length || pageErrors.length || failedRequests.length || !hasInteractiveSurface
         ? "degraded"
         : "ready"
     ));
+    const observation = authenticationGate.blocked
+      ? sanitizeDiscoveryPageObservation({
+        ...baseObservation,
+        diagnosis: {
+          ...baseObservation.diagnosis,
+          summary: "页面已打开，但当前停留在登录入口，尚不能扫描登录后的业务流程。",
+          likelyCauses: [authenticationGate.reason, ...baseObservation.diagnosis.likelyCauses].slice(0, 4),
+          retryable: false,
+          userActionRequired: true
+        }
+      })
+      : baseObservation;
     await writeDiscoveryPageObservation({
       projectId: target.projectId ?? input.projectId,
       observation

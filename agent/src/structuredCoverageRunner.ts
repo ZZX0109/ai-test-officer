@@ -15,6 +15,7 @@ import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
 import { persistExecutionResult } from "./executionPersistence.js";
 import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
 import { finalizeProofBundle, proofCredibility, type MachineGateDraft } from "./proof/proofBundleService.js";
+import { mirrorArtifactsToConfiguredStore } from "./artifactObjectStore.js";
 import {
   getProject,
   resolveProjectTarget,
@@ -150,7 +151,13 @@ export async function runStructuredCoveragePath(input: {
     clock,
     collectorVersion: "0.2.0"
   });
-  const artifact = execution?.locator ? { ...committed, locator: execution.locator } : committed;
+  // Browser and structured (API/data/job/command) paths have the same
+  // production evidence contract. A local operation log is not a committed
+  // production artifact until the configured object store has atomically
+  // accepted and verified it. Do this before minting the proof bundle so the
+  // returned Artifact v2 carries its immutable S3 replica URI.
+  const capturedArtifact = execution?.locator ? { ...committed, locator: execution.locator } : committed;
+  const [artifact] = await mirrorArtifactsToConfiguredStore([capturedArtifact], reportsDir);
   const evidence = await appendEvidence(input.runId, {
     type: "operation",
     title: `${input.coverageItem.surface} coverage: ${input.coverageItem.module}`,

@@ -1,14 +1,30 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { diagnoseBenchmarkRun } from "../src/benchmark.js";
-import { assessPlannerOutcome, deriveBenchmarkExecutionSignals, requestedScenarioForLane, validateBenchmarkFixtureBindings, validateBenchmarkProjectMappings } from "../src/benchmarkRunner.js";
+import { diagnoseBenchmarkRun, hasCompleteBenchmarkTrace } from "../src/benchmark.js";
+import { assessPlannerOutcome, deriveBenchmarkExecutionSignals, lanesRequireLlm, requestedScenarioForLane, validateBenchmarkFixtureBindings, validateBenchmarkProjectMappings } from "../src/benchmarkRunner.js";
+import { createRunRequestSchema } from "@ai-test-officer/contracts";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
 export async function testBenchmarkContract() {
+  const benchmarkInput = createRunRequestSchema.parse({
+    organizationId: "benchmark",
+    projectId: "todo_lite",
+    idempotencyKey: "benchmark-contract",
+    input: { requirement: "验证已完成筛选", executionProfile: "benchmark" }
+  });
+  assert.equal(benchmarkInput.input.executionProfile, "benchmark");
+  assert.equal(createRunRequestSchema.parse({
+    organizationId: "benchmark",
+    projectId: "todo_lite",
+    idempotencyKey: "interactive-contract",
+    input: { requirement: "默认交互运行" }
+  }).input.executionProfile, "interactive");
   const scenarioCase = { id: "todo-filter-completed", split: "development" as const, projectId: "todo_lite", requirement: "filter", diff: "filter", risk: "high" };
   assert.equal(requestedScenarioForLane(scenarioCase, "rules-deterministic"), "task_filter_completed");
+  assert.equal(lanesRequireLlm(["rules-deterministic", "test-command"]), false, "deterministic service smoke must not require a model preflight");
+  assert.equal(lanesRequireLlm(["rules-deterministic", "full-llm"]), true);
   assert.equal(requestedScenarioForLane(scenarioCase, "llm-plan-deterministic-judge"), undefined);
   assert.equal(requestedScenarioForLane(scenarioCase, "full-llm"), undefined);
   const blindCase = { id: "blind-001", split: "blind" as const, projectId: "todo_lite", requirement: "unknown requirement", diff: "unknown diff", risk: "high" };
@@ -26,6 +42,41 @@ export async function testBenchmarkContract() {
     evidenceQuality: { assertions: [{ status: "grounded" }], summary: { groundedPassedRate: 1, crossAttemptViolations: 0 } }
   }, [{ origin: "runtime-captured", integrity: { sha256: "a".repeat(64), sizeBytes: 1 } }]);
   assert.deepEqual(completeSignals, { executionStarted: true, requirementCovered: true, requirementPassed: true, executionSucceeded: true, artifactIntegrityVerified: true, evidenceGrounded: true, gateEligible: true });
+  const aggregateSignals = deriveBenchmarkExecutionSignals({
+    assertions: [{ passed: true }],
+    attempts: [{ id: "aggregate-attempt" }],
+    outcomeSummary: {
+      schemaVersion: "2.0",
+      schedulingCompleted: true,
+      executionStarted: true,
+      executionSucceeded: true,
+      requirementCovered: true,
+      requirementPassed: true,
+      artifactIntegrityVerified: true,
+      evidenceGrounded: true,
+      gateEligible: true,
+      machineGate: { status: "pass", reasons: [], reasonDetails: [], assertionFailures: [], evidenceComplete: true },
+      judgeRecommendation: { status: "pass", summary: "child evidence verified", evidenceRefs: [] },
+      finalStatus: "pass"
+    }
+  }, [{ origin: "runtime-captured", integrity: { sha256: "b".repeat(64), sizeBytes: 1 } }]);
+  assert.deepEqual(aggregateSignals, { executionStarted: true, requirementCovered: true, requirementPassed: true, executionSucceeded: true, artifactIntegrityVerified: true, evidenceGrounded: true, gateEligible: true }, "parent aggregate must preserve child coverage facts from the verified v2 outcome summary");
+  assert.equal(hasCompleteBenchmarkTrace({
+    benchmarkId: "aggregate-trace", runId: "parent-run", experimentId: "test", split: "development", lane: "rules-deterministic", repetition: 1, status: "completed", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    attempts: [
+      { id: "parent-aggregate-attempt", runId: "parent-run", scenarioId: "parent-coverage-aggregate", attempt: 1, status: "passed" },
+      { id: "child-attempt", runId: "child-run", scenarioId: "task_create_success", attempt: 1, status: "passed" }
+    ],
+    artifactsV2: [
+      { id: "parent-artifact", type: "operation-log", origin: "runtime-captured", sha256: "c".repeat(64), integrityStatus: "verified", runId: "parent-run", scenarioId: "parent-coverage-aggregate", stepId: "aggregate", attemptId: "parent-aggregate-attempt", attempt: 1, capturedAt: new Date().toISOString(), sizeBytes: 1, mediaType: "application/json", storageUri: "/artifacts/parent" },
+      { id: "child-artifact", type: "screenshot", origin: "runtime-captured", sha256: "d".repeat(64), integrityStatus: "verified", runId: "child-run", scenarioId: "task_create_success", stepId: "open", attemptId: "child-attempt", attempt: 1, capturedAt: new Date().toISOString(), sizeBytes: 1, mediaType: "image/png", storageUri: "/artifacts/child" }
+    ]
+  }), true, "parent aggregate artifacts must remain traceable alongside child browser attempts");
+  assert.equal(hasCompleteBenchmarkTrace({
+    benchmarkId: "selective-judge-trace", runId: "parent-run", experimentId: "test", split: "development", lane: "rules-plan-llm-judge", repetition: 1, status: "completed", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    attempts: [{ id: "attempt", runId: "parent-run", scenarioId: "task_create_success", attempt: 1, status: "passed" }],
+    artifactsV2: [{ id: "artifact", type: "screenshot", origin: "runtime-captured", sha256: "e".repeat(64), integrityStatus: "verified", runId: "parent-run", scenarioId: "task_create_success", stepId: "open", attemptId: "attempt", attempt: 1, capturedAt: new Date().toISOString(), sizeBytes: 1, mediaType: "image/png", storageUri: "/artifacts/attempt" }]
+  }), true, "a selective Judge lane remains traceable when the deterministic evidence is unambiguous and no Judge call is needed");
   const incompleteSignals = deriveBenchmarkExecutionSignals({
     riskCoverageMatrix: [{ covered: true, passed: false }],
     assertions: [{ passed: true }],
@@ -35,6 +86,20 @@ export async function testBenchmarkContract() {
   assert.equal(incompleteSignals.requirementCovered, true);
   assert.equal(incompleteSignals.requirementPassed, false);
   assert.equal(incompleteSignals.gateEligible, true, "a fully evidenced product failure remains decision eligible");
+  const legacySignals = deriveBenchmarkExecutionSignals({
+    assertions: [],
+    artifactIntegrity: { items: [] },
+    evidenceQuality: { assertions: [], summary: { groundedPassedRate: 0, crossAttemptViolations: 0 } }
+  }, []);
+  assert.deepEqual(legacySignals, {
+    executionStarted: false,
+    requirementCovered: false,
+    requirementPassed: false,
+    executionSucceeded: false,
+    artifactIntegrityVerified: false,
+    evidenceGrounded: false,
+    gateEligible: false
+  }, "legacy/blocked reports without a coverage matrix must fail closed");
   const handoffDiagnostic = diagnoseBenchmarkRun({
     benchmarkId: "todo-viewer-permission", runId: "run-handoff", status: "completed", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
     requestedScenarioId: "todo_visitor_permission", projectedScenarioId: "todo_visitor_permission", requirementCovered: false, executionSucceeded: false, retryCount: 0,
@@ -55,6 +120,9 @@ export async function testBenchmarkContract() {
   assert.match(todoPermissionScenario, /"triggerButtonName":"登录测试账号"/);
   const blindManifestText = await readFile(path.join(rootDir, "data", "benchmark", "blind-cases.json"), "utf8");
   const benchmarkRunnerText = await readFile(path.join(rootDir, "agent", "src", "benchmarkRunner.ts"), "utf8");
+  assert.doesNotMatch(benchmarkRunnerText, /benchmark_execution_result_resume/, "benchmark runner must never forge a Worker execution result");
+  assert.doesNotMatch(benchmarkRunnerText, /resumeUnattendedExecutionInterrupt/, "only the Worker may resume an execution-result interrupt");
+  assert.match(benchmarkRunnerText, /executionProfile:\s*"benchmark"/, "benchmark creation must opt into one-path execution isolation");
   assert.doesNotMatch(benchmarkRunnerText, /"blind-\d+"\s*:/, "runner must not hard-code blind case mappings");
   assert.doesNotMatch(benchmarkRunnerText, /"holdout-\d+"\s*:/, "runner must not hard-code holdout case mappings");
   const blindCases = JSON.parse(blindManifestText) as Array<{ id: string; fixtureVariantId: string } & Record<string, unknown>>;

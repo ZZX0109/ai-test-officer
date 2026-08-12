@@ -1,11 +1,17 @@
 import {
   agentGraphNodeSchema,
   agentInterruptSchema,
+  type BrowserActionDecision,
+  type BrowserActionResult,
+  type BrowserObservation,
+  type BrowserSession,
   type AgentGraphNode,
   type AgentGraphProjection,
   type AgentInterrupt,
   type AgentPermissionProfile,
-  type RepairDecisionAnswer
+  type RepairDecisionAnswer,
+  type RecoveryActionResult,
+  type RecoveryDecision
 } from "@ai-test-officer/contracts";
 import {
   Annotation,
@@ -53,6 +59,29 @@ export interface AgentGraphState extends AgentGraphInput {
   failure?: Record<string, unknown>;
   judge?: Record<string, unknown>;
   repairSessionId?: string;
+  recoveryDecision?: RecoveryDecision;
+  recoveryResult?: RecoveryActionResult;
+  recoveryAttempts?: Record<string, number>;
+  currentCoverageItemId?: string;
+  currentAttemptId?: string;
+  observation?: Record<string, unknown>;
+  browserSession?: BrowserSession;
+  browserObservation?: BrowserObservation;
+  browserDecision?: BrowserActionDecision;
+  browserActionResult?: BrowserActionResult;
+  /** True only for the current decision after a matching interrupt approval. */
+  browserActionAuthorized?: boolean;
+  /** A credential-use grant is scoped to one run/Playwright session. It lets
+   * the agent complete the observed login form after the user has approved
+   * the first credential fill, without prompting once for username and again
+   * for password. It is never a host, source-write, or future-run grant. */
+  browserCredentialAuthorized?: boolean;
+  browserAgentRequired?: boolean;
+  browserLoopComplete?: boolean;
+  /** Number of parent-path continuation passes already dispatched. */
+  continuationPasses?: number;
+  /** Pending independent coverage paths after a repair/retry. */
+  remainingPathCount?: number;
   planningTerminal?: boolean;
   /**
    * Discovery is a hard precondition for active full-browser planning.  A
@@ -72,9 +101,21 @@ export interface AgentGraphHooks {
   plan?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   compile?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   prepareSandbox?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  observeBrowser?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  decideBrowserAction?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  authorizeBrowserAction?: (state: AgentGraphState, resume?: Record<string, unknown>) => Promise<Partial<AgentGraphState> & { browserInterrupt?: AgentInterrupt }>;
+  executeBrowserAction?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  verifyBrowserAction?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  decideNextStep?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   execute?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   collectAndGate?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   triageFailure?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  diagnoseRuntime?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  chooseRecovery?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  recover?: (state: AgentGraphState) => Promise<Partial<AgentGraphState> & { recoveryInterrupt?: AgentInterrupt }>;
+  verifyRecovery?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  retryPath?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
+  continuePaths?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   selectiveJudge?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
   repair?: (state: AgentGraphState, resume?: RepairDecisionAnswer) => Promise<Partial<AgentGraphState> & { repairInterrupt?: AgentInterrupt }>;
   finalize?: (state: AgentGraphState) => Promise<Partial<AgentGraphState>>;
@@ -84,17 +125,29 @@ export interface AgentGraphHooks {
 const orderedNodes: AgentGraphNode[] = [
   "intake",
   "discover",
+  "diagnose-runtime",
+  "choose-recovery",
+  "recover",
+  "verify-recovery",
   "build-coverage-map",
   "plan",
   "compile",
   "approve-plan",
   "prepare-sandbox",
   "approve-capabilities",
+  "observe-browser",
+  "decide-browser-action",
+  "authorize-browser-action",
+  "execute-browser-action",
+  "verify-browser-action",
+  "decide-next-step",
   "execute",
   "collect-and-gate",
   "triage-failure",
   "selective-judge",
   "repair",
+  "retry-path",
+  "continue-paths",
   "finalize"
 ];
 
@@ -114,7 +167,10 @@ const GraphState = Annotation.Root({
   }),
   progress: Annotation<number>(),
   tokenUsage: Annotation<number>({
-    reducer: (left, right) => (left ?? 0) + (right ?? 0),
+    // Hooks report the authoritative total from the persisted invocation
+    // ledger. Summing node replays double-counts tokens after checkpoint
+    // recovery, which made the Workbench budget indicator misleading.
+    reducer: (_left, right) => right ?? 0,
     default: () => 0
   }),
   pendingInterrupt: Annotation<AgentInterrupt | undefined>(),
@@ -129,6 +185,22 @@ const GraphState = Annotation.Root({
   failure: Annotation<Record<string, unknown> | undefined>(),
   judge: Annotation<Record<string, unknown> | undefined>(),
   repairSessionId: Annotation<string | undefined>(),
+  recoveryDecision: Annotation<RecoveryDecision | undefined>(),
+  recoveryResult: Annotation<RecoveryActionResult | undefined>(),
+  recoveryAttempts: Annotation<Record<string, number> | undefined>(),
+  currentCoverageItemId: Annotation<string | undefined>(),
+  currentAttemptId: Annotation<string | undefined>(),
+  observation: Annotation<Record<string, unknown> | undefined>(),
+  browserSession: Annotation<BrowserSession | undefined>(),
+  browserObservation: Annotation<BrowserObservation | undefined>(),
+  browserDecision: Annotation<BrowserActionDecision | undefined>(),
+  browserActionResult: Annotation<BrowserActionResult | undefined>(),
+  browserActionAuthorized: Annotation<boolean>({ reducer: (_left, right) => right ?? false, default: () => false }),
+  browserCredentialAuthorized: Annotation<boolean>({ reducer: (left, right) => right ?? left ?? false, default: () => false }),
+  browserAgentRequired: Annotation<boolean>({ reducer: (_left, right) => right ?? false, default: () => false }),
+  browserLoopComplete: Annotation<boolean>({ reducer: (_left, right) => right ?? false, default: () => false }),
+  continuationPasses: Annotation<number>({ reducer: (_left, right) => right ?? 0, default: () => 0 }),
+  remainingPathCount: Annotation<number>({ reducer: (_left, right) => right ?? 0, default: () => 0 }),
   planningTerminal: Annotation<boolean | undefined>(),
   discoveryTerminal: Annotation<boolean | undefined>(),
   updatedAt: Annotation<string>()
@@ -154,6 +226,20 @@ function projection(state: AgentGraphState): AgentGraphProjection {
     lastError: state.lastError,
     tokenUsage: state.tokenUsage,
     repairSessionId: state.repairSessionId,
+    recoveryDecision: state.recoveryDecision,
+    recoveryResult: state.recoveryResult,
+    recoveryAttempts: state.recoveryAttempts,
+    currentCoverageItemId: state.currentCoverageItemId,
+    currentAttemptId: state.currentAttemptId,
+    observation: state.observation,
+    browserSession: state.browserSession,
+    browserObservation: state.browserObservation,
+    browserDecision: state.browserDecision,
+    browserActionResult: state.browserActionResult,
+    browserAgentRequired: state.browserAgentRequired ?? false,
+    browserLoopComplete: state.browserLoopComplete ?? false,
+    continuationPasses: state.continuationPasses ?? 0,
+    remainingPathCount: state.remainingPathCount ?? 0,
     updatedAt: state.updatedAt
   };
 }
@@ -309,55 +395,18 @@ function discoveryNode(hooks: AgentGraphHooks) {
     await hooks.onProjection?.(projection(started));
 
     try {
-      let update = await hooks.discover?.(started) ?? {};
-      while (discoveryStatus({ coverageMap: update.coverageMap ?? started.coverageMap }) === "waiting") {
-        const pending: AgentInterrupt = {
-          id: `interrupt_${randomUUID()}`,
-          runId: state.runId,
-          // A Discovery retry needs the same bounded browser capability as the
-          // later execution.  Reusing this public kind keeps existing clients
-          // compatible while the title/payload make the waiting state explicit.
-          kind: "browser-permission",
-          status: "pending",
-          title: "等待项目页面就绪",
-          detail: String(
-            (update.coverageMap?.discovery as Record<string, unknown> | undefined)?.reason
-            ?? "项目仍在启动；页面就绪后可恢复同一运行并重新执行 Discovery smoke。"
-          ),
-          requestedCapabilities: ["browserControl"],
-          payload: {
-            action: "retry-discovery-smoke",
-            discoveryStatus: "waiting"
-          },
-          createdAt: now()
-        };
-        await hooks.onProjection?.(projection({
-          ...started,
-          ...update,
-          status: "interrupted",
-          currentNode: "discover",
-          pendingInterrupt: pending,
-          updatedAt: now()
-        }));
-        const answer = interrupt(pending) as { approved?: boolean; retry?: boolean };
-        if (!answer?.approved && !answer?.retry) {
-          update = {
-            ...update,
-            discoveryTerminal: true,
-            coverageMap: {
-              ...(update.coverageMap ?? started.coverageMap ?? {}),
-              discovery: {
-                ...((update.coverageMap?.discovery as Record<string, unknown> | undefined) ?? {}),
-                status: "blocked",
-                reason: "discovery_retry_declined"
-              }
-            }
-          };
-          break;
-        }
-        // LangGraph resumes a node from its beginning.  Re-running the hook
-        // here performs one fresh bounded probe after the saved approval.
-        update = await hooks.discover?.({ ...started, ...update, pendingInterrupt: undefined }) ?? update;
+      // Waiting is now handled by the recovery loop instead of an opaque
+      // browser-permission interrupt. This lets the Agent explain whether the
+      // blocker is startup, auth, network or DOM and offer the correct action.
+      // The recovery node owns the bounded retry/credential interrupt.
+      const update = await hooks.discover?.(started) ?? {};
+      const discoveredStatus = discoveryStatus({ coverageMap: update.coverageMap ?? started.coverageMap });
+      if (discoveredStatus === "waiting") {
+        (update as Partial<AgentGraphState>).discoveryTerminal = true;
+      } else if (discoveredStatus === "ready") {
+        // A successful retry must clear the previous terminal marker; state
+        // reducers intentionally preserve fields that a hook omits.
+        (update as Partial<AgentGraphState>).discoveryTerminal = false;
       }
 
       const completed: AgentGraphState = {
@@ -439,6 +488,53 @@ function executionNode(hooks: AgentGraphHooks) {
   };
 }
 
+/** Checkpoint a browser action that needs credentials or a risky UI operation. */
+function browserAuthorizationNode(hooks: AgentGraphHooks) {
+  return async (state: AgentGraphState) => {
+    if (state.mode === "shadow") return makeNode("authorize-browser-action", hooks.authorizeBrowserAction, hooks)(state);
+    const node: AgentGraphNode = "authorize-browser-action";
+    const index = orderedNodes.indexOf(node);
+    const started: AgentGraphState = {
+      ...state,
+      status: "running",
+      currentNode: node,
+      pendingInterrupt: undefined,
+      progress: index / orderedNodes.length,
+      updatedAt: now()
+    };
+    await hooks.onProjection?.(projection(started));
+    const assessed = await hooks.authorizeBrowserAction?.(started) ?? {};
+    const { browserInterrupt, ...rest } = assessed as Partial<AgentGraphState> & { browserInterrupt?: AgentInterrupt };
+    let update = rest;
+    if (browserInterrupt) {
+      await hooks.onProjection?.(projection({
+        ...started,
+        ...rest,
+        status: "interrupted",
+        pendingInterrupt: browserInterrupt,
+        interruptOwner: browserInterrupt.owner,
+        interruptContext: browserInterrupt.context,
+        updatedAt: now()
+      }));
+      const answer = interrupt(browserInterrupt) as Record<string, unknown>;
+      const resumed = await hooks.authorizeBrowserAction?.({ ...started, ...rest }, answer) ?? rest;
+      const { browserInterrupt: _ignored, ...resumedRest } = resumed as Partial<AgentGraphState> & { browserInterrupt?: AgentInterrupt };
+      update = resumedRest;
+    }
+    return {
+      ...update,
+      status: "running" as const,
+      currentNode: node,
+      completedNodes: [node],
+      pendingInterrupt: undefined,
+      interruptOwner: undefined,
+      interruptContext: undefined,
+      progress: (index + 1) / orderedNodes.length,
+      updatedAt: now()
+    };
+  };
+}
+
 /**
  * Repair is the human-in-the-loop hub: when the triage attributes the failure
  * to a user / environment / developer owned cause (or the agent lacks sandbox
@@ -446,8 +542,10 @@ function executionNode(hooks: AgentGraphHooks) {
  * problem, the diagnosis performed so far, the suggested handling, and the
  * concrete operations the human may choose. The graph pauses here until the
  * caller resumes the same `thread_id` with a `Command({ resume })` answer, after
- * which the chosen action is applied. Auto-repairable (agent-owned, writable)
- * failures skip the interrupt and proceed directly.
+ * which the chosen action is applied. Even agent-owned selector or harness
+ * repairs pause here: the model may explain and propose a sandbox patch, but
+ * neither a sandbox write nor an original-source write can happen without an
+ * explicit user decision.
  *
  * The assessment pass and the resume pass are separated by the idempotency
  * `attempt` (1 = assess, 2 = apply) so a restart that replays the assessment
@@ -455,7 +553,24 @@ function executionNode(hooks: AgentGraphHooks) {
  */
 function repairNode(hooks: AgentGraphHooks) {
   return async (state: AgentGraphState) => {
-    if (state.mode === "shadow") return makeNode("repair", hooks.repair, hooks)(state);
+    if (state.mode === "shadow") {
+      // Shadow runs compare routing only. They must not create repair sessions,
+      // invoke a provider, write a patch, or raise a user interrupt.
+      const index = orderedNodes.indexOf("repair");
+      return {
+        status: "running" as const,
+        currentNode: "repair" as const,
+        completedNodes: ["repair" as const],
+        progress: (index + 1) / orderedNodes.length,
+        observation: {
+          ...(state.observation ?? {}),
+          stage: "repair",
+          status: "blocked",
+          summary: "Shadow 模式仅记录修复路由，不执行模型调用或沙盒写入。"
+        },
+        updatedAt: now()
+      };
+    }
     const index = orderedNodes.indexOf("repair");
     const started: AgentGraphState = {
       ...state,
@@ -536,6 +651,69 @@ function repairNode(hooks: AgentGraphHooks) {
 }
 
 /**
+ * Executes a bounded recovery action. Risky recovery tools can return an
+ * interrupt carrier; LangGraph checkpoints and resumes the same thread.
+ */
+function recoveryNode(hooks: AgentGraphHooks) {
+  return async (state: AgentGraphState) => {
+    const node: AgentGraphNode = "recover";
+    const index = orderedNodes.indexOf(node);
+    const started: AgentGraphState = {
+      ...state,
+      status: "running",
+      currentNode: node,
+      pendingInterrupt: undefined,
+      progress: index / orderedNodes.length,
+      updatedAt: now()
+    };
+    await hooks.onProjection?.(projection(started));
+    const output = await hooks.recover?.(started) ?? {};
+    const { recoveryInterrupt, ...rest } = output as Partial<AgentGraphState> & { recoveryInterrupt?: AgentInterrupt };
+    if (recoveryInterrupt) {
+      await hooks.onProjection?.(projection({
+        ...started,
+        ...rest,
+        status: "interrupted",
+        currentNode: node,
+        pendingInterrupt: recoveryInterrupt,
+        interruptOwner: recoveryInterrupt.owner,
+        interruptContext: recoveryInterrupt.context,
+        updatedAt: now()
+      }));
+      const answer = interrupt(recoveryInterrupt) as Record<string, unknown>;
+      const resumed = await hooks.recover?.({
+        ...started,
+        ...rest,
+        pendingInterrupt: undefined,
+        interruptOwner: undefined,
+        interruptContext: undefined,
+        interruptAnswer: answer
+      } as AgentGraphState) ?? rest;
+      return {
+        ...resumed,
+        status: "running" as const,
+        currentNode: node,
+        completedNodes: [node],
+        pendingInterrupt: undefined,
+        interruptOwner: undefined,
+        interruptContext: undefined,
+        progress: (index + 1) / orderedNodes.length,
+        updatedAt: now()
+      };
+    }
+    return {
+      ...rest,
+      status: "running" as const,
+      currentNode: node,
+      completedNodes: [node],
+      pendingInterrupt: undefined,
+      progress: (index + 1) / orderedNodes.length,
+      updatedAt: now()
+    };
+  };
+}
+
+/**
  * Safety net: a node must never finalize while a human-in-the-loop interrupt is
  * still unresolved. The real `interrupt()` in `repairNode` already pauses the
  * graph, so this guard only protects against programming errors that would
@@ -590,42 +768,115 @@ export function createAgentOrchestrationGraph(input: {
   const graph = new StateGraph(GraphState)
     .addNode("intake", makeNode("intake", hooks.intake, hooks))
     .addNode("discover", discoveryNode(hooks))
+    .addNode("diagnose-runtime", makeNode("diagnose-runtime", hooks.diagnoseRuntime, hooks))
+    .addNode("choose-recovery", makeNode("choose-recovery", hooks.chooseRecovery, hooks))
+    .addNode("recover", recoveryNode(hooks))
+    .addNode("verify-recovery", makeNode("verify-recovery", hooks.verifyRecovery, hooks))
     .addNode("build-coverage-map", makeNode("build-coverage-map", hooks.buildCoverageMap, hooks))
     .addNode("plan", makeNode("plan", hooks.plan, hooks))
     .addNode("compile", makeNode("compile", hooks.compile, hooks))
     .addNode("approve-plan", approvalNode("plan-approval", hooks))
     .addNode("prepare-sandbox", makeNode("prepare-sandbox", hooks.prepareSandbox, hooks))
     .addNode("approve-capabilities", approvalNode("browser-permission", hooks))
+    .addNode("observe-browser", makeNode("observe-browser", hooks.observeBrowser, hooks))
+    .addNode("decide-browser-action", makeNode("decide-browser-action", hooks.decideBrowserAction, hooks))
+    .addNode("authorize-browser-action", browserAuthorizationNode(hooks))
+    .addNode("execute-browser-action", makeNode("execute-browser-action", hooks.executeBrowserAction, hooks))
+    .addNode("verify-browser-action", makeNode("verify-browser-action", hooks.verifyBrowserAction, hooks))
+    .addNode("decide-next-step", makeNode("decide-next-step", hooks.decideNextStep, hooks))
     .addNode("execute", executionNode(hooks))
     .addNode("collect-and-gate", makeNode("collect-and-gate", hooks.collectAndGate, hooks))
     .addNode("triage-failure", makeNode("triage-failure", hooks.triageFailure, hooks))
     .addNode("selective-judge", makeNode("selective-judge", hooks.selectiveJudge, hooks))
     .addNode("repair", repairNode(hooks))
+    .addNode("retry-path", makeNode("retry-path", hooks.retryPath, hooks))
+    .addNode("continue-paths", makeNode("continue-paths", hooks.continuePaths, hooks))
     .addNode("finalize", finalizeNode(hooks))
     .addEdge(START, "intake")
     .addEdge("intake", "discover")
-    .addConditionalEdges("discover", (state) =>
-      state.mode === "active" && state.discoveryTerminal === true ? "finalize" : "build-coverage-map",
-    ["build-coverage-map", "finalize"])
+    // Runtime discovery is an execution-readiness signal, not the source of
+    // truth for the static business inventory.  Always compile and expose the
+    // code-derived coverage map before routing a blocked page into recovery;
+    // otherwise a login wall or a dead port replaces the entire full-scan
+    // plan with one generic error card.
+    .addEdge("discover", "build-coverage-map")
+    .addEdge("diagnose-runtime", "choose-recovery")
+    .addConditionalEdges("choose-recovery", (state) => {
+      const action = state.recoveryDecision?.action;
+      if (action === "repair-harness" || action === "repair-environment" || action === "repair-product") return "repair";
+      return action && action !== "blocked" ? "recover" : "finalize";
+    }, ["recover", "repair", "finalize"])
+    .addEdge("recover", "verify-recovery")
+    .addConditionalEdges("verify-recovery", (state) => {
+      const action = state.recoveryDecision?.action;
+      const status = state.recoveryResult?.status;
+      // A runtime/discovery repair made *after* a path attempt failed must not
+      // jump straight back to execute. Its durable Run is still `judging` and
+      // must first become `queued` through retry-path; otherwise the new
+      // Worker result is (correctly) rejected as a stale write. Pre-execution
+      // Discovery recovery has no failure carrier and can safely re-scan.
+      const retryingAnExecutedPath = Boolean(state.failure?.status && state.failure.status !== "pass");
+      if (status === "completed" && (action === "retry-path" || (retryingAnExecutedPath && (action === "retry-runtime" || action === "retry-discovery")))) return "retry-path";
+      if (status === "completed" && (action === "retry-runtime" || action === "retry-discovery")) return "discover";
+      return "finalize";
+    }, ["discover", "retry-path", "finalize"])
+    .addEdge("retry-path", "execute")
     .addEdge("build-coverage-map", "plan")
     .addConditionalEdges("plan", (state) => state.planningTerminal === true ? "finalize" : "compile", ["compile", "finalize"])
-    .addEdge("compile", "approve-plan")
+    .addConditionalEdges("compile", (state) =>
+      state.mode === "active" && state.discoveryTerminal === true ? "diagnose-runtime" : "approve-plan",
+    ["diagnose-runtime", "approve-plan"])
     .addEdge("approve-plan", "prepare-sandbox")
     .addEdge("prepare-sandbox", "approve-capabilities")
-    .addEdge("approve-capabilities", "execute")
+    .addConditionalEdges("approve-capabilities", (state) => state.browserAgentRequired === true ? "observe-browser" : "execute", ["observe-browser", "execute"])
+    .addEdge("observe-browser", "decide-browser-action")
+    .addConditionalEdges("decide-browser-action", (state) => {
+      if (state.browserDecision?.status === "act" || state.browserDecision?.status === "needs-confirmation") return "authorize-browser-action";
+      if (state.browserDecision?.status === "complete" || state.browserDecision?.status === "blocked") return "decide-next-step";
+      return "finalize";
+    }, ["authorize-browser-action", "decide-next-step", "finalize"])
+    .addConditionalEdges("authorize-browser-action", (state) => state.browserDecision?.status === "act" ? "execute-browser-action" : "finalize", ["execute-browser-action", "finalize"])
+    .addEdge("execute-browser-action", "verify-browser-action")
+    .addConditionalEdges("verify-browser-action", (state) => {
+      if (state.browserActionResult?.errorCode === "browser_control_binding_stale" && (state.browserSession?.rebindCount ?? 0) <= 2) return "observe-browser";
+      return "decide-next-step";
+    }, ["observe-browser", "decide-next-step"])
+    .addConditionalEdges("decide-next-step", (state) => {
+      if (state.browserLoopComplete === true) {
+        return (state.remainingPathCount ?? 0) > 0
+          || (state.compiledPlan && Object.keys(state.compiledPlan).length > 0)
+          ? "execute"
+          : "collect-and-gate";
+      }
+      return "observe-browser";
+    }, ["observe-browser", "execute", "collect-and-gate"])
     .addEdge("execute", "collect-and-gate")
     .addEdge("collect-and-gate", "triage-failure")
     .addConditionalEdges("triage-failure", (state) => {
       const failure = state.failure ?? {};
       if (!Object.keys(failure).length) return "finalize";
+      // A repair decision may be useful to the user even when this Run does
+      // not have sandbox-write capability. Do not suspend the execution graph
+      // on a developer interrupt that cannot be approved in this run (this
+      // used to leave benchmark/path runs permanently in `judging`). The
+      // persisted repair plan remains available for an explicit repair session.
+      if (state.recoveryDecision?.action && ["repair-harness", "repair-environment", "repair-product"].includes(state.recoveryDecision.action) && failure.repairable !== true) return "finalize";
+      if (state.recoveryDecision?.action && state.recoveryDecision.action !== "blocked") return "choose-recovery";
       if (failure.needsLlmJudge === true) return "selective-judge";
       if (failure.repairable === true) return "repair";
       return "finalize";
-    }, ["selective-judge", "repair", "finalize"])
+    }, ["choose-recovery", "selective-judge", "repair", "finalize"])
     .addConditionalEdges("selective-judge", (state) =>
       state.failure?.repairable === true ? "repair" : "finalize",
     ["repair", "finalize"])
-    .addEdge("repair", "finalize")
+    .addEdge("repair", "continue-paths")
+    .addConditionalEdges("continue-paths", (state) => {
+      // A repaired parent run must return to the executor exactly once before
+      // finalization.  The hook records the durable pending-path count and the
+      // pass counter, so a replay after restart cannot spin forever.
+      if ((state.remainingPathCount ?? 0) > 0 && (state.continuationPasses ?? 0) < 1) return "execute";
+      return "finalize";
+    }, ["execute", "finalize"])
     .addEdge("finalize", END)
     .compile({ checkpointer: input.checkpointer });
 

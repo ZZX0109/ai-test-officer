@@ -404,10 +404,20 @@ export async function runDemoVerification() {
 
     const unifiedKey = `demo-unified-${Date.now()}`;
     let unified = await runEventStore.create({ actor: "demo-verifier", idempotencyKey: unifiedKey, payload: { appUrl, scenarioId: "task_filter_active", requirement: context.requirement, diff: context.diff, plannerMode: "deterministic", judgeMode: "deterministic", permissionProfile: allowBrowser } });
-    unified = await runEventStore.append({ runId: unified.id, type: "plan_generated", expectedVersion: unified.version, actor: "planner", idempotencyKey: `${unifiedKey}:generated`, payload: { plan: buildScenarioGrayPlan(getScenario("task_filter_active")), scenarioId: "task_filter_active", provenance: { source: "deterministic", promptVersion: "demo-freeze-v1", compilationStatus: "validated" }, impactAnalysis: analysis.impactAnalysis } });
+    const unifiedPlan = buildScenarioGrayPlan(getScenario("task_filter_active"));
+    unified = await runEventStore.append({ runId: unified.id, type: "plan_generated", expectedVersion: unified.version, actor: "planner", idempotencyKey: `${unifiedKey}:generated`, payload: { plan: unifiedPlan, compiledPlan: unifiedPlan, scenarioId: "task_filter_active", provenance: { source: "deterministic", promptVersion: "demo-freeze-v1", compilationStatus: "validated" }, impactAnalysis: analysis.impactAnalysis } });
     unified = await runEventStore.append({ runId: unified.id, type: "plan_approved", expectedVersion: unified.version, actor: "demo-verifier", idempotencyKey: `${unifiedKey}:approved`, payload: {} });
     unified = await runEventStore.append({ runId: unified.id, type: "permission_granted", expectedVersion: unified.version, actor: "demo-verifier", idempotencyKey: `${unifiedKey}:permission`, payload: {} });
     unified = (await executeQueuedRun(unified.id))!;
+    // Active Graph finalization resumes asynchronously after the worker has
+    // committed its evidence. Wait for that durable projection before reading
+    // the bundle; otherwise a collecting run has no resultRunId yet.
+    const graphDeadline = Date.now() + 30_000;
+    while (!unified.resultRunId && Date.now() < graphDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      unified = (await runEventStore.get(unified.id)) ?? unified;
+    }
+    if (!unified.resultRunId) throw new Error("demo_graph_finalization_timeout");
     const unifiedEvents = await runEventStore.events(unified.id);
     const unifiedBundle = await readRunBundle(unified.resultRunId!);
     const unifiedResult = { ...unifiedBundle.result, evidence: unifiedBundle.evidence, loopEvents: unifiedBundle.loopEvents, oracles: unifiedBundle.oracles, riskCoverageMatrix: unifiedBundle.riskCoverageMatrix };

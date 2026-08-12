@@ -1,12 +1,12 @@
 import { Queue, Worker, type Job } from "bullmq";
 import { createHash } from "node:crypto";
 import { resolveFinalStatus, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
-import { appendSystemRunEvent, runEventStore, type RunProjection } from "./runEventStore.js";
+import { acceptsExecutionResult, appendSystemRunEvent, runEventStore, type RunProjection } from "./runEventStore.js";
 import { runVisualGrayTest } from "./testRunner.js";
 import type { RunRequest } from "./types.js";
 import { persistExecutionResult } from "./executionPersistence.js";
 import { acquireExecutionLease } from "./executionLease.js";
-import { agentOrchestrationMode, resumeAgentGraphInBackground, startAgentGraphForRun } from "./agentGraphService.js";
+import { agentOrchestrationMode, getAgentGraphProjection, resumeAgentGraph, startAgentGraphForRun } from "./agentGraphService.js";
 import { readCoverageItems, updateCoverageDisposition } from "./coverageStore.js";
 import { getScenario } from "./scenarios.js";
 import { buildScenarioGrayPlan } from "./plan.js";
@@ -19,6 +19,52 @@ const activeControllers = new Map<string, AbortController>();
 let queue: Queue | undefined;
 let worker: Worker | undefined;
 const inProcessJobs = new Set<string>();
+
+async function resumeGraphAndQueueIfNeeded(runId: string, value: Record<string, unknown>) {
+  try {
+    const execution = value.execution && typeof value.execution === "object"
+      ? value.execution as Record<string, unknown>
+      : undefined;
+    const currentBeforeResume = await runEventStore.get(runId);
+    // `beginEvidenceCollection` moves the durable Run to collecting.  Repeat
+    // the worker generation/attempt check at the single Graph-resume entry so
+    // every caller (including exception and parent aggregation paths) is
+    // fail-closed.  A stale BullMQ delivery must never satisfy the newer
+    // execution-result interrupt just because it happened to finish later.
+    if (!acceptsExecutionResult(currentBeforeResume, execution)) return;
+    await resumeAgentGraph(runId, value);
+    const projection = await getAgentGraphProjection(runId);
+    if (projection?.pendingInterrupt?.kind !== "execution-result") return;
+    const current = await runEventStore.get(runId);
+    if (!current || ["completed", "failed", "blocked", "cancelled", "paused"].includes(current.state)) return;
+    // A recovery loop can legitimately return to execute and wait for a new
+    // worker result. Re-enqueue the newer durable version; without this, the
+    // first worker would leave the graph paused forever after a runtime retry.
+    if (redisConnection()) {
+      await enqueueRun(runId, current.version);
+    } else if (inProcessJobs.has(runId)) {
+      // A worker can resume the graph from inside its own execution. In the
+      // in-process (no Redis) mode the current job still owns the idempotency
+      // lock at this point, so enqueueRun would silently drop the follow-up.
+      // Defer until the current worker's finally block releases the lock. A
+      // single timer is not sufficient: it can fire before that finally block,
+      // so poll briefly until the lock is actually gone.
+      const enqueueAfterRelease = () => {
+        if (inProcessJobs.has(runId)) {
+          setTimeout(enqueueAfterRelease, 10);
+          return;
+        }
+        void enqueueRun(runId, current.version).catch(() => undefined);
+      };
+      setTimeout(enqueueAfterRelease, 0);
+    } else {
+      await enqueueRun(runId, current.version);
+    }
+  } catch {
+    // The graph projection/error event is the source of truth; the worker must
+    // still release its lease even if a recovery resume cannot be scheduled.
+  }
+}
 
 function redisConnection() {
   if (!process.env.REDIS_URL) return undefined;
@@ -82,6 +128,7 @@ export function buildQueuedRunRequest(projection: RunProjection, signal: AbortSi
     runId: projection.id,
     appUrl: typeof input.appUrl === "string" ? input.appUrl : undefined,
     projectId: typeof input.projectId === "string" ? input.projectId : undefined,
+    executionProfile: input.executionProfile === "benchmark" ? "benchmark" : "interactive",
     scenarioId: projection.selectedScenarioId ?? (typeof input.scenarioId === "string" ? input.scenarioId : undefined),
     requirement: typeof input.requirement === "string" ? input.requirement : undefined,
     diff: typeof input.diff === "string" ? input.diff : undefined,
@@ -107,17 +154,37 @@ export function buildQueuedRunRequest(projection: RunProjection, signal: AbortSi
 
 const terminalRunStates = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
 
+/**
+ * A worker may finish after a Graph recovery has already moved the durable Run
+ * to a new queued attempt or terminal state. Never let that stale worker write
+ * an evidence/finalization transition into the newer state machine generation.
+ */
+async function beginEvidenceCollection(
+  runId: string,
+  payload: Record<string, unknown>,
+  expectedWorkerAttemptId?: string
+) {
+  const current = await runEventStore.get(runId);
+  if (current?.state !== "running") return false;
+  if (expectedWorkerAttemptId && current.activeExecutionAttemptId !== expectedWorkerAttemptId) return false;
+  await appendSystemRunEvent(runId, "evidence_collecting", {
+    ...payload,
+    ...(expectedWorkerAttemptId ? { workerAttemptId: expectedWorkerAttemptId } : {})
+  });
+  return true;
+}
+
 async function dispatchParentCoverageRun(projection: RunProjection) {
   const items = await readCoverageItems(projection.id);
   const executable = items.filter((item) => item.disposition === "pending" && item.scenarioId);
   if (!executable.length) {
-    return items.length
-      ? {
-          childRunIds: items.map((item) => item.childRunId).filter((id): id is string => Boolean(id)),
-          pending: false,
-          aggregateNow: true
-        }
-      : undefined;
+    const childRunIds = items.map((item) => item.childRunId).filter((id): id is string => Boolean(id));
+    // A parent without path children has no execution evidence to aggregate.
+    // Never fall through to the legacy direct-run path: that makes a broken
+    // coverage compiler look like a successful single-scenario parent run.
+    return childRunIds.length
+      ? { childRunIds, pending: false, aggregateNow: true }
+      : { childRunIds: [], pending: false, aggregateNow: false, missingChildren: true };
   }
   const children: Array<{ item: (typeof executable)[number]; runId: string; projection: RunProjection }> = [];
   for (const item of executable) {
@@ -202,9 +269,10 @@ async function dispatchParentCoverageRun(projection: RunProjection) {
   return { childRunIds: children.map((item) => item.runId), pending: true };
 }
 
-async function aggregateParentCoverageRun(runId: string) {
+async function aggregateParentCoverageRun(runId: string, expectedGeneration?: number) {
   const parent = await runEventStore.get(runId);
   if (!parent || terminalRunStates.has(parent.state)) return parent;
+  if (expectedGeneration !== undefined && parent.executionGeneration !== expectedGeneration) return parent;
   const coverage = await readCoverageItems(runId);
   const children = coverage.filter((item) => item.childRunId);
   if (!children.length) throw new Error("parent_coverage_children_missing");
@@ -225,19 +293,29 @@ async function aggregateParentCoverageRun(runId: string) {
   const childRunIds = projections.map((item) => item!.id);
   const current = await runEventStore.get(runId);
   if (current?.state === "running") {
-    await appendSystemRunEvent(runId, "evidence_collecting", { childRunIds, aggregate: true });
-    void resumeAgentGraphInBackground(runId, { execution: { childRunIds, aggregate: true } }).catch(() => undefined);
+    // A late aggregation job may race a retry or timeout.  Only the currently
+    // running parent generation may enter evidence collection; otherwise an
+    // old child result could mutate a newly queued parent attempt.
+    if (!await beginEvidenceCollection(runId, { childRunIds, aggregate: true })) return runEventStore.get(runId);
+    void resumeGraphAndQueueIfNeeded(runId, {
+      execution: {
+        childRunIds,
+        aggregate: true,
+        workerAttemptId: current.activeExecutionAttemptId,
+        executionGeneration: current.executionGeneration
+      }
+    });
   }
   return runEventStore.get(runId);
 }
 
-async function scheduleParentAggregation(runId: string) {
+async function scheduleParentAggregation(runId: string, executionGeneration?: number) {
   const connection = redisConnection();
   if (connection) {
     queue ??= new Queue(queueName, { connection });
     await queue.add(
       "aggregate-parent",
-      { runId },
+      { runId, version: executionGeneration },
       {
         jobId: `${runId}-aggregate`,
         delay: 500,
@@ -255,7 +333,7 @@ async function scheduleParentAggregation(runId: string) {
   const deadline = Date.now() + Number(process.env.PARENT_AGGREGATION_TIMEOUT_MS ?? 20 * 60_000);
   const poll = async () => {
     try {
-      await aggregateParentCoverageRun(runId);
+      await aggregateParentCoverageRun(runId, executionGeneration);
     } catch (error) {
       if (error instanceof Error && error.message === "child_runs_pending" && Date.now() < deadline) {
         setTimeout(() => void poll(), 250).unref();
@@ -263,11 +341,11 @@ async function scheduleParentAggregation(runId: string) {
       }
       const current = await runEventStore.get(runId);
       if (current?.state === "running") {
-        await appendSystemRunEvent(runId, "evidence_collecting", {
+        if (!await beginEvidenceCollection(runId, {
           finalStatus: "blocked",
           error: error instanceof Error ? error.message : "parent_aggregation_failed"
-        });
-        void resumeAgentGraphInBackground(runId, {
+        })) return;
+        void resumeGraphAndQueueIfNeeded(runId, {
           execution: {
             finalStatus: "blocked",
             error: error instanceof Error ? error.message : "parent_aggregation_failed"
@@ -279,35 +357,62 @@ async function scheduleParentAggregation(runId: string) {
   setTimeout(() => void poll(), 250).unref();
 }
 
-export async function executeQueuedRun(runId: string, options?: { terminalizeInWorker?: boolean }) {
+export async function executeQueuedRun(runId: string, options?: { expectedVersion?: number }) {
   const initialProjection = await runEventStore.get(runId);
+  if (options?.expectedVersion !== undefined && initialProjection?.version !== options.expectedVersion) {
+    return initialProjection;
+  }
   const graphOwnsFinalization = agentOrchestrationMode(
     typeof initialProjection?.input.projectId === "string" ? initialProjection.input.projectId : undefined
-  ) === "active" && !options?.terminalizeInWorker;
+  ) === "active";
   const lease = await acquireExecutionLease(runId);
   if (!lease) return runEventStore.get(runId);
   const heartbeat = setInterval(() => void lease.heartbeat().then((active) => { if (!active) activeControllers.get(runId)?.abort(); }).catch(() => activeControllers.get(runId)?.abort()), Math.max(1_000, Number(process.env.EXECUTION_LEASE_TTL_MS ?? 30_000) / 3));
   const projection = await runEventStore.get(runId);
+  if (options?.expectedVersion !== undefined && projection?.version !== options.expectedVersion) {
+    clearInterval(heartbeat);
+    await lease.release();
+    return projection;
+  }
   if (!projection || ["cancelled", "completed", "failed", "blocked", "paused"].includes(projection.state)) { clearInterval(heartbeat); await lease.release(); return projection; }
+  // `/v1/runs` normally starts the Graph before a worker can receive a job.
+  // Demo/CLI callers may enqueue a durable Run directly, however. Bootstrap
+  // the same Graph thread once in that case so the worker's evidence event can
+  // resume the authoritative execution node instead of leaving the run in
+  // collecting forever.
+  if (graphOwnsFinalization && !(await getAgentGraphProjection(runId))) {
+    await startAgentGraphForRun(projection);
+  }
   if (projection.state === "queued") await appendSystemRunEvent(runId, "run_preparing");
   const beforeStart = await runEventStore.get(runId);
-  if (beforeStart?.state === "preparing") await appendSystemRunEvent(runId, "run_started");
+  if (beforeStart?.state === "preparing") {
+    await appendSystemRunEvent(runId, "run_started", {
+      workerAttemptId: lease.attemptId,
+      executionGeneration: options?.expectedVersion ?? initialProjection?.version ?? beforeStart.version
+    });
+  }
   const controller = new AbortController();
   activeControllers.set(runId, controller);
   try {
     if (projection.runKind === "parent") {
       const dispatch = await dispatchParentCoverageRun(projection);
+      if (dispatch?.missingChildren) throw new Error("parent_coverage_children_missing");
       if (dispatch?.pending) {
-        await scheduleParentAggregation(runId);
+        await scheduleParentAggregation(runId, options?.expectedVersion ?? initialProjection?.version);
         return runEventStore.get(runId);
       }
       if (dispatch?.aggregateNow) {
-        await appendSystemRunEvent(runId, "evidence_collecting", {
+        if (!await beginEvidenceCollection(runId, {
           childRunIds: dispatch.childRunIds,
           aggregate: true
-        });
-        void resumeAgentGraphInBackground(runId, {
-          execution: { childRunIds: dispatch.childRunIds, aggregate: true }
+        }, lease.attemptId)) return runEventStore.get(runId);
+        void resumeGraphAndQueueIfNeeded(runId, {
+          execution: {
+            childRunIds: dispatch.childRunIds,
+            aggregate: true,
+            workerAttemptId: lease.attemptId,
+            executionGeneration: options?.expectedVersion ?? initialProjection?.version
+          }
         }).catch(() => undefined);
         return runEventStore.get(runId);
       }
@@ -325,12 +430,14 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
           requirement: typeof projection.input.requirement === "string" ? projection.input.requirement : undefined,
           signal: controller.signal
         });
-        await appendSystemRunEvent(runId, "evidence_collecting", { resultRunId: result.id });
+        if (!await beginEvidenceCollection(runId, { resultRunId: result.id }, lease.attemptId)) return runEventStore.get(runId);
         if (graphOwnsFinalization) {
-          void resumeAgentGraphInBackground(runId, {
+          void resumeGraphAndQueueIfNeeded(runId, {
             execution: {
               resultRunId: result.id,
-              executionSucceeded: result.outcomeSummary?.executionSucceeded === true
+              executionSucceeded: result.outcomeSummary?.executionSucceeded === true,
+              workerAttemptId: lease.attemptId,
+              executionGeneration: options?.expectedVersion ?? initialProjection?.version
             }
           }).catch(() => undefined);
           return runEventStore.get(runId);
@@ -363,12 +470,17 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
     const requestedScenarioId = typeof projection.input.scenarioId === "string" ? projection.input.scenarioId : undefined;
     if (requestedScenarioId && queuedRequest.scenarioId !== requestedScenarioId) {
       if (graphOwnsFinalization) {
-        await appendSystemRunEvent(runId, "evidence_collecting", {
+        if (!await beginEvidenceCollection(runId, {
           error: "scenario_handoff_missing",
           requestedScenarioId,
           projectedScenarioId: projection.selectedScenarioId
-        });
-        void resumeAgentGraphInBackground(runId, { execution: { finalStatus: "blocked", error: "scenario_handoff_missing" } }).catch(() => undefined);
+        }, lease.attemptId)) return runEventStore.get(runId);
+        void resumeGraphAndQueueIfNeeded(runId, { execution: {
+          finalStatus: "blocked",
+          error: "scenario_handoff_missing",
+          workerAttemptId: lease.attemptId,
+          executionGeneration: options?.expectedVersion ?? initialProjection?.version
+        } });
         return runEventStore.get(runId);
       }
       const terminal = await appendSystemRunEvent(runId, "run_blocked", {
@@ -381,8 +493,13 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
     }
     if (!queuedRequest.scenarioId) {
       if (graphOwnsFinalization) {
-        await appendSystemRunEvent(runId, "evidence_collecting", { error: "scenario_handoff_missing" });
-        void resumeAgentGraphInBackground(runId, { execution: { finalStatus: "blocked", error: "scenario_handoff_missing" } }).catch(() => undefined);
+        if (!await beginEvidenceCollection(runId, { error: "scenario_handoff_missing" }, lease.attemptId)) return runEventStore.get(runId);
+        void resumeGraphAndQueueIfNeeded(runId, { execution: {
+          finalStatus: "blocked",
+          error: "scenario_handoff_missing",
+          workerAttemptId: lease.attemptId,
+          executionGeneration: options?.expectedVersion ?? initialProjection?.version
+        } });
         return runEventStore.get(runId);
       }
       const terminal = await appendSystemRunEvent(runId, "run_blocked", { finalStatus: "blocked", error: "scenario_handoff_missing" });
@@ -390,12 +507,14 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
     }
     const result = await runVisualGrayTest(queuedRequest);
     await persistExecutionResult(runId, result);
-    await appendSystemRunEvent(runId, "evidence_collecting", { resultRunId: result.id });
+    if (!await beginEvidenceCollection(runId, { resultRunId: result.id }, lease.attemptId)) return runEventStore.get(runId);
     if (graphOwnsFinalization) {
-      void resumeAgentGraphInBackground(runId, {
+      void resumeGraphAndQueueIfNeeded(runId, {
         execution: {
           resultRunId: result.id,
-          executionSucceeded: true
+          executionSucceeded: true,
+          workerAttemptId: lease.attemptId,
+          executionGeneration: options?.expectedVersion ?? initialProjection?.version
         }
       }).catch(() => undefined);
       return runEventStore.get(runId);
@@ -417,14 +536,24 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
     const current = await runEventStore.get(runId);
     if (current?.state === "paused" || current?.state === "cancelled") return current;
     const message = error instanceof Error ? error.message : String(error);
-    const blocked = /runtime_unavailable|permission|environment|command_not_found|health|port|dependency/.test(message);
+    // A failure to atomically publish an Artifact v2 is infrastructure, not a
+    // product assertion failure. Preserve local diagnostic output but block the
+    // formal result so Graph can report an actionable object-store issue rather
+    // than opening a target-project repair session.
+    const blocked = /runtime_unavailable|permission|environment|command_not_found|health|port|dependency|artifact[_-]?object|object[ _-]?store|minio|\bs3\b|econnrefused|fetch failed/i.test(message);
     const finalStatus = blocked ? "blocked" : "fail";
     if (graphOwnsFinalization) {
       const latest = await runEventStore.get(runId);
-      if (latest?.state === "running") {
-        await appendSystemRunEvent(runId, "evidence_collecting", { error: message, finalStatus });
-      }
-      void resumeAgentGraphInBackground(runId, { execution: { finalStatus, error: message } }).catch(() => undefined);
+      const accepted = latest?.state === "running"
+        ? await beginEvidenceCollection(runId, { error: message, finalStatus }, lease.attemptId)
+        : false;
+      if (!accepted) return runEventStore.get(runId);
+      void resumeGraphAndQueueIfNeeded(runId, { execution: {
+        finalStatus,
+        error: message,
+        workerAttemptId: lease.attemptId,
+        executionGeneration: options?.expectedVersion ?? initialProjection?.version
+      } });
       return runEventStore.get(runId);
     }
     const terminal = await appendSystemRunEvent(runId, blocked ? "run_blocked" : "run_failed", {
@@ -439,9 +568,9 @@ export async function executeQueuedRun(runId: string, options?: { terminalizeInW
   }
 }
 
-async function processJob(job: Job<{ runId: string }>) {
-  if (job.name === "aggregate-parent") return aggregateParentCoverageRun(job.data.runId);
-  return executeQueuedRun(job.data.runId);
+async function processJob(job: Job<{ runId: string; version?: number }>) {
+  if (job.name === "aggregate-parent") return aggregateParentCoverageRun(job.data.runId, job.data.version);
+  return executeQueuedRun(job.data.runId, { expectedVersion: job.data.version });
 }
 
 export async function startRunWorker() {
@@ -465,7 +594,7 @@ export async function enqueueRun(runId: string, version: number) {
   if (process.env.NODE_ENV === "production") throw new Error("REDIS_URL is required in production");
   if (inProcessJobs.has(runId)) return;
   inProcessJobs.add(runId);
-  queueMicrotask(() => void executeQueuedRun(runId).finally(() => inProcessJobs.delete(runId)));
+  queueMicrotask(() => void executeQueuedRun(runId, { expectedVersion: version }).finally(() => inProcessJobs.delete(runId)));
 }
 
 export function interruptRun(runId: string) {

@@ -99,11 +99,13 @@ export function AuthenticatedArtifactLink({
 export function AuthenticatedArtifactImage({
   artifactUrl,
   alt,
-  onLoadIssue
+  onLoadIssue,
+  onImageClick
 }: {
   artifactUrl?: string;
   alt: string;
   onLoadIssue?: (message: string | null) => void;
+  onImageClick?: (input: { x: number; y: number; imageWidth: number; imageHeight: number }) => void;
 }) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -155,7 +157,33 @@ export function AuthenticatedArtifactImage({
   }
   return objectUrl ? (
     <div className="authenticated-artifact-image">
-      <img src={objectUrl} alt={alt} />
+      <img
+        src={objectUrl}
+        alt={alt}
+        onClick={onImageClick ? (event) => {
+          const image = event.currentTarget;
+          const rect = image.getBoundingClientRect();
+          const naturalWidth = image.naturalWidth || rect.width;
+          const naturalHeight = image.naturalHeight || rect.height;
+          // `object-fit: contain` may letterbox the live frame. Translate the
+          // click through the painted image rectangle, not the outer element,
+          // so user takeover targets the same Playwright coordinates.
+          const scale = Math.min(rect.width / naturalWidth, rect.height / naturalHeight);
+          const paintedWidth = naturalWidth * scale;
+          const paintedHeight = naturalHeight * scale;
+          const offsetX = (rect.width - paintedWidth) / 2;
+          const offsetY = 0; // shared browser uses object-position: top center
+          const localX = event.clientX - rect.left - offsetX;
+          const localY = event.clientY - rect.top - offsetY;
+          if (localX < 0 || localY < 0 || localX > paintedWidth || localY > paintedHeight) return;
+          onImageClick({
+            x: localX / scale,
+            y: localY / scale,
+            imageWidth: naturalWidth,
+            imageHeight: naturalHeight
+          });
+        } : undefined}
+      />
       {error ? <span className="artifact-refresh-warning">截图刷新受限，正在保留上一帧。</span> : null}
     </div>
   ) : <div className="live-view-error">正在加载截图...</div>;

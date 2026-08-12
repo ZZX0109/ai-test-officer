@@ -88,7 +88,7 @@ services:
       DATABASE_URL: postgresql://ai_test_officer:${POSTGRES_PASSWORD}@postgres:5432/ai_test_officer
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       RUN_WORKER_IN_PROCESS: "0"
-      AGENT_ORCHESTRATION_MODE: shadow
+      AGENT_ORCHESTRATION_MODE: active
       LANGGRAPH_POSTGRES_SCHEMA: langgraph
       REPAIR_SANDBOX_ENABLED: "true"
       REPAIR_HOST_APPLY_ENABLED: "false"

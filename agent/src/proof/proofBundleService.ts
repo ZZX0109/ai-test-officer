@@ -28,7 +28,12 @@ export type { MachineGateDraft } from "./proofBundleValidator.js";
  * `needs-human-review`.
  */
 
-export const PROOF_VALIDATION_VERSION = "1.0.0";
+// 1.1.0 intentionally excludes report self-references from proof identity.
+// Reports and manifests are generated after the runtime artifacts they
+// describe, so including them creates a self-referential identity that changes
+// during ordinary report generation. They remain visible in the integrity
+// report, but cannot alter a proof minted from the same browser attempt.
+export const PROOF_VALIDATION_VERSION = "1.1.0";
 
 export interface VerifiedMachineGate extends MachineGateDraft {
   evidenceComplete: boolean;
@@ -64,18 +69,42 @@ export interface FinalizeProofBundleResult {
  * The id is a pure function of (runId, scenarioId, attemptId, input hash,
  * validation version). Re-running the same attempt with identical evidence and
  * verdict therefore yields the *same* id, which makes the credibility ledger
- * insert idempotent (a shadow / retry cannot forge a second authoritative
- * record, and a re-mint overwrites rather than duplicates).
+ * insert idempotent. The ledger is append-only: a later mint with different
+ * facts for the same attempt is a credibility conflict, never an overwrite.
  */
-function buildProofBundleId(input: FinalizeProofBundleInput): string {
+export function buildProofBundleId(input: FinalizeProofBundleInput): string {
+  const artifactProjection = (input.artifactsV2 ?? [])
+    .map((item) => ({
+      id: item.id,
+      scenarioId: item.scenarioId,
+      attemptId: item.attemptId,
+      kind: item.kind,
+      origin: item.origin,
+      sha256: item.integrity.sha256,
+      sizeBytes: item.integrity.sizeBytes,
+      mediaType: item.integrity.mediaType
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const integrityProjection = input.artifactIntegrity
+    ? {
+        missing: input.artifactIntegrity.summary.missing,
+        unreadable: input.artifactIntegrity.summary.unreadable,
+        pathEscapes: input.artifactIntegrity.summary.pathEscapes,
+        hashMismatches: input.artifactIntegrity.summary.hashMismatches
+      }
+    : undefined;
   const inputHash = canonicalSha256({
     status: input.draft.status,
     reasons: [...(input.draft.reasons ?? [])].sort(),
     reasonDetails: input.draft.reasonDetails ?? [],
     assertionFailures: [...(input.draft.assertionFailures ?? [])].sort(),
     evidenceIds: (input.evidence ?? []).map((item) => item.id).sort(),
-    artifactIds: (input.artifactsV2 ?? []).map((item) => item.id).sort(),
-    artifactIntegrity: input.artifactIntegrity ? input.artifactIntegrity.items : undefined,
+    artifacts: artifactProjection,
+    // `artifact_integrity.json`, reports and the run bundle are expected
+    // self-references. Only the security-relevant counters belong in the
+    // immutable proof identity; report-only item lists are intentionally not
+    // included because they are written after the proof is minted.
+    artifactIntegrity: integrityProjection,
     judgeReportSummary: input.judgeReport
       ? {
           releaseVerdict: input.judgeReport.releaseJudge?.verdict,
@@ -153,6 +182,36 @@ export function proofCredibility(
     evidenceComplete: machineGate.evidenceComplete,
     gateEligible,
     machineGate
+  };
+}
+
+/**
+ * Audited adapter for the execution-persistence boundary. Keeping this object
+ * construction next to the verifier prevents callers from minting or
+ * reshaping credibility fields in business code.
+ */
+export function proofPersistence(
+  finalized: Pick<FinalizeProofBundleResult, "verdict" | "gateEligible">
+): { verdict: ProofVerdict; gateEligible: boolean } {
+  return { verdict: finalized.verdict, gateEligible: finalized.gateEligible };
+}
+
+/**
+ * Audited projection used when a verified phase (for example the shared
+ * browser phase of a mixed parent run) is represented as a contributor to a
+ * later aggregate. Keeping these credibility field assignments in the proof
+ * boundary prevents aggregation code from manually asserting them.
+ */
+export function proofContributorCredibility(input: {
+  artifactIntegrityVerified: boolean;
+  evidenceGrounded: boolean;
+}): {
+  artifactIntegrityVerified: boolean;
+  evidenceGrounded: boolean;
+} {
+  return {
+    artifactIntegrityVerified: input.artifactIntegrityVerified,
+    evidenceGrounded: input.evidenceGrounded
   };
 }
 

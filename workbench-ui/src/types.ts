@@ -59,7 +59,7 @@ export interface RunProjection {
 
 export interface LlmInvocation {
   id: string;
-  purpose: "planning" | "judging" | "triage" | "repairing" | "assistant";
+  purpose: "planning" | "browser-action" | "judging" | "triage" | "repairing" | "assistant";
   provider: string;
   model: string;
   requestedModel?: string;
@@ -418,13 +418,29 @@ export type AssistantSuggestedAction =
 export interface PlannedBusinessFlow {
   id: string;
   title: string;
-  kind: "page" | "component" | "api" | "scenario";
+  kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
   target: string;
   status: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
   confidence: "high" | "medium" | "low";
   reason: string;
   scenarioId?: string;
   requiredInformation: string[];
+  sourceNodeIds?: string[];
+  sourceCount?: number;
+  pathVersion?: "2.0";
+  summary?: string;
+  surfaces?: Array<"page" | "api" | "data" | "background-task">;
+  risk?: "low" | "medium" | "high";
+  roles?: string[];
+  actionCandidates?: string[];
+  oracleCandidates?: string[];
+  requiredEvidenceKinds?: string[];
+  sourceLocations?: Array<{
+    file: string;
+    line?: number;
+    parser: string;
+    sourceHash: string;
+  }>;
 }
 
 export interface PlanningConversationResult {
@@ -433,17 +449,30 @@ export interface PlanningConversationResult {
   reply: string;
   clarificationQuestions: string[];
   businessFlows: PlannedBusinessFlow[];
+  businessFlowPage?: {
+    cursor?: string;
+    nextCursor?: string;
+    total: number;
+    limit: number;
+  };
   coverage: {
     discovered: number;
     executable: number;
     autoBindable: number;
     needsInput: number;
     gaps: number;
+    sourceCandidates?: number;
     confidence: "high" | "medium" | "low";
     scope: "targeted" | "comprehensive";
   };
   plan: GrayPlan;
   analysis: IntakeAnalysis;
+  businessGraph?: {
+    version: "2.0";
+    sourceFileCount: number;
+    projectSnapshotHash: string;
+    diagnostics: string[];
+  };
   recommendedScenarioId?: string;
   llmPlanning?: {
     status: "not_configured" | "passed" | "failed";
@@ -998,6 +1027,9 @@ export interface ProjectRecoveryResult {
   runtime: ProjectRuntimeStatus;
   events: ProjectRecoveryEvent[];
   discovery?: DiscoveryScanResult;
+  /** Model advice is informative only. Applying a candidate remains an
+   * explicit user action and is constrained by the local command allowlist. */
+  advice?: RuntimeRecoveryAdvice;
   userAction: string;
   updatedAt: string;
 }
@@ -1405,6 +1437,10 @@ export interface ProjectGrant {
 export type AgentGraphNode =
   | "intake"
   | "discover"
+  | "diagnose-runtime"
+  | "choose-recovery"
+  | "recover"
+  | "verify-recovery"
   | "build-coverage-map"
   | "plan"
   | "compile"
@@ -1416,6 +1452,8 @@ export type AgentGraphNode =
   | "triage-failure"
   | "selective-judge"
   | "repair"
+  | "retry-path"
+  | "continue-paths"
   | "finalize";
 
 export type AgentInterruptOwner = "agent" | "user" | "environment" | "developer";
@@ -1487,7 +1525,84 @@ export interface AgentGraphProjection {
   lastError?: { code: string; message: string; node?: AgentGraphNode };
   tokenUsage: number;
   repairSessionId?: string;
+  recoveryDecision?: {
+    action: string;
+    reason: string;
+    confidence: "high" | "medium" | "low";
+    evidenceRefs: string[];
+    expectedState: string;
+    userQuestion?: string;
+  };
+  recoveryResult?: {
+    actionId: string;
+    action: string;
+    status: "accepted" | "running" | "completed" | "failed" | "blocked" | "needs-confirmation";
+    evidenceRefs: string[];
+    nextState: string;
+    errorCode?: string;
+    userMessage?: string;
+  };
+  recoveryAttempts?: Record<string, number>;
+  currentCoverageItemId?: string;
+  currentAttemptId?: string;
+  observation?: Record<string, unknown>;
+  browserSession?: BrowserSession;
+  browserObservation?: BrowserObservation;
+  browserDecision?: BrowserActionDecision;
+  browserActionResult?: BrowserActionResult;
+  browserAgentRequired?: boolean;
+  browserLoopComplete?: boolean;
+  continuationPasses?: number;
+  remainingPathCount?: number;
   updatedAt: string;
+}
+
+export interface BrowserSession {
+  sessionId: string;
+  runId: string;
+  attemptId: string;
+  status: "starting" | "ready" | "waiting-user" | "recovering" | "closed" | "failed";
+  owner: "agent" | "user" | "waiting-user";
+  currentUrl?: string;
+  lastObservationId?: string;
+  actionCount: number;
+  decisionCount: number;
+  rebindCount: number;
+  updatedAt: string;
+}
+
+export interface BrowserObservation {
+  observationId: string;
+  runId: string;
+  attemptId: string;
+  finalUrl: string;
+  title: string;
+  pageFingerprint: string;
+  controls: Array<{ controlId: string; kind: string; role?: string; accessibleName?: string; label?: string; visible: boolean; disabled: boolean }>;
+  consoleErrors: string[];
+  pageErrors: string[];
+  failedRequests: Array<{ method: string; url: string; status?: number; failure?: string }>;
+  evidenceRefs: string[];
+  createdAt: string;
+}
+
+export interface BrowserActionDecision {
+  decisionId: string;
+  status: "act" | "complete" | "blocked" | "needs-confirmation";
+  summary: string;
+  actions: Array<{ actionId: string; action: string; purpose: string; expectedChange: string; risk: string }>;
+  evidenceRefs: string[];
+  userQuestion?: string;
+}
+
+export interface BrowserActionResult {
+  resultId: string;
+  actionId: string;
+  coverageItemId: string;
+  status: "completed" | "failed" | "blocked" | "needs-confirmation";
+  summary: string;
+  evidenceRefs: string[];
+  oracleResults: Array<{ oracleId: string; passed: boolean; actual: string; evidenceRefs: string[] }>;
 }
 
 export interface RepairFileChange {
@@ -1543,6 +1658,15 @@ export interface RepairFileContent {
   baseSha256?: string;
   patchedSha256?: string;
   version: number;
+  risk: RepairFileChange["risk"];
+  riskReasons: string[];
+  editable: boolean;
+}
+
+/** A filtered source-tree entry from the repair sandbox, never a host path. */
+export interface RepairWorkspaceFile {
+  path: string;
+  changed: boolean;
   risk: RepairFileChange["risk"];
   riskReasons: string[];
   editable: boolean;

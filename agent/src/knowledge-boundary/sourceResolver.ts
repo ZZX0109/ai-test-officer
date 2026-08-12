@@ -6,7 +6,8 @@ import {
   type KnowledgeClaim,
   type LlmKnowledgeContext
 } from "@ai-test-officer/contracts";
-import { readRunBundle } from "../evidenceStore.js";
+import { readEvidence, readRunBundle } from "../evidenceStore.js";
+import { readBrowserArtifacts } from "../browser-agent/store.js";
 import { getProject } from "../projectAdapter.js";
 import { readDiscoveryPageObservation } from "../pageObservationStore.js";
 import { listRepairSessions } from "../repairWorkspace.js";
@@ -222,11 +223,18 @@ async function resolveSource(
     return;
   }
   if (kind === "evidence" || kind === "artifact" || kind === "evidence-or-artifact") {
-    const bundle = await loadBundle(runId);
-    if (!bundle) throw new Error("knowledge_run_bundle_not_found");
     const id = value;
-    const evidence = bundle.evidence.find((item) => item.id === id);
-    const artifact = bundle.artifactsV2?.find((item) => item.id === id);
+    const bundle = await loadBundle(runId);
+    // During an active browser loop the final Run bundle intentionally does
+    // not exist yet.  The observation nevertheless already has committed
+    // Artifact v2 + Evidence records, so validate that append-only in-progress
+    // pair instead of downgrading a real page fact to `unknown`.
+    const inProgressEvidence = runId ? await readEvidence(runId).catch(() => []) : [];
+    const inProgressArtifacts = runId ? await readBrowserArtifacts(runId).catch(() => []) : [];
+    const evidence = bundle?.evidence.find((item) => item.id === id)
+      ?? inProgressEvidence.find((item) => item.id === id);
+    const artifact = bundle?.artifactsV2?.find((item) => item.id === id)
+      ?? inProgressArtifacts.find((item) => item.id === id);
     if (!evidence && !artifact) throw new Error("knowledge_evidence_not_found");
     const scoped = evidence ?? artifact;
     if (!scoped) throw new Error("knowledge_evidence_not_found");
@@ -239,7 +247,8 @@ async function resolveSource(
     }
     const linkedArtifacts = evidence
       ? (evidence.artifactIds ?? []).map((artifactId) =>
-          bundle.artifactsV2?.find((item) => item.id === artifactId)
+          bundle?.artifactsV2?.find((item) => item.id === artifactId)
+          ?? inProgressArtifacts.find((item) => item.id === artifactId)
         )
       : [artifact];
     if (linkedArtifacts.some((item) => !item)) {

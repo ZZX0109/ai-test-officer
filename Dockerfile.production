@@ -9,7 +9,15 @@ COPY --chown=pwuser:pwuser agent/package.json agent/package.json
 COPY --chown=pwuser:pwuser app-under-test/package.json app-under-test/package.json
 COPY --chown=pwuser:pwuser workbench-ui/package.json workbench-ui/package.json
 COPY --chown=pwuser:pwuser packages packages
-RUN npm ci
+# Registry connections may be reset during a large Playwright image build.
+# Reuse the BuildKit cache and retry only transient fetches; integrity or
+# lockfile failures still fail immediately.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci \
+      --fetch-retries=5 \
+      --fetch-retry-factor=2 \
+      --fetch-retry-mintimeout=1000 \
+      --fetch-retry-maxtimeout=20000
 COPY --chown=pwuser:pwuser . .
 RUN npm run build
 

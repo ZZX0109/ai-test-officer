@@ -798,6 +798,32 @@ button:disabled {
   font-weight: 650;
 }
 
+.progressive-list-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-subtle);
+  background: rgba(248, 250, 252, 0.9);
+}
+
+.progressive-list-footer span {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.progressive-list-footer button,
+.sidebar-planning-result .progressive-list-footer button {
+  min-height: 28px;
+  margin: 0;
+  padding: 4px 9px;
+  border-color: var(--border);
+  background: #fff;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
 .planning-flow {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1729,6 +1755,15 @@ ol {
   flex-direction: column;
   align-items: center;
   gap: 14px;
+}
+
+.shared-browser-starting small {
+  position: relative;
+  z-index: 2;
+  max-width: 520px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.6;
 }
 
 .live-view-scanner {
@@ -3935,6 +3970,32 @@ select:focus {
   overflow: hidden;
 }
 
+/* Preview and Code deliberately occupy the same centre frame.  The embedded
+   code workspace inherits the live-view toolbar instead of adding a second
+   card, margin or “return to preview” header beneath it. */
+.simple-live-view > .repair-workspace.embedded {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-self: stretch;
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.simple-live-view > .repair-workspace.embedded .repair-workspace-grid {
+  flex: 1;
+  min-height: clamp(478px, 58vh, 760px);
+}
+
+.simple-live-view > .repair-workspace.embedded .repair-diff .monaco-diff-editor,
+.simple-live-view > .repair-workspace.embedded .repair-diff .overflow-guard {
+  min-height: 0 !important;
+}
+
 .repair-workspace-header,
 .repair-workspace-actions {
   display: flex;
@@ -3963,6 +4024,10 @@ select:focus {
   min-height: 64vh;
 }
 
+.repair-workspace-grid.project-browse {
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+}
+
 .repair-file-tree,
 .repair-review {
   padding: 16px;
@@ -3971,6 +4036,8 @@ select:focus {
 
 .repair-file-tree {
   border-right: 1px solid #e5eaf2;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .repair-review {
@@ -3985,10 +4052,93 @@ select:focus {
 }
 
 .repair-file-list {
-  display: grid;
-  gap: 5px;
-  margin-top: 14px;
+  display: block;
+  max-height: 58vh;
+  margin: 10px -10px 0;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
+
+.project-tree-heading {
+  display: grid;
+  gap: 2px;
+}
+
+.project-tree-heading strong {
+  color: #334155;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.project-tree-heading span {
+  color: #7b8798;
+  font-size: 10px;
+}
+
+.project-tree-branch {
+  display: block;
+}
+
+.repair-file-list .project-tree-row {
+  display: flex;
+  width: 100%;
+  min-height: 25px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  padding-top: 3px;
+  padding-right: 7px;
+  padding-bottom: 3px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #44546a;
+  text-align: left;
+  box-shadow: none;
+}
+
+.repair-file-list .project-tree-row.folder,
+.repair-file-list .project-tree-row.file {
+  justify-content: flex-start;
+}
+
+.repair-file-list .project-tree-row:hover {
+  background: #edf1f6;
+}
+
+.repair-file-list .project-tree-row.active {
+  background: #dbeafe;
+  color: #174ea6;
+}
+
+.project-tree-row.folder > span:last-child,
+.project-tree-row.file .repair-file-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-tree-row.folder svg:nth-of-type(2) {
+  color: #d39a2c;
+}
+
+.project-tree-row.file > svg {
+  flex: 0 0 auto;
+  color: #64748b;
+}
+
+.repair-change-letter {
+  margin-left: auto;
+  color: #b36b00;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.repair-change-letter.added { color: #168454; }
+.repair-change-letter.deleted { color: #c43333; }
 
 .repair-file-list button {
   display: grid;
@@ -4093,6 +4243,7 @@ select:focus {
 
 .repair-warning,
 .repair-validation,
+.repair-rationale,
 .repair-message {
   margin-top: 12px;
   padding: 10px;
@@ -4108,6 +4259,9 @@ select:focus {
 .repair-validation.blocked { background: #feecec; color: #982828; }
 .repair-validation p { margin: 5px 0 0; }
 .repair-validation code { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+.repair-rationale { background: #eef5ff; color: #365171; }
+.repair-rationale p { margin: 7px 0; }
+.repair-rationale small { display: block; margin-top: 9px; color: #59728e; }
 
 .repair-workspace-actions {
   border-top: 1px solid #e5eaf2;
@@ -4787,6 +4941,7 @@ select:focus {
 .simple-live-view {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   min-height: 340px;
   margin: 0;
   border: 0;
@@ -4854,6 +5009,57 @@ select:focus {
   gap: 5px;
 }
 
+.centre-surface-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid rgba(15, 23, 42, 0.09);
+  border-radius: 8px;
+  background: #f3f5f7;
+}
+
+.live-view-toolbar .centre-surface-switch button {
+  min-height: 25px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: #64748b;
+}
+
+.live-view-toolbar .centre-surface-switch button.active {
+  background: #ffffff;
+  color: #0f172a;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+
+.code-workspace-empty {
+  display: grid;
+  min-height: clamp(520px, 64vh, 820px);
+  align-content: center;
+  justify-items: start;
+  gap: 18px;
+  margin: 0;
+  padding: clamp(28px, 7vw, 88px);
+  border: 0;
+  border-radius: 0;
+  background:
+    linear-gradient(90deg, rgba(148, 163, 184, 0.11) 1px, transparent 1px),
+    linear-gradient(rgba(148, 163, 184, 0.11) 1px, transparent 1px),
+    #f8fafc;
+  background-size: 24px 24px;
+}
+
+.code-workspace-empty header {
+  display: flex;
+  width: min(760px, 100%);
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.code-workspace-empty h3 { margin: 5px 0 8px; font-size: clamp(21px, 2.2vw, 28px); }
+.code-workspace-empty p { max-width: 640px; margin: 0; color: #64748b; line-height: 1.7; }
+
 .live-view-content {
   position: relative;
   display: grid;
@@ -4881,11 +5087,58 @@ select:focus {
   object-fit: contain;
 }
 
-/* The embedded target is a read-only execution mirror. Playwright controls
-   the isolated browser; the preview itself is not a second interactive input
-   surface. */
+/* The embedded target is the in-app operator surface. Playwright remains the
+   isolated automation context, while users may interact for login/recovery. */
 .live-view-content > iframe.live-view-passive-frame {
-  pointer-events: none;
+  pointer-events: auto;
+}
+
+.shared-browser-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  color: #526071;
+}
+
+.shared-browser-controls input {
+  width: min(240px, 20vw);
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid #d6dde7;
+  border-radius: 7px;
+  background: #fff;
+  font: inherit;
+}
+
+.shared-browser-controls button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #fff;
+  color: #263547;
+}
+
+.shared-browser-view .authenticated-artifact-image,
+.shared-browser-view .authenticated-artifact-image img {
+  width: 100%;
+  height: 100%;
+}
+
+.shared-browser-view .authenticated-artifact-image img {
+  display: block;
+  object-fit: contain;
+  object-position: top center;
+  background: #eef2f6;
+}
+
+.shared-browser-view.user-controlled .authenticated-artifact-image img {
+  cursor: crosshair;
+  outline: 2px solid rgba(37, 99, 235, 0.45);
+  outline-offset: -2px;
 }
 
 .live-capture-badge {
@@ -4907,6 +5160,27 @@ select:focus {
 .live-capture-badge.waiting {
   background: rgba(37, 99, 235, 0.86);
 }
+
+.agent-live-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.agent-live-status strong { color: var(--text-primary); }
+.agent-live-status__dot { width: 7px; height: 7px; border-radius: 50%; background: #94a3b8; }
+.agent-live-status__dot--running { background: #2563eb; box-shadow: 0 0 0 4px rgba(37, 99, 235, .12); }
+.agent-live-status__dot--interrupted { background: #d97706; }
+.agent-live-status__dot--failed { background: #dc2626; }
+.agent-live-status__dot--completed { background: #16a34a; }
 
 .simple-live-view .live-view-placeholder {
   flex: 1;
@@ -6605,3 +6879,23 @@ textarea,
 
 .interrupt-decision-hint { font-size: 11px; color: var(--text-secondary, #6a7c93); }
 .interrupt-decision-error { font-size: 12px; color: var(--red, #b03a3a); }
+
+.planning-flow-evidence {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #dbe4ef);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-secondary, #fff) 82%, #eef5ff);
+  color: var(--text-secondary, #52627a);
+  font-size: 12px;
+}
+
+.planning-flow-evidence summary {
+  cursor: pointer;
+  color: var(--text-primary, #263851);
+  font-weight: 650;
+}
+
+.planning-flow-evidence p { margin: 7px 0 0; line-height: 1.55; }
+.planning-flow-evidence ul { margin: 7px 0 0; padding-left: 18px; max-height: 176px; overflow: auto; }
+.planning-flow-evidence li { margin: 3px 0; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; }

@@ -131,6 +131,12 @@ export async function testProjectAdapter() {
   });
   assert.equal(resolvedRuntimeTarget.frontendUrl, "http://127.0.0.1:65403");
   assert.equal(resolvedRuntimeTarget.healthCheckUrl, "http://127.0.0.1:65403");
+  const isolatedBenchmarkTarget = await resolveProjectTarget({
+    projectId: runtimeTargetProject.id,
+    appUrl: "http://127.0.0.1:65404/?fixtureVariantId=fxv_test",
+    preferAppUrl: true
+  });
+  assert.equal(isolatedBenchmarkTarget.frontendUrl, "http://127.0.0.1:65404/?fixtureVariantId=fxv_test", "a benchmark-owned service URL must not be overwritten by a saved project port");
   recordProjectRuntimeStatus({
     projectId: runtimeTargetProject.id,
     status: "stopped",

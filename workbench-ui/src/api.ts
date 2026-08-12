@@ -2,6 +2,10 @@ import type {
   BotDelivery,
   AuditStoreStatus,
   AgentGraphProjection,
+  BrowserActionDecision,
+  BrowserActionResult,
+  BrowserObservation,
+  BrowserSession,
   RepairDecisionAnswer,
   BenchmarkSummary,
   CommitCheckResult,
@@ -32,6 +36,7 @@ import type {
   RepairFileContent,
   RepairPlanData,
   RepairSession,
+  RepairWorkspaceFile,
   RunBundle,
   RunBundleDownloadManifest,
   RunHistoryEntry,
@@ -69,6 +74,63 @@ export function getRunAgent(runId: string) {
   return request<{ agent: AgentGraphProjection | null }>(`/v1/runs/${encodeURIComponent(runId)}/agent`);
 }
 
+export function getRunBrowserSession(runId: string) {
+  return request<{ session: BrowserSession | null }>(`/v1/runs/${encodeURIComponent(runId)}/browser-session`);
+}
+
+export function getRunBrowserObservations(runId: string) {
+  return request<{ observations: BrowserObservation[] }>(`/v1/runs/${encodeURIComponent(runId)}/browser-observations`);
+}
+
+export function getRunBrowserActions(runId: string) {
+  return request<{ decisions: BrowserActionDecision[]; actions: BrowserActionResult[] }>(`/v1/runs/${encodeURIComponent(runId)}/browser-actions`);
+}
+
+export function acquireRunBrowserControl(runId: string) {
+  return request<{ session: BrowserSession }>(`/v1/runs/${encodeURIComponent(runId)}/browser-control/acquire`, { method: "POST", body: JSON.stringify({}) });
+}
+
+export function releaseRunBrowserControl(runId: string) {
+  return request<{ session: BrowserSession }>(`/v1/runs/${encodeURIComponent(runId)}/browser-control/release`, { method: "POST", body: JSON.stringify({}) });
+}
+
+export function sendRunBrowserInput(runId: string, input: { kind: "click" | "type" | "press" | "scroll"; x?: number; y?: number; text?: string; key?: "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown" | "Space"; deltaY?: number }) {
+  return request<{ observation: BrowserObservation }>(`/v1/runs/${encodeURIComponent(runId)}/browser-input`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function getRunRecoveryActions(runId: string) {
+  return request<{
+    decisions: Array<Record<string, unknown>>;
+    actions: Array<Record<string, unknown>>;
+    observations: Array<Record<string, unknown>>;
+  }>(`/v1/runs/${encodeURIComponent(runId)}/recovery-actions`);
+}
+
+export function getRunObservations(runId: string) {
+  return request<{ observations: Array<Record<string, unknown>> }>(`/v1/runs/${encodeURIComponent(runId)}/observations`);
+}
+
+export function recoverRun(runId: string, payload: { approved?: boolean; action?: string } = {}) {
+  return request<{ accepted: boolean; runId: string; agent: AgentGraphProjection | null }>(`/v1/runs/${encodeURIComponent(runId)}/recover`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function retryRunPath(runId: string, pathId: string) {
+  return request<{ accepted: boolean; pathId: string }>(`/v1/runs/${encodeURIComponent(runId)}/paths/${encodeURIComponent(pathId)}/retry`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export function continueRun(runId: string, approved = true) {
+  return request<{ accepted: boolean }>(`/v1/runs/${encodeURIComponent(runId)}/continue`, {
+    method: "POST",
+    body: JSON.stringify({ approved })
+  });
+}
+
 export function getRunCoverage(runId: string) {
   return request<{
     coverage: CoverageItem[];
@@ -83,7 +145,7 @@ export function getRunLlmCalls(runId: string) {
     budgetLedger: {
       budget: { maxTotalTokens: number; totalTimeoutMs: number; maxJudgeCalls: number };
       reserved: { tokens: number; wallClockMs: number };
-      consumed: { plannerCalls: number; judgeCalls: number; triageCalls: number; repairCalls: number; tokens: number; wallClockMs: number; estimatedCostUsd: number | null };
+      consumed: { plannerCalls: number; browserActionCalls: number; judgeCalls: number; triageCalls: number; repairCalls: number; tokens: number; wallClockMs: number; estimatedCostUsd: number | null };
     };
     summary: { count: number; totalTokens: number; cost: number | "unknown"; retries: number; failures: number };
   }>(`/v1/runs/${encodeURIComponent(runId)}/llm-calls`);
@@ -304,8 +366,23 @@ export function createRunRepair(
   });
 }
 
+export function createProjectCodeSession(
+  projectId: string,
+  input: string | { summary?: string; autoAnalyze?: boolean; credentialId?: string } = {}
+) {
+  const payload = typeof input === "string" ? { summary: input } : input;
+  return request<{ repair: RepairSession }>(`/v1/projects/${encodeURIComponent(projectId)}/code-sessions`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function getRepairSession(id: string) {
   return request<{ repair: RepairSession }>(`/v1/repair-sessions/${encodeURIComponent(id)}`);
+}
+
+export function listRepairWorkspaceFiles(id: string) {
+  return request<{ files: RepairWorkspaceFile[] }>(`/v1/repair-sessions/${encodeURIComponent(id)}/files`);
 }
 
 export function getRepairFile(id: string, filePath: string) {
@@ -325,10 +402,10 @@ export function updateRepairFile(
   );
 }
 
-export function validateRepair(id: string) {
+export function validateRepair(id: string, allowNetworkInstall = false) {
   return request<{ repair: RepairSession }>(`/v1/repair-sessions/${encodeURIComponent(id)}/validate`, {
     method: "POST",
-    body: "{}"
+    body: JSON.stringify({ allowNetworkInstall })
   });
 }
 
@@ -562,6 +639,21 @@ export function continuePlanningConversation(payload: {
   });
 }
 
+export function getPlanningFlowPage(payload: {
+  planningId: string;
+  projectId: string;
+  cursor?: string;
+  limit?: number;
+}) {
+  const query = new URLSearchParams({ projectId: payload.projectId });
+  if (payload.cursor) query.set("cursor", payload.cursor);
+  if (payload.limit) query.set("limit", String(payload.limit));
+  return request<{
+    flows: PlanningConversationResult["businessFlows"];
+    page: NonNullable<PlanningConversationResult["businessFlowPage"]>;
+  }>(`/api/planning/${encodeURIComponent(payload.planningId)}/flows?${query.toString()}`);
+}
+
 export function chatWithTestAssistant(payload: {
   projectId: string;
   message: string;
@@ -743,7 +835,25 @@ export function createVisualRun(
   appUrl: string | undefined,
   permissionProfile: PermissionProfile,
   scenarioId: string | undefined,
-  context: RunTargetPayload & { requirement?: string; diff?: string; coverageScenarioIds?: string[] }
+  context: RunTargetPayload & {
+    requirement?: string;
+    diff?: string;
+    coverageScenarioIds?: string[];
+    coverageInventory?: Array<{
+      id: string;
+      title: string;
+      kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
+      target: string;
+      sourceNodeIds: string[];
+      sourceCount: number;
+      surfaces?: Array<"page" | "api" | "data" | "background-task">;
+      requiredEvidenceKinds?: string[];
+      preconditions?: string[];
+    }>;
+    coverageMode?: "targeted" | "full";
+    dynamicBrowser?: boolean;
+    modelProfileId?: string;
+  }
 ) {
   const idempotencyKey = crypto.randomUUID();
   return request<{ run: RunProjection }>("/v1/runs", {
@@ -758,9 +868,18 @@ export function createVisualRun(
         appUrl,
         scenarioId,
         coverageScenarioIds: context.coverageScenarioIds ?? (scenarioId ? [scenarioId] : []),
-        coverageMode: (context.coverageScenarioIds?.length ?? 0) > 1 ? "full" : "targeted",
+        coverageMode: context.coverageMode ?? ((context.coverageScenarioIds?.length ?? 0) > 1 ? "full" : "targeted"),
+        coverageInventory: context.coverageInventory ?? [],
+        dynamicBrowser: context.dynamicBrowser ?? false,
         requirement: context.requirement,
         diff: context.diff,
+        // The conversation planner and the durable Graph must use the same
+        // active model profile. Previously the Workbench used SophNet to
+        // explain the plan, then created a deterministic-only Run, so the LLM
+        // could not participate in recovery or selective judging.
+        plannerMode: context.modelProfileId ? "adaptive" : "deterministic",
+        judgeMode: context.modelProfileId ? "adaptive" : "deterministic",
+        modelProfileId: context.modelProfileId,
         permissionProfile,
         executionMode: "oci",
         capabilities: ["browser"]
@@ -1180,10 +1299,14 @@ export function getProjectRecovery(id: string) {
   return request<{ recovery: ProjectRecoveryResult }>(`/api/projects/${encodeURIComponent(id)}/recovery`);
 }
 
-export function recoverAndRetryProject(id: string, mode: "auto" | "runtime" | "discovery" = "auto") {
+export function recoverAndRetryProject(
+  id: string,
+  mode: "auto" | "runtime" | "discovery" = "auto",
+  credentialId?: string
+) {
   return request<{ accepted: boolean; recovery: ProjectRecoveryResult }>(`/api/projects/${encodeURIComponent(id)}/recover-and-retry`, {
     method: "POST",
-    body: JSON.stringify({ mode })
+    body: JSON.stringify({ mode, credentialId })
   });
 }
 

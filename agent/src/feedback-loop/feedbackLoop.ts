@@ -4,17 +4,19 @@
  * Failure → 原因分析 → 修复方案 → 验证结果 → 写入 Experience Memory → 下一次测试调用
  */
 
-import type {
-  FeedbackLoopSession,
-  FeedbackStage,
-  FailureDetection,
-  RootCauseAnalysis,
-  RepairProposal,
-  FeedbackRepairValidation,
-  ExperienceMemoryEntry
+import {
+  feedbackLoopSessionSchema,
+  type FeedbackLoopSession,
+  type FeedbackStage,
+  type FailureDetection,
+  type RootCauseAnalysis,
+  type RepairProposal,
+  type FeedbackRepairValidation,
+  type ExperienceMemoryEntry
 } from "@ai-test-officer/contracts";
 import { getMemoryService } from "../memory/index.js";
 import { randomUUID } from "node:crypto";
+import { Pool } from "pg";
 
 // ─── Repair experience recall ────────────────────────────────────
 
@@ -77,14 +79,16 @@ function createStore(): FeedbackStore {
 
 export class FeedbackLoop {
   private store: FeedbackStore;
+  private readonly pool?: Pool;
 
-  constructor(store?: FeedbackStore) {
+  constructor(store?: FeedbackStore, connectionString = process.env.DATABASE_URL) {
     this.store = store ?? createStore();
+    this.pool = !store && connectionString ? new Pool({ connectionString, max: 2 }) : undefined;
   }
 
   // ─── Step 1: Detect Failure ──────────────────────────────────
 
-  startSession(projectId: string, detection?: Partial<FailureDetection>): FeedbackLoopSession {
+  async startSession(projectId: string, detection?: Partial<FailureDetection>): Promise<FeedbackLoopSession> {
     const sessionId = `fbl_${randomUUID().slice(0, 12)}`;
     const now = new Date().toISOString();
 
@@ -110,18 +114,17 @@ export class FeedbackLoop {
       updatedAt: now
     };
 
-    this.store.sessions.set(sessionId, session);
-    this.store.activeSessionIds.add(sessionId);
+    await this.persistSession(session);
     return session;
   }
 
   // ─── Step 2: Root Cause Analysis ─────────────────────────────
 
-  analyze(
+  async analyze(
     sessionId: string,
     analysis: Omit<RootCauseAnalysis, "analysisId" | "detectionId" | "analyzedAt">
-  ): FeedbackLoopSession {
-    const session = this.mustGetSession(sessionId);
+  ): Promise<FeedbackLoopSession> {
+    const session = await this.mustGetSession(sessionId);
     const now = new Date().toISOString();
 
     const fullAnalysis: RootCauseAnalysis = {
@@ -138,17 +141,17 @@ export class FeedbackLoop {
       updatedAt: now
     };
 
-    this.store.sessions.set(sessionId, updated);
+    await this.persistSession(updated);
     return updated;
   }
 
   // ─── Step 3: Propose Repair ──────────────────────────────────
 
-  propose(
+  async propose(
     sessionId: string,
     proposal: Omit<RepairProposal, "proposalId" | "analysisId" | "proposedAt">
-  ): FeedbackLoopSession {
-    const session = this.mustGetSession(sessionId);
+  ): Promise<FeedbackLoopSession> {
+    const session = await this.mustGetSession(sessionId);
     if (!session.analysis) {
       throw new Error("Must complete root cause analysis before proposing repair");
     }
@@ -168,17 +171,17 @@ export class FeedbackLoop {
       updatedAt: now
     };
 
-    this.store.sessions.set(sessionId, updated);
+    await this.persistSession(updated);
     return updated;
   }
 
   // ─── Step 4: Validate ────────────────────────────────────────
 
-  validate(
+  async validate(
     sessionId: string,
     validation: Omit<FeedbackRepairValidation, "validationId" | "proposalId" | "validatedAt">
-  ): FeedbackLoopSession {
-    const session = this.mustGetSession(sessionId);
+  ): Promise<FeedbackLoopSession> {
+    const session = await this.mustGetSession(sessionId);
     if (!session.proposal) {
       throw new Error("Must propose repair before validating");
     }
@@ -198,14 +201,14 @@ export class FeedbackLoop {
       updatedAt: now
     };
 
-    this.store.sessions.set(sessionId, updated);
+    await this.persistSession(updated);
     return updated;
   }
 
   // ─── Step 5: Write to Experience Memory ─────────────────────
 
   async commitToMemory(sessionId: string): Promise<{ session: FeedbackLoopSession; memoryEntry: ExperienceMemoryEntry }> {
-    const session = this.mustGetSession(sessionId);
+    const session = await this.mustGetSession(sessionId);
 
     if (!session.analysis || !session.proposal || !session.validation) {
       throw new Error("Incomplete feedback loop: missing analysis, proposal, or validation");
@@ -253,8 +256,7 @@ export class FeedbackLoop {
       updatedAt: now
     };
 
-    this.store.sessions.set(sessionId, updated);
-    this.store.activeSessionIds.delete(sessionId);
+    await this.persistSession(updated);
 
     return { session: updated, memoryEntry: entry };
   }
@@ -268,26 +270,38 @@ export class FeedbackLoop {
     proposal: Omit<RepairProposal, "proposalId" | "analysisId" | "proposedAt">,
     validation: Omit<FeedbackRepairValidation, "validationId" | "proposalId" | "validatedAt">
   ): Promise<{ session: FeedbackLoopSession; memoryEntry: ExperienceMemoryEntry }> {
-    let session = this.startSession(projectId, detection);
-    session = this.analyze(session.sessionId, analysis);
-    session = this.propose(session.sessionId, proposal);
-    session = this.validate(session.sessionId, validation);
+    let session = await this.startSession(projectId, detection);
+    session = await this.analyze(session.sessionId, analysis);
+    session = await this.propose(session.sessionId, proposal);
+    session = await this.validate(session.sessionId, validation);
     return this.commitToMemory(session.sessionId);
   }
 
   // ─── Query ──────────────────────────────────────────────────
 
-  getSession(sessionId: string): FeedbackLoopSession | undefined {
+  async getSession(sessionId: string): Promise<FeedbackLoopSession | undefined> {
+    if (this.pool) {
+      const result = await this.pool.query<{ payload: unknown }>("SELECT payload FROM feedback_loop_sessions_v1 WHERE session_id=$1", [sessionId]);
+      return result.rows[0] ? feedbackLoopSessionSchema.parse(result.rows[0].payload) : undefined;
+    }
     return this.store.sessions.get(sessionId);
   }
 
-  getActiveSessions(): FeedbackLoopSession[] {
+  async getActiveSessions(): Promise<FeedbackLoopSession[]> {
+    if (this.pool) {
+      const result = await this.pool.query<{ payload: unknown }>("SELECT payload FROM feedback_loop_sessions_v1 WHERE closed=false ORDER BY updated_at DESC");
+      return result.rows.map((row) => feedbackLoopSessionSchema.parse(row.payload));
+    }
     return Array.from(this.store.activeSessionIds)
       .map((id) => this.store.sessions.get(id))
       .filter(Boolean) as FeedbackLoopSession[];
   }
 
-  getProjectSessions(projectId: string): FeedbackLoopSession[] {
+  async getProjectSessions(projectId: string): Promise<FeedbackLoopSession[]> {
+    if (this.pool) {
+      const result = await this.pool.query<{ payload: unknown }>("SELECT payload FROM feedback_loop_sessions_v1 WHERE project_id=$1 ORDER BY updated_at DESC", [projectId]);
+      return result.rows.map((row) => feedbackLoopSessionSchema.parse(row.payload));
+    }
     return Array.from(this.store.sessions.values())
       .filter((s) => s.projectId === projectId);
   }
@@ -340,10 +354,10 @@ export class FeedbackLoop {
       .sort((left, right) => right.successRate - left.successRate);
   }
 
-  getStageCounts(projectId?: string): Record<FeedbackStage, number> {
+  async getStageCounts(projectId?: string): Promise<Record<FeedbackStage, number>> {
     const sessions = projectId
-      ? this.getProjectSessions(projectId)
-      : Array.from(this.store.sessions.values());
+      ? await this.getProjectSessions(projectId)
+      : this.pool ? await this.allSessions() : Array.from(this.store.sessions.values());
 
     const counts: Record<FeedbackStage, number> = {
       failure_detected: 0,
@@ -363,10 +377,37 @@ export class FeedbackLoop {
     return counts;
   }
 
+  async close(): Promise<void> { await this.pool?.end(); }
+
   // ─── Private ────────────────────────────────────────────────
 
-  private mustGetSession(sessionId: string): FeedbackLoopSession {
-    const session = this.store.sessions.get(sessionId);
+  private async persistSession(input: FeedbackLoopSession): Promise<void> {
+    const session = feedbackLoopSessionSchema.parse(input);
+    if (this.pool) {
+      await this.pool.query(
+        `INSERT INTO feedback_loop_sessions_v1
+          (session_id,project_id,run_id,stage,closed,payload,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (session_id) DO UPDATE SET
+           project_id=EXCLUDED.project_id,run_id=EXCLUDED.run_id,stage=EXCLUDED.stage,
+           closed=EXCLUDED.closed,payload=EXCLUDED.payload,updated_at=EXCLUDED.updated_at`,
+        [session.sessionId, session.projectId, session.detection?.runId ?? null, session.stage, session.closed, session, session.updatedAt]
+      );
+      return;
+    }
+    this.store.sessions.set(session.sessionId, session);
+    if (session.closed) this.store.activeSessionIds.delete(session.sessionId);
+    else this.store.activeSessionIds.add(session.sessionId);
+  }
+
+  private async allSessions(): Promise<FeedbackLoopSession[]> {
+    if (!this.pool) return Array.from(this.store.sessions.values());
+    const result = await this.pool.query<{ payload: unknown }>("SELECT payload FROM feedback_loop_sessions_v1 ORDER BY updated_at DESC");
+    return result.rows.map((row) => feedbackLoopSessionSchema.parse(row.payload));
+  }
+
+  private async mustGetSession(sessionId: string): Promise<FeedbackLoopSession> {
+    const session = await this.getSession(sessionId);
     if (!session) {
       throw new Error(`Feedback loop session ${sessionId} not found`);
     }

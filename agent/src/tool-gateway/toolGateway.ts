@@ -6,7 +6,6 @@
  */
 
 import type { ProjectMemoryEntry, ToolVersion, ExperienceMemoryEntry } from "@ai-test-officer/contracts";
-import { getContextLayer } from "../context-layer/index.js";
 import { getMemoryService } from "../memory/index.js";
 
 export type ToolCapability =
@@ -19,7 +18,33 @@ export type ToolCapability =
   | "query_experience_memory"
   | "propose_write_action"
   | "check_schema_version"
-  | "search_similar_experiences";
+  | "search_similar_experiences"
+  | "inspect_runtime"
+  | "read_runtime_log"
+  | "inspect_health_check"
+  | "observe_page"
+  | "read_current_plan"
+  | "read_failed_attempt"
+  | "read_evidence_proof"
+  | "start_sandbox"
+  | "restart_sandbox"
+  | "resolve_port"
+  | "retry_health_check"
+  | "retry_discovery"
+  | "retry_failed_path"
+  | "continue_safe_paths"
+  | "create_validation_run";
+
+export type SafeRecoveryCapability = Extract<ToolCapability,
+  | "start_sandbox"
+  | "restart_sandbox"
+  | "resolve_port"
+  | "retry_health_check"
+  | "retry_discovery"
+  | "retry_failed_path"
+  | "continue_safe_paths"
+  | "create_validation_run"
+>;
 
 export interface ToolCall {
   callId: string;
@@ -33,6 +58,13 @@ export interface ToolCall {
 export interface ToolResult {
   callId: string;
   success: boolean;
+  /** Structured action outcome consumed by LangGraph/Workbench. */
+  status?: "completed" | "blocked" | "failed" | "needs-confirmation";
+  actionId?: string;
+  evidenceRefs?: string[];
+  nextState?: string;
+  errorCode?: string;
+  userMessage?: string;
   data?: unknown;
   error?: {
     code: string;
@@ -49,12 +81,12 @@ interface RegisteredTool {
   handler: (params: Record<string, unknown>, runId: string) => Promise<unknown>;
 }
 
-const toolMetadata = (capability: ToolCapability, name: string, inputSchema: Record<string, unknown>): ToolVersion => {
+const toolMetadata = (capability: ToolCapability, name: string, inputSchema: Record<string, unknown>, options: Partial<Pick<ToolVersion, "isReadOnly" | "riskLevel" | "approvalRequired">> = {}): ToolVersion => {
   const now = new Date().toISOString();
   return {
     schemaVersion: "1.0", toolId: `tool-${capability}`, toolName: name, version: "1.0.0",
-    capability, isReadOnly: true, inputSchema, outputSchema: {}, changelog: [],
-    compatibleApiContractVersions: [], riskLevel: "low", approvalRequired: false,
+    capability, isReadOnly: options.isReadOnly ?? true, inputSchema, outputSchema: {}, changelog: [],
+    compatibleApiContractVersions: [], riskLevel: options.riskLevel ?? "low", approvalRequired: options.approvalRequired ?? false,
     isDeprecated: false, createdAt: now, updatedAt: now
   };
 };
@@ -90,6 +122,14 @@ export interface ServiceLayer {
   queryProjectMemoryRaw: (projectId: string, category?: string) => Promise<unknown[]>;
   queryExperienceMemoryRaw: (projectId: string, failureType?: string) => Promise<unknown[]>;
   getSchemaVersionsRaw: () => Promise<unknown>;
+  inspectRuntimeRaw?: (projectId: string) => Promise<unknown>;
+  readRuntimeLogRaw?: (projectId: string, limit?: number) => Promise<unknown>;
+  inspectHealthCheckRaw?: (projectId: string) => Promise<unknown>;
+  observePageRaw?: (runId: string) => Promise<unknown>;
+  readCurrentPlanRaw?: (runId: string) => Promise<unknown>;
+  readFailedAttemptRaw?: (runId: string) => Promise<unknown>;
+  readEvidenceProofRaw?: (runId: string) => Promise<unknown>;
+  safeRecoveryActionRaw?: (action: SafeRecoveryCapability, params: Record<string, unknown>, runId: string) => Promise<unknown>;
 }
 
 // ─── Tool Gateway ────────────────────────────────────────────────
@@ -108,14 +148,10 @@ export class ToolGateway {
     // Project Context
     this.registry.register("get_project_context", {
       definition: toolMetadata("get_project_context", "get_project_context", { projectId: "string" }),
-      handler: async (params) => {
-        const contextLayer = getContextLayer();
-        return contextLayer.getProjectContext({
-          projectId: params.projectId as string,
-          subject: "llm_agent",
-          maxContextTokens: 8_000
-        });
-      }
+      // The application service is authoritative. ContextLayer remains the
+      // redaction/aggregation facade, but the tool must not read its bootstrap
+      // placeholder after the real project registry is available.
+      handler: async (params) => this.serviceLayer.getProjectContextRaw(String(params.projectId ?? ""))
     });
 
     const contextTools: Array<[ToolCapability, string, Record<string, unknown>, (params: Record<string, unknown>, runId: string) => Promise<unknown>]> = [
@@ -162,6 +198,30 @@ export class ToolGateway {
         );
       }
     });
+
+    const observationTools: Array<[ToolCapability, string, Record<string, unknown>, (params: Record<string, unknown>, runId: string) => Promise<unknown>]> = [
+      ["inspect_runtime", "inspect_runtime", { projectId: "string" }, async (params) => this.serviceLayer.inspectRuntimeRaw?.(String(params.projectId ?? "")) ?? { status: "blocked", errorCode: "runtime_inspector_unavailable" }],
+      ["read_runtime_log", "read_runtime_log", { projectId: "string", limit: "number?" }, async (params) => this.serviceLayer.readRuntimeLogRaw?.(String(params.projectId ?? ""), typeof params.limit === "number" ? params.limit : 100) ?? { status: "blocked", errorCode: "runtime_log_unavailable" }],
+      ["inspect_health_check", "inspect_health_check", { projectId: "string" }, async (params) => this.serviceLayer.inspectHealthCheckRaw?.(String(params.projectId ?? "")) ?? { status: "blocked", errorCode: "health_check_unavailable" }],
+      ["observe_page", "observe_page", { runId: "string" }, async (params, runId) => this.serviceLayer.observePageRaw?.(String(params.runId ?? runId)) ?? { status: "blocked", errorCode: "page_observer_unavailable" }],
+      ["read_current_plan", "read_current_plan", { runId: "string" }, async (params, runId) => this.serviceLayer.readCurrentPlanRaw?.(String(params.runId ?? runId)) ?? { status: "blocked", errorCode: "plan_unavailable" }],
+      ["read_failed_attempt", "read_failed_attempt", { runId: "string" }, async (params, runId) => this.serviceLayer.readFailedAttemptRaw?.(String(params.runId ?? runId)) ?? { status: "blocked", errorCode: "attempt_unavailable" }],
+      ["read_evidence_proof", "read_evidence_proof", { runId: "string" }, async (params, runId) => this.serviceLayer.readEvidenceProofRaw?.(String(params.runId ?? runId)) ?? { status: "blocked", errorCode: "proof_unavailable" }]
+    ];
+    for (const [capability, name, schema, handler] of observationTools) {
+      this.registry.register(capability, { definition: toolMetadata(capability, name, schema), handler });
+    }
+
+    const safeRecoveryTools: SafeRecoveryCapability[] = ["start_sandbox", "restart_sandbox", "resolve_port", "retry_health_check", "retry_discovery", "retry_failed_path", "continue_safe_paths", "create_validation_run"];
+    for (const capability of safeRecoveryTools) {
+      this.registry.register(capability, {
+        definition: toolMetadata(capability, capability, { runId: "string", projectId: "string?" }, { isReadOnly: false, riskLevel: "medium", approvalRequired: false }),
+        handler: async (params, runId) => {
+          if (!this.serviceLayer.safeRecoveryActionRaw) return { status: "blocked", actionId: `tool_${capability}`, nextState: "waiting_user", errorCode: "recovery_gateway_unavailable", userMessage: "当前恢复工具尚未连接到 Agent Graph。" };
+          return this.serviceLayer.safeRecoveryActionRaw(capability, params, runId);
+        }
+      });
+    }
   }
 
   async execute(call: ToolCall): Promise<ToolResult> {
@@ -172,6 +232,9 @@ export class ToolGateway {
       return {
         callId: call.callId,
         success: false,
+        status: "failed",
+        nextState: "blocked",
+        errorCode: "unknown_capability",
         error: { code: "unknown_capability", message: `Tool ${call.capability} not registered` },
         cacheHit: false,
         durationMs: Date.now() - start
@@ -182,17 +245,24 @@ export class ToolGateway {
       return {
         callId: call.callId,
         success: false,
+        status: "failed",
+        nextState: "blocked",
+        errorCode: "tool_version_mismatch",
         error: { code: "tool_version_mismatch", message: `Requested ${call.toolVersion}, active ${tool.definition.version}` },
         cacheHit: false,
         durationMs: Date.now() - start
       };
     }
 
-    if (!tool.definition.isReadOnly) {
+    if (!tool.definition.isReadOnly && tool.definition.approvalRequired) {
       return {
         callId: call.callId,
         success: false,
-        error: { code: "write_not_allowed", message: "Write tools must go through write safety layer" },
+        status: "needs-confirmation",
+        nextState: "waiting_user",
+        errorCode: "capability_confirmation_required",
+        userMessage: "该操作需要用户确认后才能执行。",
+        error: { code: "capability_confirmation_required", message: "This capability requires a user approval interrupt." },
         cacheHit: false,
         durationMs: Date.now() - start
       };
@@ -200,14 +270,14 @@ export class ToolGateway {
 
     try {
       const cacheKey = `${call.capability}:${JSON.stringify(call.params)}`;
-      const cached = this.cache.get(cacheKey);
+      const cached = tool.definition.isReadOnly ? this.cache.get(cacheKey) : undefined;
       if (cached && cached.expiresAt > Date.now()) {
-        return { callId: call.callId, success: true, data: cached.data, cacheHit: true, durationMs: 0 };
+        return { callId: call.callId, success: true, data: cached.data, cacheHit: true, durationMs: 0, ...structuredOutcome(cached.data) };
       }
 
       const data = await tool.handler(call.params, call.runId);
 
-      this.cache.set(cacheKey, {
+      if (tool.definition.isReadOnly) this.cache.set(cacheKey, {
         expiresAt: Date.now() + 30_000,
         data
       });
@@ -216,6 +286,7 @@ export class ToolGateway {
         callId: call.callId,
         success: true,
         data,
+        ...structuredOutcome(data),
         cacheHit: false,
         durationMs: Date.now() - start
       };
@@ -224,6 +295,9 @@ export class ToolGateway {
       return {
         callId: call.callId,
         success: false,
+        status: "failed",
+        nextState: "blocked",
+        errorCode: "execution_error",
         error: { code: "execution_error", message },
         cacheHit: false,
         durationMs: Date.now() - start
@@ -234,6 +308,20 @@ export class ToolGateway {
   getRegistry(): ToolRegistry {
     return this.registry;
   }
+}
+
+function structuredOutcome(value: unknown): Partial<Pick<ToolResult, "status" | "actionId" | "evidenceRefs" | "nextState" | "errorCode" | "userMessage">> {
+  if (!value || typeof value !== "object") return {};
+  const record = value as Record<string, unknown>;
+  const status = record.status;
+  return {
+    ...(status === "completed" || status === "blocked" || status === "failed" || status === "needs-confirmation" ? { status } : {}),
+    ...(typeof record.actionId === "string" ? { actionId: record.actionId } : {}),
+    ...(Array.isArray(record.evidenceRefs) ? { evidenceRefs: record.evidenceRefs.filter((item): item is string => typeof item === "string") } : {}),
+    ...(typeof record.nextState === "string" ? { nextState: record.nextState } : {}),
+    ...(typeof record.errorCode === "string" ? { errorCode: record.errorCode } : {}),
+    ...(typeof record.userMessage === "string" ? { userMessage: record.userMessage } : {})
+  };
 }
 
 let instance: ToolGateway | null = null;

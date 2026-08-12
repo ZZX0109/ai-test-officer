@@ -132,6 +132,254 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/runs/{id}/browser-session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Shared Playwright browser session */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            session: components["schemas"]["BrowserSession"] & unknown;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/browser-observations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Structured browser observations */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            observations: components["schemas"]["BrowserObservation"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/browser-actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description LLM browser decisions and deterministic results */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            decisions: components["schemas"]["BrowserActionDecision"][];
+                            actions: components["schemas"]["BrowserActionResult"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/browser-control/acquire": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Acquire the shared browser for user input */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            session: components["schemas"]["BrowserSession"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/browser-control/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Return the shared browser to the Agent */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            session: components["schemas"]["BrowserSession"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{id}/browser-input": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        kind: "click" | "type" | "press" | "scroll";
+                        x?: number;
+                        y?: number;
+                        text?: string;
+                        /** @enum {string} */
+                        key?: "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown" | "Space";
+                        deltaY?: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description User input applied to the shared Playwright page */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            observation: components["schemas"]["BrowserObservation"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/runs/{id}/coverage": {
         parameters: {
             query?: never;
@@ -677,6 +925,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/projects/{id}/code-sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        summary?: string;
+                        autoAnalyze?: boolean;
+                        credentialId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Project sandbox code session */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            repair: components["schemas"]["RepairSession"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/repair-sessions/{id}": {
         parameters: {
             query?: never;
@@ -710,6 +1005,51 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/repair-sessions/{id}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        allowNetworkInstall?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Repair validation */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            repair: components["schemas"]["RepairSession"];
+                        };
+                    };
+                };
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -795,45 +1135,6 @@ export interface paths {
             };
         };
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/repair-sessions/{id}/validate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Validated repair */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            repair: components["schemas"]["RepairSession"];
-                        };
-                    };
-                };
-            };
-        };
         delete?: never;
         options?: never;
         head?: never;
@@ -1099,7 +1400,7 @@ export interface components {
             id: string;
             runId: string;
             /** @enum {string} */
-            type: "run_created" | "plan_generated" | "plan_approved" | "permission_granted" | "run_queued" | "run_preparing" | "run_started" | "run_paused" | "run_resumed" | "evidence_collecting" | "run_judging" | "human_review_requested" | "decision_overridden" | "run_completed" | "run_failed" | "run_blocked" | "run_cancelled";
+            type: "run_created" | "plan_generated" | "plan_approved" | "permission_granted" | "run_queued" | "run_preparing" | "run_started" | "run_retrying" | "run_paused" | "run_resumed" | "evidence_collecting" | "run_judging" | "human_review_requested" | "decision_overridden" | "repair_decision_recorded" | "run_completed" | "run_failed" | "run_blocked" | "run_cancelled";
             version: number;
             /** Format: date-time */
             createdAt: string;
@@ -1120,15 +1421,15 @@ export interface components {
             /** @enum {string} */
             status: "idle" | "running" | "interrupted" | "completed" | "failed" | "cancelled";
             /** @enum {string} */
-            currentNode?: "intake" | "discover" | "build-coverage-map" | "plan" | "compile" | "approve-plan" | "prepare-sandbox" | "approve-capabilities" | "execute" | "collect-and-gate" | "triage-failure" | "selective-judge" | "repair" | "finalize";
+            currentNode?: "intake" | "discover" | "diagnose-runtime" | "choose-recovery" | "recover" | "verify-recovery" | "build-coverage-map" | "plan" | "compile" | "approve-plan" | "prepare-sandbox" | "approve-capabilities" | "observe-browser" | "decide-browser-action" | "authorize-browser-action" | "execute-browser-action" | "verify-browser-action" | "decide-next-step" | "execute" | "collect-and-gate" | "triage-failure" | "selective-judge" | "repair" | "retry-path" | "continue-paths" | "finalize";
             /** @default [] */
-            completedNodes: ("intake" | "discover" | "build-coverage-map" | "plan" | "compile" | "approve-plan" | "prepare-sandbox" | "approve-capabilities" | "execute" | "collect-and-gate" | "triage-failure" | "selective-judge" | "repair" | "finalize")[];
+            completedNodes: ("intake" | "discover" | "diagnose-runtime" | "choose-recovery" | "recover" | "verify-recovery" | "build-coverage-map" | "plan" | "compile" | "approve-plan" | "prepare-sandbox" | "approve-capabilities" | "observe-browser" | "decide-browser-action" | "authorize-browser-action" | "execute-browser-action" | "verify-browser-action" | "decide-next-step" | "execute" | "collect-and-gate" | "triage-failure" | "selective-judge" | "repair" | "retry-path" | "continue-paths" | "finalize")[];
             progress: number;
             pendingInterrupt?: {
                 id: string;
                 runId: string;
                 /** @enum {string} */
-                kind: "plan-approval" | "browser-permission" | "credential" | "network-install" | "dangerous-operation" | "repair-apply" | "execution-result";
+                kind: "plan-approval" | "browser-permission" | "credential" | "network-install" | "dangerous-operation" | "repair-apply" | "repair-decision" | "execution-result";
                 /** @enum {string} */
                 status: "pending" | "approved" | "rejected" | "expired";
                 title: string;
@@ -1139,20 +1440,482 @@ export interface components {
                 payload: {
                     [key: string]: unknown;
                 };
+                /** @enum {string} */
+                owner?: "agent" | "user" | "environment" | "developer";
+                context?: {
+                    [key: string]: unknown;
+                };
+                options?: {
+                    value: string;
+                    label: string;
+                    description?: string;
+                }[];
+                diagnoses?: string[];
+                evidenceRefs?: string[];
+                attemptId?: string;
+                scenarioId?: string;
+                decision?: string;
                 /** Format: date-time */
                 createdAt: string;
                 /** Format: date-time */
                 resolvedAt?: string;
             };
+            /** @enum {string} */
+            interruptOwner?: "agent" | "user" | "environment" | "developer";
+            interruptContext?: {
+                [key: string]: unknown;
+            };
             lastError?: {
                 code: string;
                 message: string;
                 /** @enum {string} */
-                node?: "intake" | "discover" | "build-coverage-map" | "plan" | "compile" | "approve-plan" | "prepare-sandbox" | "approve-capabilities" | "execute" | "collect-and-gate" | "triage-failure" | "selective-judge" | "repair" | "finalize";
+                node?: "intake" | "discover" | "diagnose-runtime" | "choose-recovery" | "recover" | "verify-recovery" | "build-coverage-map" | "plan" | "compile" | "approve-plan" | "prepare-sandbox" | "approve-capabilities" | "observe-browser" | "decide-browser-action" | "authorize-browser-action" | "execute-browser-action" | "verify-browser-action" | "decide-next-step" | "execute" | "collect-and-gate" | "triage-failure" | "selective-judge" | "repair" | "retry-path" | "continue-paths" | "finalize";
             };
             /** @default 0 */
             tokenUsage: number;
             repairSessionId?: string;
+            recoveryDecision?: {
+                /** @enum {string} */
+                schemaVersion: "1.0";
+                id: string;
+                runId: string;
+                coverageItemId?: string;
+                attemptId?: string;
+                /** @enum {string} */
+                action: "retry-runtime" | "retry-discovery" | "retry-path" | "repair-harness" | "repair-environment" | "repair-product" | "request-credentials" | "request-user-confirmation" | "blocked";
+                reason: string;
+                /** @enum {string} */
+                confidence: "high" | "medium" | "low";
+                /** @default [] */
+                evidenceRefs: string[];
+                /** @default [] */
+                preconditions: string[];
+                expectedState: string;
+                userQuestion?: string;
+                /** Format: date-time */
+                createdAt: string;
+                policyVersion: string;
+            };
+            recoveryResult?: {
+                /** @enum {string} */
+                schemaVersion: "1.0";
+                actionId: string;
+                runId: string;
+                /** @enum {string} */
+                action: "retry-runtime" | "retry-discovery" | "retry-path" | "repair-harness" | "repair-environment" | "repair-product" | "request-credentials" | "request-user-confirmation" | "blocked";
+                /** @enum {string} */
+                status: "accepted" | "running" | "completed" | "failed" | "blocked" | "needs-confirmation";
+                /** @default [] */
+                evidenceRefs: string[];
+                nextState: string;
+                errorCode?: string;
+                userMessage?: string;
+                /** Format: date-time */
+                startedAt: string;
+                /** Format: date-time */
+                completedAt?: string;
+            };
+            recoveryAttempts?: {
+                [key: string]: number;
+            };
+            currentCoverageItemId?: string;
+            currentAttemptId?: string;
+            observation?: {
+                [key: string]: unknown;
+            };
+            browserSession?: {
+                /** @enum {string} */
+                schemaVersion: "1.0";
+                sessionId: string;
+                runId: string;
+                attemptId: string;
+                projectId?: string;
+                /** @enum {string} */
+                status: "starting" | "ready" | "waiting-user" | "recovering" | "closed" | "failed";
+                /** @enum {string} */
+                owner: "agent" | "user" | "waiting-user";
+                /** Format: uri */
+                currentUrl?: string;
+                lastObservationId?: string;
+                actionCount: number;
+                decisionCount: number;
+                rebindCount: number;
+                /** Format: date-time */
+                startedAt: string;
+                /** Format: date-time */
+                updatedAt: string;
+                /** Format: date-time */
+                leaseExpiresAt?: string;
+            };
+            browserObservation?: {
+                /** @enum {string} */
+                schemaVersion: "1.0";
+                observationId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId?: string;
+                /** Format: uri */
+                requestedUrl: string;
+                /** Format: uri */
+                finalUrl: string;
+                title: string;
+                /** @enum {string} */
+                readyState: "loading" | "interactive" | "complete" | "unknown";
+                pageFingerprint: string;
+                bodyTextSample: string;
+                accessibilityTree?: string;
+                controls: {
+                    controlId: string;
+                    observationId: string;
+                    runId: string;
+                    attemptId: string;
+                    pageFingerprint: string;
+                    /** @enum {string} */
+                    kind: "link" | "button" | "input" | "textarea" | "select" | "checkbox" | "radio" | "other";
+                    role?: string;
+                    accessibleName?: string;
+                    label?: string;
+                    testId?: string;
+                    inputType?: string;
+                    /** @default [] */
+                    framePath: string[];
+                    /** @default [] */
+                    shadowPath: string[];
+                    locatorCandidates: {
+                        /** @enum {string} */
+                        strategy: "test-id" | "role-name" | "label" | "text" | "css-safe";
+                        value: string;
+                        unique: boolean;
+                    }[];
+                    boundingBox?: {
+                        x: number;
+                        y: number;
+                        width: number;
+                        height: number;
+                    };
+                    visible: boolean;
+                    disabled: boolean;
+                    /** @default false */
+                    obscured: boolean;
+                }[];
+                consoleErrors: string[];
+                pageErrors: string[];
+                failedRequests: {
+                    method: string;
+                    /** Format: uri */
+                    url: string;
+                    status?: number;
+                    failure?: string;
+                }[];
+                screenshotArtifactId?: string;
+                /** @default [] */
+                evidenceRefs: string[];
+                /** Format: date-time */
+                createdAt: string;
+            };
+            browserDecision?: {
+                /** @enum {string} */
+                schemaVersion: "1.0";
+                decisionId: string;
+                runId: string;
+                attemptId: string;
+                observationId: string;
+                /** @enum {string} */
+                status: "act" | "complete" | "blocked" | "needs-confirmation";
+                summary: string;
+                actions: ({
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "click-control";
+                    controlId: string;
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "fill-control";
+                    controlId: string;
+                    valueRef: string;
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "select-control";
+                    controlId: string;
+                    valueRef: string;
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "check-control";
+                    controlId: string;
+                    checked: boolean;
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "press-key";
+                    controlId?: string;
+                    /** @enum {string} */
+                    key: "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown" | "Space";
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "scroll-to-control";
+                    controlId: string;
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "wait-for-control";
+                    controlId: string;
+                    /** @enum {string} */
+                    state: "visible" | "hidden" | "enabled" | "disabled";
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "navigate-route";
+                    routeId: string;
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "submit-form";
+                    controlId: string;
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    /** @default [] */
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "observe-page";
+                } | {
+                    actionId: string;
+                    runId: string;
+                    attemptId: string;
+                    coverageItemId: string;
+                    sourceObservationId: string;
+                    sourcePageFingerprint: string;
+                    purpose: string;
+                    expectedChange: string;
+                    oracleIds: string[];
+                    /** @enum {string} */
+                    risk: "low" | "medium" | "high" | "forbidden";
+                    /** @default 10000 */
+                    timeoutMs: number;
+                    /** @enum {string} */
+                    action: "evaluate-oracle";
+                })[];
+                oracles: ({
+                    id: string;
+                    /** @enum {string} */
+                    type: "element-state";
+                    controlId: string;
+                    /** @enum {string} */
+                    expected: "visible" | "hidden" | "enabled" | "disabled";
+                    description: string;
+                } | {
+                    id: string;
+                    /** @enum {string} */
+                    type: "text";
+                    controlId?: string;
+                    /** @enum {string} */
+                    operator: "equals" | "contains" | "not-contains";
+                    expected: string;
+                    description: string;
+                } | {
+                    id: string;
+                    /** @enum {string} */
+                    type: "url";
+                    /** @enum {string} */
+                    operator: "equals" | "contains" | "not-contains";
+                    expected: string;
+                    description: string;
+                } | {
+                    id: string;
+                    /** @enum {string} */
+                    type: "count-change";
+                    controlId?: string;
+                    /** @enum {string} */
+                    expected: "increased" | "decreased" | "unchanged";
+                    description: string;
+                } | {
+                    id: string;
+                    /** @enum {string} */
+                    type: "network";
+                    operationId: string;
+                    expectedStatus?: number;
+                    description: string;
+                } | {
+                    id: string;
+                    /** @enum {string} */
+                    type: "dom-change";
+                    /** @enum {string} */
+                    expected: "changed" | "unchanged";
+                    description: string;
+                })[];
+                /** @default [] */
+                evidenceRefs: string[];
+                userQuestion?: string;
+                /** Format: date-time */
+                createdAt: string;
+            };
+            browserActionResult?: {
+                /** @enum {string} */
+                schemaVersion: "1.0";
+                resultId: string;
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                /** @enum {string} */
+                status: "completed" | "failed" | "blocked" | "needs-confirmation";
+                errorCode?: string;
+                summary: string;
+                beforeObservationId: string;
+                afterObservationId?: string;
+                /** @default [] */
+                evidenceRefs: string[];
+                /** @default [] */
+                oracleResults: {
+                    oracleId: string;
+                    passed: boolean;
+                    actual: string;
+                    evidenceRefs: string[];
+                }[];
+                /** Format: date-time */
+                startedAt: string;
+                /** Format: date-time */
+                completedAt: string;
+            };
+            /** @default false */
+            browserAgentRequired: boolean;
+            /** @default false */
+            browserLoopComplete: boolean;
+            /** @default 0 */
+            continuationPasses: number;
+            /** @default 0 */
+            remainingPathCount: number;
             /** Format: date-time */
             updatedAt: string;
         };
@@ -1267,6 +2030,11 @@ export interface components {
                  * @enum {string}
                  */
                 coverageMode: "targeted" | "full";
+                /**
+                 * @default interactive
+                 * @enum {string}
+                 */
+                executionProfile: "interactive" | "benchmark";
                 requirement?: string;
                 diff?: string;
                 /**
@@ -1532,7 +2300,7 @@ export interface components {
             /** @enum {string} */
             failureClass?: "transport" | "authentication" | "authorization" | "model-access" | "budget" | "semantic" | "provider" | "unknown";
             /** @enum {string} */
-            transportMode?: "stream" | "non-stream-fallback";
+            transportMode?: "stream" | "non-stream" | "non-stream-fallback";
             fallbackReason?: string;
             /**
              * @default none
@@ -1905,8 +2673,411 @@ export interface components {
             llmCallId?: string;
             suggestedAction?: string;
             requiresConfirmation?: boolean;
+            repairPlan?: {
+                owner: string;
+                problem?: string;
+                type?: string;
+                executable?: boolean;
+                steps: string[];
+                validation: string;
+                message?: string;
+                planId?: string;
+                runId?: string;
+                attemptId?: string;
+                scenarioId?: string;
+                /** @enum {string} */
+                status?: "pending" | "applied" | "resolved" | "dismissed";
+                evidenceRefs?: string[];
+                policyVersion?: string;
+                action?: string;
+            };
             /** Format: date-time */
             createdAt: string;
+        };
+        BrowserSession: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            sessionId: string;
+            runId: string;
+            attemptId: string;
+            projectId?: string;
+            /** @enum {string} */
+            status: "starting" | "ready" | "waiting-user" | "recovering" | "closed" | "failed";
+            /** @enum {string} */
+            owner: "agent" | "user" | "waiting-user";
+            /** Format: uri */
+            currentUrl?: string;
+            lastObservationId?: string;
+            actionCount: number;
+            decisionCount: number;
+            rebindCount: number;
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            /** Format: date-time */
+            leaseExpiresAt?: string;
+        };
+        BrowserObservation: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            observationId: string;
+            runId: string;
+            attemptId: string;
+            coverageItemId?: string;
+            /** Format: uri */
+            requestedUrl: string;
+            /** Format: uri */
+            finalUrl: string;
+            title: string;
+            /** @enum {string} */
+            readyState: "loading" | "interactive" | "complete" | "unknown";
+            pageFingerprint: string;
+            bodyTextSample: string;
+            accessibilityTree?: string;
+            controls: {
+                controlId: string;
+                observationId: string;
+                runId: string;
+                attemptId: string;
+                pageFingerprint: string;
+                /** @enum {string} */
+                kind: "link" | "button" | "input" | "textarea" | "select" | "checkbox" | "radio" | "other";
+                role?: string;
+                accessibleName?: string;
+                label?: string;
+                testId?: string;
+                inputType?: string;
+                /** @default [] */
+                framePath: string[];
+                /** @default [] */
+                shadowPath: string[];
+                locatorCandidates: {
+                    /** @enum {string} */
+                    strategy: "test-id" | "role-name" | "label" | "text" | "css-safe";
+                    value: string;
+                    unique: boolean;
+                }[];
+                boundingBox?: {
+                    x: number;
+                    y: number;
+                    width: number;
+                    height: number;
+                };
+                visible: boolean;
+                disabled: boolean;
+                /** @default false */
+                obscured: boolean;
+            }[];
+            consoleErrors: string[];
+            pageErrors: string[];
+            failedRequests: {
+                method: string;
+                /** Format: uri */
+                url: string;
+                status?: number;
+                failure?: string;
+            }[];
+            screenshotArtifactId?: string;
+            /** @default [] */
+            evidenceRefs: string[];
+            /** Format: date-time */
+            createdAt: string;
+        };
+        BrowserActionDecision: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            decisionId: string;
+            runId: string;
+            attemptId: string;
+            observationId: string;
+            /** @enum {string} */
+            status: "act" | "complete" | "blocked" | "needs-confirmation";
+            summary: string;
+            actions: ({
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "click-control";
+                controlId: string;
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "fill-control";
+                controlId: string;
+                valueRef: string;
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "select-control";
+                controlId: string;
+                valueRef: string;
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "check-control";
+                controlId: string;
+                checked: boolean;
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "press-key";
+                controlId?: string;
+                /** @enum {string} */
+                key: "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown" | "Space";
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "scroll-to-control";
+                controlId: string;
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "wait-for-control";
+                controlId: string;
+                /** @enum {string} */
+                state: "visible" | "hidden" | "enabled" | "disabled";
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "navigate-route";
+                routeId: string;
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "submit-form";
+                controlId: string;
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                /** @default [] */
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "observe-page";
+            } | {
+                actionId: string;
+                runId: string;
+                attemptId: string;
+                coverageItemId: string;
+                sourceObservationId: string;
+                sourcePageFingerprint: string;
+                purpose: string;
+                expectedChange: string;
+                oracleIds: string[];
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "forbidden";
+                /** @default 10000 */
+                timeoutMs: number;
+                /** @enum {string} */
+                action: "evaluate-oracle";
+            })[];
+            oracles: ({
+                id: string;
+                /** @enum {string} */
+                type: "element-state";
+                controlId: string;
+                /** @enum {string} */
+                expected: "visible" | "hidden" | "enabled" | "disabled";
+                description: string;
+            } | {
+                id: string;
+                /** @enum {string} */
+                type: "text";
+                controlId?: string;
+                /** @enum {string} */
+                operator: "equals" | "contains" | "not-contains";
+                expected: string;
+                description: string;
+            } | {
+                id: string;
+                /** @enum {string} */
+                type: "url";
+                /** @enum {string} */
+                operator: "equals" | "contains" | "not-contains";
+                expected: string;
+                description: string;
+            } | {
+                id: string;
+                /** @enum {string} */
+                type: "count-change";
+                controlId?: string;
+                /** @enum {string} */
+                expected: "increased" | "decreased" | "unchanged";
+                description: string;
+            } | {
+                id: string;
+                /** @enum {string} */
+                type: "network";
+                operationId: string;
+                expectedStatus?: number;
+                description: string;
+            } | {
+                id: string;
+                /** @enum {string} */
+                type: "dom-change";
+                /** @enum {string} */
+                expected: "changed" | "unchanged";
+                description: string;
+            })[];
+            /** @default [] */
+            evidenceRefs: string[];
+            userQuestion?: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        BrowserActionResult: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            resultId: string;
+            actionId: string;
+            runId: string;
+            attemptId: string;
+            coverageItemId: string;
+            /** @enum {string} */
+            status: "completed" | "failed" | "blocked" | "needs-confirmation";
+            errorCode?: string;
+            summary: string;
+            beforeObservationId: string;
+            afterObservationId?: string;
+            /** @default [] */
+            evidenceRefs: string[];
+            /** @default [] */
+            oracleResults: {
+                oracleId: string;
+                passed: boolean;
+                actual: string;
+                evidenceRefs: string[];
+            }[];
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            completedAt: string;
         };
     };
     responses: never;

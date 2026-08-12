@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { analyzeIntake } from "../src/intakeAnalyzer.js";
 import { buildPlanningConversation, type PlanningMessage } from "../src/planningConversation.js";
 import type { CodeImpactGraph } from "../src/codeImpactGraph.js";
+import type { BusinessCapabilityGraph } from "../src/businessCapabilityGraph.js";
 import type { ProjectConfig } from "../src/types.js";
 
 const graph: CodeImpactGraph = {
@@ -16,6 +17,26 @@ const graph: CodeImpactGraph = {
     { id: "api_report", kind: "api-route", label: "/api/reports", file: "src/server.ts", confidence: "high" }
   ],
   edges: []
+};
+
+const businessGraph: BusinessCapabilityGraph = {
+  version: "2.0",
+  createdAt: "2026-08-11T00:00:00.000Z",
+  repositoryRoot: "/tmp/planning-project",
+  projectSnapshotHash: "a".repeat(64),
+  sourceFileCount: 2,
+  diagnostics: [],
+  nodes: [
+    { id: "bcg_page_orders", kind: "page", label: "订单", confidence: "high", source: { file: "src/pages/orders.tsx", line: 1, parser: "typescript-jsx", sourceHash: "b".repeat(64) } },
+    { id: "bcg_call_orders", kind: "frontend-call", label: "/api/orders", confidence: "high", source: { file: "src/pages/orders.tsx", line: 6, parser: "typescript-jsx", sourceHash: "b".repeat(64) }, metadata: { route: "/api/orders" } },
+    { id: "bcg_api_orders", kind: "api-route", label: "GET /api/orders", confidence: "high", source: { file: "src/server/orders.ts", line: 10, parser: "typescript", sourceHash: "c".repeat(64) }, metadata: { route: "/api/orders", method: "GET" } },
+    { id: "bcg_guard", kind: "auth-guard", label: "requireAuth", confidence: "medium", source: { file: "src/server/orders.ts", line: 4, parser: "typescript", sourceHash: "c".repeat(64) } }
+  ],
+  edges: [
+    { from: "bcg_page_orders", to: "bcg_call_orders", kind: "calls", confidence: "high", reason: "页面请求订单接口。" },
+    { from: "bcg_call_orders", to: "bcg_api_orders", kind: "calls", confidence: "high", reason: "前后端路径相同。" },
+    { from: "bcg_guard", to: "bcg_api_orders", kind: "guards", confidence: "medium", reason: "权限守卫。" }
+  ]
 };
 
 const project: ProjectConfig = {
@@ -39,6 +60,21 @@ export function testPlanningConversation() {
   assert.match(first.clarificationQuestions[0] ?? "", /测试账号|未登录/);
   assert.ok(first.businessFlows.every((flow) => flow.status === "auto-bindable"));
   assert.match(first.plan.levels[0]?.paths[0]?.steps.join("\n") ?? "", /自动发现并绑定/);
+
+  const semanticInventory = buildPlanningConversation({
+    project,
+    message: requirement,
+    history: [],
+    graph,
+    capabilityGraph: businessGraph,
+    analysis
+  });
+  const ordersFlow = semanticInventory.businessFlows.find((flow) => flow.pathVersion === "2.0");
+  assert.ok(ordersFlow, "capability graph must replace directory-only flows with an auditable business path");
+  assert.ok(ordersFlow?.surfaces?.includes("page"));
+  assert.ok(ordersFlow?.surfaces?.includes("api"));
+  assert.ok(ordersFlow?.roles?.length);
+  assert.ok(ordersFlow?.sourceLocations?.some((source) => source.file === "src/server/orders.ts"));
 
   const noBrowserProject: ProjectConfig = {
     ...project,
@@ -90,11 +126,32 @@ export function testPlanningConversation() {
       runtimeStatus: "starting"
     }
   });
-  assert.equal(waitingForSmoke.phase, "clarifying");
-  assert.equal(waitingForSmoke.businessFlows.length, 1, "coverage must not expand before connectivity smoke passes");
-  assert.equal(waitingForSmoke.coverage.discovered, 1);
-  assert.equal(waitingForSmoke.coverage.needsInput, 1);
-  assert.match(waitingForSmoke.reply, /暂不展开大量候选流程/);
+  assert.equal(waitingForSmoke.phase, "draft-ready");
+  assert.equal(waitingForSmoke.businessFlows.length, 3, "comprehensive scans retain the code-derived inventory while runtime preparation waits");
+  assert.equal(waitingForSmoke.coverage.discovered, 3);
+  assert.equal(waitingForSmoke.coverage.autoBindable, 3);
+  assert.match(waitingForSmoke.reply, /代码全面扫描已完成/);
+  assert(waitingForSmoke.businessFlows.every((flow) => flow.status === "auto-bindable"));
+
+  const targetedWhileStarting = buildPlanningConversation({
+    project,
+    message: "测试订单审批功能",
+    history: [],
+    graph,
+    capabilityGraph: businessGraph,
+    analysis,
+    discoveryReadiness: {
+      status: "waiting",
+      checkedUrl: project.frontendUrl,
+      attempts: 0,
+      maxAttempts: 2,
+      reason: "项目正在启动",
+      retryable: true,
+      runtimeStatus: "starting"
+    }
+  });
+  assert.ok(targetedWhileStarting.businessFlows.some((flow) => flow.pathVersion === "2.0"), "targeted planning remains source-grounded while runtime starts");
+  assert.match(targetedWhileStarting.reply, /代码定向分析已完成/);
 
   const readyForDiscovery = buildPlanningConversation({
     project,
@@ -114,4 +171,40 @@ export function testPlanningConversation() {
     }
   });
   assert.equal(readyForDiscovery.businessFlows.length, 3, "coverage expands only after connectivity smoke passes");
+
+  // A full inventory is not an execution batch. Large projects retain every
+  // source node, but related code symbols are grouped into bounded business
+  // paths so confirmation does not create hundreds of synchronous LLM loops.
+  const largeGraph: CodeImpactGraph = {
+    ...graph,
+    nodes: Array.from({ length: 241 }, (_, index) => ({
+      id: `page_${index}`,
+      kind: "page" as const,
+      label: `src/pages/page-${index}.tsx`,
+      file: `src/pages/page-${index}.tsx`,
+      confidence: "high" as const
+    }))
+  };
+  const largeAnalysis = analyzeIntake({ requirement, diff: "", projectId: project.id, codeGraph: largeGraph });
+  const largeInventory = buildPlanningConversation({
+    project,
+    message: requirement,
+    history,
+    graph: largeGraph,
+    analysis: largeAnalysis,
+    discoveryReadiness: {
+      status: "ready",
+      checkedUrl: project.frontendUrl,
+      attempts: 1,
+      maxAttempts: 2,
+      reason: "connectivity_smoke_passed:http_200",
+      retryable: false,
+      runtimeStatus: "running",
+      httpStatus: 200
+    }
+  });
+  assert.equal(largeInventory.coverage.sourceCandidates, 241, "all source candidates remain auditable");
+  assert(largeInventory.businessFlows.length < 20, "large flat code inventories should be grouped into bounded business paths");
+  assert.equal(largeInventory.businessFlows.flatMap((flow) => flow.sourceNodeIds ?? []).length, 241);
+  assert.equal(largeInventory.plan.levels[0]?.paths.length, largeInventory.businessFlows.length);
 }

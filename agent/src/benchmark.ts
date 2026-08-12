@@ -50,7 +50,7 @@ export interface BenchmarkRunRecord {
   executionErrorCode?: string;
   finalStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
   planProvenance?: {
-    source: "deterministic" | "llm" | "scenario_fallback" | "adaptive-rule-fallback" | "cached-llm";
+    source: "deterministic" | "llm" | "scenario_fallback" | "adaptive-rule-fallback" | "cached-llm" | "dynamic-browser-agent";
     promptVersion?: string;
     modelProfileId?: string;
     model?: string;
@@ -76,7 +76,7 @@ export interface BenchmarkRunRecord {
     status: string;
     errorCode?: string;
     durationMs?: number;
-    transportMode?: "stream" | "non-stream-fallback";
+  transportMode?: "stream" | "non-stream" | "non-stream-fallback";
     fallbackReason?: string;
     usage?: JudgeLaneRecord["usage"];
     transportAttempts?: Array<{
@@ -378,7 +378,11 @@ export function hasCompleteBenchmarkTrace(record: BenchmarkRunRecord) {
     && typeof artifact.sizeBytes === "number"
     && artifact.mediaType
   );
-  const llmRequired = record.lane?.includes("llm") ?? false;
+  // A selective LLM Judge is intentionally not invoked when deterministic
+  // assertions and evidence already agree.  Its lane name contains "llm",
+  // but an absent Judge call is therefore not a broken trace.  Planning lanes
+  // and Full LLM do require a persisted Planner invocation.
+  const llmRequired = record.lane === "full-llm" || record.lane === "llm-plan-deterministic-judge";
   const llmValid = !llmRequired || Boolean(record.llmCalls?.length && record.llmCalls.every((call) => call.id && call.runId && call.provider && call.model && call.status));
   return attemptsValid && artifactsValid && llmValid;
 }

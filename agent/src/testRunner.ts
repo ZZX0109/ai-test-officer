@@ -53,94 +53,22 @@ import {
   type StructuredAction,
   type StructuredActionResult
 } from "./structuredActionExecutors.js";
+import {
+  classifyExecutionError,
+  envFlag,
+  navigateToUsablePage,
+  redactPageObservationText,
+  redactPageObservationUrl,
+  reloadUsablePage,
+  resolveBrowserHeadlessMode
+} from "./executionRuntime.js";
+export { resolveBrowserHeadlessMode } from "./executionRuntime.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
 
 function scenarioFingerprint(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
-}
-
-function redactPageObservationText(value: unknown, limit = 2_000) {
-  const text = String(value ?? "")
-    .replace(/\b(?:sk|afk)-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_KEY]")
-    .replace(/\bAIza[A-Za-z0-9_-]{20,}\b/g, "[REDACTED_KEY]")
-    .replace(/(\bBearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
-    .replace(/((?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]")
-    .replace(/\s+/g, " ")
-    .trim();
-  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
-}
-
-function redactPageObservationUrl(value: string) {
-  try {
-    const url = new URL(value);
-    url.username = "";
-    url.password = "";
-    url.hash = "";
-    for (const key of [...url.searchParams.keys()]) url.searchParams.set(key, "[REDACTED]");
-    return url.toString();
-  } catch {
-    return redactPageObservationText(value, 800);
-  }
-}
-
-function classifyExecutionError(error: unknown, stepId?: string): NonNullable<VisualRunResult["executionError"]> {
-  const raw = error instanceof Error ? error.message : String(error);
-  const message = raw.replace(/[\r\n]+/g, " ").slice(0, 1_000);
-  if (/locator\.|waiting for|getByRole|getByLabel|selector/i.test(raw)) {
-    return { code: "action_binding_failure", stepId, message, failureClass: "test_script_issue" };
-  }
-  if (/target page.*closed|browser.*closed|context.*closed|crash/i.test(raw)) {
-    return { code: "browser_runtime_failure", stepId, message, failureClass: "environment_issue" };
-  }
-  if (/net::|ECONN|ERR_CONNECTION|health|timeout.*navigation/i.test(raw)) {
-    return { code: "environment_failure", stepId, message, failureClass: "environment_issue" };
-  }
-  return { code: "execution_failure", stepId, message, failureClass: "unknown" };
-}
-
-function envFlag(name: string) {
-  return ["1", "true", "yes", "on"].includes((process.env[name] ?? "").toLowerCase());
-}
-
-export function resolveBrowserHeadlessMode(value = process.env.HEADLESS) {
-  return value !== "0";
-}
-
-async function waitForUsablePageDom(page: Page) {
-  // Lightweight executor unit tests use a minimal Page double. Real
-  // Playwright pages always expose waitForFunction.
-  if (typeof page.waitForFunction !== "function") return true;
-  return page.waitForFunction(() => {
-    const body = document.body;
-    if (!body) return false;
-    const visibleText = (body.innerText || "").replace(/\s+/g, " ").trim();
-    return visibleText.length > 0 ||
-      Boolean(body.querySelector("a,button,input,textarea,select,[role='button'],[data-testid],canvas,svg"));
-  }, undefined, { timeout: 15_000 })
-    .then(() => true)
-    // A committed document may still be streaming modules or redirecting.
-    // Preserve the current page for target-specific waits and evidence instead
-    // of converting a generic warm-up timeout into a fatal execution error.
-    .catch(() => false);
-}
-
-async function navigateToUsablePage(page: Page, url: string, onNavigation?: (event: { status: "started" | "succeeded" | "failed"; url: string; httpStatus?: number; error?: string }) => void) {
-  onNavigation?.({ status: "started", url });
-  try {
-    const response = await page.goto(url, { waitUntil: "commit", timeout: 15_000 });
-    onNavigation?.({ status: "succeeded", url: page.url(), httpStatus: response?.status() });
-  } catch (error) {
-    onNavigation?.({ status: "failed", url: page.url() || url, error: error instanceof Error ? error.message : String(error) });
-    throw error;
-  }
-  return waitForUsablePageDom(page);
-}
-
-async function reloadUsablePage(page: Page) {
-  await page.reload({ waitUntil: "commit", timeout: 15_000 });
-  return waitForUsablePageDom(page);
 }
 
 async function ensureReportDirs(runId: string) {
@@ -349,7 +277,12 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   assertRunRequestExecutablePlan(input);
   const scenario = getScenario(input.scenarioId);
   const compiledPlan = input.compiledPlan ? assertCompiledPlanBinding(input.compiledPlan, scenario) : undefined;
-  let targetRuntime = await resolveProjectTarget(input);
+  // Benchmark fixtures run in a dedicated service group with an ephemeral
+  // port.  Do not let a saved project runtime (for example :6183) overwrite
+  // the runner-provided target. Interactive runs retain managed OCI runtime
+  // resolution, where an appUrl may indeed be stale after a container restart.
+  const useBenchmarkTarget = input.executionProfile === "benchmark" && Boolean(input.appUrl);
+  let targetRuntime = await resolveProjectTarget({ ...input, preferAppUrl: useBenchmarkTarget });
   let frontendUrl = targetFrontendUrl(targetRuntime.frontendUrl, input.fixtureVariantId);
   const id = input.runId ?? `run_${Date.now()}`;
   const startedAt = new Date().toISOString();
@@ -414,7 +347,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   };
   let projectWasStartedByRunner = false;
   let runtimeStatus: VisualRunResult["runtimeStatus"];
-  const healthResult = configuredProject
+  const healthResult = configuredProject && !useBenchmarkTarget
     ? await testProjectConnection(configuredProject)
     : input.target
       ? await testProjectConnection({
@@ -429,7 +362,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
         updatedAt: startedAt
       })
       : undefined;
-  if (configuredProject) {
+  if (configuredProject && !useBenchmarkTarget) {
     if (healthResult?.ok) {
       targetRuntime = await resolveProjectTarget({ projectId: configuredProject.id });
       runtimeStatus = {
@@ -460,7 +393,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   if (runtimeStatus?.status === "failed") {
     throw new Error(`runtime_unavailable:${runtimeStatus.failureReason ?? "unknown"}:${runtimeStatus.message ?? "Project runtime failed."}`);
   }
-  if (configuredProject) {
+  if (configuredProject && !useBenchmarkTarget) {
     // Starting or recovering an OCI sandbox can allocate a new host port.
     // Resolve the target again only after the runtime is healthy so Playwright
     // never navigates to the persisted container URL.

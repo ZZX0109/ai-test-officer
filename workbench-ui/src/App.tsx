@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   CalendarClock,
   CheckCircle2,
+  Code2,
   FileSearch,
   KeyRound,
   Link2,
@@ -43,7 +44,8 @@ import { RunTimeline } from "./components/RunTimeline";
 import { RunAssistantPanel } from "./components/RunAssistantPanel";
 import { KnowledgeBasis } from "./components/KnowledgeBasis";
 import { AssistantConversationMessage } from "./components/AssistantConversationMessage";
-import { RepairWorkspace } from "./components/RepairWorkspace";
+import { BusinessFlowList } from "./components/BusinessFlowList";
+import { LazyDetails, ProgressiveDetailsList } from "./components/ProgressiveDetailsList";
 import { SecurityPanel } from "./components/SecurityPanel";
 import { SourceStatusPanel } from "./components/SourceStatusPanel";
 import { StoragePanel } from "./components/StoragePanel";
@@ -56,15 +58,20 @@ import {
 } from "./state/workspaceReducer";
 import { readProjectHistoryCache, writeProjectHistoryCache } from "./projectHistoryCache";
 import { planRequiresLoginCredentials } from "./loginPlan";
+
+const RepairWorkspace = React.lazy(() => import("./components/MonacoRepairWorkspace")
+  .then((module) => ({ default: module.RepairWorkspace })));
 import {
   analyzeConnectedContext,
   bindProjectApiCredential,
   chatWithTestAssistant,
   continuePlanningConversation,
+  getPlanningFlowPage,
   controlRun,
   approveScenarioDraft,
   createCredential,
   createRunRepair,
+  createProjectCodeSession,
   createHarnessGapDraft,
   createProjectGrant,
   deleteCredential,
@@ -92,8 +99,13 @@ import {
   getRunEvidence,
   getRunProjection,
   getRunAgent,
+  getRunBrowserSession,
+  acquireRunBrowserControl,
+  releaseRunBrowserControl,
+  sendRunBrowserInput,
   resumeRepairDecision,
   listRunRepairs,
+  listRepairWorkspaceFiles,
   applyRepair,
   exportRepair,
   listHarnessGaps,
@@ -116,6 +128,7 @@ import {
   runPatrolPlanNow,
   runRequirementAcceptance,
   recoverAndRetryProject,
+  resumeRunAgentInterrupt,
   runStorageRetention,
   createVisualRun,
   approveRunPlan,
@@ -171,6 +184,7 @@ import type {
   RepairFileContent,
   RepairPlanActionStatus,
   AgentGraphProjection,
+  BrowserSession,
   RepairDecisionValue,
   RepairPlanData,
   RepairSession,
@@ -364,6 +378,8 @@ export function App() {
   }]);
   const [planningInput, setPlanningInput] = useState("");
   const [planningResult, setPlanningResult] = useState<PlanningConversationResult | null>(null);
+  const [planningFlowPageLoading, setPlanningFlowPageLoading] = useState(false);
+  const [excludedPlanningFlowIds, setExcludedPlanningFlowIds] = useState<Set<string>>(() => new Set());
   const [planningBusy, setPlanningBusy] = useState(false);
   const [assistantChatBusy, setAssistantChatBusy] = useState(false);
   const [assistantSuggestedAction, setAssistantSuggestedAction] = useState<{
@@ -388,6 +404,7 @@ export function App() {
   const surfacedAssistantNotices = useRef(new Set<string>());
   const surfacedProjectDiagnostics = useRef(new Set<string>());
   const hydratedAgentThreads = useRef(new Set<string>());
+  const surfacedObservationIds = useRef(new Set<string>());
   const generationRequestRef = useRef<{ id: string; projectId: string; controller: AbortController } | null>(null);
   const diagnosisOperationRef = useRef<{ id: string; projectId: string } | null>(null);
   const [flowDeleteReadyId, setFlowDeleteReadyId] = useState<string | null>(null);
@@ -412,6 +429,10 @@ export function App() {
   const [activeRun, setActiveRun] = useState<RunProjection | null>(null);
   const [repairSession, setRepairSession] = useState<RepairSession | null>(null);
   const [repairWorkspaceOpen, setRepairWorkspaceOpen] = useState(false);
+  // The centre surface has two explicit modes. Preview never grants source
+  // write access; code mode is always a sandbox workspace and only becomes
+  // editable after the operator explicitly asks to create a repair session.
+  const [centreSurface, setCentreSurface] = useState<"preview" | "code">("preview");
   const [repairBusy, setRepairBusy] = useState(false);
   const [reviewReason, setReviewReason] = useState("");
   const [runPreviewModalOpen, setRunPreviewModalOpen] = useState(false);
@@ -440,6 +461,10 @@ export function App() {
   // The graph projection is the only place a *paused* run surfaces. Without it
   // an interrupted run is indistinguishable from a stalled one.
   const [agentProjection, setAgentProjection] = useState<AgentGraphProjection | null>(null);
+  const [browserSession, setBrowserSession] = useState<BrowserSession | null>(null);
+  const [browserFrameRevision, setBrowserFrameRevision] = useState(0);
+  const [browserControlBusy, setBrowserControlBusy] = useState(false);
+  const [browserManualInput, setBrowserManualInput] = useState("");
   const [interruptBusy, setInterruptBusy] = useState(false);
   const [interruptError, setInterruptError] = useState<string | null>(null);
   const [permissionProfile, setPermissionProfile] = useState<PermissionProfile>({
@@ -492,7 +517,15 @@ export function App() {
     // whereas every uploaded project gets an OCI manifest during detection.
     ?? "trusted-local";
   const hasSelectedProject = Boolean(selectedProjectId || (projectDraft?.id && projectDetection?.executionReady !== false));
-  const discoveryAllowsPlanning = !discovery?.orchestration || discovery.orchestration.status === "ready";
+  const runtimeDiscoveryReady = !discovery?.orchestration || discovery.orchestration.status === "ready";
+  // A comprehensive scan is a source-backed plan, not a promise that the
+  // separate Playwright session is already authenticated. Keep the full code
+  // inventory reviewable/confirmable while runtime preparation is pending;
+  // execution still performs its own sandbox, login and page-binding gates.
+  const discoveryAllowsPlanning = runtimeDiscoveryReady || Boolean(
+    planningResult?.coverage.scope === "comprehensive"
+      && planningResult.businessFlows.length > 0
+  );
   const planningHasBlockingQuestions = !discoveryAllowsPlanning
     || (planningResult ? hasBlockingPlanningQuestions(planningResult) : false);
   const planningAutomationBusy = isPlanningAutomationBusy(planningAutomation.phase);
@@ -521,7 +554,10 @@ export function App() {
   ));
   const evidenceCount = result?.evidence?.length ?? 0;
   const sourceContextCount = analysis?.sourceContexts?.length ?? 0;
-  const planStepCount = activeExecutablePlan?.steps.length ?? plan?.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0) ?? 0;
+  const planStepCount = activeExecutablePlan?.steps.length
+    ?? planningResult?.plan.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0)
+    ?? plan?.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0)
+    ?? 0;
   const latestDecision = result?.finalStatus
     ?? result?.gateStatus
     ?? activeRun?.finalStatus
@@ -579,9 +615,15 @@ export function App() {
       || latestDecision === "blocked"
     )
   );
+  const runtimeRecoveryExhausted = Boolean(
+    selectedProjectId
+    && projectRecovery?.projectId === selectedProjectId
+    && ["blocked", "failed"].includes(projectRecovery.status)
+  );
   const runtimeRecoveryAvailable = Boolean(
     projectRuntime
     && projectRuntime.status !== "running"
+    && !runtimeRecoveryExhausted
     && (
       ["idle", "failed", "starting", "installing"].includes(projectRuntime.status)
       || ["container_runtime_unavailable", "dependency_missing", "command_not_found", "port_conflict", "health_timeout", "early_exit"].includes(projectRuntime.failureReason ?? "")
@@ -592,8 +634,13 @@ export function App() {
     && planningAutomation.phase === "blocked"
     && /Discovery|真实页面|页面绑定|入口、控件或预期结果|可执行路径/i.test(planningAutomation.detail)
   );
-  const assistantAutoRepairAvailable = runtimeRecoveryAvailable || discoveryRecoveryAvailable || pathBindingRepairable || codeRepairAvailable;
-  const assistantFeedbackRequired = runIsBlocked || runtimeRecoveryAvailable || discoveryRecoveryAvailable || authFeedbackRequired || credentialReadyForRetry || apiCredentialFeedbackRequired || screenshotRateLimited || reviewRequired || codeRepairAvailable;
+  const startupRepairAvailable = Boolean(
+    selectedProjectId
+    && runtimeRecoveryExhausted
+    && projectRuntime?.status !== "running"
+  );
+  const assistantAutoRepairAvailable = runtimeRecoveryAvailable || discoveryRecoveryAvailable || pathBindingRepairable || codeRepairAvailable || startupRepairAvailable;
+  const assistantFeedbackRequired = runIsBlocked || runtimeRecoveryAvailable || discoveryRecoveryAvailable || authFeedbackRequired || credentialReadyForRetry || apiCredentialFeedbackRequired || screenshotRateLimited || reviewRequired || codeRepairAvailable || startupRepairAvailable;
   const latestPlanningAssistant = [...planningMessages].reverse().find((item) => item.role === "assistant");
   const latestPlanningAssistantMessage = latestPlanningAssistant?.content;
   const assistantQuickCommands = runIsBlocked || reviewRequired
@@ -752,16 +799,72 @@ export function App() {
 
   async function openCodeRepairWorkspace() {
     if (!activeRunId) {
-      setMessage("当前没有可关联的持久化运行，无法创建修复会话。");
+      setCentreSurface("code");
+      if (!selectedProjectId || repairBusy) {
+        setMessage(selectedProjectId ? "代码沙盒正在准备，请稍候。" : "请先选择项目，再打开代码沙盒。");
+        return;
+      }
+      setRepairBusy(true);
+      const analyzeStartup = startupRepairAvailable;
+      const pendingId = `startup_repair_${Date.now()}`;
+      setMessage(analyzeStartup
+        ? "正在读取启动诊断并让 AI 生成受限的沙盒修复…"
+        : "正在创建项目代码沙盒；原项目保持只读。");
+      if (analyzeStartup) {
+        setPlanningMessages((current) => [...current, {
+          id: pendingId,
+          role: "assistant",
+          content: "遇到的问题：项目经过有限恢复后仍未启动。\n系统正在做什么：正在读取启动日志和允许修改的配置文件，在隔离沙盒中生成最小补丁。\n需要你操作：你已确认本次沙盒分析；原项目不会被修改，联网安装仍会单独询问。",
+          createdAt: new Date().toISOString()
+        }]);
+      }
+      try {
+        const response = await createProjectCodeSession(selectedProjectId, {
+          autoAnalyze: analyzeStartup,
+          credentialId: defaultCredential?.id,
+          summary: analyzeStartup
+            ? "根据已保存的项目启动状态和运行日志，分析最小启动配置修复。"
+            : undefined
+        });
+        setRepairSession(response.repair);
+        setRepairWorkspaceOpen(true);
+        const changedFiles = response.repair.files.map((file) => file.path);
+        setMessage(analyzeStartup ? response.repair.summary : "代码沙盒已准备，可以查看和编辑文件。保存只写入沙盒，不会直接修改原项目。");
+        if (analyzeStartup) {
+          setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+            ...item,
+            content: [
+              `遇到的问题：${projectRecovery?.events.at(-1)?.message ?? projectRuntime?.message ?? "项目启动失败。"}`,
+              `系统已经做了什么：${response.repair.summary}`,
+              changedFiles.length
+                ? `沙盒变更：${changedFiles.join("、")}。已打开代码 Diff，尚未写回原项目。`
+                : "沙盒变更：模型没有生成满足安全约束的修改，未改动任何文件。",
+              "需要你操作：查看 Diff；如涉及依赖清单，需先授权联网安装，然后执行重新验证。"
+            ].join("\n")
+          } : item));
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "创建代码沙盒失败";
+        setMessage(detail);
+        if (analyzeStartup) {
+          setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
+            ...item,
+            content: `遇到的问题：启动修复没有完成。\n系统已经做了什么：已保留原启动诊断，没有修改原项目。技术原因：${detail}\n需要你操作：检查模型配置，或在已打开的代码沙盒中手动调整启动配置。`
+          } : item));
+        }
+      } finally {
+        setRepairBusy(false);
+      }
       return;
     }
+    setCentreSurface("code");
     setRepairBusy(true);
-    setMessage("正在创建只读源码快照和可写沙盒副本，并根据失败证据生成最小修复。");
+    setMessage("已获得你的请求，正在创建只读源码快照和可写沙盒副本，并根据失败证据生成最小修复。");
     const pendingId = `code_repair_pending_${Date.now()}`;
     setPlanningMessages((current) => [...current, {
       id: pendingId,
       role: "assistant",
-      content: "正在创建沙盒源码副本，调用 Repair 模型定位失败文件，并在修改后运行定向测试。原项目保持只读。",
+        content: "你已授权 AI 在隔离沙盒中分析失败并提出最小补丁。系统会先保留原始证据；原项目保持只读。AI 会说明修改原因、预期效果和复测范围，验证通过前不会应用到原项目。",
       createdAt: new Date().toISOString()
     }]);
     try {
@@ -785,7 +888,7 @@ export function App() {
           repairCall
             ? `模型 ${repairCall.model}；调用 ${repairCall.id}；${repairCall.durationMs}ms；${repairCall.usage.totalTokens ?? 0} Token；状态 ${repairCall.status}。`
             : "本次没有可用的 Repair 模型调用记录。",
-          "修复工作区已打开，可逐行查看 Diff；重新验证通过前不会应用到原项目。"
+          "修复工作区已打开，可逐行查看 Diff；重新验证通过前不会应用到原项目。你可以继续手动编辑沙盒副本。"
         ].join("\n")
       } : item));
     } catch (error) {
@@ -795,6 +898,38 @@ export function App() {
         ...item,
         content: `修复会话创建失败：${detail}。原机器结论和证据保持不变，没有修改项目文件。`
       } : item));
+    } finally {
+      setRepairBusy(false);
+    }
+  }
+
+  // Code mode is a normal project-viewing surface, not a reward unlocked only
+  // after a failed test.  Opening it creates a filtered, writable sandbox copy
+  // of the selected project's source.  The original folder is never exposed
+  // for writes; repair-specific AI proposals still use openCodeRepairWorkspace
+  // above and retain their run/evidence provenance.
+  async function openProjectCodeWorkspace() {
+    setCentreSurface("code");
+    if (!selectedProjectId) {
+      setMessage("请先上传或选择项目，再查看代码。");
+      return;
+    }
+    if (repairSession?.projectId === selectedProjectId) {
+      setRepairWorkspaceOpen(true);
+      return;
+    }
+    if (repairBusy) return;
+    setRepairBusy(true);
+    setMessage("正在创建受控项目代码副本；原项目保持只读。");
+    try {
+      const response = await createProjectCodeSession(selectedProjectId, "项目代码工作区：用于查看、编辑沙盒副本和准备后续测试修复。");
+      setRepairSession(response.repair);
+      setRepairWorkspaceOpen(true);
+      setMessage("项目代码已载入受控工作区。任何保存只写入沙盒副本，不会直接修改原项目。");
+    } catch (error) {
+      setRepairWorkspaceOpen(false);
+      setCentreSurface("preview");
+      setMessage(error instanceof Error ? `无法打开项目代码：${error.message}` : "无法打开项目代码工作区。");
     } finally {
       setRepairBusy(false);
     }
@@ -810,9 +945,9 @@ export function App() {
     return response.repair;
   }
 
-  async function validateCurrentRepair() {
+  async function validateCurrentRepair(allowNetworkInstall = false) {
     if (!repairSession) throw new Error("repair_session_not_selected");
-    const response = await validateRepair(repairSession.id);
+    const response = await validateRepair(repairSession.id, allowNetworkInstall);
     setRepairSession(response.repair);
     return response.repair;
   }
@@ -1003,6 +1138,7 @@ export function App() {
   function excludePlanningFlow(flowId: string) {
     const removed = planningResult?.businessFlows.find((flow) => flow.id === flowId);
     if (!removed) return;
+    setExcludedPlanningFlowIds((current) => new Set([...current, flowId]));
     setPlanningResult((current) => {
       if (!current) return current;
       const businessFlows = current.businessFlows.filter((flow) => flow.id !== flowId);
@@ -1020,6 +1156,7 @@ export function App() {
           autoBindable,
           needsInput,
           gaps,
+          sourceCandidates: businessFlows.reduce((total, flow) => total + (flow.sourceCount ?? 1), 0),
           confidence: businessFlows.length && gaps === 0 ? "high" : businessFlows.length ? "medium" : "low"
         },
         plan: {
@@ -1413,14 +1550,85 @@ export function App() {
   useEffect(() => {
     if (!activeRunId) return;
     return subscribeRunEvents(activeRunId, ({ id, type, payload }) => {
+      if (type.startsWith("browser.")) {
+        if (type.startsWith("browser.session.") || type === "browser.control.changed") {
+          const candidate = payload as unknown as BrowserSession;
+          if (candidate?.runId === activeRunId && candidate?.sessionId) setBrowserSession(candidate);
+          else void getRunBrowserSession(activeRunId).then(({ session }) => setBrowserSession(session)).catch(() => undefined);
+        }
+        if (type === "browser.observation.created" || type === "browser.action.completed" || type === "browser.action.failed") {
+          setBrowserFrameRevision((current) => current + 1);
+          void getRunBrowserSession(activeRunId).then(({ session }) => setBrowserSession(session)).catch(() => undefined);
+        }
+        if (type === "browser.action.proposed") {
+          const decision = payload as { decisionId?: string; summary?: string; actions?: Array<{ purpose?: string; expectedChange?: string }> };
+          if (decision.decisionId) setPlanningMessages((current) => current.some((message) => message.id === `browser-decision-${decision.decisionId}`) ? current : [...current, {
+            id: `browser-decision-${decision.decisionId}`,
+            role: "assistant",
+            content: [`AI 当前准备执行：${decision.actions?.[0]?.purpose ?? decision.summary ?? "分析页面"}`, `预期结果：${decision.actions?.[0]?.expectedChange ?? "执行后重新观察页面并验证"}`, "需要你做什么：低风险操作会自动执行；敏感操作会先请求确认。"].join("\n"),
+            createdAt: new Date().toISOString()
+          }]);
+        }
+        return;
+      }
       // Graph lifecycle frames carry the projection itself. `agent.interrupt.*`
       // is what turns a silently paused run into a visible decision request, so
       // it must be consumed here rather than polled.
       if (type.startsWith("agent.")) {
-        const projection = payload as unknown as AgentGraphProjection;
-        if (projection?.runId === activeRunId) {
-          setAgentProjection(projection);
-          if (projection.pendingInterrupt) setInterruptError(null);
+        const candidate = payload as unknown as AgentGraphProjection;
+        const isProjectionEvent = type.startsWith("agent.node.") || type.startsWith("agent.interrupt");
+        if (type === "agent.observation.created") {
+          const observation = payload as unknown as {
+            id?: string;
+            status?: string;
+            summary?: string;
+            finalUrl?: string;
+            httpStatus?: number;
+            controls?: Array<{ name?: string; role?: string; visible?: boolean }>;
+            consoleErrors?: string[];
+            pageErrors?: string[];
+            failedRequests?: Array<{ url?: string; status?: number; failure?: string }>;
+            userActionRequired?: boolean;
+            retryable?: boolean;
+          };
+          if (observation.id && !surfacedObservationIds.current.has(observation.id)) {
+            surfacedObservationIds.current.add(observation.id);
+            const controls = observation.controls?.filter((item) => item.visible !== false).slice(0, 5)
+              .map((item) => item.name || item.role).filter(Boolean).join("、");
+            const failures = [
+              ...(observation.consoleErrors ?? []).slice(0, 2).map((item) => `控制台：${item}`),
+              ...(observation.pageErrors ?? []).slice(0, 2).map((item) => `页面：${item}`),
+              ...(observation.failedRequests ?? []).slice(0, 2).map((item) => `网络：${item.url ?? "请求"}${item.status ? ` (${item.status})` : ""}`)
+            ];
+            setPlanningMessages((current) => [...current, {
+              id: `agent_observation_message_${observation.id}`,
+              role: "assistant",
+              content: [
+                `遇到的问题：${observation.summary ?? "系统正在读取页面状态。"}`,
+                `系统已经做了什么：已采集页面地址${observation.finalUrl ? ` ${observation.finalUrl}` : ""}${observation.httpStatus ? `、HTTP ${observation.httpStatus}` : ""}${controls ? `，发现控件：${controls}` : ""}${failures.length ? `。${failures.join("；")}` : "。暂未发现控制台或网络错误"}`,
+                `需要你做什么：${observation.userActionRequired ? "请根据上面的阻塞提示补充授权或凭据。" : observation.retryable ? "无需操作，系统将按有限次数继续恢复并重试。" : "无需操作，系统会保留当前证据并进入下一步。"}`
+              ].join("\n"),
+              createdAt: new Date().toISOString(),
+              reasoningSummary: {
+                phase: observation.userActionRequired ? "waiting-user" : "diagnosing",
+                observations: failures.length ? failures : [observation.summary ?? "页面观测已保存"],
+                assessment: observation.status === "ready" ? "页面已具备可观察状态。" : "页面观测未达到可执行条件。",
+                nextStep: observation.retryable ? "有限恢复或重新 Discovery" : "保留证据并等待下一节点",
+                userAction: observation.userActionRequired ? "请完成授权或凭据配置。" : "无需操作",
+                confidence: failures.length ? "high" : "medium"
+              }
+            }]);
+          }
+        }
+        if (isProjectionEvent && candidate?.runId === activeRunId) {
+          setAgentProjection(candidate);
+          if (candidate.pendingInterrupt) setInterruptError(null);
+        } else if (!isProjectionEvent) {
+          // Recovery/observation/tool SSE payloads are records, not graph
+          // projections. Refresh the projection so the status bar and pending
+          // interrupt remain coherent instead of replacing state with a
+          // malformed decision object.
+          void getRunAgent(activeRunId).then(({ agent }) => setAgentProjection(agent)).catch(() => undefined);
         }
         return;
       }
@@ -1451,6 +1659,14 @@ export function App() {
       });
       void getRunProjection(activeRunId).then(({ run }) => setActiveRun(run)).catch(() => undefined);
     });
+  }, [activeRunId]);
+
+  useEffect(() => {
+    if (!activeRunId) {
+      setBrowserSession(null);
+      return;
+    }
+    void getRunBrowserSession(activeRunId).then(({ session }) => setBrowserSession(session)).catch(() => setBrowserSession(null));
   }, [activeRunId]);
 
   /**
@@ -2158,6 +2374,7 @@ export function App() {
           diagnosis: diagnosed?.diagnosis,
           recoveryAdvice
         });
+        await recoverProjectAndRetry("runtime");
         return;
       }
 
@@ -2189,6 +2406,7 @@ export function App() {
           diagnosis: diagnosed.diagnosis,
           connection: tested.result
         });
+        await recoverProjectAndRetry(tested.result.ok ? "discovery" : "runtime");
       }
     } catch (error) {
       if (!isCurrentDiagnosis()) return;
@@ -2463,7 +2681,7 @@ export function App() {
     setMessage(response.runtime.message ?? `项目状态：${response.runtime.status}`);
   }
 
-  async function recoverProjectAndRetry(mode: "auto" | "runtime" | "discovery" = "auto") {
+  async function recoverProjectAndRetry(mode: "auto" | "runtime" | "discovery" = "auto"): Promise<ProjectRecoveryResult | undefined> {
     const projectId = selectedProjectId || projectDraft?.id;
     if (!projectId) {
       const detail = "当前没有已选择的项目，因此没有可执行的恢复操作。";
@@ -2474,9 +2692,9 @@ export function App() {
         content: `遇到的问题：${detail}\n系统正在做什么：未启动重试，也没有创建代码修复。\n需要你操作：先选择并保存一个项目。`,
         createdAt: new Date().toISOString()
       }]);
-      return;
+      return undefined;
     }
-    if (projectRecoveryBusy) return;
+    if (projectRecoveryBusy) return undefined;
 
     setProjectRecoveryBusy(true);
     const pendingId = `project_recovery_${Date.now()}`;
@@ -2492,7 +2710,7 @@ export function App() {
     setMessage(mode === "discovery" ? "正在重新扫描页面并绑定路径…" : "正在重新启动沙盒并诊断项目…");
 
     try {
-      const accepted = await recoverAndRetryProject(projectId, mode);
+      const accepted = await recoverAndRetryProject(projectId, mode, defaultCredential?.id);
       let recovery = accepted.recovery;
       setProjectRecovery(recovery);
       const deadline = Date.now() + 190_000;
@@ -2502,6 +2720,7 @@ export function App() {
         recovery = snapshot.recovery;
         setProjectRecovery(recovery);
         setProjectRuntime(recovery.runtime);
+        setRuntimeRecoveryAdvice(recovery.advice ?? null);
         const lastEvent = recovery.events.at(-1);
         setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
           ...item,
@@ -2514,17 +2733,25 @@ export function App() {
       }
       setProjectRecovery(recovery);
       setProjectRuntime(recovery.runtime);
+      setRuntimeRecoveryAdvice(recovery.advice ?? null);
       const lastEvent = recovery.events.at(-1);
       const completed = recovery.status === "completed";
+      const advisorText = recovery.advice?.status === "passed" && recovery.advice.summary
+        ? `\nAI 判断：${boundedAssistantText(recovery.advice.summary, 500)}`
+        : "";
       const finalText = completed
         ? `遇到的问题：恢复完成。\n系统已经做了什么：${lastEvent?.message ?? "沙盒、页面连通性和 Discovery 已恢复。"}\n需要你操作：无需操作；现在可以继续生成或执行测试计划。`
-        : `遇到的问题：${lastEvent?.message ?? recovery.sourceError ?? "恢复未完成。"}\n系统已经做了什么：已执行受限恢复并保留运行状态；没有修改项目源码，也没有覆盖既有证据。\n需要你操作：${recovery.userAction}`;
+        : `遇到的问题：${lastEvent?.message ?? recovery.sourceError ?? "恢复未完成。"}\n系统已经做了什么：已执行受限恢复并保留运行状态；没有修改项目源码，也没有覆盖既有证据。${advisorText}\n需要你操作：${recovery.userAction}`;
       setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
         ...item,
         content: finalText,
-        suggestedAction: completed ? "start-run" : "none",
-        requiresConfirmation: completed
+        suggestedAction: completed ? "start-run" : "create-repair",
+        requiresConfirmation: true
       } : item));
+      setAssistantSuggestedAction({
+        action: completed ? "start-run" : "create-repair",
+        label: completed ? assistantActionLabel("start-run") : "在沙盒中分析启动问题"
+      });
       setMessage(completed ? "项目环境已恢复，可以继续测试。" : recovery.userAction);
       if (completed) {
         setPlanningAutomation({ phase: "idle", detail: "项目恢复完成，等待继续规划或执行测试。" });
@@ -2532,6 +2759,7 @@ export function App() {
       } else {
         setPlanningAutomation({ phase: "blocked", detail: lastEvent?.message ?? recovery.sourceError ?? "项目恢复未完成" });
       }
+      return recovery;
     } catch (error) {
       const detail = userFacingAutomationError(error instanceof Error ? error.message : "恢复请求失败");
       setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
@@ -2539,6 +2767,7 @@ export function App() {
         content: `遇到的问题：${detail}\n系统已经做了什么：恢复请求未完成，系统没有启动代码修复或覆盖已有测试证据。\n需要你操作：请稍后重试；如果持续失败，请查看运行详情。`
       } : item));
       setMessage(detail);
+      return undefined;
     } finally {
       setProjectRecoveryBusy(false);
     }
@@ -2615,8 +2844,8 @@ export function App() {
       return;
     }
     if (action === "create-repair") {
-      if (!activeRunId) {
-        setMessage("当前没有可关联的失败运行，因此不能创建代码修复。请先恢复项目或执行一条真实失败路径。");
+      if (!activeRunId && !startupRepairAvailable) {
+        setMessage("当前没有可关联的失败运行或启动诊断，因此不能生成自动修复。请先运行诊断。");
         return;
       }
       await openCodeRepairWorkspace();
@@ -2767,10 +2996,15 @@ export function App() {
     setInterruptBusy(true);
     setInterruptError(null);
     try {
-      const { agent } = await resumeRepairDecision(activeRunId, interrupt.id, {
-        decision,
-        message: note
-      });
+      const { agent } = interrupt.kind === "repair-decision"
+        ? await resumeRepairDecision(activeRunId, interrupt.id, {
+          decision,
+          message: note
+        })
+        : await resumeRunAgentInterrupt(activeRunId, interrupt.id, {
+          approved: decision !== "dismiss",
+          input: { action: decision, message: note }
+        });
       setAgentProjection(agent);
       setMessage(
         decision === "dismiss"
@@ -2803,9 +3037,9 @@ export function App() {
   function resolveRecoverableAssistantAction(action: Exclude<AssistantSuggestedAction, "none"> | undefined) {
     if (!action) return action;
     const recoveryRequested = action === "retry-failed-path" || action === "create-repair";
-    if (recoveryRequested && projectRuntime?.status !== "running") return "retry-runtime" as const;
+    if (recoveryRequested && projectRuntime?.status !== "running" && !startupRepairAvailable) return "retry-runtime" as const;
     if (recoveryRequested && discovery?.orchestration && discovery.orchestration.status !== "ready") return "retry-discovery" as const;
-    if (action === "create-repair" && !activeRunId) return undefined;
+    if (action === "create-repair" && !activeRunId && !startupRepairAvailable) return undefined;
     return action;
   }
 
@@ -3082,10 +3316,14 @@ export function App() {
         : null;
       const smokeReady = !response.discovery?.orchestration
         || response.discovery.orchestration.status === "ready";
+      // Comprehensive scans remain useful when the independent browser smoke
+      // is waiting for login: code-derived flows are still real planning
+      // output, while runtime binding remains explicitly pending.
+      const keepCodePlanWhileRuntimeWaits = fullInventoryCommand && response.planning.businessFlows.length > 0;
       const assistantMessage: PlanningMessage = {
         id: `planning_assistant_${Date.now()}`,
         role: "assistant",
-        content: smokeReady || !orchestrationCopy
+        content: smokeReady || !orchestrationCopy || keepCodePlanWhileRuntimeWaits
           ? response.planning.reply
           : [
             `遇到的问题：${orchestrationCopy.reason}`,
@@ -3101,18 +3339,21 @@ export function App() {
         .map((item) => item.content)
         .join("\n");
       setRequirementText(combinedRequirement);
-      if (!smokeReady) {
+      if (!smokeReady && !keepCodePlanWhileRuntimeWaits) {
         setPlanningResult(null);
         setPlanningConfirmed(false);
         setScenarioId("");
         setMessage(orchestrationCopy?.status ?? "页面预检未通过，测试尚未开始。");
         return null;
       }
+      setExcludedPlanningFlowIds(new Set());
       setPlanningResult(response.planning);
       setMessage(response.planning.llmPlanning?.status === "failed"
         ? "代码扫描已完成，但 AI 规划暂时不可用；已保留可继续编辑的规则计划。"
         : response.planning.llmPlanning?.status === "not_configured"
           ? "代码扫描已完成。配置 AI 模型后可获得优先级建议和追问。"
+        : !smokeReady && keepCodePlanWhileRuntimeWaits
+        ? "代码测试清单已生成；页面前置条件会在确认执行时自动处理。"
         : response.planning.phase === "clarifying"
         ? "系统需要你回答几个问题，回答后会更新计划。"
         : "测试计划草案已生成，请检查业务流程后确认。");
@@ -3222,9 +3463,27 @@ export function App() {
   }
 
   async function executeConfirmedScenarioAutomatically(
-    selectedScenarioId: string,
+    selectedScenarioId: string | undefined,
     grantedProfile = permissionProfile,
-    targetOverride?: { appUrl: string; projectId: string; batchMode?: boolean; coverageScenarioIds?: string[] }
+    targetOverride?: {
+      appUrl: string;
+      projectId: string;
+      batchMode?: boolean;
+      coverageScenarioIds?: string[];
+      coverageInventory?: Array<{
+        id: string;
+        title: string;
+        kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
+        target: string;
+        sourceNodeIds: string[];
+        sourceCount: number;
+        surfaces?: Array<"page" | "api" | "data" | "background-task">;
+        requiredEvidenceKinds?: string[];
+        preconditions?: string[];
+      }>;
+      coverageMode?: "targeted" | "full";
+      dynamicBrowser?: boolean;
+    }
   ) {
     if (!grantedProfile.observe || !grantedProfile.browserControl) {
       setPlanningAutomation({
@@ -3250,7 +3509,11 @@ export function App() {
         diff: diffText,
         projectId: targetOverride?.projectId ?? (selectedProjectId || projectDraft?.id),
         executionMode: selectedProjectExecutionMode,
-        coverageScenarioIds: targetOverride?.coverageScenarioIds
+        coverageScenarioIds: targetOverride?.coverageScenarioIds,
+        coverageInventory: targetOverride?.coverageInventory,
+        coverageMode: targetOverride?.coverageMode,
+        dynamicBrowser: targetOverride?.dynamicBrowser,
+        modelProfileId: defaultCredential?.id
       });
       setActiveRunId(created.run.id);
       setActiveRun(created.run);
@@ -3322,6 +3585,9 @@ export function App() {
   ) {
     const activePlanning = planningOverride ?? planningResult;
     if (!activePlanning) return;
+    const comprehensiveRun = /全面|灰度|全量|所有业务|所有功能|full|comprehensive/i.test(
+      `${requirementText} ${activePlanning.plan.sessionName}`
+    );
     // Permission is the first user decision. Do not prepare a sandbox and then
     // jump backwards to an authorization step.
     if (!grantedProfile.observe || !grantedProfile.browserControl) {
@@ -3342,6 +3608,56 @@ export function App() {
     let activeScenarioId: string | undefined;
     try {
       const project = await ensureProjectReadyForAutomation(projectOverride);
+      if (project.manifest?.execution.mode === "oci" || selectedProjectExecutionMode === "oci") {
+        const coverageInventory = activePlanning.businessFlows.map((flow) => ({
+          id: flow.id,
+          title: flow.title,
+          kind: flow.kind,
+          target: flow.target,
+          sourceNodeIds: flow.sourceNodeIds ?? [],
+          sourceCount: flow.sourceCount ?? 1,
+          surfaces: flow.surfaces,
+          requiredEvidenceKinds: flow.requiredEvidenceKinds,
+          preconditions: flow.requiredInformation
+        }));
+        setPlanningMessages((current) => [...current, {
+          id: `dynamic_browser_handoff_${Date.now()}`,
+          role: "assistant",
+          content: `项目服务已连通。${coverageInventory.length} 条归并业务路径现在交给 LangGraph：AI 会观察真实页面、选择受限动作、执行机器 oracle，并在需要账号或高风险操作时再询问你。`,
+          createdAt: new Date().toISOString()
+        }]);
+        setPlanningAutomation({
+          phase: "starting-run",
+          detail: "正在创建自主浏览器 Run；首个页面观测或动作产生后会立即显示在测试现场。"
+        });
+        const parentOutcome = await executeConfirmedScenarioAutomatically(undefined, grantedProfile, {
+          appUrl: project.frontendUrl,
+          projectId: project.id,
+          batchMode: true,
+          coverageScenarioIds: [],
+          coverageInventory,
+          coverageMode: comprehensiveRun ? "full" : "targeted",
+          dynamicBrowser: true
+        });
+        if (parentOutcome?.success) {
+          setAutomationFailures([]);
+          setPlanningAutomation({ phase: "ready", detail: parentOutcome.detail });
+          setMessage(parentOutcome.detail);
+        } else {
+          const failure: AutomationFailure = {
+            scenarioId: "dynamic-browser-agent",
+            title: "动态浏览器自动化",
+            target: project.frontendUrl,
+            stage: "execution",
+            detail: parentOutcome?.detail ?? "动态浏览器 Run 未返回结果"
+          };
+          setAutomationFailures([failure]);
+          await analyzeAutomationFailures([failure], 0);
+          setPlanningAutomation({ phase: "blocked", detail: failure.detail });
+          setMessage(failure.detail);
+        }
+        return;
+      }
       setPlanningAutomation({ phase: "discovering", detail: "正在读取真实页面、控件、接口和可验证结果。" });
       const reusableDiscovery = discovery
         && discovery.target.projectId === project.id
@@ -3409,7 +3725,18 @@ export function App() {
             .map((id) => response.discovery.drafts.find((draft) => draft.scenarioId === id))
             .filter((draft): draft is HarnessGapScenarioDraft => Boolean(draft))
         : [chooseDiscoveryDraft(response.discovery)].filter((draft): draft is HarnessGapScenarioDraft => Boolean(draft));
-      if (!selectedDrafts.length) throw new Error("页面扫描没有找到可安全执行的测试路径。");
+      // Keep every already-validated scenario from the static coverage
+      // compiler. Runtime Discovery supplements unknown pages; it must not
+      // replace known API/permission/business scenarios with just the first
+      // currently visible page.
+      const compiledScenarioIds = Array.from(new Set(
+        activePlanning.businessFlows
+          .filter((flow) => flow.status === "executable" && Boolean(flow.scenarioId))
+          .map((flow) => flow.scenarioId!)
+      ));
+      if (!selectedDrafts.length && !compiledScenarioIds.length) {
+        throw new Error("页面扫描没有找到可安全执行的测试路径。");
+      }
       setPlanningMessages((current) => [...current, {
         id: `discovery_summary_${Date.now()}`,
         role: "assistant",
@@ -3428,7 +3755,7 @@ export function App() {
         detail: `${selectionMode}；正在验证元素、动作、oracle 和证据要求。`,
         scenarioId: selectedDrafts[0]?.scenarioId
       });
-      const approvedScenarioIds: string[] = [];
+      const approvedScenarioIds: string[] = [...compiledScenarioIds];
       const bindingFailures: AutomationFailure[] = [];
       const bindingRepairs: string[] = [];
       for (const [index, draft] of selectedDrafts.entries()) {
@@ -3468,7 +3795,9 @@ export function App() {
         }
         const approved = await approveScenarioDraft(draft.scenarioId);
         if (approved.draft.draftReviewStatus === "approved") {
-          approvedScenarioIds.push(approved.draft.scenarioId);
+          if (!approvedScenarioIds.includes(approved.draft.scenarioId)) {
+            approvedScenarioIds.push(approved.draft.scenarioId);
+          }
         } else {
           bindingFailures.push({
             scenarioId: draft.scenarioId,
@@ -3504,11 +3833,18 @@ export function App() {
         scenarioId: approvedScenarioIds[0]
       });
       setScenarioId(approvedScenarioIds[0]!);
+      // A comprehensive scan is also an auditable inventory. Pass every flow
+      // into the parent coverage ledger: executable scenarios become child
+      // runs, while unbound/unsafe flows remain explicit blocked dispositions
+      // instead of silently disappearing from the final report.
+      const coverageIdsForRun = comprehensiveRun
+        ? Array.from(new Set(activePlanning.businessFlows.map((flow) => flow.scenarioId ?? flow.id)))
+        : approvedScenarioIds;
       const parentOutcome = await executeConfirmedScenarioAutomatically(approvedScenarioIds[0]!, grantedProfile, {
         appUrl: project.frontendUrl,
         projectId: project.id,
         batchMode: true,
-        coverageScenarioIds: approvedScenarioIds
+        coverageScenarioIds: coverageIdsForRun
       });
       const completedCount = parentOutcome?.success ? approvedScenarioIds.length : 0;
       const executionFailures: AutomationFailure[] = parentOutcome?.success
@@ -3548,7 +3884,38 @@ export function App() {
     }
   }
 
+  async function fetchPlanningFlows(candidate: PlanningConversationResult, fetchAll = false) {
+    const projectId = selectedProjectId || projectDraft?.id;
+    if (!projectId || !candidate.businessFlowPage?.nextCursor) return candidate;
+    setPlanningFlowPageLoading(true);
+    try {
+      let current = candidate;
+      do {
+        const response = await getPlanningFlowPage({
+          planningId: current.id,
+          projectId,
+          cursor: current.businessFlowPage?.nextCursor,
+          limit: fetchAll ? 100 : 24
+        });
+        const known = new Set(current.businessFlows.map((flow) => flow.id));
+        current = {
+          ...current,
+          businessFlows: [...current.businessFlows, ...response.flows.filter((flow) => !known.has(flow.id) && !excludedPlanningFlowIds.has(flow.id))],
+          businessFlowPage: { ...response.page, total: Math.max(0, response.page.total - excludedPlanningFlowIds.size) }
+        };
+      } while (fetchAll && current.businessFlowPage?.nextCursor);
+      setPlanningResult((existing) => existing?.id === current.id ? current : existing);
+      return current;
+    } finally {
+      setPlanningFlowPageLoading(false);
+    }
+  }
+
   async function confirmPlanningResult(candidate: PlanningConversationResult) {
+    // The first planning response deliberately contains one page. Execution
+    // is the only point where Workbench requests the complete inventory.
+    const completeCandidate = await fetchPlanningFlows(candidate, true);
+    candidate = completeCandidate;
     if (hasBlockingPlanningQuestions(candidate)) {
       setMessage("请先回答规划中的澄清问题。");
       return;
@@ -3718,7 +4085,8 @@ export function App() {
         requirement: requirementText,
         diff: diffText,
         projectId: selectedProjectId || projectDraft?.id,
-        executionMode: selectedProjectExecutionMode
+        executionMode: selectedProjectExecutionMode,
+        modelProfileId: defaultCredential?.id
       });
       setActiveRunId(response.run.id);
       setActiveRun(response.run);
@@ -4187,6 +4555,12 @@ export function App() {
                   <article><strong>{planningResult.coverage.autoBindable ?? 0}</strong><span>可自动绑定</span></article>
                   <article><strong>{planningResult.coverage.gaps}</strong><span>覆盖缺口</span></article>
                 </div>
+                {planningResult.businessGraph ? (
+                  <p className="planning-coverage-note">
+                    业务路径图 v{planningResult.businessGraph.version}：已安全索引 {planningResult.businessGraph.sourceFileCount} 个源码文件；每条流程可展开查看代码、接口与运行时绑定依据。
+                    {planningResult.businessGraph.diagnostics.length ? ` ${planningResult.businessGraph.diagnostics.join("；")}` : ""}
+                  </p>
+                ) : null}
                 {(planningResult.coverage.autoBindable ?? 0) > 0 && (
                   <p className="planning-coverage-note">
                     “可自动绑定”不是失败：这些流程来自代码扫描。确认后，系统会在沙盒页面中验证真实入口、控件和结果；
@@ -4214,44 +4588,17 @@ export function App() {
                     ))}
                   </div>
                 )}
-                <details className="planning-flow-list" open>
-                  <summary>查看全部 {planningResult.businessFlows.length} 条业务流程</summary>
-                  {planningResult.businessFlows.map((flow) => (
-                    <article
-                      key={flow.id}
-                      className={`planning-flow ${flow.status}`}
-                      onMouseEnter={() => scheduleFlowDelete(flow.id)}
-                      onMouseLeave={() => hideFlowDelete(flow.id)}
-                    >
-                      <div>
-                        <strong>{flow.title}</strong>
-                        <span>{flow.kind === "page" ? "页面" : flow.kind === "component" ? "功能组件" : flow.kind === "api" ? "接口" : "测试场景"} · {flow.confidence} confidence</span>
-                      </div>
-                      <div className="planning-flow-actions">
-                        <span className="planning-flow-status">
-                          {flow.status === "executable"
-                            ? "可执行"
-                            : flow.status === "auto-bindable"
-                              ? "可自动生成"
-                              : flow.status === "needs-input"
-                                ? "待补条件"
-                                : "覆盖缺口"}
-                        </span>
-                        {flowDeleteReadyId === flow.id && (
-                          <button
-                            className="planning-flow-delete"
-                            type="button"
-                            onClick={() => excludePlanningFlow(flow.id)}
-                            aria-label={`从本次测试计划删除 ${flow.title}`}
-                          >
-                            <Trash2 size={13} />删除
-                          </button>
-                        )}
-                      </div>
-                      <p>{flow.reason}</p>
-                    </article>
-                  ))}
-                </details>
+                <BusinessFlowList
+                  flows={planningResult.businessFlows}
+                  total={planningResult.businessFlowPage?.total}
+                  hasMore={Boolean(planningResult.businessFlowPage?.nextCursor)}
+                  loading={planningFlowPageLoading}
+                  deletingId={flowDeleteReadyId}
+                  onLoadMore={async () => { await fetchPlanningFlows(planningResult); }}
+                  onDelete={excludePlanningFlow}
+                  onHoverStart={scheduleFlowDelete}
+                  onHoverEnd={hideFlowDelete}
+                />
                 <button
                   className="confirm-planning-button"
                   type="button"
@@ -4608,6 +4955,47 @@ export function App() {
     );
   }
 
+  async function toggleBrowserControl() {
+    if (!activeRunId || browserControlBusy) return;
+    setBrowserControlBusy(true);
+    try {
+      const response = browserSession?.owner === "user"
+        ? await releaseRunBrowserControl(activeRunId)
+        : await acquireRunBrowserControl(activeRunId);
+      setBrowserSession(response.session);
+      setBrowserFrameRevision((current) => current + 1);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "浏览器控制权切换失败");
+    } finally {
+      setBrowserControlBusy(false);
+    }
+  }
+
+  async function clickSharedBrowser(input: { x: number; y: number; imageWidth: number; imageHeight: number }) {
+    if (!activeRunId || browserSession?.owner !== "user") return;
+    try {
+      await sendRunBrowserInput(activeRunId, {
+        kind: "click",
+        x: Math.max(0, Math.min(Math.round(input.x), Math.round(input.imageWidth) - 1)),
+        y: Math.max(0, Math.min(Math.round(input.y), Math.round(input.imageHeight) - 1))
+      });
+      setBrowserFrameRevision((current) => current + 1);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "页面操作失败");
+    }
+  }
+
+  async function typeIntoSharedBrowser() {
+    if (!activeRunId || browserSession?.owner !== "user" || !browserManualInput) return;
+    try {
+      await sendRunBrowserInput(activeRunId, { kind: "type", text: browserManualInput });
+      setBrowserManualInput("");
+      setBrowserFrameRevision((current) => current + 1);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "页面输入失败");
+    }
+  }
+
   return (
     <main className="app-shell minimal-shell">
       <header className="topbar minimal-topbar">
@@ -4834,17 +5222,20 @@ export function App() {
                           autoRepairLabel={runtimeRecoveryAvailable
                             ? "重新启动沙盒并诊断"
                             : discoveryRecoveryAvailable ? "重新扫描页面并绑定路径"
-                            : pathBindingRepairable ? "重新绑定并验证路径" : "生成沙盒代码修复"}
+                            : pathBindingRepairable ? "重新绑定并验证路径"
+                              : startupRepairAvailable ? "在沙盒中分析启动问题" : "生成沙盒代码修复"}
                           autoRepairDescription={runtimeRecoveryAvailable
                             ? "系统会自动启动 Docker Desktop（如需要）、重新启动沙盒、检查健康状态并重新扫描页面；不会修改项目源码。"
                             : discoveryRecoveryAvailable
                               ? "页面已经连通；系统只会重新扫描页面、控件和网络并重新绑定路径，不会修改项目源码或覆盖已有证据。"
                             : pathBindingRepairable
                               ? "根据已探测页面重新绑定入口、控件和验证条件，然后立即复验。不会修改项目源码。"
-                              : "读取失败断言和证据，在沙盒副本中生成最小补丁，并展示 Diff 与验证结果。"}
+                              : startupRepairAvailable
+                                ? "读取已保存的启动状态和日志，只修改沙盒中的启动/构建配置；原项目只读，联网安装需单独确认。"
+                                : "读取失败断言和证据，在沙盒副本中生成最小补丁，并展示 Diff 与验证结果。"}
                           onAutoRepair={runtimeRecoveryAvailable
-                            ? () => recoverProjectAndRetry("runtime")
-                            : discoveryRecoveryAvailable ? () => recoverProjectAndRetry("discovery")
+                            ? async () => { await recoverProjectAndRetry("runtime"); }
+                            : discoveryRecoveryAvailable ? async () => { await recoverProjectAndRetry("discovery"); }
                             : pathBindingRepairable ? repairBlockedPlanning : openCodeRepairWorkspace}
                           onEditPlan={() => {
                             setPlanningConfirmed(false);
@@ -4856,7 +5247,10 @@ export function App() {
                         <div className="assistant-command-preview assistant-plan-command">
                           {planningResult && discoveryAllowsPlanning ? (
                             <>
-                              <strong>本次准备测试 {planningResult.businessFlows.length} 条流程</strong>
+                              <strong>本次准备测试 {planningResult.businessFlows.length} 条业务路径</strong>
+                              {(planningResult.coverage.sourceCandidates ?? planningResult.coverage.discovered) > planningResult.businessFlows.length
+                                ? <small>已从 {planningResult.coverage.sourceCandidates} 个代码候选归并，原始候选仍可审计。</small>
+                                : null}
                               <div className="assistant-plan-summary">
                                 <span>{planningResult.coverage.executable} 条可直接执行</span>
                                 <span>{planningResult.coverage.autoBindable ?? 0} 条自动绑定页面</span>
@@ -4864,10 +5258,19 @@ export function App() {
                                   ? <span>{planningResult.coverage.needsInput + planningResult.coverage.gaps} 条需补充或阻塞</span>
                                   : null}
                               </div>
-                              <details className="assistant-plan-list" open>
-                                <summary>查看要测试的具体内容</summary>
-                                <ol>
-                                  {planningResult.businessFlows.map((flow) => (
+                              <ProgressiveDetailsList
+                                className="assistant-plan-list"
+                                listTag="ol"
+                                items={planningResult.businessFlows}
+                                itemKey={(flow) => flow.id}
+                                initialCount={16}
+                                batchSize={16}
+                                totalCount={planningResult.businessFlowPage?.total}
+                                hasMore={Boolean(planningResult.businessFlowPage?.nextCursor)}
+                                loadingMore={planningFlowPageLoading}
+                                onLoadMore={async () => { await fetchPlanningFlows(planningResult); }}
+                                summary="查看要测试的具体内容"
+                                renderItem={(flow) => (
                                     <li key={flow.id}>
                                       <span>{flow.title}</span>
                                       <small>{flow.status === "executable"
@@ -4878,9 +5281,8 @@ export function App() {
                                             ? "需要补充条件"
                                             : "当前阻塞"}</small>
                                     </li>
-                                  ))}
-                                </ol>
-                              </details>
+                                )}
+                              />
                               <button
                                 className="assistant-suggested-action"
                                 type="button"
@@ -4943,11 +5345,19 @@ export function App() {
               ) : null}
               {planningResult && discoveryAllowsPlanning ? (
                 <div className="sidebar-planning-result">
-                  <span>{planningResult.coverage.discovered} 条流程 · {planningResult.coverage.executable} 条可直接执行 · {planningResult.coverage.autoBindable ?? 0} 条待页面绑定</span>
-                  <details className="sidebar-flow-list" open>
-                    <summary>确认本次要测试的 {planningResult.businessFlows.length} 条流程</summary>
-                    <div>
-                      {planningResult.businessFlows.map((flow) => (
+                  <span>{planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径 · {planningResult.coverage.executable} 条可直接执行 · {planningResult.coverage.autoBindable ?? 0} 条由 AI 动态绑定</span>
+                  <ProgressiveDetailsList
+                    className="sidebar-flow-list"
+                    items={planningResult.businessFlows}
+                    itemKey={(flow) => flow.id}
+                    initialCount={20}
+                    batchSize={20}
+                    totalCount={planningResult.businessFlowPage?.total}
+                    hasMore={Boolean(planningResult.businessFlowPage?.nextCursor)}
+                    loadingMore={planningFlowPageLoading}
+                    onLoadMore={async () => { await fetchPlanningFlows(planningResult); }}
+                    summary={<>查看本次 {planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径{(planningResult.coverage.sourceCandidates ?? 0) > (planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length) ? `（来自 ${planningResult.coverage.sourceCandidates} 个代码候选）` : ""}</>}
+                    renderItem={(flow) => (
                         <article
                           className={`planning-flow ${flow.status}`}
                           key={flow.id}
@@ -4959,15 +5369,23 @@ export function App() {
                             <span>{flow.status === "executable" ? "可执行" : flow.status === "auto-bindable" ? "待页面绑定" : flow.status === "needs-input" ? "待补条件" : "覆盖缺口"}</span>
                           </header>
                           <p>{flow.reason}</p>
+                          {flow.pathVersion === "2.0" && flow.sourceLocations?.length ? (
+                            <LazyDetails
+                              className="planning-flow-evidence"
+                              summary={<>代码依据{flow.sourceCount ? ` · ${flow.sourceCount} 项` : ""}</>}
+                            >
+                              {flow.summary ? <p>{flow.summary}</p> : null}
+                              <ul>{flow.sourceLocations.slice(0, 8).map((source) => <li key={`${source.file}:${source.line ?? 0}`}>{source.file}{source.line ? `:${source.line}` : ""}</li>)}</ul>
+                            </LazyDetails>
+                          ) : null}
                           {flowDeleteReadyId === flow.id ? (
                             <button className="planning-flow-delete" type="button" onClick={() => excludePlanningFlow(flow.id)}>
                               <Trash2 size={13} /> 删除
                             </button>
                           ) : null}
                         </article>
-                      ))}
-                    </div>
-                  </details>
+                    )}
+                  />
                   <button
                     className="primary execute-plan-button"
                     type="button"
@@ -5018,7 +5436,7 @@ export function App() {
           <div className="mission-stage">
             <div>
               <p className="eyebrow">AI 测试任务</p>
-              <h2>{selectedCandidate?.title ?? selectedScenario?.title ?? (scenarioId || "等待生成测试内容")}</h2>
+              <h2>{selectedCandidate?.title ?? selectedScenario?.title ?? scenarioId ?? planningResult?.plan.sessionName ?? "等待生成测试内容"}</h2>
               <p className="mission-summary" aria-label="本次测试摘要">
                 测试对象：{selectedProjectName}　·　测试依据：{sourceContextCount || analysis?.sources.length || 0} 个来源　·　执行计划：{planStepCount || "待生成"}{planStepCount ? " 步" : ""}{planningDraftReady ? "　·　测试计划草案已生成，请检查业务流程后确认。" : ""}
               </p>
@@ -5082,7 +5500,7 @@ export function App() {
                   </div>
                   <div className="model-budget-summary">
                     <strong>本次模型预算</strong>
-                    <span>Planner ≤ 2 · Judge ≤ 1 · Triage ≤ 1</span>
+                    <span>Planner ≤ 2 · 浏览器决策 ≤ 12 · Judge ≤ 1 · Triage ≤ 1</span>
                     <span>总 Token ≤ 12,000 · 总模型时间 ≤ 120 秒</span>
                     <small>价格未知时显示 unknown；达到预算后保留机器结论并转人工复核。</small>
                   </div>
@@ -5102,19 +5520,6 @@ export function App() {
                 <button className="primary" type="submit" disabled={planningBusy || !planningInput.trim()}><Send size={15} />{planningBusy ? "规划中" : "发送"}</button>
               </form>
             </section>
-          ) : null}
-
-          {repairWorkspaceOpen && repairSession ? (
-            <RepairWorkspace
-              session={repairSession}
-              canApply={viteEnv.VITE_REPAIR_HOST_APPLY_ENABLED === "true"}
-              onLoadFile={(filePath) => getRepairFile(repairSession.id, filePath).then((response) => response.file)}
-              onSaveFile={saveRepairFile}
-              onValidate={validateCurrentRepair}
-              onExport={exportCurrentRepair}
-              onApply={applyCurrentRepair}
-              onClose={() => setRepairWorkspaceOpen(false)}
-            />
           ) : null}
 
           {/* A paused run outranks everything else on screen: the graph is
@@ -5137,25 +5542,90 @@ export function App() {
             />
           ) : null}
 
-          <section className="live-view simple-live-view" aria-label="测试现场" hidden={repairWorkspaceOpen}>
+          <section className="live-view simple-live-view" aria-label="项目工作区">
             <header className="live-view-toolbar">
               <div className="live-view-window-dots" aria-hidden="true">
                 <span />
                 <span />
                 <span />
               </div>
+              <div className="centre-surface-switch" role="tablist" aria-label="中央工作区模式">
+                <button type="button" role="tab" aria-selected={centreSurface === "preview"} className={centreSurface === "preview" ? "active" : ""} onClick={() => setCentreSurface("preview")}>预览</button>
+                <button type="button" role="tab" aria-selected={centreSurface === "code"} className={centreSurface === "code" ? "active" : ""} onClick={() => void openProjectCodeWorkspace()}><Code2 size={14} />代码</button>
+              </div>
               <span className="live-view-mode">
-                {latestScreenshot ? "沙盒执行画面" : projectPreviewReady ? "内置项目画面" : "沙盒测试现场"}
+                {centreSurface === "code" ? "项目代码（沙盒副本）" : latestScreenshot ? "沙盒执行画面" : projectPreviewReady ? "内置项目画面" : "沙盒测试现场"}
               </span>
-              <code title={previewUrl}>{previewUrl || "尚未启动项目"}</code>
-              {projectPreviewReady && !latestScreenshot && (
+              {centreSurface === "preview" ? <code title={previewUrl}>{previewUrl || "尚未启动项目"}</code> : <code>{selectedProjectName || "未选择项目"}</code>}
+              {centreSurface === "preview" && projectPreviewReady && !latestScreenshot && (
                 <button type="button" onClick={() => setPreviewRevision((current) => current + 1)} aria-label="刷新项目预览">
                   <RefreshCw size={14} />
                   刷新
                 </button>
               )}
+              {centreSurface === "preview" && activeRunId && browserSession && !["closed", "failed"].includes(browserSession.status) ? (
+                <div className="shared-browser-controls">
+                  <span>{browserSession.owner === "user" ? "你正在操作" : "AI 正在操作"}</span>
+                  {browserSession.owner === "user" ? (
+                    <>
+                      <input value={browserManualInput} onChange={(event) => setBrowserManualInput(event.target.value)} placeholder="点击画面中的输入框后，在这里输入" aria-label="共享浏览器输入" />
+                      <button type="button" disabled={!browserManualInput} onClick={() => void typeIntoSharedBrowser()}>输入</button>
+                    </>
+                  ) : null}
+                  <button type="button" disabled={browserControlBusy} onClick={() => void toggleBrowserControl()}>
+                    {browserControlBusy ? "切换中…" : browserSession.owner === "user" ? "交还 AI" : "接管页面"}
+                  </button>
+                </div>
+              ) : null}
             </header>
-            {latestScreenshot ? (
+            {centreSurface === "code" ? (
+              repairWorkspaceOpen && repairSession ? (
+                <React.Suspense fallback={(
+                  <div className="live-view-placeholder code-workspace-loading" role="status" aria-live="polite">
+                    <div className="live-view-dots"><span /><span /><span /></div>
+                    <p>正在按需载入代码编辑器…</p>
+                  </div>
+                )}>
+                  <RepairWorkspace
+                    session={repairSession}
+                    embedded
+                    canApply={viteEnv.VITE_REPAIR_HOST_APPLY_ENABLED === "true"}
+                    onListFiles={() => listRepairWorkspaceFiles(repairSession.id).then((response) => response.files)}
+                    onLoadFile={(filePath) => getRepairFile(repairSession.id, filePath).then((response) => response.file)}
+                    onSaveFile={saveRepairFile}
+                    onValidate={validateCurrentRepair}
+                    onExport={exportCurrentRepair}
+                    onApply={applyCurrentRepair}
+                    onClose={() => setCentreSurface("preview")}
+                  />
+                </React.Suspense>
+              ) : (
+                <div className="live-view-placeholder code-workspace-loading">
+                  <div className="live-view-dots"><span /><span /><span /></div>
+                  <p>{repairBusy ? "正在载入项目代码…" : "选择项目后即可在这里查看受控代码副本。"}</p>
+                </div>
+              )
+            ) : activeRunId && browserSession && !["closed", "failed"].includes(browserSession.status) ? (
+              <div className={`live-view-content shared-browser-view ${browserSession.owner === "user" ? "user-controlled" : "agent-controlled"}`}>
+                <AuthenticatedArtifactImage
+                  artifactUrl={`/v1/runs/${encodeURIComponent(activeRunId)}/browser-frame?revision=${browserFrameRevision}`}
+                  alt="AI 与用户共享的 Playwright 测试现场"
+                  onLoadIssue={setScreenshotIssue}
+                  onImageClick={browserSession.owner === "user" ? (input) => void clickSharedBrowser(input) : undefined}
+                />
+                <span className={`live-capture-badge ${browserSession.owner === "user" ? "waiting" : ""}`}>
+                  <Activity size={13} /> {browserSession.owner === "user" ? "用户控制中" : "AI 正在真实操作"}
+                </span>
+              </div>
+            ) : activeRunId ? (
+              <div className="live-view-placeholder shared-browser-starting" role="status" aria-live="polite">
+                <div className="live-view-grid" />
+                <div className="live-view-scanner" />
+                <div className="live-view-dots"><span /><span /><span /></div>
+                <p>正在建立本次运行的共享 Playwright 会话…</p>
+                <small>会话建立前不会切换到另一个 iframe；AI 与你将操作同一组页面、Cookie 和登录状态。</small>
+              </div>
+            ) : latestScreenshot ? (
               <div className="live-view-content">
                 <AuthenticatedArtifactImage artifactUrl={latestScreenshot} alt="Agent 最新测试画面" onLoadIssue={setScreenshotIssue} />
                 {isRunning && <span className="live-capture-badge"><Activity size={13} /> 正在执行</span>}
@@ -5168,12 +5638,12 @@ export function App() {
                   src={previewUrl}
                   title={`${selectedProjectName} 项目预览`}
                   sandbox="allow-downloads allow-forms allow-modals allow-same-origin allow-scripts"
-                  tabIndex={-1}
+                  tabIndex={0}
                   ref={(frame) => {
-                    // This is a passive visual mirror. Browser actions belong
-                    // to the isolated test runtime, not to this document.
-                    // React's current iframe typings do not expose `inert`.
-                    frame?.setAttribute("inert", "");
+                    // Before a Run exists this is only a passive project
+                    // preview. Once execution begins the branch above replaces
+                    // it with the authoritative Playwright session.
+                    frame?.removeAttribute("inert");
                   }}
                 />
                 {isRunning && <span className="live-capture-badge waiting"><Activity size={13} /> 等待第一帧执行证据</span>}
@@ -5224,6 +5694,16 @@ export function App() {
               </p>
             ) : null}
             {workspaceState.error ? <p className="error-text" role="alert">{workspaceState.error}</p> : null}
+            {agentProjection && activeRunId ? (
+              <div className="agent-live-status" aria-live="polite">
+                <span className={`agent-live-status__dot agent-live-status__dot--${agentProjection.status}`} />
+                <strong>{agentProjection.currentNode ?? "准备中"}</strong>
+                <span>{agentProjection.status === "interrupted" ? "等待你的确认" : agentProjection.status === "running" ? "正在执行" : agentProjection.status === "failed" ? "执行失败" : "已完成"}</span>
+                <span>{Math.round((agentProjection.progress ?? 0) * 100)}%</span>
+                {agentProjection.recoveryDecision ? <span>恢复：{agentProjection.recoveryDecision.action}</span> : null}
+                {agentProjection.recoveryResult?.userMessage ? <span>{agentProjection.recoveryResult.userMessage}</span> : null}
+              </div>
+            ) : null}
             <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
           </section>
 

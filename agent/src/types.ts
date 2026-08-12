@@ -290,6 +290,25 @@ export interface ProjectRecoveryResult {
   runtime: ProjectRuntimeStatus;
   events: ProjectRecoveryEvent[];
   discovery?: DiscoveryScanResult;
+  /**
+   * Optional, advisory-only model diagnosis produced after the deterministic
+   * sandbox recovery has exhausted its bounded retry.  The selected candidate
+   * is never executed by the model: Workbench must present it to the user and
+   * apply the allowlisted command through the normal project configuration
+   * path.
+   */
+  advice?: {
+    status: "not_configured" | "passed" | "failed";
+    summary?: string;
+    failureClass?: "configuration" | "dependency" | "port" | "runtime" | "environment" | "unknown";
+    selectedCandidateId?: string;
+    nextStep?: "retry_current" | "use_candidate" | "repair_dependencies" | "ask_user";
+    model?: string;
+    callId?: string;
+    durationMs?: number;
+    errorCode?: string;
+    candidates: Array<{ id: string; label: string; command: string; frontendUrl?: string }>;
+  };
   userAction: string;
   updatedAt: string;
 }
@@ -544,6 +563,7 @@ export interface RunRequest {
   appUrl?: string;
   projectId?: string;
   logicalProjectId?: string;
+  executionProfile?: "interactive" | "benchmark";
   planId?: string;
   target?: TargetAppRuntime;
   keepProjectRunning?: boolean;

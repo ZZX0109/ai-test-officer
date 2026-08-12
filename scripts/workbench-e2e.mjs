@@ -20,25 +20,42 @@ try {
   await page.getByText("测试官工作台", { exact: true }).waitFor();
 
   const projectPicker = page.locator("select").first();
+  await projectPicker.locator("option").nth(1).waitFor({ state: "attached", timeout: 15_000 });
   const options = await projectPicker.locator("option").evaluateAll((items) =>
     items.map((item) => ({ value: (item).value, label: item.textContent?.trim() ?? "" }))
   );
   const candidates = options.filter((item) => item.value);
-  if (candidates.length < 2) throw new Error("workbench_e2e_requires_two_projects");
+  if (!candidates.length) throw new Error("workbench_e2e_requires_project");
 
   await projectPicker.selectOption(candidates[0].value);
   await page.getByText(`测试对象：${candidates[0].label}`, { exact: false }).waitFor();
   if (await projectPicker.inputValue() !== candidates[0].value) {
     throw new Error("workbench_e2e_first_project_not_selected");
   }
-  await projectPicker.selectOption(candidates[1].value);
-  await page.getByText(`测试对象：${candidates[1].label}`, { exact: false }).waitFor();
-  if (await projectPicker.inputValue() !== candidates[1].value) {
-    throw new Error("workbench_e2e_second_project_not_selected");
+  const activeCandidate = candidates[0];
+  if (candidates[1]) {
+    await projectPicker.selectOption(candidates[1].value);
+    await page.getByText(`测试对象：${candidates[1].label}`, { exact: false }).waitFor();
+    if (await projectPicker.inputValue() !== candidates[1].value) {
+      throw new Error("workbench_e2e_second_project_not_selected");
+    }
+    if (await page.getByText(`测试对象：${candidates[0].label}`, { exact: false }).count()) {
+      throw new Error("workbench_e2e_stale_project_state");
+    }
+    await projectPicker.selectOption(activeCandidate.value);
+    await page.getByText(`测试对象：${activeCandidate.label}`, { exact: false }).waitFor();
   }
-  if (await page.getByText(`测试对象：${candidates[0].label}`, { exact: false }).count()) {
-    throw new Error("workbench_e2e_stale_project_state");
-  }
+
+  // The central surface is intentionally a workspace switch, not an external
+  // editor. With no failed run selected it must show the safe sandbox entry
+  // point and return to preview without changing the selected project.
+  await page.getByRole("tab", { name: "代码" }).click();
+  await page.getByText("资源管理器", { exact: true })
+    .or(page.getByRole("heading", { name: "先创建可审阅的沙盒副本" }))
+    .first()
+    .waitFor();
+  await page.getByRole("tab", { name: "预览" }).click();
+  await page.getByRole("tab", { name: "预览", selected: true }).waitFor();
 
   const generation = await page.evaluate(async ({ projectId, token }) => {
     const response = await fetch("/agent-api/api/generate-plan", {
@@ -53,7 +70,7 @@ try {
       })
     });
     return { status: response.status, body: await response.json() };
-  }, { projectId: candidates[1].value, token: agentToken });
+  }, { projectId: activeCandidate.value, token: agentToken });
   if (generation.status !== 200) throw new Error(`workbench_e2e_generation_http_${generation.status}`);
   if (!generation.body?.plan?.levels?.length) throw new Error("workbench_e2e_generation_empty");
   if (generation.body.source !== "rules") throw new Error(`workbench_e2e_generation_source:${generation.body.source}`);

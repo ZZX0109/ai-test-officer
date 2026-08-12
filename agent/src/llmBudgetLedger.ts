@@ -13,10 +13,9 @@ const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.
 const ledgerRoot = path.join(rootDir, "reports", "llm-budgets");
 const localLocks = new Map<string, Promise<void>>();
 
-type CountedPurpose = "planning" | "judging" | "triage" | "repairing";
-
 function counterFor(purpose: LlmCall["purpose"]): keyof LlmBudgetLedger["reserved"] | undefined {
   if (purpose === "planning") return "plannerCalls";
+  if (purpose === "browser-action") return "browserActionCalls";
   if (purpose === "judging") return "judgeCalls";
   if (purpose === "triage") return "triageCalls";
   if (purpose === "repairing") return "repairCalls";
@@ -26,6 +25,7 @@ function counterFor(purpose: LlmCall["purpose"]): keyof LlmBudgetLedger["reserve
 function emptyUsage() {
   return {
     plannerCalls: 0,
+    browserActionCalls: 0,
     judgeCalls: 0,
     triageCalls: 0,
     repairCalls: 0,
@@ -55,7 +55,8 @@ function assertCapacity(
   const key = counterFor(purpose);
   if (key && countLogicalCall) {
     const maximum = purpose === "planning" ? ledger.budget.maxPlannerCalls
-      : purpose === "judging" ? ledger.budget.maxJudgeCalls
+      : purpose === "browser-action" ? ledger.budget.maxBrowserActionCalls
+        : purpose === "judging" ? ledger.budget.maxJudgeCalls
         : purpose === "triage" ? ledger.budget.maxTriageCalls
           : ledger.budget.maxRepairCallsPerRound * ledger.budget.maxRepairRounds;
     if ((ledger.reserved[key] ?? 0) + (ledger.consumed[key] ?? 0) + 1 > maximum) {

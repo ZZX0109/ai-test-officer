@@ -1,4 +1,11 @@
 import { z } from "zod";
+import { recoveryActionResultSchema, recoveryDecisionSchema } from "./recovery.js";
+import {
+  browserActionDecisionSchema,
+  browserActionResultSchema,
+  browserObservationSchema,
+  browserSessionSchema
+} from "./browser-agent.js";
 
 export const gateStatusSchema = z.enum(["pass", "fail", "blocked", "needs-human-review"]);
 export type GateStatus = z.infer<typeof gateStatusSchema>;
@@ -144,6 +151,10 @@ export const runEventTypeSchema = z.enum([
   "run_queued",
   "run_preparing",
   "run_started",
+  // Explicitly returns a judging run to the queue for a new evidence-backed
+  // attempt. This is not a state-only UI retry: the worker receives a fresh
+  // delivery and the original attempt remains immutable in the run bundle.
+  "run_retrying",
   "run_paused",
   "run_resumed",
   "evidence_collecting",
@@ -268,7 +279,7 @@ const transitions: Record<RunState, Partial<Record<RunEventType, RunState>>> = {
   running: { run_paused: "paused", evidence_collecting: "collecting", run_judging: "judging", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
   paused: { run_resumed: "running", run_cancelled: "cancelled", run_blocked: "blocked" },
   collecting: { run_judging: "judging", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
-  judging: { human_review_requested: "awaiting-human-review", run_completed: "completed", run_failed: "failed", run_blocked: "blocked" },
+  judging: { run_retrying: "queued", human_review_requested: "awaiting-human-review", run_completed: "completed", run_failed: "failed", run_blocked: "blocked" },
   "awaiting-human-review": { decision_overridden: "awaiting-human-review", run_completed: "completed", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
   completed: { decision_overridden: "completed" },
   failed: { decision_overridden: "failed" },
@@ -361,6 +372,7 @@ export type JudgeMode = z.infer<typeof judgeModeSchema>;
 
 export const llmBudgetSchema = z.object({
   maxPlannerCalls: z.number().int().min(1).max(2).default(2),
+  maxBrowserActionCalls: z.number().int().min(1).max(60).default(12),
   maxJudgeCalls: z.number().int().min(1).max(1).default(1),
   maxTriageCalls: z.number().int().min(0).max(1).default(1),
   maxRepairCallsPerRound: z.number().int().min(0).max(2).default(2),
@@ -402,7 +414,7 @@ export const llmCallSchema = z.object({
   id: z.string().min(1),
   runId: z.string().min(1).optional(),
   experimentId: z.string().min(1).optional(),
-  purpose: z.enum(["planning", "judging", "triage", "repairing", "assistant"]),
+  purpose: z.enum(["planning", "browser-action", "judging", "triage", "repairing", "assistant"]),
   provider: z.enum(["openai-compatible", "openai", "anthropic", "openrouter", "custom"]),
   model: z.string().min(1),
   requestedModel: z.string().min(1).optional(),
@@ -451,7 +463,7 @@ export const llmCallSchema = z.object({
   }).default({}),
   errorCode: z.string().min(1).optional(),
   failureClass: z.enum(["transport", "authentication", "authorization", "model-access", "budget", "semantic", "provider", "unknown"]).optional(),
-  transportMode: z.enum(["stream", "non-stream-fallback"]).optional(),
+  transportMode: z.enum(["stream", "non-stream", "non-stream-fallback"]).optional(),
   fallbackReason: z.string().min(1).optional(),
   fallbackImpact: z.enum(["none", "plan-source-changed", "recommendation-unavailable", "human-review-required", "path-blocked"]).default("none"),
   finalStatusImpact: z.enum(["none", "advisory-only", "forced-review", "blocked"]).default("none"),
@@ -565,7 +577,7 @@ export const llmKnowledgeContextSchema = z.object({
   id: z.string().min(1).optional(),
   runId: z.string().min(1).optional(),
   invocationId: z.string().min(1).optional(),
-  purpose: z.enum(["planning", "judging", "triage", "repairing", "assistant"]),
+  purpose: z.enum(["planning", "browser-action", "judging", "triage", "repairing", "assistant"]),
   projectSnapshot: z.object({
     projectId: z.string().min(1),
     commitSha: z.string().min(1).optional(),
@@ -795,7 +807,7 @@ export const modelPriceCatalogSchema = z.object({
 export type ModelPriceCatalog = z.infer<typeof modelPriceCatalogSchema>;
 
 export const planProvenanceSchema = z.object({
-  source: z.enum(["deterministic", "llm", "cached-llm", "adaptive-rule-fallback"]),
+  source: z.enum(["deterministic", "llm", "cached-llm", "adaptive-rule-fallback", "dynamic-browser-agent"]),
   promptVersion: z.string().min(1),
   modelProfileId: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
@@ -905,17 +917,29 @@ export type AgentPermissionProfile = z.infer<typeof agentPermissionProfileSchema
 export const agentGraphNodeSchema = z.enum([
   "intake",
   "discover",
+  "diagnose-runtime",
+  "choose-recovery",
+  "recover",
+  "verify-recovery",
   "build-coverage-map",
   "plan",
   "compile",
   "approve-plan",
   "prepare-sandbox",
   "approve-capabilities",
+  "observe-browser",
+  "decide-browser-action",
+  "authorize-browser-action",
+  "execute-browser-action",
+  "verify-browser-action",
+  "decide-next-step",
   "execute",
   "collect-and-gate",
   "triage-failure",
   "selective-judge",
   "repair",
+  "retry-path",
+  "continue-paths",
   "finalize"
 ]);
 export type AgentGraphNode = z.infer<typeof agentGraphNodeSchema>;
@@ -989,6 +1013,20 @@ export const agentGraphProjectionSchema = z.object({
   lastError: z.object({ code: z.string().min(1), message: z.string().min(1), node: agentGraphNodeSchema.optional() }).optional(),
   tokenUsage: z.number().int().nonnegative().default(0),
   repairSessionId: z.string().min(1).optional(),
+  recoveryDecision: recoveryDecisionSchema.optional(),
+  recoveryResult: recoveryActionResultSchema.optional(),
+  recoveryAttempts: z.record(z.number().int().nonnegative()).optional(),
+  currentCoverageItemId: z.string().min(1).optional(),
+  currentAttemptId: z.string().min(1).optional(),
+  observation: z.record(z.unknown()).optional(),
+  browserSession: browserSessionSchema.optional(),
+  browserObservation: browserObservationSchema.optional(),
+  browserDecision: browserActionDecisionSchema.optional(),
+  browserActionResult: browserActionResultSchema.optional(),
+  browserAgentRequired: z.boolean().default(false),
+  browserLoopComplete: z.boolean().default(false),
+  continuationPasses: z.number().int().nonnegative().default(0),
+  remainingPathCount: z.number().int().nonnegative().default(0),
   updatedAt: z.string().datetime()
 });
 export type AgentGraphProjection = z.infer<typeof agentGraphProjectionSchema>;
@@ -1042,6 +1080,16 @@ export const repairSessionSchema = z.object({
   updatedAt: z.string().datetime()
 });
 export type RepairSession = z.infer<typeof repairSessionSchema>;
+
+/** A safe, source-only entry exposed in the sandbox code workspace tree. */
+export const repairWorkspaceFileSchema = z.object({
+  path: z.string().min(1),
+  changed: z.boolean().default(false),
+  risk: z.enum(["low", "medium", "high", "forbidden"]),
+  riskReasons: z.array(z.string()).default([]),
+  editable: z.boolean()
+});
+export type RepairWorkspaceFile = z.infer<typeof repairWorkspaceFileSchema>;
 
 export const coverageItemSchema = z.object({
   schemaVersion: z.literal("1.0"),
@@ -1177,6 +1225,7 @@ export const llmBudgetLedgerSchema = z.object({
   budget: llmBudgetSchema,
   reserved: z.object({
     plannerCalls: z.number().int().nonnegative(),
+    browserActionCalls: z.number().int().nonnegative().default(0),
     judgeCalls: z.number().int().nonnegative(),
     triageCalls: z.number().int().nonnegative(),
     repairCalls: z.number().int().nonnegative(),
@@ -1186,6 +1235,7 @@ export const llmBudgetLedgerSchema = z.object({
   }),
   consumed: z.object({
     plannerCalls: z.number().int().nonnegative(),
+    browserActionCalls: z.number().int().nonnegative().default(0),
     judgeCalls: z.number().int().nonnegative(),
     triageCalls: z.number().int().nonnegative(),
     repairCalls: z.number().int().nonnegative(),
@@ -1232,6 +1282,24 @@ export const createRunRequestSchema = z.object({
     scenarioId: z.string().optional(),
     coverageScenarioIds: z.array(z.string().min(1)).max(500).default([]),
     coverageMode: z.enum(["targeted", "full"]).default("targeted"),
+    /** Grouped, label-free coverage inventory produced by static discovery.
+     * These are business-path candidates, not Scenario Registry IDs. */
+    coverageInventory: z.array(z.object({
+      id: z.string().min(1),
+      title: z.string().min(1).max(500),
+      kind: z.enum(["page", "component", "api", "scenario", "data", "background-task"]),
+      target: z.string().min(1).max(1_000),
+      sourceNodeIds: z.array(z.string().min(1)).max(2_000).default([]),
+      sourceCount: z.number().int().positive().default(1),
+      surfaces: z.array(z.enum(["page", "api", "data", "background-task"])).max(4).default([]),
+      requiredEvidenceKinds: z.array(artifactKindV2Schema).max(20).default([]),
+      preconditions: z.array(z.string().min(1).max(500)).max(30).default([])
+    }).strict()).max(5_000).default([]),
+    /** Force an uploaded project through the observation/action/oracle loop
+     * instead of binding a stale registry scenario in the Workbench. */
+    dynamicBrowser: z.boolean().default(false),
+    /** Benchmark runs execute exactly one selected scenario so lane results remain comparable. */
+    executionProfile: z.enum(["interactive", "benchmark"]).default("interactive"),
     requirement: z.string().optional(),
     diff: z.string().optional(),
     plannerMode: plannerModeSchema.default("deterministic"),
@@ -1286,6 +1354,14 @@ export const runStreamEventSchema = z.object({
     "agent.interrupt.resumed",
     "agent.interrupt.rejected",
     "agent.interrupt.expired",
+    "agent.observation.created",
+    "agent.recovery.started",
+    "agent.recovery.completed",
+    "agent.recovery.blocked",
+    "agent.tool.started",
+    "agent.tool.completed",
+    "path.retrying",
+    "parent.continuing",
     "llm.call.started",
     "llm.call.retried",
     "llm.call.completed",
@@ -1469,3 +1545,39 @@ export type {
   RepairValidation as FeedbackRepairValidation,
   RootCauseAnalysis
 } from "./feedback-loop.js";
+
+export {
+  agentObservationSchema,
+  recoveryActionResultSchema,
+  recoveryActionSchema,
+  recoveryActionStatusSchema,
+  recoveryDecisionSchema
+} from "./recovery.js";
+export type {
+  AgentObservation,
+  RecoveryAction,
+  RecoveryActionResult,
+  RecoveryActionStatus,
+  RecoveryDecision
+} from "./recovery.js";
+
+export {
+  browserActionDecisionSchema,
+  browserActionResultSchema,
+  browserAgentActionSchema,
+  browserControlOwnerSchema,
+  browserControlSchema,
+  browserObservationSchema,
+  browserSessionSchema,
+  dynamicOracleSchema
+} from "./browser-agent.js";
+export type {
+  BrowserActionDecision,
+  BrowserActionResult,
+  BrowserAgentAction,
+  BrowserControl,
+  BrowserControlOwner,
+  BrowserObservation,
+  BrowserSession,
+  DynamicOracle
+} from "./browser-agent.js";

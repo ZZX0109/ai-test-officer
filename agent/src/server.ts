@@ -146,7 +146,7 @@ import {
 import { detectProject, detectProjectManifest, diagnoseProject } from "./projectDetection.js";
 import { createRuntimeRecoveryAdvice } from "./runtimeStartupAdvisor.js";
 import { saveProjectLoginSecret } from "./projectLoginStore.js";
-import { probeDiscoveryConnectivity, runSmokeFirstDiscovery } from "./smokeFirstDiscovery.js";
+import { runSmokeFirstDiscovery } from "./smokeFirstDiscovery.js";
 import {
   discoveryPageObservationSchema,
   resolveTrustedDiscoveryObservation
@@ -178,9 +178,10 @@ import { isIdempotentReplay, runEventStore } from "./runEventStore.js";
 import type { RunEventType } from "@ai-test-officer/contracts";
 import { createRunRequestSchema } from "@ai-test-officer/contracts";
 import { buildCodeImpactGraph, changedFilesFromDiff } from "./codeImpactGraph.js";
+import { buildBusinessCapabilityGraph } from "./businessCapabilityGraph.js";
 import { createMissionPreview } from "./missionPreview.js";
-import { buildPlanningConversation } from "./planningConversation.js";
-import { createLlmPlanningAdvice } from "./llmPlanningAdvisor.js";
+import { getPlanningFlowPage } from "./planningInventoryStore.js";
+import { createPlanningConversation } from "./planningService.js";
 import { enqueueRun, executeQueuedRun, interruptRun } from "./runOrchestrator.js";
 import { buildBenchmarkCatalog, trustedBenchmarkRuntimeMetrics } from "./benchmarkSummary.js";
 import { chooseNativeProjectFolder, listProjectDirectory } from "./projectFolderBrowser.js";
@@ -188,21 +189,40 @@ import {
   agentOrchestrationMode,
   getAgentGraphProjection,
   resumeAgentGraph,
+  resumeAgentGraphInBackground,
+  startAgentGraphForRun,
   startAgentGraphInBackground
 } from "./agentGraphService.js";
 import {
   applyRepairSession,
   createRepairSession,
   exportRepairSession,
+  findReusableProjectCodeSession,
+  listRepairWorkspaceFiles,
   listRepairSessions,
   readRepairFile,
   readRepairSession,
+  updateRepairSessionSummary,
   validateRepairSession,
   writeRepairFile
 } from "./repairWorkspace.js";
-import { proposeCodeRepair } from "./llmCodeRepair.js";
+import { proposeCodeRepair, proposeProjectStartupRepair } from "./llmCodeRepair.js";
 import { getAgentSustainability, initializeAgentSustainability } from "./agentSustainability.js";
 import { getWriteSafetyLayer } from "./write-safety/index.js";
+import { listRecoveryRecords } from "./recoveryStore.js";
+import {
+  browserSessionFramePath,
+  readBrowserActionResults,
+  readBrowserDecisions,
+  readBrowserObservations,
+  readBrowserSession,
+  subscribeBrowserAgentLifecycle
+} from "./browser-agent/store.js";
+import {
+  acquireBrowserControl,
+  executeUserBrowserInput,
+  releaseBrowserControl
+} from "./browser-agent/sessionManager.js";
 
 const app = express();
 const projectStartTasks = new Map<string, Promise<Awaited<ReturnType<typeof startProject>>>>();
@@ -271,7 +291,7 @@ async function startProjectWithFreshConfig(id: string) {
 
 function runtimeRecoveryAction(runtime: ProjectRuntimeStatus): ProjectRecoveryAction {
   if (runtime.status === "running") return "retry-discovery";
-  if (["container_runtime_unavailable", "dependency_missing", "command_not_found", "port_conflict", "health_timeout", "early_exit"].includes(runtime.failureReason ?? "")) return "retry-runtime";
+  if (["container_runtime_unavailable", "dependency_missing", "command_not_found", "port_conflict", "health_timeout", "early_exit", "budget_exceeded"].includes(runtime.failureReason ?? "")) return "retry-runtime";
   if (["idle", "installing", "starting"].includes(runtime.status)) return "retry-runtime";
   return "unavailable";
 }
@@ -292,7 +312,11 @@ function appendRecoveryEvent(snapshot: ProjectRecoveryResult, phase: ProjectReco
   projectRecoverySnapshots.set(snapshot.projectId, { ...snapshot, events: [...snapshot.events] });
 }
 
-function recoverAndRetryProject(id: string, requestedMode: "auto" | "runtime" | "discovery" = "auto"): Promise<ProjectRecoveryResult> {
+function recoverAndRetryProject(
+  id: string,
+  requestedMode: "auto" | "runtime" | "discovery" = "auto",
+  credentialId?: string
+): Promise<ProjectRecoveryResult> {
   const existing = projectRecoveryTasks.get(id);
   if (existing) return existing;
   const task = (async (): Promise<ProjectRecoveryResult> => {
@@ -353,7 +377,19 @@ function recoverAndRetryProject(id: string, requestedMode: "auto" | "runtime" | 
       }
       if (runtime.status !== "running") {
         snapshot.status = "blocked";
+        // The deterministic starter has already tried the saved, allowlisted
+        // launch contract.  At this point an LLM may *recommend* one of the
+        // inspected candidates, but it cannot execute it or mutate the source.
+        // This turns an opaque startup block into a concrete, user-approved
+        // next step without weakening the sandbox boundary.
+        snapshot.advice = await createRuntimeRecoveryAdvice({ project, runtime, credentialId }).catch(() => undefined);
         snapshot.userAction = recoveryUserAction("retry-runtime", runtime);
+        if (snapshot.advice?.status === "passed" && snapshot.advice.nextStep === "use_candidate" && snapshot.advice.selectedCandidateId) {
+          const candidate = snapshot.advice.candidates.find((item) => item.id === snapshot.advice?.selectedCandidateId);
+          snapshot.userAction = candidate
+            ? `AI 已根据脱敏启动日志建议“${candidate.label}”。请确认采用后再重试；系统不会自动执行模型建议的命令。`
+            : snapshot.userAction;
+        }
         appendRecoveryEvent(snapshot, "blocked", runtime.message || "安全沙盒未能启动。");
         return snapshot;
       }
@@ -364,7 +400,12 @@ function recoverAndRetryProject(id: string, requestedMode: "auto" | "runtime" | 
     if (!connection.ok) {
       snapshot.runtime = await getProjectRuntimeStatusWithRecovery(id);
       snapshot.status = "blocked";
+      snapshot.advice = await createRuntimeRecoveryAdvice({ project, runtime: snapshot.runtime, credentialId }).catch(() => undefined);
       snapshot.userAction = "无需立即修改源码；请等待系统完成有限恢复。若仍失败，请补充项目启动所需的外部服务或凭据。";
+      if (snapshot.advice?.status === "passed" && snapshot.advice.nextStep === "use_candidate" && snapshot.advice.selectedCandidateId) {
+        const candidate = snapshot.advice.candidates.find((item) => item.id === snapshot.advice?.selectedCandidateId);
+        if (candidate) snapshot.userAction = `AI 已建议采用“${candidate.label}”。请确认后再修改下一次沙盒启动配置。`;
+      }
       appendRecoveryEvent(snapshot, "blocked", connection.message);
       return snapshot;
     }
@@ -384,6 +425,7 @@ function recoverAndRetryProject(id: string, requestedMode: "auto" | "runtime" | 
       appendRecoveryEvent(snapshot, "completed", "恢复完成：页面连通性和 Discovery 已通过。");
     } else {
       snapshot.status = "blocked";
+      snapshot.advice = await createRuntimeRecoveryAdvice({ project, runtime: snapshot.runtime, credentialId }).catch(() => undefined);
       snapshot.userAction = discovery.observation.diagnosis.userActionRequired
         ? "请根据页面实际提示完成登录、授权或凭据配置后重试。"
         : "无需重复点击；系统已保存页面截图、DOM、控制台和网络诊断，可查看详情后补充启动条件。";
@@ -695,9 +737,12 @@ app.use(repairRouter(assertProjectAccess));
 app.use("/api/credentials", requireRole(["admin"]));
 app.use("/api/projects/grants", requireRole(["admin"]));
 app.post("/v1/runs", requireRole(["admin", "runner"]));
-for (const action of ["plan-approval", "permissions", "pause", "resume", "cancel"]) app.post(`/v1/runs/:id/${action}`, requireRole(["admin", "runner"]));
+for (const action of ["plan-approval", "permissions", "pause", "resume", "cancel", "benchmark-timeout"]) app.post(`/v1/runs/:id/${action}`, requireRole(["admin", "runner"]));
 app.post("/v1/runs/:id/decision-override", requireRole(["admin", "reviewer"]));
 app.post("/v1/runs/:id/repairs", requireRole(["admin", "maintainer"]));
+app.post("/v1/runs/:id/recover", requireRole(["admin", "runner"]));
+app.post("/v1/runs/:id/continue", requireRole(["admin", "runner"]));
+app.post("/v1/runs/:id/paths/:pathId/retry", requireRole(["admin", "runner"]));
 app.put("/v1/repair-sessions/:id/files/*", requireRole(["admin", "maintainer"]));
 app.post("/v1/repair-sessions/:id/validate", requireRole(["admin", "maintainer"]));
 app.post("/v1/repair-sessions/:id/export", requireRole(["admin", "maintainer"]));
@@ -1115,14 +1160,81 @@ for (const [action, eventType] of Object.entries(controlEvents)) {
   app.post(`/v1/runs/:id/${action}`, async (req, res, next) => {
     try {
       const body = runControlSchema.parse(req.body);
-      const existing = await runEventStore.get(req.params.id);
+      let existing = await runEventStore.get(req.params.id);
       if (!existing) return void res.status(404).json({ error: "run_not_found" });
       assertOrganizationAccess(req, existing.input.organizationId);
       await assertProjectAccess(req, existing.input.projectId, "run_tests");
+      const graphMode = agentOrchestrationMode(
+        typeof existing.input.projectId === "string" ? existing.input.projectId : undefined
+      );
+      // In active mode the Graph, rather than this HTTP route, creates the
+      // durable plan. A user (or the production acceptance client) can submit
+      // approval immediately after POST /v1/runs, before the background graph
+      // has reached its approval interrupt. Drive that same graph thread to
+      // its checkpoint first; never manufacture a plan_approved event from
+      // the planning state.
+      if (eventType === "plan_approved" && graphMode === "active" && existing.state === "planning") {
+        await startAgentGraphForRun(existing);
+        existing = await runEventStore.get(req.params.id);
+        if (!existing) return void res.status(404).json({ error: "run_not_found" });
+        if (existing.state !== "awaiting-plan-approval") {
+          res.status(409).json({
+            error: "plan_not_ready",
+            message: "Agent Graph has not produced a reviewable test plan yet.",
+            runState: existing.state
+          });
+          return;
+        }
+      }
+      if (eventType === "plan_approved" && existing.state !== "awaiting-plan-approval") {
+        res.status(409).json({
+          error: "plan_not_ready",
+          message: "A test plan must be generated before it can be approved.",
+          runState: existing.state
+        });
+        return;
+      }
       if (eventType === "decision_overridden") {
         z.object({ status: z.enum(["approved", "blocked", "accepted-risk"]), reason: z.string().min(1), originalDecision: z.string().optional(), newLabel: z.string().optional() }).parse(body.payload);
       }
-      const run = await runEventStore.append({ runId: req.params.id, type: eventType, ...body, payload: body.payload ?? {} });
+      // Pause/resume/cancel race the Worker and Graph by design. The user's
+      // operational intent must not turn into a dead button merely because an
+      // internal node committed one progress event between GET and POST. In
+      // active mode retry these controls against the latest durable version;
+      // planning/permission/override mutations keep strict optimistic
+      // concurrency because their payload changes business meaning.
+      const operationalControl = graphMode === "active"
+        && (eventType === "run_paused" || eventType === "run_resumed" || eventType === "run_cancelled");
+      let run: typeof existing | undefined;
+      for (let attempt = 0; attempt < (operationalControl ? 4 : 1); attempt += 1) {
+        try {
+          run = await runEventStore.append({
+            runId: req.params.id,
+            type: eventType,
+            ...body,
+            // The Graph creates plan_generated asynchronously. Once the API
+            // has synchronized a planning run to its approval checkpoint, the
+            // client cannot know that internal event's version yet.
+            expectedVersion: (eventType === "plan_approved" && graphMode === "active") || operationalControl
+              ? existing.version
+              : body.expectedVersion,
+            payload: body.payload ?? {}
+          });
+          break;
+        } catch (error) {
+          if (!operationalControl || !(error instanceof Error) || !error.message.startsWith("run_version_conflict:") || attempt === 3) throw error;
+          const latest = await runEventStore.get(req.params.id);
+          if (!latest) return void res.status(404).json({ error: "run_not_found" });
+          // Cancellation that loses the race to a terminal result is already
+          // complete and requires no destructive replay. Return that durable
+          // truth to the caller instead of manufacturing a transition.
+          if (eventType === "run_cancelled" && ["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(latest.state)) {
+            return void res.json({ run: latest });
+          }
+          existing = latest;
+        }
+      }
+      if (!run) throw new Error("run_control_retry_exhausted");
       const replayed = isIdempotentReplay(run);
       if (!replayed && eventType === "decision_overridden" && run.resultRunId) {
         await appendHumanOverrideConclusion({
@@ -1132,16 +1244,22 @@ for (const [action, eventType] of Object.entries(controlEvents)) {
           status: String(body.payload?.status ?? "approved")
         });
       }
-      const graphMode = agentOrchestrationMode(
-        typeof run.input.projectId === "string" ? run.input.projectId : undefined
-      );
       if (!replayed && eventType === "plan_approved" && graphMode === "active") {
         await resumeAgentGraph(run.id, { approved: true, actor: body.actor });
       }
       if (!replayed && eventType === "permission_granted" && graphMode === "active") {
-        await resumeAgentGraph(run.id, { approved: true, actor: body.actor });
+        // Permission approval starts the potentially long browser/LLM loop.
+        // Running that loop inside this HTTP request made the Workbench look
+        // frozen and could turn an eventual Graph validation error into a
+        // failed button click even though permission_granted was already
+        // durable. Return the queued Run immediately and let SSE/polling show
+        // every subsequent Graph node and browser action.
+        await resumeAgentGraphInBackground(run.id, { approved: true, actor: body.actor });
       }
-      if (!replayed && (eventType === "permission_granted" || eventType === "run_resumed")) await enqueueRun(run.id, run.version);
+      if (!replayed && (eventType === "permission_granted" || eventType === "run_resumed")
+        && run.planProvenance?.source !== "dynamic-browser-agent") {
+        await enqueueRun(run.id, run.version);
+      }
       if (!replayed && (eventType === "run_paused" || eventType === "run_cancelled")) interruptRun(run.id);
       res.json({ run });
     } catch (error) {
@@ -1153,6 +1271,40 @@ for (const [action, eventType] of Object.entries(controlEvents)) {
     }
   });
 }
+
+/**
+ * The benchmark harness owns its wall-clock budget.  Timeout must become a
+ * durable, fail-closed Run result before the harness tears down its services;
+ * otherwise a parent graph can keep waiting while the experiment is already
+ * reported as failed.
+ */
+app.post("/v1/runs/:id/benchmark-timeout", async (req, res, next) => {
+  try {
+    const body = z.object({ timeoutMs: z.number().int().positive(), actor: z.string().min(1).default("benchmark-runner") }).parse(req.body);
+    const current = await runEventStore.get(req.params.id);
+    if (!current) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, current.input.organizationId);
+    await assertProjectAccess(req, current.input.projectId, "run_tests");
+    if (["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(current.state)) {
+      return void res.json({ run: current, replayed: true });
+    }
+    interruptRun(current.id);
+    const run = await runEventStore.append({
+      runId: current.id,
+      type: "run_blocked",
+      expectedVersion: current.version,
+      actor: body.actor,
+      idempotencyKey: `benchmark-timeout:${current.id}:${current.version}`,
+      payload: { finalStatus: "blocked", error: "execution_timeout", timeoutMs: body.timeoutMs }
+    });
+    res.json({ run });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("run_version_conflict:")) {
+      return void res.status(409).json({ error: "run_version_conflict", actualVersion: Number(error.message.split(":")[1]) });
+    }
+    next(error);
+  }
+});
 
 app.get("/v1/runs/:id/artifacts", async (req, res, next) => {
   try {
@@ -1177,8 +1329,38 @@ app.get("/v1/runs/:id/report", async (req, res, next) => {
     assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, run.input.projectId, "read_artifacts");
     try {
-      const result = (await readRunBundle(run?.resultRunId ?? req.params.id)).result;
-      res.json({ report: { ...result, gateStatus: run?.gateStatus ?? result.gateStatus, finalStatus: run?.gateStatus ?? result.finalStatus, machineGate: run?.machineGate ?? result.machineGate, judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation, humanDecision: run?.humanDecision, planProvenance: run?.planProvenance, plannerCall: run?.plannerCall, plannerCalls: run?.plannerCalls, impactAnalysis: run?.impactAnalysis } });
+      const bundle = await readRunBundle(run?.resultRunId ?? req.params.id);
+      const result = bundle.result;
+      // RunBundle keeps evidence-bearing collections at its immutable top
+      // level to avoid duplicating large payloads in `result`. Rehydrate the
+      // public report projection here. Returning only `result` made parent
+      // aggregates look like an operation-log with no coverage/attempts to
+      // Benchmark and the Workbench, even though their child evidence existed.
+      res.json({ report: {
+        ...result,
+        evidence: bundle.evidence,
+        artifactsV2: bundle.artifactsV2 ?? result.artifactsV2,
+        attempts: bundle.attempts ?? result.attempts,
+        loopEvents: bundle.loopEvents,
+        oracles: bundle.oracles,
+        riskCoverageMatrix: bundle.riskCoverageMatrix,
+        failureAttributions: bundle.failureAttributions ?? result.failureAttributions,
+        artifactIntegrity: bundle.artifactIntegrity ?? result.artifactIntegrity,
+        coverageItems: bundle.coverageItems ?? result.coverageItems,
+        conclusions: bundle.conclusions ?? result.conclusions,
+        proofNodes: bundle.proofNodes ?? result.proofNodes,
+        proofEdges: bundle.proofEdges ?? result.proofEdges,
+        evidenceManifest: bundle.evidenceManifest ?? result.evidenceManifest,
+        gateStatus: run?.gateStatus ?? result.gateStatus,
+        finalStatus: run?.gateStatus ?? result.finalStatus,
+        machineGate: run?.machineGate ?? result.machineGate,
+        judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation,
+        humanDecision: run?.humanDecision,
+        planProvenance: run?.planProvenance,
+        plannerCall: run?.plannerCall,
+        plannerCalls: run?.plannerCalls,
+        impactAnalysis: run?.impactAnalysis
+      } });
     } catch (error) {
       if (!isMissingRunBundle(error)) throw error;
       res.json({ report: { ...unavailableRunReport(run), humanDecision: run.humanDecision, planProvenance: run.planProvenance, plannerCall: run.plannerCall, plannerCalls: run.plannerCalls, impactAnalysis: run.impactAnalysis } });
@@ -1194,6 +1376,176 @@ app.get("/v1/runs/:id/agent", async (req, res, next) => {
     await assertProjectAccess(req, run.input.projectId, "read_artifacts");
     const agent = await getAgentGraphProjection(run.id);
     res.json({ agent: agent ?? null });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/browser-session", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    res.json({ session: await readBrowserSession(run.id) ?? null });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/browser-observations", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    res.json({ observations: await readBrowserObservations(run.id) });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/browser-actions", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    const [decisions, actions] = await Promise.all([readBrowserDecisions(run.id), readBrowserActionResults(run.id)]);
+    res.json({ decisions, actions });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/browser-frame", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(browserSessionFramePath(run.id), (error) => {
+      if (error && !res.headersSent) res.status(404).json({ error: "browser_frame_not_available" });
+    });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/runs/:id/browser-control/acquire", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "run_tests");
+    // This endpoint is itself an authenticated, explicit operator action. It
+    // may pre-empt the Agent's short lease so the user can immediately handle
+    // MFA, consent or a blocked page in the same Playwright context.
+    res.json({ session: await acquireBrowserControl(run.id, "user", { force: true }) });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/runs/:id/browser-control/release", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "run_tests");
+    res.json({ session: await releaseBrowserControl(run.id, "user") });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/runs/:id/browser-input", async (req, res, next) => {
+  try {
+    const body = z.object({
+      kind: z.enum(["click", "type", "press", "scroll"]),
+      x: z.number().finite().nonnegative().optional(),
+      y: z.number().finite().nonnegative().optional(),
+      text: z.string().max(4_000).optional(),
+      key: z.enum(["Enter", "Tab", "Escape", "ArrowUp", "ArrowDown", "Space"]).optional(),
+      deltaY: z.number().finite().min(-5_000).max(5_000).optional()
+    }).strict().parse(req.body);
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "run_tests");
+    res.json({ observation: await executeUserBrowserInput({ runId: run.id, ...body }) });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/recovery-actions", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    const records = await listRecoveryRecords(req.params.id);
+    res.json(records);
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/observations", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+    const records = await listRecoveryRecords(req.params.id);
+    res.json({ observations: records.observations });
+  } catch (error) { next(error); }
+});
+
+/** Resume the active graph with a recovery decision. Safe recovery actions
+ * are executed by the graph; credential, source-write and other risky actions
+ * remain interrupt-gated and are never performed by this route itself. */
+app.post("/v1/runs/:id/recover", async (req, res, next) => {
+  try {
+    const body = z.object({
+      approved: z.boolean().default(true),
+      action: z.string().optional(),
+      idempotencyKey: z.string().min(1).optional()
+    }).strict().parse(req.body ?? {});
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "run_tests");
+    if (agentOrchestrationMode(typeof run.input.projectId === "string" ? run.input.projectId : undefined) !== "active") {
+      return void res.status(409).json({ error: "active_graph_required" });
+    }
+    const value = { approved: body.approved, actor: authContext(req)?.subject ?? "user", ...(body.action ? { action: body.action } : {}) };
+    const projection = await getAgentGraphProjection(run.id);
+    const resumed = projection?.pendingInterrupt
+      ? await resumeAgentGraph(run.id, value)
+      : (startAgentGraphInBackground(run), undefined);
+    res.status(202).json({ accepted: true, runId: run.id, resumed: resumed ?? null, agent: await getAgentGraphProjection(run.id) ?? null });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/runs/:id/paths/:pathId/retry", async (req, res, next) => {
+  try {
+    const body = z.object({ idempotencyKey: z.string().min(1).optional() }).strict().parse(req.body ?? {});
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "run_tests");
+    if (agentOrchestrationMode(typeof run.input.projectId === "string" ? run.input.projectId : undefined) !== "active") {
+      return void res.status(409).json({ error: "active_graph_required" });
+    }
+    const projection = await getAgentGraphProjection(run.id);
+    if (!projection) return void res.status(409).json({ error: "agent_state_unavailable" });
+    const resumed = projection.pendingInterrupt
+      ? await resumeAgentGraph(run.id, { approved: true, action: "retry-path", pathId: req.params.pathId, actor: authContext(req)?.subject ?? "user" })
+      : (startAgentGraphInBackground(run), undefined);
+    res.status(202).json({ accepted: true, pathId: req.params.pathId, idempotencyKey: body.idempotencyKey, resumed: resumed ?? null });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/runs/:id/continue", async (req, res, next) => {
+  try {
+    const body = z.object({ approved: z.boolean().default(true) }).strict().parse(req.body ?? {});
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "run_tests");
+    if (agentOrchestrationMode(typeof run.input.projectId === "string" ? run.input.projectId : undefined) !== "active") {
+      return void res.status(409).json({ error: "active_graph_required" });
+    }
+    const projection = await getAgentGraphProjection(run.id);
+    const resumed = projection?.pendingInterrupt
+      ? await resumeAgentGraph(run.id, { approved: body.approved, action: "continue-safe-paths", actor: authContext(req)?.subject ?? "user" })
+      : (startAgentGraphInBackground(run), undefined);
+    res.status(202).json({ accepted: true, resumed: resumed ?? null });
   } catch (error) { next(error); }
 });
 
@@ -1762,15 +2114,79 @@ app.post("/v1/runs/:id/repairs", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+/**
+ * Open the project-level code surface without pretending that a test run
+ * exists. This creates an un-analyzed sandbox session: it is safe to browse
+ * and edit, but it cannot publish a test result or apply to the source tree.
+ */
+app.post("/v1/projects/:id/code-sessions", async (req, res, next) => {
+  try {
+    const body = z.object({
+      summary: z.string().max(2_000).optional(),
+      autoAnalyze: z.boolean().default(false),
+      credentialId: z.string().optional()
+    }).parse(req.body ?? {});
+    const project = await getProject(req.params.id);
+    if (!project) return void res.status(404).json({ error: "project_not_found" });
+    await assertProjectAccess(req, project.id, "edit_sandbox");
+    const reusable = body.autoAnalyze ? undefined : await findReusableProjectCodeSession(project.id);
+    let repair = reusable ?? await createRepairSession({
+      runId: `code-session:${project.id}:${crypto.randomUUID()}`,
+      project,
+      summary: body.summary ?? "项目代码沙盒已创建。原项目保持只读，保存和导出都只作用于沙盒副本。",
+      failureClass: body.autoAnalyze ? "environment" : "unknown"
+    });
+    if (body.autoAnalyze) {
+      const runtime = await getProjectRuntimeStatusWithRecovery(project.id);
+      try {
+        repair = await proposeProjectStartupRepair({
+          sessionId: repair.id,
+          project,
+          runtime,
+          credentialId: body.credentialId
+        });
+      } catch (error) {
+        // The code surface remains useful when the provider is unavailable.
+        // Return the session with an explicit diagnosis instead of turning a
+        // model outage into another opaque, unopenable UI failure.
+        const errorCode = (error instanceof Error ? error.message : "model_repair_failed")
+          .replace(/[^a-zA-Z0-9_:-]/g, "_")
+          .slice(0, 120);
+        repair = await updateRepairSessionSummary(repair.id, {
+          summary: `AI 启动修复未完成（${errorCode}）。沙盒副本已保留，原项目未修改。`,
+          status: "editing",
+          failureClass: "environment"
+        });
+      }
+    }
+    res.status(201).json({ repair });
+  } catch (error) { next(error); }
+});
+
 app.get("/v1/repair-sessions/:id", async (req, res, next) => {
   try {
     const repair = await readRepairSession(req.params.id);
     if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
     const run = await runEventStore.get(repair.runId);
-    if (!run) return void res.status(404).json({ error: "run_not_found" });
-    assertOrganizationAccess(req, run.input.organizationId);
+    if (!run && !repair.runId.startsWith("code-session:")) return void res.status(404).json({ error: "run_not_found" });
+    if (run) assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, repair.projectId, "read_artifacts");
     res.json({ repair });
+  } catch (error) { next(error); }
+});
+
+// Deliberately registered before the wildcard file-content route below. The
+// workbench receives only the filtered sandbox snapshot tree, never arbitrary
+// paths from the host project.
+app.get("/v1/repair-sessions/:id/files", async (req, res, next) => {
+  try {
+    const repair = await readRepairSession(req.params.id);
+    if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
+    const run = await runEventStore.get(repair.runId);
+    if (!run && !repair.runId.startsWith("code-session:")) return void res.status(404).json({ error: "run_not_found" });
+    if (run) assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, repair.projectId, "read_artifacts");
+    res.json({ files: await listRepairWorkspaceFiles(repair.id) });
   } catch (error) { next(error); }
 });
 
@@ -1779,8 +2195,8 @@ app.get("/v1/repair-sessions/:id/files/*", async (req, res, next) => {
     const repair = await readRepairSession(req.params.id);
     if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
     const run = await runEventStore.get(repair.runId);
-    if (!run) return void res.status(404).json({ error: "run_not_found" });
-    assertOrganizationAccess(req, run.input.organizationId);
+    if (!run && !repair.runId.startsWith("code-session:")) return void res.status(404).json({ error: "run_not_found" });
+    if (run) assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, repair.projectId, "read_artifacts");
     const requestedPath = (req.params as Record<string, string>)["0"] ?? "";
     res.json({ file: await readRepairFile(repair.id, requestedPath) });
@@ -1796,8 +2212,8 @@ app.put("/v1/repair-sessions/:id/files/*", async (req, res, next) => {
     const repair = await readRepairSession(req.params.id);
     if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
     const run = await runEventStore.get(repair.runId);
-    if (!run) return void res.status(404).json({ error: "run_not_found" });
-    assertOrganizationAccess(req, run.input.organizationId);
+    if (!run && !repair.runId.startsWith("code-session:")) return void res.status(404).json({ error: "run_not_found" });
+    if (run) assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, repair.projectId, "edit_sandbox");
     const requestedPath = (req.params as Record<string, string>)["0"] ?? "";
     res.json({ repair: await writeRepairFile({ id: repair.id, path: requestedPath, ...body }) });
@@ -1806,15 +2222,16 @@ app.put("/v1/repair-sessions/:id/files/*", async (req, res, next) => {
 
 app.post("/v1/repair-sessions/:id/validate", async (req, res, next) => {
   try {
+    const body = z.object({ allowNetworkInstall: z.boolean().default(false) }).parse(req.body ?? {});
     const repair = await readRepairSession(req.params.id);
     if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
     const run = await runEventStore.get(repair.runId);
-    if (!run) return void res.status(404).json({ error: "run_not_found" });
-    assertOrganizationAccess(req, run.input.organizationId);
+    if (!run && !repair.runId.startsWith("code-session:")) return void res.status(404).json({ error: "run_not_found" });
+    if (run) assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, repair.projectId, "edit_sandbox");
     const project = await getProject(repair.projectId);
     if (!project) return void res.status(404).json({ error: "project_not_found" });
-    res.json({ repair: await validateRepairSession(repair.id, project) });
+    res.json({ repair: await validateRepairSession(repair.id, project, body) });
   } catch (error) { next(error); }
 });
 
@@ -1824,8 +2241,8 @@ app.post("/v1/repair-sessions/:id/export", async (req, res, next) => {
     const repair = await readRepairSession(req.params.id);
     if (!repair) return void res.status(404).json({ error: "repair_session_not_found" });
     const run = await runEventStore.get(repair.runId);
-    if (!run) return void res.status(404).json({ error: "run_not_found" });
-    assertOrganizationAccess(req, run.input.organizationId);
+    if (!run && !repair.runId.startsWith("code-session:")) return void res.status(404).json({ error: "run_not_found" });
+    if (run) assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, repair.projectId, "export_source");
     res.json(await exportRepairSession(repair.id, body.format));
   } catch (error) { next(error); }
@@ -1895,6 +2312,7 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
     let lastInterruptId: string | undefined;
     const sentRepairUpdates = new Map<string, string>();
     const sentLlmCalls = new Map<string, string>();
+    let sentRecoveryFingerprint = "";
     let sentEvidenceRoot = "";
     const unsubscribeLlm = subscribeLlmLifecycle(req.params.id, (event) => {
       res.write(`event: ${event.name}\ndata: ${JSON.stringify({
@@ -1905,6 +2323,12 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
     });
     const unsubscribeKnowledge = subscribeKnowledgeLifecycle((event) => {
       if (event.runId !== req.params.id) return;
+      res.write(`event: ${event.type}\ndata: ${JSON.stringify({
+        at: event.createdAt,
+        ...event.payload
+      })}\n\n`);
+    });
+    const unsubscribeBrowser = subscribeBrowserAgentLifecycle(req.params.id, (event) => {
       res.write(`event: ${event.type}\ndata: ${JSON.stringify({
         at: event.createdAt,
         ...event.payload
@@ -1939,6 +2363,20 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
           res.write(`event: ${eventName}\ndata: ${JSON.stringify(agent)}\n\n`);
         }
         sentAgentUpdatedAt = agent.updatedAt;
+      }
+      const recovery = await listRecoveryRecords(req.params.id);
+      const latestDecision = recovery.decisions.at(-1);
+      const latestAction = recovery.actions.at(-1);
+      const latestObservation = recovery.observations.at(-1);
+      const recoveryFingerprint = [latestDecision?.id, latestAction?.actionId, latestAction?.status, latestObservation?.id].filter(Boolean).join(":");
+      if (recoveryFingerprint && recoveryFingerprint !== sentRecoveryFingerprint) {
+        if (latestObservation) res.write(`event: agent.observation.created\ndata: ${JSON.stringify(latestObservation)}\n\n`);
+        if (latestDecision) res.write(`event: agent.recovery.started\ndata: ${JSON.stringify(latestDecision)}\n\n`);
+        if (latestAction) {
+          const eventName = latestAction.status === "completed" ? "agent.recovery.completed" : latestAction.status === "blocked" || latestAction.status === "needs-confirmation" ? "agent.recovery.blocked" : "agent.recovery.started";
+          res.write(`event: ${eventName}\ndata: ${JSON.stringify(latestAction)}\n\n`);
+        }
+        sentRecoveryFingerprint = recoveryFingerprint;
       }
       const repairs = await listRepairSessions(req.params.id);
       for (const repair of repairs) {
@@ -1995,6 +2433,7 @@ app.get("/v1/runs/:id/stream", async (req, res, next) => {
       clearInterval(timer);
       unsubscribeLlm();
       unsubscribeKnowledge();
+      unsubscribeBrowser();
     });
   } catch (error) { next(error); }
 });
@@ -2151,7 +2590,8 @@ app.post("/v1/impact/code-graph", async (req, res, next) => {
     const repositoryRoot = path.resolve(body.repositoryRoot);
     if (repositoryRoot !== allowedRoot && !repositoryRoot.startsWith(`${allowedRoot}${path.sep}`)) throw new Error("impact_repository_outside_workspace");
     const scenarios = listScenarios().map((scenario) => ({ id: scenario.id, keywords: scenario.matcher?.keywords ?? [scenario.id] }));
-    res.json({ graph: await buildCodeImpactGraph({ repositoryRoot, files: body.files, includeRepositorySources: body.scope === "repository", scenarios, historicalBugs: body.historicalBugs }) });
+    const graph = await buildCodeImpactGraph({ repositoryRoot, files: body.files, includeRepositorySources: body.scope === "repository", scenarios, historicalBugs: body.historicalBugs });
+    res.json({ graph, businessGraph: await buildBusinessCapabilityGraph({ repositoryRoot, codeGraph: graph }) });
   } catch (error) { next(error); }
 });
 
@@ -2398,12 +2838,15 @@ app.get("/api/projects/:id/recovery", async (req, res, next) => {
 
 app.post("/api/projects/:id/recover-and-retry", async (req, res, next) => {
   try {
-    const body = z.object({ mode: z.enum(["auto", "runtime", "discovery"]).default("auto") }).strict().parse(req.body ?? {});
+    const body = z.object({
+      mode: z.enum(["auto", "runtime", "discovery"]).default("auto"),
+      credentialId: z.string().min(1).max(200).optional()
+    }).strict().parse(req.body ?? {});
     const project = await getProject(req.params.id);
     if (!project) return void res.status(404).json({ error: "project_not_found" });
     const existing = projectRecoverySnapshots.get(req.params.id);
     const runtime = await getProjectRuntimeStatusWithRecovery(req.params.id);
-    const task = recoverAndRetryProject(req.params.id, body.mode);
+    const task = recoverAndRetryProject(req.params.id, body.mode, body.credentialId);
     // Deliberately return immediately: Docker startup and dependency recovery
     // may take minutes. The Workbench polls this same recovery record and
     // updates one conversation message instead of leaving a dead button.
@@ -2601,6 +3044,27 @@ app.post("/api/intake/analyze", (req, res, next) => {
   }
 });
 
+app.get("/api/planning/:planningId/flows", async (req, res, next) => {
+  try {
+    const query = z.object({
+      projectId: z.string().min(1),
+      cursor: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional()
+    }).parse(req.query);
+    await assertProjectAccess(req, query.projectId, "run_tests");
+    const page = await getPlanningFlowPage({
+      inventoryId: req.params.planningId,
+      projectId: query.projectId,
+      cursor: query.cursor,
+      limit: query.limit
+    });
+    if (!page) return void res.status(404).json({ error: "planning_inventory_not_found" });
+    res.json(page);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/planning/conversation", async (req, res, next) => {
   try {
     const body = z.object({
@@ -2620,88 +3084,7 @@ app.post("/api/planning/conversation", async (req, res, next) => {
     await assertProjectAccess(req, body.projectId, "run_tests");
     const project = await getProject(body.projectId);
     if (!project) return void res.status(404).json({ error: "project_not_found" });
-    const requiresPageSmoke = /全面扫描|灰度测试|完整测试|全量测试|full[\s_-]*(scan|coverage)/i.test(body.message);
-    let discoveryReadiness = await probeDiscoveryConnectivity({
-      projectId: project.id,
-      maxAttempts: 2
-    });
-    const scenarioContracts = listScenarios()
-      .filter((scenario) => !scenario.matcher?.projectIds?.length || scenario.matcher.projectIds.includes(project.id))
-      .map((scenario) => ({
-      id: scenario.id,
-      keywords: scenario.matcher?.keywords ?? [scenario.id, scenario.title]
-      }));
-    const graph = await buildCodeImpactGraph({
-      // Project registry paths are workspace-relative by contract. The Agent
-      // process runs from the agent workspace, so resolving the raw string
-      // here incorrectly scanned agent/app-under-test and returned no plan.
-      // Reuse the project adapter's validated canonical root for every scan.
-      repositoryRoot: toTargetProjectConfig(project).rootDir,
-      files: changedFilesFromDiff(body.diff),
-      diff: body.diff || undefined,
-      includeRepositorySources: true,
-      scenarios: scenarioContracts,
-      cacheFile: path.join(reportsDir, "planning-cache", `${project.id}.json`)
-    });
-    const analysis = analyzeIntake({
-      projectId: project.id,
-      requirement: body.message,
-      diff: body.diff,
-      bugTicket: body.bugTicket,
-      codeGraph: graph
-    });
-    // A comprehensive plan must not fan a static code graph out into hundreds
-    // of "auto-bindable" paths before one real browser page has proved usable.
-    // Run one bounded, deterministic page smoke first; no LLM is involved in
-    // this gate. The same immutable observation is returned to Workbench and
-    // can be reused after plan approval instead of scanning the page twice.
-    const discoverySmoke = requiresPageSmoke && discoveryReadiness.status === "ready"
-      ? await runSmokeFirstDiscovery({
-          projectId: project.id,
-          sourceContexts: analysis.sourceContexts,
-          goal: body.message,
-          discoveryAttempts: 2
-        })
-      : undefined;
-    if (discoverySmoke?.orchestration) {
-      discoveryReadiness = discoverySmoke.orchestration;
-    }
-    const planning = buildPlanningConversation({
-      project,
-      message: body.message,
-      history: body.history,
-      graph,
-      analysis,
-      discoveryReadiness
-    });
-    if (body.planningMode === "llm-guided" && discoveryReadiness.status === "ready") {
-      const advice = await createLlmPlanningAdvice({
-        project,
-        goal: body.message,
-        flows: planning.businessFlows,
-        credentialId: body.credentialId,
-        pageObservation: discoverySmoke?.observation
-      });
-      planning.llmPlanning = advice;
-      if (advice.status === "passed") {
-        const priority = new Map(advice.prioritizedFlowIds.map((id, index) => [id, index]));
-        planning.businessFlows = [...planning.businessFlows].sort((left, right) =>
-          (priority.get(left.id) ?? Number.MAX_SAFE_INTEGER)
-          - (priority.get(right.id) ?? Number.MAX_SAFE_INTEGER)
-        );
-        const orderedFlowIds = new Map(planning.businessFlows.map((flow, index) => [flow.id, index]));
-        planning.plan.levels = planning.plan.levels.map((level) => ({
-          ...level,
-          paths: [...level.paths].sort((left, right) =>
-            (orderedFlowIds.get(left.id) ?? Number.MAX_SAFE_INTEGER)
-            - (orderedFlowIds.get(right.id) ?? Number.MAX_SAFE_INTEGER)
-          )
-        }));
-        planning.reply = `${planning.reply}\n\nAI 规划建议：${advice.summary}`;
-        planning.clarificationQuestions = [...new Set([...planning.clarificationQuestions, ...advice.clarificationQuestions])].slice(0, 6);
-      }
-    }
-    res.json({ planning, ...(discoverySmoke ? { discovery: discoverySmoke } : {}) });
+    res.json(await createPlanningConversation({ project, request: body, reportsDir }));
   } catch (error) {
     next(error);
   }
@@ -3573,14 +3956,14 @@ app.get("/api/agent/sustainability", async (_req, res, next) => {
       modules: ["context-layer", "memory", "tool-gateway", "write-safety", "tracing", "llm-input", "feedback-loop"],
       tools: platform.tools.getRegistry().listTools(),
       pendingApprovals: platform.writeSafety.getPendingApprovals().length,
-      feedback: platform.feedback.getStageCounts()
+      feedback: await platform.feedback.getStageCounts()
     });
   } catch (error) { next(error); }
 });
 
 app.get("/api/runs/:runId/trace", async (req, res, next) => {
   try {
-    const chain = getAgentSustainability().tracer.getChainByRunId(req.params.runId);
+    const chain = await getAgentSustainability().tracer.getChainByRunId(req.params.runId);
     if (!chain) return void res.status(404).json({ error: "trace_not_found", runId: req.params.runId });
     res.json({ chain, spans: chain.spans });
   } catch (error) { next(error); }
@@ -3642,7 +4025,132 @@ app.post("/api/desktop-capture/screenshot", async (req, res, next) => {
 app.use(errorHandler);
 
 assertSecurityConfig(host);
-initializeAgentSustainability();
+// Connect the sustainable-agent facade to the real application services.
+// The earlier default initialization exposed correctly shaped but empty
+// placeholders, which meant an LLM could describe recovery tools while every
+// runtime/evidence tool still returned "not restored". Keep this composition
+// at the application boundary so the gateway never talks to storage directly.
+initializeAgentSustainability(undefined, {
+  getProjectContextRaw: async (projectId) => {
+    const project = await getProject(projectId);
+    if (!project) return { status: "blocked", errorCode: "project_not_found" };
+    return {
+      project: {
+        id: project.id,
+        name: project.name,
+        frontendUrl: project.frontendUrl,
+        backendUrl: project.backendUrl,
+        execution: project.manifest?.execution,
+        capabilities: project.manifest?.capabilities,
+        hasLogin: Boolean(project.login),
+        apiCredentialRequirementNames: project.apiCredentialRequirements?.map((item) => item.envName) ?? []
+      },
+      manifest: project.manifest
+    };
+  },
+  getRunStatusRaw: async (runId) => {
+    const run = await runEventStore.get(runId);
+    return run ?? { status: "blocked", errorCode: "run_not_found" };
+  },
+  getEvidenceRaw: async (runId) => {
+    const run = await runEventStore.get(runId);
+    if (!run) return { status: "blocked", errorCode: "run_not_found" };
+    const resultRunId = run.resultRunId ?? run.id;
+    return Promise.all([
+      readRunBundle(resultRunId).catch(() => undefined),
+      readProofArtifacts(resultRunId).catch(() => undefined)
+    ]).then(([bundle, proof]) => ({ bundle, proof }));
+  },
+  getFailureHistoryRaw: async (projectId) => (await listRunHistory())
+    .filter((run) => run.projectId === projectId && run.verdict !== "continue"),
+  getRepairHistoryRaw: async (projectId) => {
+    const runs = (await listRunHistory()).filter((run) => run.projectId === projectId);
+    return (await Promise.all(runs.slice(-20).map((run) => listRepairSessions(run.runId)))).flat();
+  },
+  inspectRuntimeRaw: async (projectId) => getProjectRuntimeStatusWithRecovery(projectId),
+  readRuntimeLogRaw: async (projectId) => ({
+    runtime: await getProjectRuntimeStatusWithRecovery(projectId),
+    diagnosis: await diagnoseProject(projectId).catch(() => undefined)
+  }),
+  inspectHealthCheckRaw: async (projectId) => {
+    const project = await getProject(projectId);
+    return project
+      ? testProjectConnection(project)
+      : { status: "blocked", errorCode: "project_not_found" };
+  },
+  observePageRaw: async (runId) => {
+    const records = await listRecoveryRecords(runId);
+    return records.observations.at(-1) ?? { status: "blocked", errorCode: "page_observation_unavailable" };
+  },
+  readCurrentPlanRaw: async (runId) => {
+    const run = await runEventStore.get(runId);
+    return run ? { plan: run.plan, compiledPlan: run.compiledPlan, selectedScenarioId: run.selectedScenarioId } : { status: "blocked", errorCode: "run_not_found" };
+  },
+  readFailedAttemptRaw: async (runId) => {
+    const run = await runEventStore.get(runId);
+    if (!run) return { status: "blocked", errorCode: "run_not_found" };
+    return readRunBundle(run.resultRunId ?? run.id).catch(() => ({ status: "blocked", errorCode: "attempt_unavailable" }));
+  },
+  readEvidenceProofRaw: async (runId) => {
+    const run = await runEventStore.get(runId);
+    return run
+      ? readProofArtifacts(run.resultRunId ?? run.id)
+      : { status: "blocked", errorCode: "run_not_found" };
+  },
+  safeRecoveryActionRaw: async (action, params, runId) => {
+    const run = await runEventStore.get(runId);
+    const projectId = typeof params.projectId === "string"
+      ? params.projectId
+      : typeof run?.input.projectId === "string" ? run.input.projectId : undefined;
+    const actionId = `tool_${action}_${crypto.randomUUID()}`;
+    if (["start_sandbox", "restart_sandbox", "resolve_port"].includes(action)) {
+      if (!projectId) return { status: "blocked", actionId, nextState: "waiting_user", errorCode: "project_missing", userMessage: "当前运行没有关联项目。" };
+      if (action === "restart_sandbox") await stopProject(projectId).catch(() => undefined);
+      const runtime = await startProjectWithFreshConfig(projectId);
+      return {
+        status: runtime.status === "running" ? "completed" : "failed",
+        actionId,
+        nextState: runtime.status === "running" ? "retry-discovery" : "waiting_user",
+        errorCode: runtime.status === "running" ? undefined : runtime.failureReason,
+        userMessage: runtime.message,
+        runtime
+      };
+    }
+    if (action === "retry_health_check") {
+      if (!projectId) return { status: "blocked", actionId, nextState: "waiting_user", errorCode: "project_missing" };
+      const project = await getProject(projectId);
+      const health = project ? await testProjectConnection(project) : undefined;
+      return { status: health?.ok ? "completed" : "failed", actionId, nextState: health?.ok ? "retry-discovery" : "waiting_user", errorCode: health?.ok ? undefined : health?.reason ?? "project_not_found", health };
+    }
+    if (action === "retry_discovery") {
+      if (!projectId) return { status: "blocked", actionId, nextState: "waiting_user", errorCode: "project_missing" };
+      const discovery = await runSmokeFirstDiscovery({ projectId, goal: typeof run?.input.requirement === "string" ? run.input.requirement : "重新扫描页面", smokeAttempts: 2, discoveryAttempts: 2 });
+      const ready = discovery.orchestration?.status === "ready";
+      return { status: ready ? "completed" : "failed", actionId, nextState: ready ? "planning" : "waiting_user", errorCode: ready ? undefined : discovery.orchestration?.reason ?? discovery.status, discovery };
+    }
+    if (action === "retry_failed_path" || action === "continue_safe_paths") {
+      if (!run) return { status: "blocked", actionId, nextState: "waiting_user", errorCode: "run_not_found" };
+      const projection = await getAgentGraphProjection(runId);
+      if (projection?.pendingInterrupt) {
+        await resumeAgentGraph(runId, {
+          approved: true,
+          action: action === "retry_failed_path" ? "retry-path" : "continue-safe-paths",
+          actor: "tool-gateway"
+        });
+      } else {
+        startAgentGraphInBackground(run);
+      }
+      return { status: "completed", actionId, nextState: action === "retry_failed_path" ? "retrying" : "executing" };
+    }
+    return {
+      status: "needs-confirmation",
+      actionId,
+      nextState: "waiting_user",
+      errorCode: "repair_confirmation_required",
+      userMessage: "创建验证运行前需要先确认沙盒代码修复。"
+    };
+  }
+});
 app.listen(port, host, () => {
   console.log(`AI Test Officer agent listening on http://${host}:${port}`);
   console.log("Security boundary:", securitySummary());

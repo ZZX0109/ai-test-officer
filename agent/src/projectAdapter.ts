@@ -569,6 +569,46 @@ export function getProjectRuntimeStatus(id: string): ProjectRuntimeStatus {
 export async function getProjectRuntimeStatusWithRecovery(id: string): Promise<ProjectRuntimeStatus> {
   const cached = getProjectRuntimeStatus(id);
   if (cached.status !== "idle") {
+    // A process can disappear after a successful launch (for example a Vite
+    // dev server exits when its esbuild service crashes).  Returning the
+    // in-memory `running` snapshot forever leaves the Workbench iframe pointed
+    // at a dead port and makes the failure look like a browser problem.  Poll
+    // the runtime endpoint before advertising a managed project as live.
+    if (cached.status === "running") {
+      const containerFailure = await inspectManagedContainerFailure(runningProjects.get(id));
+      if (containerFailure) {
+        const failed: ProjectRuntimeStatus = {
+          ...cached,
+          status: "failed",
+          phase: "failed",
+          progressPercent: 100,
+          failureReason: containerFailure,
+          updatedAt: now(),
+          message: containerFailure === "budget_exceeded"
+            ? "安全沙盒内存不足，前端编译进程已退出。系统将使用重型项目资源配置重建沙盒。"
+            : "安全沙盒进程已退出，需要重新启动并诊断。"
+        };
+        runningProjects.set(id, { ...runningProjects.get(id), status: failed });
+        return failed;
+      }
+      const project = await getProject(id);
+      if (project) {
+        const health = await testProjectConnection(projectWithActiveRuntime(project));
+        if (!health.ok) {
+          const failed: ProjectRuntimeStatus = {
+            ...cached,
+            status: "failed",
+            phase: "failed",
+            progressPercent: 100,
+            failureReason: health.reason,
+            updatedAt: now(),
+            message: `项目运行已停止或不可访问：${health.reason}。可重新启动沙盒并诊断。`
+          };
+          runningProjects.set(id, { ...runningProjects.get(id), status: failed });
+          return failed;
+        }
+      }
+    }
     // Saving a project and submitting an async start can overlap during an
     // Agent hot reload. In that narrow window an earlier lookup may record
     // config_missing even though the registry file has since been committed.
@@ -938,6 +978,21 @@ async function captureProcessOutput(executable: string, args: string[], timeoutM
   });
 }
 
+async function inspectManagedContainerFailure(running: RunningProject | undefined): Promise<ProjectRuntimeFailureReason | undefined> {
+  for (const container of running?.ociContainers ?? []) {
+    const result = await captureProcessOutput(container.engine, [
+      "inspect",
+      "--format", "{{.State.Status}}|{{.State.OOMKilled}}",
+      container.containerName
+    ]);
+    if (result.exitCode !== 0) return "early_exit";
+    const [state, oomKilled] = result.stdout.trim().split("|");
+    if (oomKilled === "true") return "budget_exceeded";
+    if (state !== "running") return "early_exit";
+  }
+  return undefined;
+}
+
 async function containerEngineIsReady(engine: "docker" | "podman") {
   const result = await captureProcessOutput(engine, ["info"], 5_000, 64 * 1024);
   return result.exitCode === 0;
@@ -1082,6 +1137,18 @@ async function inspectRunningSandbox(project: ProjectConfig) {
     .map((name) => name.trim())
     .filter((name) => name.startsWith(prefix));
   for (const containerName of names) {
+    const stateResult = await captureProcessOutput(engine, [
+      "inspect",
+      "--format", "{{.State.Status}}|{{.State.OOMKilled}}",
+      containerName
+    ]);
+    const [containerState, oomKilled] = stateResult.stdout.trim().split("|");
+    if (stateResult.exitCode !== 0 || containerState !== "running" || oomKilled === "true") {
+      // An OOM may kill only esbuild while leaving Vite and its HTTP port
+      // alive. That container is poisoned even though a shallow GET succeeds.
+      await captureProcessOutput(engine, ["rm", "-f", containerName], 15_000, 64 * 1024);
+      continue;
+    }
     const ports = await captureProcessOutput(engine, ["port", containerName]);
     if (ports.exitCode !== 0) continue;
     const mappings = new Map<number, number>();
@@ -1500,8 +1567,11 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
       && (existing.process || (existing.processes?.length ?? 0) > 0 || (existing.ociContainers?.length ?? 0) > 0)
     ) return existing.status;
     if (existing.status.status === "running") {
-      const activeHealth = await testProjectConnection(projectWithActiveRuntime(project));
-      if (activeHealth.ok) return existing.status;
+      const containerFailure = await inspectManagedContainerFailure(existing);
+      if (!containerFailure) {
+        const activeHealth = await testProjectConnection(projectWithActiveRuntime(project));
+        if (activeHealth.ok) return existing.status;
+      }
     }
     runningProjects.delete(id);
   }
@@ -1852,7 +1922,26 @@ export async function stopProject(id: string): Promise<ProjectRuntimeStatus> {
   };
 }
 
-export async function resolveProjectTarget(input: { projectId?: string; appUrl?: string; target?: TargetAppRuntime }) {
+export async function resolveProjectTarget(input: {
+  projectId?: string;
+  appUrl?: string;
+  target?: TargetAppRuntime;
+  /**
+   * A benchmark owns its fixture service group and passes a freshly allocated
+   * URL.  It must not be replaced by a persisted developer/runtime endpoint
+   * (which can point at a stale fixed port).  Interactive OCI projects keep
+   * their managed-runtime precedence by leaving this false.
+   */
+  preferAppUrl?: boolean;
+}) {
+  if (input.preferAppUrl && input.appUrl) {
+    return {
+      projectId: input.projectId,
+      frontendUrl: input.appUrl,
+      backendUrl: input.appUrl,
+      healthCheckUrl: input.appUrl
+    };
+  }
   if (input.projectId) {
     const project = await getProject(input.projectId);
     if (project) {

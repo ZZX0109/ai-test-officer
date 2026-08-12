@@ -101,6 +101,18 @@ assert.match(volumeCachedArgs, /type=volume,src=ato-packages-demo,dst=\/sandbox-
 assert.match(volumeCachedArgs, /src=\/cache\/demo\/metadata,dst=\/sandbox-meta/);
 assert.match(volumeCachedArgs, /\/sandbox-meta\/prepared-lock-hash/);
 assert.doesNotMatch(volumeCachedArgs, /src=\/cache\/demo\/workspace,dst=\/workspace/);
+const parallelInvocation = buildOciInvocation({
+  engine: "docker",
+  image: "node:22",
+  manifest,
+  repositoryRoot: "/repo",
+  command: { executable: "npm", args: ["run", "dev", "--parallel"] },
+  portBindings: [
+    { hostPort: 5173, containerPort: 5173 },
+    { hostPort: 3000, containerPort: 3000 }
+  ]
+});
+assert.match(parallelInvocation.args.join(" "), /--cpus 3 --memory 6g --memory-swap 6g --pids-limit 384/);
 assert.throws(() => buildOciInvocation({
   engine: "docker",
   image: "node:22",

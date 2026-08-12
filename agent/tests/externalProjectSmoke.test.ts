@@ -6,6 +6,8 @@ import path from "node:path";
 import { saveProject, startProject, stopProject, testProjectConnection } from "../src/projectAdapter.js";
 import { detectProject } from "../src/projectDetection.js";
 import { runVisualGrayTest } from "../src/testRunner.js";
+import { runSmokeFirstDiscovery } from "../src/smokeFirstDiscovery.js";
+import { approveScenarioDraft, probeScenarioDraft } from "../src/harnessGapStore.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
@@ -35,6 +37,8 @@ export async function testExternalProjectSmoke() {
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const projectFile = path.join(rootDir, "data", "projects", `${projectId}.json`);
+  const generatedScenarioFiles: string[] = [];
+  const generatedDraftFiles: string[] = [];
   const previousHeadless = process.env.HEADLESS;
   process.env.HEADLESS = "1";
 
@@ -88,6 +92,61 @@ export async function testExternalProjectSmoke() {
     const health = await testProjectConnection(project);
     assert.equal(health.ok, true);
 
+    // This mirrors the interactive upload path: only after the OCI runtime is
+    // healthy do we discover the live page, bind a generated scenario against
+    // its real DOM and execute it.  It guards against regressing to a UI that
+    // merely lists static code-graph flows without ever producing a runnable
+    // browser path for an uploaded project.
+    const discovery = await runSmokeFirstDiscovery({
+      projectId,
+      goal: "全面扫描",
+      smokeAttempts: 2,
+      discoveryAttempts: 2
+    });
+    assert.equal(discovery.status, "passed");
+    assert.equal(discovery.orchestration?.status, "ready");
+    assert.ok(discovery.suggestions.length > 0, "live page discovery should yield testable candidates");
+    assert.ok((discovery.recommendedScenarioIds?.length ?? 0) > 0, "comprehensive discovery should retain every selected candidate");
+    for (const item of discovery.drafts) {
+      generatedDraftFiles.push(path.join(rootDir, "reports", "harness-gaps", "drafts", `${item.scenarioId}.json`));
+    }
+
+    const draft = discovery.drafts.find((item) => {
+      const core = item.scenario.corePath as { action?: unknown } | undefined;
+      return core?.action === "table_sort_filter_paginate";
+    }) ?? discovery.drafts[0];
+    assert.ok(draft, "discovery should produce at least one bindable scenario draft");
+    generatedScenarioFiles.push(path.join(rootDir, "data", "scenarios", `${draft.scenarioId}.json`));
+    const probed = await probeScenarioDraft(draft.scenarioId);
+    assert.equal(
+      probed.selectorProbeStatus,
+      "passed",
+      `generated scenario must bind to the live project DOM before execution: ${(probed.missingInfo ?? []).join(", ")}`
+    );
+    const approvedDraft = await approveScenarioDraft(draft.scenarioId);
+    assert.equal(approvedDraft.draftReviewStatus, "approved");
+
+    const dynamicRun = await runVisualGrayTest({
+      projectId,
+      scenarioId: draft.scenarioId,
+      requirement: "上传项目的全面扫描动态路径验证",
+      diff: "generated after live page discovery",
+      trigger: "manual",
+      keepProjectRunning: true,
+      permissionProfile: {
+        observe: true,
+        browserControl: true,
+        workspaceControl: false,
+        ideTerminalControl: false,
+        systemControl: false
+      }
+    });
+    assert.ok(dynamicRun.evidence.some((item) => item.type === "screenshot"));
+    assert.ok(dynamicRun.evidence.some((item) => item.type === "dom"));
+    assert.ok(dynamicRun.evidence.some((item) => item.type === "network"));
+    assert.equal(dynamicRun.outcomeSummary?.requirementCovered, true);
+    assert.equal(dynamicRun.outcomeSummary?.artifactIntegrityVerified, true);
+
     const run = await runVisualGrayTest({
       projectId,
       scenarioId: "generic_table_sort_filter_pagination",
@@ -113,6 +172,8 @@ export async function testExternalProjectSmoke() {
   } finally {
     restoreEnv("HEADLESS", previousHeadless);
     await stopProject(projectId);
+    await Promise.all(generatedScenarioFiles.map((file) => rm(file, { force: true })));
+    await Promise.all(generatedDraftFiles.map((file) => rm(file, { force: true })));
     await rm(projectFile, { force: true });
     await rm(tempRoot, { recursive: true, force: true });
   }

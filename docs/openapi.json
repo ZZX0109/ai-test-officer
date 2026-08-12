@@ -373,12 +373,14 @@
               "run_queued",
               "run_preparing",
               "run_started",
+              "run_retrying",
               "run_paused",
               "run_resumed",
               "evidence_collecting",
               "run_judging",
               "human_review_requested",
               "decision_overridden",
+              "repair_decision_recorded",
               "run_completed",
               "run_failed",
               "run_blocked",
@@ -461,17 +463,29 @@
             "enum": [
               "intake",
               "discover",
+              "diagnose-runtime",
+              "choose-recovery",
+              "recover",
+              "verify-recovery",
               "build-coverage-map",
               "plan",
               "compile",
               "approve-plan",
               "prepare-sandbox",
               "approve-capabilities",
+              "observe-browser",
+              "decide-browser-action",
+              "authorize-browser-action",
+              "execute-browser-action",
+              "verify-browser-action",
+              "decide-next-step",
               "execute",
               "collect-and-gate",
               "triage-failure",
               "selective-judge",
               "repair",
+              "retry-path",
+              "continue-paths",
               "finalize"
             ]
           },
@@ -482,17 +496,29 @@
               "enum": [
                 "intake",
                 "discover",
+                "diagnose-runtime",
+                "choose-recovery",
+                "recover",
+                "verify-recovery",
                 "build-coverage-map",
                 "plan",
                 "compile",
                 "approve-plan",
                 "prepare-sandbox",
                 "approve-capabilities",
+                "observe-browser",
+                "decide-browser-action",
+                "authorize-browser-action",
+                "execute-browser-action",
+                "verify-browser-action",
+                "decide-next-step",
                 "execute",
                 "collect-and-gate",
                 "triage-failure",
                 "selective-judge",
                 "repair",
+                "retry-path",
+                "continue-paths",
                 "finalize"
               ]
             },
@@ -523,6 +549,7 @@
                   "network-install",
                   "dangerous-operation",
                   "repair-apply",
+                  "repair-decision",
                   "execution-result"
                 ]
               },
@@ -558,6 +585,68 @@
                 },
                 "default": {}
               },
+              "owner": {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "user",
+                  "environment",
+                  "developer"
+                ]
+              },
+              "context": {
+                "type": "object",
+                "additionalProperties": {
+                  "nullable": true
+                }
+              },
+              "options": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "label"
+                  ]
+                }
+              },
+              "diagnoses": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "attemptId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "scenarioId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "decision": {
+                "type": "string"
+              },
               "createdAt": {
                 "type": "string",
                 "format": "date-time"
@@ -577,6 +666,21 @@
               "createdAt"
             ]
           },
+          "interruptOwner": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "user",
+              "environment",
+              "developer"
+            ]
+          },
+          "interruptContext": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            }
+          },
           "lastError": {
             "type": "object",
             "properties": {
@@ -593,17 +697,29 @@
                 "enum": [
                   "intake",
                   "discover",
+                  "diagnose-runtime",
+                  "choose-recovery",
+                  "recover",
+                  "verify-recovery",
                   "build-coverage-map",
                   "plan",
                   "compile",
                   "approve-plan",
                   "prepare-sandbox",
                   "approve-capabilities",
+                  "observe-browser",
+                  "decide-browser-action",
+                  "authorize-browser-action",
+                  "execute-browser-action",
+                  "verify-browser-action",
+                  "decide-next-step",
                   "execute",
                   "collect-and-gate",
                   "triage-failure",
                   "selective-judge",
                   "repair",
+                  "retry-path",
+                  "continue-paths",
                   "finalize"
                 ]
               }
@@ -621,6 +737,2039 @@
           "repairSessionId": {
             "type": "string",
             "minLength": 1
+          },
+          "recoveryDecision": {
+            "type": "object",
+            "properties": {
+              "schemaVersion": {
+                "type": "string",
+                "enum": [
+                  "1.0"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "coverageItemId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attemptId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "retry-runtime",
+                  "retry-discovery",
+                  "retry-path",
+                  "repair-harness",
+                  "repair-environment",
+                  "repair-product",
+                  "request-credentials",
+                  "request-user-confirmation",
+                  "blocked"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "confidence": {
+                "type": "string",
+                "enum": [
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "maxItems": 20,
+                "default": []
+              },
+              "preconditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "maxItems": 20,
+                "default": []
+              },
+              "expectedState": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "userQuestion": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "policyVersion": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "schemaVersion",
+              "id",
+              "runId",
+              "action",
+              "reason",
+              "confidence",
+              "expectedState",
+              "createdAt",
+              "policyVersion"
+            ]
+          },
+          "recoveryResult": {
+            "type": "object",
+            "properties": {
+              "schemaVersion": {
+                "type": "string",
+                "enum": [
+                  "1.0"
+                ]
+              },
+              "actionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "retry-runtime",
+                  "retry-discovery",
+                  "retry-path",
+                  "repair-harness",
+                  "repair-environment",
+                  "repair-product",
+                  "request-credentials",
+                  "request-user-confirmation",
+                  "blocked"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "accepted",
+                  "running",
+                  "completed",
+                  "failed",
+                  "blocked",
+                  "needs-confirmation"
+                ]
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "default": []
+              },
+              "nextState": {
+                "type": "string",
+                "minLength": 1
+              },
+              "errorCode": {
+                "type": "string",
+                "minLength": 1
+              },
+              "userMessage": {
+                "type": "string",
+                "minLength": 1
+              },
+              "startedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "completedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "schemaVersion",
+              "actionId",
+              "runId",
+              "action",
+              "status",
+              "nextState",
+              "startedAt"
+            ]
+          },
+          "recoveryAttempts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "currentCoverageItemId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "currentAttemptId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observation": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            }
+          },
+          "browserSession": {
+            "type": "object",
+            "properties": {
+              "schemaVersion": {
+                "type": "string",
+                "enum": [
+                  "1.0"
+                ]
+              },
+              "sessionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attemptId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "projectId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "starting",
+                  "ready",
+                  "waiting-user",
+                  "recovering",
+                  "closed",
+                  "failed"
+                ]
+              },
+              "owner": {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "user",
+                  "waiting-user"
+                ]
+              },
+              "currentUrl": {
+                "type": "string",
+                "format": "uri"
+              },
+              "lastObservationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "actionCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "decisionCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "rebindCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "startedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "updatedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "leaseExpiresAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "schemaVersion",
+              "sessionId",
+              "runId",
+              "attemptId",
+              "status",
+              "owner",
+              "actionCount",
+              "decisionCount",
+              "rebindCount",
+              "startedAt",
+              "updatedAt"
+            ],
+            "additionalProperties": false
+          },
+          "browserObservation": {
+            "type": "object",
+            "properties": {
+              "schemaVersion": {
+                "type": "string",
+                "enum": [
+                  "1.0"
+                ]
+              },
+              "observationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attemptId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "coverageItemId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "requestedUrl": {
+                "type": "string",
+                "format": "uri"
+              },
+              "finalUrl": {
+                "type": "string",
+                "format": "uri"
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "readyState": {
+                "type": "string",
+                "enum": [
+                  "loading",
+                  "interactive",
+                  "complete",
+                  "unknown"
+                ]
+              },
+              "pageFingerprint": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "bodyTextSample": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "accessibilityTree": {
+                "type": "string",
+                "maxLength": 12000
+              },
+              "controls": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "observationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "pageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "link",
+                        "button",
+                        "input",
+                        "textarea",
+                        "select",
+                        "checkbox",
+                        "radio",
+                        "other"
+                      ]
+                    },
+                    "role": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "accessibleName": {
+                      "type": "string",
+                      "maxLength": 240
+                    },
+                    "label": {
+                      "type": "string",
+                      "maxLength": 240
+                    },
+                    "testId": {
+                      "type": "string",
+                      "maxLength": 240
+                    },
+                    "inputType": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "framePath": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 500
+                      },
+                      "maxItems": 8,
+                      "default": []
+                    },
+                    "shadowPath": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 500
+                      },
+                      "maxItems": 8,
+                      "default": []
+                    },
+                    "locatorCandidates": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "strategy": {
+                            "type": "string",
+                            "enum": [
+                              "test-id",
+                              "role-name",
+                              "label",
+                              "text",
+                              "css-safe"
+                            ]
+                          },
+                          "value": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          },
+                          "unique": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "strategy",
+                          "value",
+                          "unique"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "minItems": 1,
+                      "maxItems": 6
+                    },
+                    "boundingBox": {
+                      "type": "object",
+                      "properties": {
+                        "x": {
+                          "type": "number"
+                        },
+                        "y": {
+                          "type": "number"
+                        },
+                        "width": {
+                          "type": "number",
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        },
+                        "height": {
+                          "type": "number",
+                          "minimum": 0,
+                          "exclusiveMinimum": true
+                        }
+                      },
+                      "required": [
+                        "x",
+                        "y",
+                        "width",
+                        "height"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "visible": {
+                      "type": "boolean"
+                    },
+                    "disabled": {
+                      "type": "boolean"
+                    },
+                    "obscured": {
+                      "type": "boolean",
+                      "default": false
+                    }
+                  },
+                  "required": [
+                    "controlId",
+                    "observationId",
+                    "runId",
+                    "attemptId",
+                    "pageFingerprint",
+                    "kind",
+                    "locatorCandidates",
+                    "visible",
+                    "disabled"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 200
+              },
+              "consoleErrors": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "maxItems": 50
+              },
+              "pageErrors": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "maxItems": 50
+              },
+              "failedRequests": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "method": {
+                      "type": "string",
+                      "maxLength": 20
+                    },
+                    "url": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "status": {
+                      "type": "integer"
+                    },
+                    "failure": {
+                      "type": "string",
+                      "maxLength": 500
+                    }
+                  },
+                  "required": [
+                    "method",
+                    "url"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 100
+              },
+              "screenshotArtifactId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "default": []
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "schemaVersion",
+              "observationId",
+              "runId",
+              "attemptId",
+              "requestedUrl",
+              "finalUrl",
+              "title",
+              "readyState",
+              "pageFingerprint",
+              "bodyTextSample",
+              "controls",
+              "consoleErrors",
+              "pageErrors",
+              "failedRequests",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          },
+          "browserDecision": {
+            "type": "object",
+            "properties": {
+              "schemaVersion": {
+                "type": "string",
+                "enum": [
+                  "1.0"
+                ]
+              },
+              "decisionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attemptId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "observationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "act",
+                  "complete",
+                  "blocked",
+                  "needs-confirmation"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 800
+              },
+              "actions": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "click-control"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action",
+                        "controlId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "fill-control"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "valueRef": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action",
+                        "controlId",
+                        "valueRef"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "select-control"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "valueRef": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action",
+                        "controlId",
+                        "valueRef"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "check-control"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "checked": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action",
+                        "controlId",
+                        "checked"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "press-key"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "key": {
+                          "type": "string",
+                          "enum": [
+                            "Enter",
+                            "Tab",
+                            "Escape",
+                            "ArrowUp",
+                            "ArrowDown",
+                            "Space"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action",
+                        "key"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "scroll-to-control"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action",
+                        "controlId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "wait-for-control"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "visible",
+                            "hidden",
+                            "enabled",
+                            "disabled"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action",
+                        "controlId",
+                        "state"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "navigate-route"
+                          ]
+                        },
+                        "routeId": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action",
+                        "routeId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "submit-form"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action",
+                        "controlId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "maxItems": 6,
+                          "default": []
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "observe-page"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "risk",
+                        "action"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "actionId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "runId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "coverageItemId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourceObservationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sourcePageFingerprint": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "expectedChange": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "oracleIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "minItems": 1,
+                          "maxItems": 6
+                        },
+                        "risk": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "forbidden"
+                          ]
+                        },
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 250,
+                          "maximum": 45000,
+                          "default": 10000
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "evaluate-oracle"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "actionId",
+                        "runId",
+                        "attemptId",
+                        "coverageItemId",
+                        "sourceObservationId",
+                        "sourcePageFingerprint",
+                        "purpose",
+                        "expectedChange",
+                        "oracleIds",
+                        "risk",
+                        "action"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "maxItems": 3
+              },
+              "oracles": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "element-state"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "expected": {
+                          "type": "string",
+                          "enum": [
+                            "visible",
+                            "hidden",
+                            "enabled",
+                            "disabled"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "type",
+                        "controlId",
+                        "expected",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "text"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "operator": {
+                          "type": "string",
+                          "enum": [
+                            "equals",
+                            "contains",
+                            "not-contains"
+                          ]
+                        },
+                        "expected": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "type",
+                        "operator",
+                        "expected",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "url"
+                          ]
+                        },
+                        "operator": {
+                          "type": "string",
+                          "enum": [
+                            "equals",
+                            "contains",
+                            "not-contains"
+                          ]
+                        },
+                        "expected": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "type",
+                        "operator",
+                        "expected",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "count-change"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "expected": {
+                          "type": "string",
+                          "enum": [
+                            "increased",
+                            "decreased",
+                            "unchanged"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "type",
+                        "expected",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "network"
+                          ]
+                        },
+                        "operationId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "expectedStatus": {
+                          "type": "integer",
+                          "minimum": 100,
+                          "maximum": 599
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "type",
+                        "operationId",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "dom-change"
+                          ]
+                        },
+                        "expected": {
+                          "type": "string",
+                          "enum": [
+                            "changed",
+                            "unchanged"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "type",
+                        "expected",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "maxItems": 6
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "default": []
+              },
+              "userQuestion": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "schemaVersion",
+              "decisionId",
+              "runId",
+              "attemptId",
+              "observationId",
+              "status",
+              "summary",
+              "actions",
+              "oracles",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          },
+          "browserActionResult": {
+            "type": "object",
+            "properties": {
+              "schemaVersion": {
+                "type": "string",
+                "enum": [
+                  "1.0"
+                ]
+              },
+              "resultId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "actionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attemptId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "coverageItemId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "failed",
+                  "blocked",
+                  "needs-confirmation"
+                ]
+              },
+              "errorCode": {
+                "type": "string",
+                "minLength": 1
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "beforeObservationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "afterObservationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "default": []
+              },
+              "oracleResults": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "oracleId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "passed": {
+                      "type": "boolean"
+                    },
+                    "actual": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "evidenceRefs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "oracleId",
+                    "passed",
+                    "actual",
+                    "evidenceRefs"
+                  ],
+                  "additionalProperties": false
+                },
+                "default": []
+              },
+              "startedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "completedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "schemaVersion",
+              "resultId",
+              "actionId",
+              "runId",
+              "attemptId",
+              "coverageItemId",
+              "status",
+              "summary",
+              "beforeObservationId",
+              "startedAt",
+              "completedAt"
+            ],
+            "additionalProperties": false
+          },
+          "browserAgentRequired": {
+            "type": "boolean",
+            "default": false
+          },
+          "browserLoopComplete": {
+            "type": "boolean",
+            "default": false
+          },
+          "continuationPasses": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "remainingPathCount": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
           },
           "updatedAt": {
             "type": "string",
@@ -1019,6 +3168,14 @@
                   "full"
                 ],
                 "default": "targeted"
+              },
+              "executionProfile": {
+                "type": "string",
+                "enum": [
+                  "interactive",
+                  "benchmark"
+                ],
+                "default": "interactive"
               },
               "requirement": {
                 "type": "string"
@@ -1975,6 +4132,7 @@
             "type": "string",
             "enum": [
               "stream",
+              "non-stream",
               "non-stream-fallback"
             ]
           },
@@ -3479,6 +5637,80 @@
           "requiresConfirmation": {
             "type": "boolean"
           },
+          "repairPlan": {
+            "type": "object",
+            "properties": {
+              "owner": {
+                "type": "string"
+              },
+              "problem": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "executable": {
+                "type": "boolean"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "validation": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "planId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attemptId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "scenarioId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "applied",
+                  "resolved",
+                  "dismissed"
+                ]
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "policyVersion": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "owner",
+              "steps",
+              "validation"
+            ]
+          },
           "createdAt": {
             "type": "string",
             "format": "date-time"
@@ -3491,6 +5723,1819 @@
           "content",
           "createdAt"
         ]
+      },
+      "BrowserSession": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "projectId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "starting",
+              "ready",
+              "waiting-user",
+              "recovering",
+              "closed",
+              "failed"
+            ]
+          },
+          "owner": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "user",
+              "waiting-user"
+            ]
+          },
+          "currentUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "lastObservationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actionCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "decisionCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rebindCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "leaseExpiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "sessionId",
+          "runId",
+          "attemptId",
+          "status",
+          "owner",
+          "actionCount",
+          "decisionCount",
+          "rebindCount",
+          "startedAt",
+          "updatedAt"
+        ],
+        "additionalProperties": false
+      },
+      "BrowserObservation": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "observationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "coverageItemId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requestedUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "finalUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "readyState": {
+            "type": "string",
+            "enum": [
+              "loading",
+              "interactive",
+              "complete",
+              "unknown"
+            ]
+          },
+          "pageFingerprint": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "bodyTextSample": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "accessibilityTree": {
+            "type": "string",
+            "maxLength": 12000
+          },
+          "controls": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "controlId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "observationId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "runId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "attemptId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "pageFingerprint": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "link",
+                    "button",
+                    "input",
+                    "textarea",
+                    "select",
+                    "checkbox",
+                    "radio",
+                    "other"
+                  ]
+                },
+                "role": {
+                  "type": "string",
+                  "maxLength": 80
+                },
+                "accessibleName": {
+                  "type": "string",
+                  "maxLength": 240
+                },
+                "label": {
+                  "type": "string",
+                  "maxLength": 240
+                },
+                "testId": {
+                  "type": "string",
+                  "maxLength": 240
+                },
+                "inputType": {
+                  "type": "string",
+                  "maxLength": 80
+                },
+                "framePath": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  "maxItems": 8,
+                  "default": []
+                },
+                "shadowPath": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  "maxItems": 8,
+                  "default": []
+                },
+                "locatorCandidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "strategy": {
+                        "type": "string",
+                        "enum": [
+                          "test-id",
+                          "role-name",
+                          "label",
+                          "text",
+                          "css-safe"
+                        ]
+                      },
+                      "value": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "unique": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "strategy",
+                      "value",
+                      "unique"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 1,
+                  "maxItems": 6
+                },
+                "boundingBox": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    },
+                    "width": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true
+                    },
+                    "height": {
+                      "type": "number",
+                      "minimum": 0,
+                      "exclusiveMinimum": true
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y",
+                    "width",
+                    "height"
+                  ],
+                  "additionalProperties": false
+                },
+                "visible": {
+                  "type": "boolean"
+                },
+                "disabled": {
+                  "type": "boolean"
+                },
+                "obscured": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "required": [
+                "controlId",
+                "observationId",
+                "runId",
+                "attemptId",
+                "pageFingerprint",
+                "kind",
+                "locatorCandidates",
+                "visible",
+                "disabled"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 200
+          },
+          "consoleErrors": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 1000
+            },
+            "maxItems": 50
+          },
+          "pageErrors": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 1000
+            },
+            "maxItems": 50
+          },
+          "failedRequests": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "maxLength": 20
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "status": {
+                  "type": "integer"
+                },
+                "failure": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              },
+              "required": [
+                "method",
+                "url"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 100
+          },
+          "screenshotArtifactId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidenceRefs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default": []
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "observationId",
+          "runId",
+          "attemptId",
+          "requestedUrl",
+          "finalUrl",
+          "title",
+          "readyState",
+          "pageFingerprint",
+          "bodyTextSample",
+          "controls",
+          "consoleErrors",
+          "pageErrors",
+          "failedRequests",
+          "createdAt"
+        ],
+        "additionalProperties": false
+      },
+      "BrowserActionDecision": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "decisionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "act",
+              "complete",
+              "blocked",
+              "needs-confirmation"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 800
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "click-control"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action",
+                    "controlId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "fill-control"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "valueRef": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action",
+                    "controlId",
+                    "valueRef"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "select-control"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "valueRef": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action",
+                    "controlId",
+                    "valueRef"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "check-control"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "checked": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action",
+                    "controlId",
+                    "checked"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "press-key"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "key": {
+                      "type": "string",
+                      "enum": [
+                        "Enter",
+                        "Tab",
+                        "Escape",
+                        "ArrowUp",
+                        "ArrowDown",
+                        "Space"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action",
+                    "key"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "scroll-to-control"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action",
+                    "controlId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "wait-for-control"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "visible",
+                        "hidden",
+                        "enabled",
+                        "disabled"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action",
+                    "controlId",
+                    "state"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "navigate-route"
+                      ]
+                    },
+                    "routeId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action",
+                    "routeId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "submit-form"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action",
+                    "controlId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 6,
+                      "default": []
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "observe-page"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "risk",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "actionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coverageItemId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceObservationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourcePageFingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "expectedChange": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "oracleIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1,
+                      "maxItems": 6
+                    },
+                    "risk": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "forbidden"
+                      ]
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 250,
+                      "maximum": 45000,
+                      "default": 10000
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "evaluate-oracle"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "actionId",
+                    "runId",
+                    "attemptId",
+                    "coverageItemId",
+                    "sourceObservationId",
+                    "sourcePageFingerprint",
+                    "purpose",
+                    "expectedChange",
+                    "oracleIds",
+                    "risk",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "maxItems": 3
+          },
+          "oracles": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "element-state"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "expected": {
+                      "type": "string",
+                      "enum": [
+                        "visible",
+                        "hidden",
+                        "enabled",
+                        "disabled"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "controlId",
+                    "expected",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "text"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "operator": {
+                      "type": "string",
+                      "enum": [
+                        "equals",
+                        "contains",
+                        "not-contains"
+                      ]
+                    },
+                    "expected": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "operator",
+                    "expected",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "url"
+                      ]
+                    },
+                    "operator": {
+                      "type": "string",
+                      "enum": [
+                        "equals",
+                        "contains",
+                        "not-contains"
+                      ]
+                    },
+                    "expected": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "operator",
+                    "expected",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "count-change"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "expected": {
+                      "type": "string",
+                      "enum": [
+                        "increased",
+                        "decreased",
+                        "unchanged"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "expected",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "network"
+                      ]
+                    },
+                    "operationId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "expectedStatus": {
+                      "type": "integer",
+                      "minimum": 100,
+                      "maximum": 599
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "operationId",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "dom-change"
+                      ]
+                    },
+                    "expected": {
+                      "type": "string",
+                      "enum": [
+                        "changed",
+                        "unchanged"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "expected",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "maxItems": 6
+          },
+          "evidenceRefs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default": []
+          },
+          "userQuestion": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "decisionId",
+          "runId",
+          "attemptId",
+          "observationId",
+          "status",
+          "summary",
+          "actions",
+          "oracles",
+          "createdAt"
+        ],
+        "additionalProperties": false
+      },
+      "BrowserActionResult": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "1.0"
+            ]
+          },
+          "resultId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "coverageItemId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "failed",
+              "blocked",
+              "needs-confirmation"
+            ]
+          },
+          "errorCode": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "beforeObservationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "afterObservationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidenceRefs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default": []
+          },
+          "oracleResults": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "oracleId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "passed": {
+                  "type": "boolean"
+                },
+                "actual": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "evidenceRefs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "oracleId",
+                "passed",
+                "actual",
+                "evidenceRefs"
+              ],
+              "additionalProperties": false
+            },
+            "default": []
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "resultId",
+          "actionId",
+          "runId",
+          "attemptId",
+          "coverageItemId",
+          "status",
+          "summary",
+          "beforeObservationId",
+          "startedAt",
+          "completedAt"
+        ],
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -3606,6 +7651,282 @@
                   },
                   "required": [
                     "agent"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/browser-session": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Shared Playwright browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/BrowserSession"
+                        },
+                        {
+                          "nullable": true
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "session"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/browser-observations": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Structured browser observations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "observations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BrowserObservation"
+                      }
+                    }
+                  },
+                  "required": [
+                    "observations"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/browser-actions": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "LLM browser decisions and deterministic results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BrowserActionDecision"
+                      }
+                    },
+                    "actions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BrowserActionResult"
+                      }
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "actions"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/browser-control/acquire": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Acquire the shared browser for user input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": {
+                      "$ref": "#/components/schemas/BrowserSession"
+                    }
+                  },
+                  "required": [
+                    "session"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/browser-control/release": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Return the shared browser to the Agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": {
+                      "$ref": "#/components/schemas/BrowserSession"
+                    }
+                  },
+                  "required": [
+                    "session"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/browser-input": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "click",
+                      "type",
+                      "press",
+                      "scroll"
+                    ]
+                  },
+                  "x": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "y": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "text": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "key": {
+                    "type": "string",
+                    "enum": [
+                      "Enter",
+                      "Tab",
+                      "Escape",
+                      "ArrowUp",
+                      "ArrowDown",
+                      "Space"
+                    ]
+                  },
+                  "deltaY": {
+                    "type": "number",
+                    "minimum": -5000,
+                    "maximum": 5000
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "User input applied to the shared Playwright page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "observation": {
+                      "$ref": "#/components/schemas/BrowserObservation"
+                    }
+                  },
+                  "required": [
+                    "observation"
                   ]
                 }
               }
@@ -4255,6 +8576,60 @@
         }
       }
     },
+    "/v1/projects/{id}/code-sessions": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "autoAnalyze": {
+                    "type": "boolean"
+                  },
+                  "credentialId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Project sandbox code session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repair": {
+                      "$ref": "#/components/schemas/RepairSession"
+                    }
+                  },
+                  "required": [
+                    "repair"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/repair-sessions/{id}": {
       "get": {
         "parameters": [
@@ -4270,6 +8645,54 @@
         "responses": {
           "200": {
             "description": "Repair session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repair": {
+                      "$ref": "#/components/schemas/RepairSession"
+                    }
+                  },
+                  "required": [
+                    "repair"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repair-sessions/{id}/validate": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "allowNetworkInstall": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Repair validation",
             "content": {
               "application/json": {
                 "schema": {
@@ -4418,40 +8841,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/repair-sessions/{id}/validate": {
-      "post": {
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Validated repair",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "repair": {
-                      "$ref": "#/components/schemas/RepairSession"
-                    }
-                  },
-                  "required": [
-                    "repair"
-                  ]
                 }
               }
             }

@@ -39,7 +39,10 @@ const repairHistory = (projectId: string): RepairHistoryContext => ({
 });
 
 let initialized = false;
-export function initializeAgentSustainability(deps?: Partial<ContextLayerDependencies>): void {
+export function initializeAgentSustainability(
+  deps?: Partial<ContextLayerDependencies>,
+  serviceOverrides?: Partial<ServiceLayer>
+): void {
   if (initialized) return;
   const contextDeps: ContextLayerDependencies = {
     getProjectContext: deps?.getProjectContext ?? (async (id) => projectContext(id)),
@@ -57,7 +60,8 @@ export function initializeAgentSustainability(deps?: Partial<ContextLayerDepende
     getRepairHistoryRaw: async (id) => repairHistory(id),
     queryProjectMemoryRaw: async (id, category) => getMemoryService().queryProjectEntries({ projectId: id, ...(category ? { category: category as never } : {}), includeUnverified: true, limit: 50 }),
     queryExperienceMemoryRaw: async (id, failureType) => getMemoryService().queryExperienceEntries({ projectId: id, ...(failureType ? { failureType: [failureType as never] } : {}), includeUnvalidated: true, limit: 50, semanticLimit: 10, semanticThreshold: 0.6, offset: 0 }),
-    getSchemaVersionsRaw: async () => ({ contracts: "1.0", agentModules: "1.0" })
+    getSchemaVersionsRaw: async () => ({ contracts: "1.0", agentModules: "1.0" }),
+    ...serviceOverrides
   };
   getToolGateway(service);
   getTracer(); getWriteSafetyLayer(); getLlmInputCompiler(); getFeedbackLoop();

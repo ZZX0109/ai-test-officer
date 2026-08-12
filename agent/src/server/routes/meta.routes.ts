@@ -15,7 +15,12 @@ import { listScenarios } from "../../scenarios.js";
 export const metaRouter = Router();
 
 metaRouter.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "ai-test-officer-agent" });
+  res.json({
+    ok: true,
+    service: "ai-test-officer-agent",
+    instanceId: process.env.BENCHMARK_INSTANCE_ID,
+    buildId: process.env.AGENT_BUILD_ID
+  });
 });
 
 metaRouter.get("/api/gray-plan", (_req, res) => {

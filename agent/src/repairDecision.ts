@@ -100,6 +100,7 @@ export function mapDeterministicClassToFailureClass(value: string): FailureClass
   if (value === "environment") return "environment_issue";
   if (value === "test-script") return "test_script_issue";
   if (value === "product-bug") return "product_bug";
+  if (value === "evidence") return "insufficient_evidence";
   return "unknown";
 }
 

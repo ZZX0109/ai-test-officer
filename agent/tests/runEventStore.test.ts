@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { isIdempotentReplay, runEventStore, SqliteRunEventStore } from "../src/runEventStore.js";
+import { acceptsExecutionResult, isIdempotentReplay, runEventStore, SqliteRunEventStore } from "../src/runEventStore.js";
 
 export async function testRunEventStore() {
   const suffix = randomUUID();
@@ -21,7 +21,21 @@ export async function testRunEventStore() {
   assert.equal(isIdempotentReplay(duplicate), true);
   await assert.rejects(() => runEventStore.append({ runId, type: "run_preparing", expectedVersion: 2, actor: "tester", idempotencyKey: `stale-${suffix}` }), /version_conflict/);
   run = await runEventStore.append({ runId, type: "run_preparing", expectedVersion: 4, actor: "worker", idempotencyKey: `prepare-${suffix}` });
-  run = await runEventStore.append({ runId, type: "run_started", expectedVersion: 5, actor: "worker", idempotencyKey: `start-${suffix}` });
+  run = await runEventStore.append({
+    runId,
+    type: "run_started",
+    expectedVersion: 5,
+    actor: "worker",
+    idempotencyKey: `start-${suffix}`,
+    payload: { workerAttemptId: `attempt-${suffix}`, executionGeneration: 4 }
+  });
+  assert.equal(run.activeExecutionAttemptId, `attempt-${suffix}`);
+  assert.equal(run.executionGeneration, 4);
+  const collectingProjection = { ...run, state: "collecting" as const };
+  assert.equal(acceptsExecutionResult(collectingProjection, { workerAttemptId: `attempt-${suffix}`, executionGeneration: 4 }), true);
+  assert.equal(acceptsExecutionResult(collectingProjection, { workerAttemptId: "late-attempt", executionGeneration: 4 }), false);
+  assert.equal(acceptsExecutionResult(collectingProjection, { workerAttemptId: `attempt-${suffix}`, executionGeneration: 3 }), false);
+  assert.equal(acceptsExecutionResult(run, { workerAttemptId: `attempt-${suffix}`, executionGeneration: 4 }), false, "a Worker result is accepted only after evidence collection is durably published");
   run = await runEventStore.append({ runId, type: "run_paused", expectedVersion: 6, actor: "tester", idempotencyKey: `pause-${suffix}` });
   assert.equal(run.state, "paused");
   run = await runEventStore.append({ runId, type: "run_resumed", expectedVersion: 7, actor: "tester", idempotencyKey: `resume-${suffix}` });
@@ -46,10 +60,22 @@ export async function testRunEventStore() {
   queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "plan_approved", expectedVersion: queuedPause.version, actor: "tester", idempotencyKey: `queued-approve-${suffix}` });
   queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "permission_granted", expectedVersion: queuedPause.version, actor: "tester", idempotencyKey: `queued-permission-${suffix}` });
   assert.equal(queuedPause.state, "queued");
+  await assert.rejects(
+    () => runEventStore.append({
+      runId: queuedPauseId,
+      type: "evidence_collecting",
+      expectedVersion: queuedPause.version,
+      actor: "late-worker",
+      idempotencyKey: `queued-stale-evidence-${suffix}`
+    }),
+    /Invalid run transition: queued \+ evidence_collecting/,
+    "a late Worker result must not write evidence into a newly queued generation"
+  );
   queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "run_paused", expectedVersion: queuedPause.version, actor: "tester", idempotencyKey: `queued-pause-${suffix}` });
   assert.equal(queuedPause.state, "paused");
   queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "run_resumed", expectedVersion: queuedPause.version, actor: "tester", idempotencyKey: `queued-resume-${suffix}` });
-  assert.equal(queuedPause.state, "running");
+  assert.equal(queuedPause.state, "queued", "a queued pause resumes to queued so a Worker can bind a fresh attempt");
+  assert.equal(queuedPause.activeExecutionAttemptId, undefined);
 
   for (const [eventType, expectedState, expectedGate] of [
     ["human_review_requested", "awaiting-human-review", "needs-human-review"],

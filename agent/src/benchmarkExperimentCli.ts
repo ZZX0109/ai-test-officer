@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   evaluateExperiment,
@@ -12,6 +12,13 @@ import {
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
 async function json<T>(file: string) { return JSON.parse(await readFile(file, "utf8")) as T; }
+
+/** Avoid a dashboard observing a half-written experiment lifecycle document. */
+async function atomicJson(file: string, value: unknown) {
+  const temporary = `${file}.${process.pid}.tmp`;
+  await writeFile(temporary, JSON.stringify(value, null, 2));
+  await rename(temporary, file);
+}
 
 function externalDirectory(value: string | undefined, name: string) {
   if (!value) throw new Error(`${name}_required_for_blind_evaluation`);
@@ -82,7 +89,12 @@ async function main() {
     ? externalDirectory(process.env.BENCHMARK_EVALUATOR_REPORTS_ROOT, "BENCHMARK_EVALUATOR_REPORTS_ROOT")
     : undefined;
   if (sealedEvaluation) externalDirectory(labelsRoot, "BENCHMARK_LABELS_ROOT");
-  if (manifest.status !== "awaiting_evaluation") throw new Error(`experiment_not_ready:${manifest.status}`);
+  // Evaluation is a derived, immutable-from-raw-records snapshot.  Allow a
+  // completed experiment to be re-evaluated after an evaluator bug fix; do
+  // not require mutating the manifest back to a pseudo-running state.
+  if (manifest.status !== "awaiting_evaluation" && manifest.status !== "completed") {
+    throw new Error(`experiment_not_ready:${manifest.status}`);
+  }
   if (!manifest.caseIds?.length) throw new Error("experiment_manifest_case_ids_missing");
   if (!manifest.repetitions || !manifest.models) throw new Error("experiment_manifest_matrix_definition_missing");
   const files = (await readdir(path.join(directory, "runs"))).filter((file) => file.endsWith(".json"));
@@ -141,9 +153,21 @@ async function main() {
     await writeFile(path.join(evaluatorDirectory, "evaluation.json"), JSON.stringify(output, null, 2));
     await writeFile(path.join(evaluatorDirectory, "evaluation-summary.md"), evaluationMarkdown(output));
   }
-  await writeFile(path.join(directory, "evaluation.json"), JSON.stringify(publicOutput, null, 2));
+  await atomicJson(path.join(directory, "evaluation.json"), publicOutput);
   await writeFile(path.join(directory, "evaluation-summary.md"), evaluationMarkdown(publicOutput));
-  await writeFile(path.join(rootDir, "reports", "benchmarks", "latest.json"), JSON.stringify(publicOutput, null, 2));
+  await atomicJson(path.join(rootDir, "reports", "benchmarks", "latest.json"), publicOutput);
+  // `awaiting_evaluation` is a transient runner state. Once an evaluator has
+  // emitted a complete matrix it must never leave the experiment manifest
+  // looking active; a supervisor restart would otherwise report contradictory
+  // lifecycle states for the exact same experiment.
+  await atomicJson(path.join(directory, "manifest.json"), {
+    ...manifest,
+    status: "completed",
+    completedRuns: records.length,
+    evaluatedAt: output.createdAt,
+    evaluationStatus: publicOutput.status,
+    conclusion: publicOutput.conclusion
+  });
   console.log(JSON.stringify(publicOutput, null, 2));
   if (blind && !blind.acceptance.proven) process.exitCode = 3;
 }

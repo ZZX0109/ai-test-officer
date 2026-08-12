@@ -41,6 +41,7 @@ export async function testLlmPlannerFailClosed() {
   assert.match(repair, /<untrusted_previous_output>/);
   assert.match(repair, /全部 oracleId 对应 assert action/);
   assert.match(repair, /不得扩大 capability/);
+  assert.ok(repair.length < 3_000, "a semantic repair must not repeat the full Planner context and exhaust the remaining run budget");
 
   const reservation = reserveLlmOutputTokens({
     prompt: "short prompt",

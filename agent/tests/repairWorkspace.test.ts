@@ -6,6 +6,7 @@ import {
   applyRepairSession,
   createRepairSession,
   exportRepairSession,
+  listRepairWorkspaceFiles,
   readRepairFile,
   validateRepairSession,
   writeRepairFile
@@ -29,6 +30,10 @@ export async function testRepairWorkspace() {
       failureClass: "product-bug"
     });
     assert.notEqual(session.workspaceRoot, source);
+    const tree = await listRepairWorkspaceFiles(session.id);
+    assert.ok(tree.some((file) => file.path === "app.ts" && file.editable));
+    assert.equal(tree.some((file) => file.path === ".env"), false, "secret files must never enter the editor tree");
+    assert.equal(tree.some((file) => file.path === "logo.png"), false, "binary files must not enter the editor tree");
     await assert.rejects(() => readRepairFile(session.id, "../outside.ts"), /repair_path_escape/);
     await assert.rejects(() => readRepairFile(session.id, ".env"), /repair_path_forbidden/);
     await assert.rejects(() => readRepairFile(session.id, "logo.png"), /repair_path_forbidden/);

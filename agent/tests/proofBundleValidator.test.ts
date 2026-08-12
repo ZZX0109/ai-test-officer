@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import type { ArtifactV2, MachineGate } from "@ai-test-officer/contracts";
 import { deriveGateEligible, validateProofBundle } from "../src/proof/proofBundleValidator.js";
+import { buildProofBundleId } from "../src/proof/proofBundleService.js";
 import type { ArtifactIntegrityReport, EvidenceItem } from "../src/types.js";
 
-function makeEvidence(id: string): EvidenceItem {
-  return { id, runId: "run_1", type: "operation", title: id, timestamp: new Date().toISOString(), payload: {} };
+function makeEvidence(id: string, type: EvidenceItem["type"] = "operation"): EvidenceItem {
+  return { id, runId: "run_1", type, title: id, timestamp: new Date().toISOString(), payload: {} };
 }
 
 function makeArtifact(kind: ArtifactV2["kind"], origin: ArtifactV2["origin"] = "runtime-captured"): ArtifactV2 {
@@ -87,6 +88,25 @@ export function testProofBundleValidator() {
   });
   assert.ok(unlinked.issues.some((issue) => issue.includes("lacks evidence linkage")));
 
+  // Object-store publication can fail after child paths have run. The parent
+  // must be blocked (not stranded in collecting), while its environmental
+  // reasons remain grounded in the local console observation. It is still
+  // ineligible because no formal object-store Artifact v2 was committed.
+  const objectStoreBlocked = validateProofBundle({
+    evidence: [makeEvidence("ev_minio", "console")],
+    machineGate: makeMachineGate({
+      status: "blocked",
+      reasons: ["environment_unavailable", "artifact_object_store_unavailable"],
+      reasonDetails: [
+        { code: "environment_unavailable", summary: "MinIO unavailable", evidenceRefs: ["ev_minio"] },
+        { code: "artifact_object_store_unavailable", summary: "MinIO unavailable", evidenceRefs: ["ev_minio"] }
+      ]
+    })
+  });
+  assert.equal(objectStoreBlocked.evidenceGrounded, true);
+  assert.equal(objectStoreBlocked.evidenceComplete, false);
+  assert.equal(objectStoreBlocked.issues.some((issue) => issue.includes("lacks evidence linkage")), false);
+
   // Missing a required artifact kind breaks completeness even with clean integrity.
   const missingKind = validateProofBundle({
     evidence: [makeEvidence("ev_1")],
@@ -110,6 +130,34 @@ export function testProofBundleValidator() {
   const tampered = validateProofBundle({ artifactIntegrity: makeIntegrityReport({ hashMismatches: 1 }) });
   assert.equal(tampered.artifactIntegrityVerified, false);
   assert.ok(tampered.issues.some((issue) => issue.includes("hashMismatches")));
+
+  // Run reports are intentionally self-referential: report.json and the
+  // integrity manifest are written after runtime artifacts are captured and
+  // therefore cannot be hashed without a circular dependency. They must be
+  // visible in the report but never invalidate an otherwise verified bundle.
+  const reportReferences = validateProofBundle({
+    evidence: [makeEvidence("ev_1")],
+    artifactsV2: [makeArtifact("screenshot")],
+    artifactIntegrity: makeIntegrityReport({ selfReferences: 5 }),
+    requiredArtifactKinds: ["screenshot"]
+  });
+  assert.equal(reportReferences.artifactIntegrityVerified, true);
+  assert.equal(reportReferences.evidenceComplete, true);
+
+  // Proof identity must remain stable after report generation adds those
+  // benign self-reference entries to the integrity report.
+  const proofInput = {
+    draft: { status: "pass" as const, reasons: [], reasonDetails: [], assertionFailures: [] },
+    runId: "run_1",
+    scenarioId: "scenario_1",
+    attemptId: "attempt_1",
+    evidence: [makeEvidence("ev_1")],
+    artifactsV2: [makeArtifact("screenshot")],
+    requiredArtifactKinds: ["screenshot"]
+  };
+  const beforeReports = buildProofBundleId({ ...proofInput, artifactIntegrity: makeIntegrityReport() });
+  const afterReports = buildProofBundleId({ ...proofInput, artifactIntegrity: makeIntegrityReport({ selfReferences: 5 }) });
+  assert.equal(beforeReports, afterReports);
 
   // deriveGateEligible mirrors the runOutcomeSummaryV2 invariant.
   assert.equal(deriveGateEligible({ artifactIntegrityVerified: true, evidenceGrounded: true }, { executionSucceeded: true, requirementCovered: true }), true);

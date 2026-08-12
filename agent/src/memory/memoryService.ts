@@ -5,14 +5,17 @@
  * service behind this interface means the planner, diagnosis and repair loops
  * do not need to know where memory is stored.
  */
-import type {
-  ProjectMemoryEntry,
-  ProjectMemoryQuery,
-  ExperienceMemoryEntry,
-  ExperienceMemoryQuery,
-  MemoryStatistics
+import {
+  experienceMemoryEntrySchema,
+  projectMemoryEntrySchema,
+  type ProjectMemoryEntry,
+  type ProjectMemoryQuery,
+  type ExperienceMemoryEntry,
+  type ExperienceMemoryQuery,
+  type MemoryStatistics
 } from "@ai-test-officer/contracts";
 import { createHash } from "node:crypto";
+import { Pool } from "pg";
 
 function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length || a.length === 0) return 0;
@@ -43,22 +46,43 @@ function createStore(): MemoryStore {
 
 export class MemoryService {
   private readonly store: MemoryStore;
+  private readonly pool?: Pool;
 
-  constructor(store?: MemoryStore) {
+  constructor(store?: MemoryStore, connectionString = process.env.DATABASE_URL) {
     this.store = store ?? createStore();
+    this.pool = !store && connectionString ? new Pool({ connectionString, max: 2 }) : undefined;
   }
 
   async upsertProjectEntry(entry: ProjectMemoryEntry): Promise<void> {
-    this.store.projectEntries.set(entry.entryId, { ...entry });
+    const parsed = projectMemoryEntrySchema.parse(entry);
+    if (this.pool) {
+      await this.pool.query(
+        `INSERT INTO project_memory_entries_v1
+          (entry_id,project_id,category,memory_key,verified,payload,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (entry_id) DO UPDATE SET
+           project_id=EXCLUDED.project_id,category=EXCLUDED.category,
+           memory_key=EXCLUDED.memory_key,verified=EXCLUDED.verified,
+           payload=EXCLUDED.payload,updated_at=EXCLUDED.updated_at`,
+        [parsed.entryId, parsed.projectId, parsed.category, parsed.key, parsed.verified, parsed, parsed.updatedAt]
+      );
+      return;
+    }
+    this.store.projectEntries.set(parsed.entryId, { ...parsed });
   }
 
   async getProjectEntry(entryId: string): Promise<ProjectMemoryEntry | undefined> {
+    if (this.pool) {
+      const result = await this.pool.query<{ payload: unknown }>("SELECT payload FROM project_memory_entries_v1 WHERE entry_id=$1", [entryId]);
+      return result.rows[0] ? projectMemoryEntrySchema.parse(result.rows[0].payload) : undefined;
+    }
     return this.store.projectEntries.get(entryId);
   }
 
   async queryProjectEntries(query: ProjectMemoryQuery): Promise<ProjectMemoryEntry[]> {
-    let entries = [...this.store.projectEntries.values()]
-      .filter((entry) => entry.projectId === query.projectId);
+    let entries = this.pool
+      ? (await this.pool.query<{ payload: unknown }>("SELECT payload FROM project_memory_entries_v1 WHERE project_id=$1 ORDER BY updated_at DESC", [query.projectId])).rows.map((row) => projectMemoryEntrySchema.parse(row.payload))
+      : [...this.store.projectEntries.values()].filter((entry) => entry.projectId === query.projectId);
     if (query.category) entries = entries.filter((entry) => entry.category === query.category);
     if (query.keys?.length) entries = entries.filter((entry) => query.keys!.includes(entry.key));
     if (!query.includeUnverified) entries = entries.filter((entry) => entry.verified);
@@ -72,20 +96,42 @@ export class MemoryService {
       entry.rootCauseDescription,
       entry.repairDescription
     ].join(" ");
-    const normalized: ExperienceMemoryEntry = {
+    const normalized = experienceMemoryEntrySchema.parse({
       ...entry,
       embeddingText,
       embeddingVector: entry.embeddingVector?.length ? entry.embeddingVector : textToEmbedding(embeddingText)
-    };
+    });
+    if (this.pool) {
+      await this.pool.query(
+        `INSERT INTO experience_memory_entries_v1
+          (entry_id,project_id,failure_type,repair_strategy,validation_result,payload,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (entry_id) DO UPDATE SET
+           project_id=EXCLUDED.project_id,failure_type=EXCLUDED.failure_type,
+           repair_strategy=EXCLUDED.repair_strategy,validation_result=EXCLUDED.validation_result,
+           payload=EXCLUDED.payload,updated_at=EXCLUDED.updated_at`,
+        [normalized.entryId, normalized.projectId, normalized.failureType, normalized.repairStrategy, normalized.validationResult, normalized, normalized.updatedAt]
+      );
+      return;
+    }
     this.store.experienceEntries.set(normalized.entryId, normalized);
   }
 
   async getExperienceEntry(entryId: string): Promise<ExperienceMemoryEntry | undefined> {
+    if (this.pool) {
+      const result = await this.pool.query<{ payload: unknown }>("SELECT payload FROM experience_memory_entries_v1 WHERE entry_id=$1", [entryId]);
+      return result.rows[0] ? experienceMemoryEntrySchema.parse(result.rows[0].payload) : undefined;
+    }
     return this.store.experienceEntries.get(entryId);
   }
 
   async queryExperienceEntries(query: ExperienceMemoryQuery): Promise<ExperienceMemoryEntry[]> {
-    let entries = [...this.store.experienceEntries.values()];
+    let entries = this.pool
+      ? (await this.pool.query<{ payload: unknown }>(
+          "SELECT payload FROM experience_memory_entries_v1 WHERE ($1::text IS NULL OR project_id=$1) ORDER BY updated_at DESC",
+          [query.projectId ?? null]
+        )).rows.map((row) => experienceMemoryEntrySchema.parse(row.payload))
+      : [...this.store.experienceEntries.values()];
     if (query.projectId) entries = entries.filter((entry) => entry.projectId === query.projectId);
     if (query.failureType?.length) entries = entries.filter((entry) => query.failureType!.includes(entry.failureType));
     if (query.rootCauseCategory?.length) entries = entries.filter((entry) => query.rootCauseCategory!.includes(entry.rootCauseCategory));
@@ -120,7 +166,14 @@ export class MemoryService {
   }
 
   async getStatistics(projectId: string): Promise<MemoryStatistics> {
-    const entries = [...this.store.experienceEntries.values()].filter((entry) => entry.projectId === projectId);
+    const entries = await this.queryExperienceEntries({
+      projectId,
+      includeUnvalidated: true,
+      limit: 100_000,
+      offset: 0,
+      semanticLimit: 10,
+      semanticThreshold: 0
+    });
     const byFailureType: Record<string, number> = {};
     const byRepairStrategy: Record<string, number> = {};
     const strategyTotals = new Map<string, { success: number; total: number }>();
@@ -155,6 +208,8 @@ export class MemoryService {
       generatedAt: new Date().toISOString()
     };
   }
+
+  async close(): Promise<void> { await this.pool?.end(); }
 }
 
 let instance: MemoryService | undefined;

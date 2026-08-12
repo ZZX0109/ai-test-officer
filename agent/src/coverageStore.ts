@@ -95,6 +95,50 @@ export function createCoverageItems(input: {
   });
 }
 
+export function createDynamicBrowserCoverageItems(input: {
+  runId: string;
+  paths: Array<{
+    id: string;
+    title: string;
+    riskReason?: string;
+    surface?: CoverageItem["surface"];
+    preconditions?: string[];
+    requiredEvidenceKinds?: CoverageItem["requiredEvidenceKinds"];
+  }>;
+  now?: string;
+}) {
+  const now = input.now ?? new Date().toISOString();
+  return input.paths.map((path) => {
+    const surface = path.surface ?? "page";
+    const browserPath = surface === "page";
+    return coverageItemSchema.parse({
+    schemaVersion: "1.0",
+    id: stableId(input.runId, path.id),
+    runId: input.runId,
+    flowId: path.id,
+    module: path.title,
+    surface,
+    risk: "high",
+    preconditions: path.preconditions ?? [],
+    permissions: browserPath ? ["browserControl"] : [],
+    actionPathIds: [path.id],
+    oracleIds: [],
+    requiredEvidenceKinds: path.requiredEvidenceKinds?.length
+      ? path.requiredEvidenceKinds
+      : browserPath ? ["screenshot", "dom", "trace", "operation-log"] : ["operation-log"],
+    // Dynamic controls are presently a browser executor contract. API/data/
+    // job entries must be rebound to their allow-listed manifest executor;
+    // retaining them as blocked is safer than silently passing or pretending
+    // a browser click exercised a backend-only path.
+    disposition: browserPath ? "pending" : "blocked",
+    dispositionReason: browserPath ? path.riskReason : "static_business_path_requires_manifest_executor_binding",
+    scenarioId: `dynamic_${path.id.replace(/[^a-zA-Z0-9_-]+/g, "_")}`,
+    createdAt: now,
+    updatedAt: now
+    });
+  });
+}
+
 function structuredCoverageItem(input: {
   runId: string;
   flowId: string;

@@ -38,6 +38,19 @@ type PlanningInput = {
   cachePolicy?: "auto" | "bypass";
   llmBudget?: LlmBudget;
   permissionProfile?: { browserControl?: boolean };
+  executionProfile?: "interactive" | "benchmark";
+  dynamicBrowser?: boolean;
+  coverageInventory?: Array<{
+    id: string;
+    title: string;
+    kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
+    target: string;
+    sourceNodeIds: string[];
+    sourceCount: number;
+    surfaces?: Array<"page" | "api" | "data" | "background-task">;
+    requiredEvidenceKinds?: string[];
+    preconditions?: string[];
+  }>;
 };
 
 type PlanPayload = {
@@ -50,6 +63,67 @@ type PlanPayload = {
   impactAnalysis?: ImpactAnalysis;
   plannerRouting?: { route: "deterministic" | "llm"; reason: string; signals: string[] };
 };
+
+function dynamicBrowserPlan(input: {
+  requirement?: string;
+  impactAnalysis: ImpactAnalysis;
+  promptVersion: string;
+  modelProfileId?: string;
+  coverageInventory?: PlanningInput["coverageInventory"];
+}): PlanPayload {
+  const inventory = input.coverageInventory ?? [];
+  const pathIds = inventory.length ? inventory.map((item) => item.id) : [
+    ...input.impactAnalysis.affectedPages.map((item) => item.id),
+    ...input.impactAnalysis.uncoveredRisks.map((item) => item.id)
+  ];
+  // Full-scan planning must never silently drop discovered paths. Execution
+  // budgets control concurrency and may explicitly block a path, but every
+  // discovered flow remains visible in Coverage disposition.
+  const uniquePathIds = Array.from(new Set(pathIds));
+  const effectivePathIds = uniquePathIds.length ? uniquePathIds : ["dynamic-browser-path"];
+  return {
+    plan: {
+      sessionName: "动态浏览器 Agent 测试计划",
+      risks: [{
+        id: "dynamic-browser-binding",
+        level: "high",
+        title: "未知项目需要运行时页面绑定与机器 Oracle",
+        evidence: input.requirement ?? "用户要求执行交互式浏览器测试",
+        pathIds: effectivePathIds,
+        coverageDisposition: "required"
+      }],
+      levels: [{
+        id: "core_path",
+        title: "运行时业务路径",
+        description: "由页面观测、受限 LLM 动作和确定性 Oracle 逐步执行。",
+        paths: effectivePathIds.map((id, index) => ({
+          id,
+          title: inventory.find((item) => item.id === id)?.title
+            ?? input.impactAnalysis.affectedPages[index]?.target
+            ?? `动态业务路径 ${index + 1}`,
+          riskReason: inventory.find((item) => item.id === id)
+            ? `该业务路径代表 ${inventory.find((item) => item.id === id)?.sourceCount ?? 1} 个静态代码候选；必须在真实页面中形成动作和机器 Oracle。`
+            : "没有可直接复用的固定 Scenario，需在真实页面中绑定控件。",
+          expectedFrom: "llm_inferred" as const,
+          steps: ["观测页面", "选择受限动作", "执行并采集前后证据", "执行机器 Oracle"],
+          retry: 2
+        }))
+      }]
+    },
+    provenance: planProvenanceSchema.parse({
+      source: "dynamic-browser-agent",
+      promptVersion: input.promptVersion,
+      modelProfileId: input.modelProfileId,
+      compilationStatus: "validated"
+    }),
+    impactAnalysis: input.impactAnalysis,
+    plannerRouting: {
+      route: "llm",
+      reason: "dynamic_browser_agent_required",
+      signals: ["no_static_scenario", "runtime_controls_required"]
+    }
+  };
+}
 
 async function appendPlanningEvent(
   runId: string,
@@ -175,6 +249,16 @@ export async function planRunFromDurableInput(runId: string): Promise<RunProject
         fallbackReason: "impact_analysis_missing"
       }
     });
+  }
+  if (input.dynamicBrowser && input.executionProfile !== "benchmark") {
+    const payload = dynamicBrowserPlan({
+      requirement: input.requirement,
+      impactAnalysis,
+      promptVersion,
+      modelProfileId: input.modelProfileId,
+      coverageInventory: input.coverageInventory
+    });
+    return appendPlanningEvent(runId, "plan_generated", "dynamic-browser-requested", payload as unknown as Record<string, unknown>);
   }
   const plannerRouting = plannerMode === "adaptive"
     ? routePlanner({
@@ -311,6 +395,10 @@ export async function planRunFromDurableInput(runId: string): Promise<RunProject
         };
       } else {
         const review = reason.startsWith("llm_plan_") || reason.includes("schema") || reason.includes("parse");
+        if (input.executionProfile !== "benchmark" && input.permissionProfile?.browserControl !== false) {
+          payload = dynamicBrowserPlan({ requirement: input.requirement, impactAnalysis, promptVersion, modelProfileId: input.modelProfileId });
+          return appendPlanningEvent(runId, "plan_generated", "dynamic-browser-fallback", payload as unknown as Record<string, unknown>);
+        }
         return appendPlanningEvent(runId, review ? "human_review_requested" : "run_blocked", "planner-failed", {
           finalStatus: review ? "needs-human-review" : "blocked",
           error: failureReason,
@@ -333,6 +421,10 @@ export async function planRunFromDurableInput(runId: string): Promise<RunProject
     const scenarioId = input.scenarioId
       ?? intake.scenarioCandidates.find((candidate) => candidate.executable && candidate.source !== "patrol")?.mappedScenarioId;
     if (!scenarioId || !hasScenario(scenarioId) || !getScenario(scenarioId).compiledPlanContract) {
+      if (input.executionProfile !== "benchmark" && input.permissionProfile?.browserControl !== false) {
+        payload = dynamicBrowserPlan({ requirement: input.requirement, impactAnalysis, promptVersion, modelProfileId: input.modelProfileId });
+        return appendPlanningEvent(runId, "plan_generated", "dynamic-browser-plan", payload as unknown as Record<string, unknown>);
+      }
       return appendPlanningEvent(runId, "human_review_requested", "impact-gap", {
         finalStatus: "needs-human-review",
         error: "impact_analysis_no_executable_scenario",

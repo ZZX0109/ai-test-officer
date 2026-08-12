@@ -125,6 +125,11 @@ export function buildOciInvocation(input: {
     workspaceVolume?: string;
     packageCacheVolume?: string;
   };
+  resources?: {
+    cpus?: number;
+    memoryGiB?: number;
+    pidsLimit?: number;
+  };
 }) {
   const manifest = projectManifestSchema.parse(input.manifest);
   for (const command of [input.prepareCommand, input.command].filter((item): item is CommandSpec => Boolean(item))) {
@@ -136,6 +141,16 @@ export function buildOciInvocation(input: {
   const token = createHash("sha256").update(`${manifest.projectId}:${randomUUID()}`).digest("hex").slice(0, 20);
   const containerName = `ato-${manifest.projectId}-${token}`;
   const network = manifest.network.mode === "deny" ? "none" : "bridge";
+  const parallelRuntime = (input.portBindings?.length ?? 0) > 1
+    || input.command.args.includes("--parallel")
+    || manifest.ports.length > 1;
+  // Multi-service monorepos can exceed 4 GiB briefly while the frontend and
+  // backend compile together. If only esbuild is OOM-killed, Vite keeps its
+  // port open and looks healthy while serving an error overlay. Scale this
+  // generic profile from the manifest shape, never from a project name.
+  const memoryGiB = Math.min(6, Math.max(1, input.resources?.memoryGiB ?? (parallelRuntime ? 6 : 4)));
+  const cpus = Math.min(4, Math.max(1, input.resources?.cpus ?? (parallelRuntime ? 3 : 2)));
+  const pidsLimit = Math.min(512, Math.max(64, input.resources?.pidsLimit ?? (parallelRuntime ? 384 : 256)));
   const environmentArgs = manifest.environmentAllowlist.flatMap((name) => ["--env", name]);
   const portArgs = (input.portBindings ?? []).flatMap(({ hostPort, containerPort }) => [
     "--publish", `127.0.0.1:${hostPort}:${containerPort}`
@@ -238,10 +253,9 @@ export function buildOciInvocation(input: {
     executable: input.engine,
     args: [
       "run", "--rm", "--read-only", "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
-      // Keep each sandbox within the documented 4 GiB production budget. The
-      // Agent prevents duplicate containers for the same project, so a stale
-      // runtime cannot silently consume the Docker VM's remaining memory.
-      "--cpus", "2", "--memory", "4g", "--memory-swap", "4g", "--pids-limit", "256", "--user", "65532:65532", "--network", network,
+      // Keep every sandbox bounded while allowing multi-process targets a
+      // larger, still finite profile.
+      "--cpus", String(cpus), "--memory", `${memoryGiB}g`, "--memory-swap", `${memoryGiB}g`, "--pids-limit", String(pidsLimit), "--user", "65532:65532", "--network", network,
       "--label", "ai-test-officer.managed=true",
       "--label", `ai-test-officer.project-id=${manifest.projectId}`,
       ...portArgs,

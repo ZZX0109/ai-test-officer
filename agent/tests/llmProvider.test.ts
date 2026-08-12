@@ -115,7 +115,7 @@ export async function testLlmProviderResponsesTransport() {
     requests = 0;
     globalThis.fetch = (async () => { requests += 1; return jsonResponse({ id: "response-direct", model: "gpt-5.1-codex", output_text: '{"ok":true}', usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } }); }) as typeof fetch;
     const direct = await executeLlmCall({ credential, apiKey: "test-only", prompt: "{}", system: "json", maxTokens: 64, timeoutMs: 2_000, totalTimeoutMs: 8_000, transportPreference: "non-stream", context: { purpose: "planning", experimentId: "provider-unit-test" } });
-    assert.equal(direct.call.transportMode, "non-stream-fallback");
+    assert.equal(direct.call.transportMode, "non-stream");
     assert.deepEqual(direct.call.transportAttempts?.map((item) => item.mode), ["non-stream"]);
     assert.equal(requests, 1);
 

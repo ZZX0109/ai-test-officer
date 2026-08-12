@@ -3,6 +3,7 @@ import { contextLayerOutputSchema, experienceMemoryEntrySchema, traceChainSchema
 import { ContextLayer } from "../src/context-layer/contextLayer.js";
 import { MemoryService } from "../src/memory/memoryService.js";
 import { Tracer } from "../src/tracing/tracer.js";
+import { FeedbackLoop } from "../src/feedback-loop/feedbackLoop.js";
 import { WriteSafetyLayer } from "../src/write-safety/writeSafety.js";
 
 export async function testSustainabilityModules() {
@@ -18,17 +19,28 @@ export async function testSustainabilityModules() {
   assert.equal(contextLayerOutputSchema.parse(await context.build(policy)).results.run_status?.runId, "r1");
   await assert.rejects(() => context.build({ ...policy, expiresAt: new Date(Date.now() - 1).toISOString() }), /context_policy_expired/);
 
-  const memory = new MemoryService();
+  const memory = new MemoryService(undefined, "");
   const entry = experienceMemoryEntrySchema.parse({ schemaVersion: "1.0", entryId: "e1", projectId: "p1", runId: "r1", failureType: "timeout", rootCauseCategory: "environment", rootCauseDescription: "slow", contributingFactors: [], repairStrategy: "wait_strategy", repairDescription: "wait", validationResult: "passed", successCount: 1, failureCount: 0, tags: ["slow"], severity: "minor", createdAt: now, updatedAt: now });
   await memory.upsertExperienceEntry(entry);
   assert.equal((await memory.queryExperienceEntries({ projectId: "p1", includeUnvalidated: true, limit: 10, semanticLimit: 10, semanticThreshold: 0, offset: 0 })).length, 1);
   assert.equal((await memory.getStatistics("p1")).overallSuccessRate, 1);
 
-  const tracer = new Tracer();
-  const traceId = tracer.startTrace("r1", "p1", "test");
-  const span = tracer.traceAgentDecision("r1", "plan", { ok: true });
-  tracer.endSpan(span, { selected: true });
-  assert.equal(traceChainSchema.parse(tracer.getChain(traceId)).statistics.totalSpans, 1);
+  const tracer = new Tracer(undefined, "");
+  const traceId = await tracer.startTrace("r1", "p1", "test");
+  const span = await tracer.traceAgentDecision("r1", "plan", { ok: true });
+  await tracer.endSpan(span, { selected: true });
+  assert.equal(traceChainSchema.parse(await tracer.getChain(traceId)).statistics.totalSpans, 1);
+
+  const feedback = new FeedbackLoop(undefined, "");
+  const feedbackSession = await feedback.startSession("p1", {
+    runId: "r1",
+    failureType: "timeout",
+    title: "fixture timeout",
+    description: "fixture",
+    severity: "minor"
+  });
+  assert.equal((await feedback.getSession(feedbackSession.sessionId))?.stage, "failure_detected");
+  assert.equal((await feedback.getStageCounts("p1")).failure_detected, 1);
 
   const safety = new WriteSafetyLayer();
   const action = writeActionSchema.parse({ actionId: "a1", proposedBy: "user", capability: "save_fixture", params: {}, reason: "test", sourceClaimIds: ["claim"], riskLevel: "low", requiresConfirmation: false, idempotencyKey: "a1", runId: "r1", proposedAt: now });

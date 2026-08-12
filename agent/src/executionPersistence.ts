@@ -221,11 +221,42 @@ export async function persistExecutionResult(
         proofValidationVersion: candidateGate.proofValidationVersion ?? ""
       });
       try {
-        await client.query(
+        // The ledger is immutable and has one record per exact run/attempt.
+        // Replaying the same worker event is harmless only if it remints the
+        // exact same gate. A different Proof Bundle ID or canonical hash for
+        // that attempt is an internal credibility conflict, not a product
+        // failure and must never be silently converted into a repair request.
+        const existing = await client.query<{
+          id: string;
+          proof_bundle_id: string;
+          canonical_sha256: string;
+        }>(
+          `SELECT id, proof_bundle_id, canonical_sha256
+             FROM proof_bundles_v1
+            WHERE run_id = $1
+              AND attempt_id IS NOT DISTINCT FROM $2
+              AND aggregate_attempt = $3
+            LIMIT 1`,
+          [controlRunId, gateAttemptId, aggregateAttempt]
+        );
+        const matchesExisting = (row: { id: string; proof_bundle_id: string; canonical_sha256: string }) =>
+          row.id === candidateGate.proofBundleId
+          && row.proof_bundle_id === candidateGate.proofBundleId
+          && row.canonical_sha256 === canonical;
+        if (existing.rows[0]) {
+          if (!matchesExisting(existing.rows[0])) {
+            throw new CredibilityError(
+              "proof_bundle_attempt_conflict",
+              `run ${controlRunId} attempt ${gateAttemptId ?? "aggregate"} already has an immutable proof bundle with different facts`
+            );
+          }
+        } else {
+          const inserted = await client.query(
           `INSERT INTO proof_bundles_v1
            (id,run_id,attempt_id,aggregate_attempt,scenario_id,status,reasons,reason_details,assertion_failures,evidence_complete,artifact_integrity_verified,evidence_grounded,gate_eligible,proof_bundle_id,proof_validation_version,canonical_sha256,payload)
            VALUES ($1,$2,$3,$17,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-           ON CONFLICT (id) DO NOTHING`,
+           ON CONFLICT DO NOTHING
+           RETURNING id, proof_bundle_id, canonical_sha256`,
           [
             candidateGate.proofBundleId, controlRunId, gateAttemptId, scenarioId, candidateGate.status,
             JSON.stringify(candidateGate.reasons ?? []), JSON.stringify(candidateGate.reasonDetails ?? []), JSON.stringify(candidateGate.assertionFailures ?? []),
@@ -234,6 +265,32 @@ export async function persistExecutionResult(
             aggregateAttempt
           ]
         );
+          // A simultaneous replay may have inserted the authoritative row
+          // between the lookup and our INSERT. Treat only an exact match as
+          // idempotent; otherwise fail closed with an actionable internal
+          // credibility error.
+          if (inserted.rowCount === 0) {
+            const raced = await client.query<{
+              id: string;
+              proof_bundle_id: string;
+              canonical_sha256: string;
+            }>(
+              `SELECT id, proof_bundle_id, canonical_sha256
+                 FROM proof_bundles_v1
+                WHERE run_id = $1
+                  AND attempt_id IS NOT DISTINCT FROM $2
+                  AND aggregate_attempt = $3
+                LIMIT 1`,
+              [controlRunId, gateAttemptId, aggregateAttempt]
+            );
+            if (!raced.rows[0] || !matchesExisting(raced.rows[0])) {
+              throw new CredibilityError(
+                "proof_bundle_attempt_conflict",
+                `run ${controlRunId} attempt ${gateAttemptId ?? "aggregate"} has a conflicting immutable proof bundle`
+              );
+            }
+          }
+        }
       } catch (ledgerError) {
         // In production the credibility ledger is the source of truth for
         // "this run was verified". A run whose proof bundle cannot be persisted
@@ -241,9 +298,9 @@ export async function persistExecutionResult(
         // and roll back the whole persist. Only non-production (local dev) is
         // allowed to degrade to a best-effort file record.
         const strict = process.env.NODE_ENV === "production" || process.env.PROOF_LEDGER_STRICT === "true";
-        if (strict) {
+        if (ledgerError instanceof CredibilityError || strict) {
           throw new CredibilityError(
-            "proof_persistence_failed",
+            ledgerError instanceof CredibilityError ? ledgerError.code : "proof_persistence_failed",
             `proof bundle ledger write failed for run ${controlRunId}: ${ledgerError instanceof Error ? ledgerError.message : String(ledgerError)}`
           );
         }

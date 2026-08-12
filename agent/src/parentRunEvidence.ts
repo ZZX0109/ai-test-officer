@@ -14,13 +14,16 @@ import {
 import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
 import { persistExecutionResult } from "./executionPersistence.js";
 import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
+import { mirrorArtifactsToConfiguredStore } from "./artifactObjectStore.js";
 import {
   finalizeProofBundle,
   proofCredibility,
+  proofPersistence,
   type MachineGateDraft
 } from "./proof/proofBundleService.js";
 import { assertVerifiedMachineGate } from "./proof/proofBundleIntegrity.js";
 import type {
+  ArtifactIntegrityReport,
   JudgeResult,
   LayeredJudgeReport,
   RunBundle,
@@ -109,7 +112,7 @@ export async function persistParentAggregateEvidence(input: {
     machineGate: input.machineGateDraft
   }, null, 2));
   const clock = new AttemptClock();
-  const artifact = await commitCapturedFile({
+  const capturedArtifact = await commitCapturedFile({
     temporaryPath,
     finalPath,
     id: `${input.runId}_parent_aggregate`,
@@ -121,6 +124,11 @@ export async function persistParentAggregateEvidence(input: {
     clock,
     collectorVersion: "0.2.0"
   });
+  // Parent aggregation is a first-class production result, not merely a
+  // pointer to child runs. Commit its operation evidence through the same
+  // atomic object-store path as browser/API/data executors so a parent report
+  // can never claim a pass based solely on local files.
+  const [artifact] = await mirrorArtifactsToConfiguredStore([capturedArtifact], reportsDir);
   const evidence = await appendEvidence(input.runId, {
     type: "operation",
     title: "Parent coverage and child-run aggregation",
@@ -137,6 +145,31 @@ export async function persistParentAggregateEvidence(input: {
       coverageDispositionComplete: input.coverage.every((item) => item.disposition !== "pending")
     }
   });
+  const artifactIntegrity: ArtifactIntegrityReport = {
+    id: `${input.runId}_aggregate_artifact_integrity`,
+    runId: input.runId,
+    generatedAt: new Date().toISOString(),
+    artifactRoot: "/artifacts",
+    summary: {
+      total: 1,
+      present: 1,
+      missing: 0,
+      unreadable: 0,
+      pathEscapes: 0,
+      selfReferences: 0,
+      hashMismatches: 0,
+      hashed: 1
+    },
+    items: [{
+      id: artifact.id,
+      artifactUri: artifact.storageUri,
+      kind: "operation",
+      evidenceId: evidence.id,
+      status: "present",
+      sha256: artifact.integrity.sha256,
+      sizeBytes: artifact.integrity.sizeBytes
+    }]
+  };
   const judgeRecommendation: JudgeRecommendation = {
     ...input.judgeRecommendation,
     evidenceRefs: [evidence.id]
@@ -175,10 +208,20 @@ export async function persistParentAggregateEvidence(input: {
     attemptId,
     evidence: [evidence],
     artifactsV2: [artifact],
+    artifactIntegrity,
+    requiredArtifactKinds: ["operation-log"],
     gateEligibleFacts: input.gateEligibleFacts
   });
   const machineGate = finalized.machineGate;
-  const finalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
+  // A parent aggregate may have a mechanically passing child set while its
+  // own proof bundle is not eligible (for example, a child gate is legacy or
+  // unverified).  Never let the recommendation turn that into a formal pass:
+  // the outcome contract is intentionally fail-closed at the aggregate
+  // boundary as well as in the individual runner.
+  const resolvedFinalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
+  const finalStatus = resolvedFinalStatus === "pass" && !finalized.gateEligible
+    ? "needs-human-review"
+    : resolvedFinalStatus;
   const covered = input.coverage.length > 0 && input.coverage.every((item) => item.disposition !== "pending");
   const requirementPassed = machineGate.status === "pass";
   const outcomeSummary = runOutcomeSummaryV2Schema.parse({
@@ -278,6 +321,7 @@ export async function persistParentAggregateEvidence(input: {
       artifactIds: [artifact.id]
     }],
     artifactsV2: [artifact],
+    artifactIntegrity,
     gateStatus: finalStatus,
     machineGate,
     judgeRecommendation,
@@ -333,6 +377,6 @@ export async function persistParentAggregateEvidence(input: {
   bundle.evidenceManifest = manifest;
   bundle.result.evidenceManifest = manifest;
   await writeRunBundle(bundle);
-  await persistExecutionResult(input.runId, result, { verdict: finalized.verdict, gateEligible: finalized.gateEligible });
+  await persistExecutionResult(input.runId, result, proofPersistence(finalized));
   return { result, bundle, manifest };
 }

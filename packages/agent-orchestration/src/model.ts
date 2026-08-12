@@ -2,7 +2,7 @@ import { RunnableLambda } from "@langchain/core/runnables";
 import { z } from "zod";
 
 export interface StructuredModelRequest<T> {
-  purpose: "planning" | "judging" | "triage" | "repairing" | "assistant";
+  purpose: "planning" | "browser-action" | "judging" | "triage" | "repairing" | "assistant";
   system: string;
   prompt: string;
   schema: z.ZodType<T>;

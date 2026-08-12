@@ -16,6 +16,10 @@ export interface RunProjection {
   runKind: RunKind;
   parentRunId?: string;
   coverageItemId?: string;
+  /** Queue projection version which owns the currently running execution. */
+  executionGeneration?: number;
+  /** Worker lease attempt allowed to publish the next execution result. */
+  activeExecutionAttemptId?: string;
   gateStatus?: GateStatus;
   machineGate?: MachineGate;
   judgeRecommendation?: JudgeRecommendation;
@@ -60,17 +64,61 @@ export function isIdempotentReplay(projection: RunProjection) {
   return idempotentReplayProjections.has(projection);
 }
 
+/**
+ * Validate the durable Worker ownership carried by an execution result before
+ * it is allowed to resume LangGraph.  Keeping this beside the projection
+ * reducer makes replay and live delivery use the same generation semantics.
+ */
+export function acceptsExecutionResult(
+  projection: RunProjection | undefined,
+  execution: Record<string, unknown> | undefined
+) {
+  if (!projection || projection.state !== "collecting") return false;
+  if (typeof execution?.workerAttemptId === "string"
+    && projection.activeExecutionAttemptId !== execution.workerAttemptId) return false;
+  if (typeof execution?.executionGeneration === "number"
+    && projection.executionGeneration !== execution.executionGeneration) return false;
+  return true;
+}
+
 function replayThroughEvent(events: readonly RunEvent[], event: RunEvent) {
   return markIdempotentReplay(replayRunEvents(events.filter((candidate) => candidate.version <= event.version)));
 }
 
 function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
-  const state = transitionRunState(current.state, event.type);
+  // A pause is allowed both before a Worker starts (queued) and while an
+  // attempt is already running. Resuming those states is not equivalent:
+  //
+  // - queued -> paused -> resume must return to queued so the new Worker can
+  //   publish run_preparing/run_started and bind its lease attempt;
+  // - running -> paused -> resume keeps running because the attempt identity
+  //   already exists and may be resumed/cancelled by the runtime.
+  //
+  // Treating both as running left a pre-execution resume with no active
+  // workerAttemptId. Its result was then correctly rejected by the generation
+  // fence and the Run stayed `running` forever.
+  const state = event.type === "run_resumed"
+    && current.state === "paused"
+    && !current.activeExecutionAttemptId
+    ? "queued"
+    : transitionRunState(current.state, event.type);
   const projection: RunProjection = { ...current, state, version: event.version, updatedAt: event.createdAt };
   if (event.type === "run_created") {
     projection.runKind = event.payload.runKind === "path" || event.payload.runKind === "validation" ? event.payload.runKind : "parent";
     projection.parentRunId = typeof event.payload.parentRunId === "string" ? event.payload.parentRunId : undefined;
     projection.coverageItemId = typeof event.payload.coverageItemId === "string" ? event.payload.coverageItemId : undefined;
+  }
+  if (event.type === "run_started") {
+    projection.executionGeneration = typeof event.payload.executionGeneration === "number"
+      ? event.payload.executionGeneration
+      : undefined;
+    projection.activeExecutionAttemptId = typeof event.payload.workerAttemptId === "string"
+      ? event.payload.workerAttemptId
+      : undefined;
+  }
+  if (event.type === "run_retrying") {
+    projection.executionGeneration = undefined;
+    projection.activeExecutionAttemptId = undefined;
   }
   if (event.payload.machineGate) projection.machineGate = event.payload.machineGate as MachineGate;
   if (event.payload.judgeRecommendation) projection.judgeRecommendation = event.payload.judgeRecommendation as JudgeRecommendation;

@@ -71,12 +71,20 @@ import { testProofBundleValidator } from "./proofBundleValidator.test.js";
 import { testProofBundleIntegrity } from "./proofBundleIntegrity.test.js";
 import { testEvidenceArtifactLinker } from "./evidenceArtifactLinker.test.js";
 import { testSustainabilityModules } from "./sustainabilityModules.test.js";
+import { testDurableSustainabilityRestart } from "./durableSustainabilityRestart.test.js";
+import { testBrowserAgentLoop } from "./browserAgentLoop.test.js";
+import { testBusinessCapabilityGraph } from "./businessCapabilityGraph.test.js";
+import { testPlanningInventoryStore } from "./planningInventoryStore.test.js";
 
 async function main() {
+  await testBrowserAgentLoop();
+  await testBusinessCapabilityGraph();
+  await testPlanningInventoryStore();
   testAssistantFallback();
   testProofBundleValidator();
   testEvidenceArtifactLinker();
   await testSustainabilityModules();
+  await testDurableSustainabilityRestart();
   testProofBundleIntegrity();
   await testConnectorEnvelope();
   await testProjectDetectionWizard();

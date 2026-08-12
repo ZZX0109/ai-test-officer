@@ -19,11 +19,131 @@ type ExecutionMapping = { logicalProjectId: string; executionProjectId: string; 
 type FixtureVariantBinding = { fixtureVariantId: string; logicalProjectId: string; executionProjectId: string };
 const terminalRunStates = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
 
+/** A deterministic-only smoke must validate Graph/Worker/fixtures without
+ * depending on a provider credential.  Provider preflight is a requirement of
+ * LLM lanes only; applying it to rules makes infrastructure diagnosis opaque. */
+export function lanesRequireLlm(lanes: Lane[]) {
+  return lanes.some((lane) => lane === "llm-plan-deterministic-judge" || lane === "rules-plan-llm-judge" || lane === "full-llm");
+}
+
+/**
+ * Interrupts are compare-and-swap operations in the graph store. A recovery
+ * probe can race with the worker (or with another child probe) and receive a
+ * 409 after the interrupt has already been resumed. That is an idempotent
+ * success for an unattended benchmark, not a benchmark failure.
+ */
+async function resumeInterrupt(runId: string, interruptId: string, body: Record<string, unknown>): Promise<"resumed" | "stale"> {
+  const route = `/v1/runs/${runId}/interrupts/${interruptId}/resume`;
+  try {
+    await request(route, { method: "POST", body: JSON.stringify(body) });
+    return "resumed";
+  } catch (error) {
+    const conflict = error instanceof Error && error.message.startsWith("benchmark_api_409:");
+    if (!conflict) throw error;
+    // Re-read the projection before retrying. If another worker already moved
+    // the graph past this interrupt, the desired state has been achieved.
+    try {
+      const latest = await request<{ agent?: { pendingInterrupt?: { id?: string } } }>(`/v1/runs/${runId}/agent`);
+      if (latest.agent?.pendingInterrupt?.id !== interruptId) return "stale";
+    } catch {
+      // A concurrently completed run is also an idempotent outcome.
+      return "stale";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    try {
+      await request(route, { method: "POST", body: JSON.stringify(body) });
+      return "resumed";
+    } catch (retryError) {
+      if (retryError instanceof Error && retryError.message.startsWith("benchmark_api_409:")) return "stale";
+      throw retryError;
+    }
+  }
+}
+
+/**
+ * Benchmark runs are deliberately unattended. A graph interrupt that asks for
+ * credentials, a browser permission, or another user decision must become an
+ * auditable blocked/review outcome instead of leaving the experiment polling
+ * forever. Interactive Workbench runs still use the normal resume endpoint.
+ */
+async function dismissUnattendedInterrupt(runId: string, agent?: {
+  status?: string;
+  pendingInterrupt?: { id?: string; owner?: string; kind?: string };
+}) {
+  const interrupt = agent?.pendingInterrupt;
+  if (agent?.status !== "interrupted" || !interrupt?.id) return false;
+  if (interrupt.owner !== "user" && interrupt.kind !== "credential") return false;
+  await resumeInterrupt(runId, interrupt.id, {
+    approved: false,
+    decision: "dismiss",
+    message: "benchmark_unattended_run_no_user_input"
+  });
+  return true;
+}
+
+async function dismissUnattendedChildInterrupts(runId: string) {
+  let dismissed = false;
+  let coverage: { childRunId?: string }[] = [];
+  try {
+    const response = await request<{ coverage?: { childRunId?: string }[] }>(`/v1/runs/${runId}/coverage`);
+    coverage = response.coverage ?? [];
+  } catch {
+    return false;
+  }
+  for (const item of coverage) {
+    if (!item.childRunId) continue;
+    try {
+      const child = await request<{ agent?: { status?: string; pendingInterrupt?: { id?: string; owner?: string; kind?: string } } }>(`/v1/runs/${item.childRunId}/agent`);
+      // Worker completion is the sole authority that resumes execution-result.
+      // This runner may only dismiss a genuine unattended user/credential ask.
+      if (await dismissUnattendedInterrupt(item.childRunId, child.agent)) dismissed = true;
+    } catch {
+      // A child may already have reached a terminal state between the two reads.
+    }
+  }
+  return dismissed;
+}
+
 type BenchmarkAgentReport = VisualRunResult & {
   planProvenance?: PlanProvenance;
   plannerCall?: LlmCall;
   plannerCalls?: LlmCall[];
 };
+
+/**
+ * A parent run is intentionally compact: its own Artifact proves the
+ * aggregation, while each browser/API assertion remains on its immutable path
+ * child. Benchmark evaluation needs both levels to verify required evidence
+ * types and the actually executed scenario. Never silently score only the
+ * aggregate operation-log as if it were a complete browser run.
+ */
+async function loadExecutionProjection(parent: BenchmarkAgentReport, parentArtifacts: ArtifactV2[]) {
+  const childRunIds = [...new Set((parent.coverageItems ?? [])
+    .map((item) => item.childRunId)
+    .filter((id): id is string => Boolean(id)))];
+  if (!childRunIds.length) {
+    return { reports: [parent], artifacts: parentArtifacts, attempts: parent.attempts ?? [], evidence: parent.evidence ?? [] };
+  }
+  const children = await Promise.all(childRunIds.map(async (runId) => {
+    const [reportResponse, artifactResponse] = await Promise.all([
+      request<{ report: BenchmarkAgentReport }>(`/v1/runs/${runId}/report`),
+      request<{ artifacts: ArtifactV2[] }>(`/v1/runs/${runId}/artifacts`)
+    ]);
+    return { report: reportResponse.report, artifacts: artifactResponse.artifacts };
+  }));
+  const reports = [parent, ...children.map((item) => item.report)];
+  const artifacts = [...parentArtifacts, ...children.flatMap((item) => item.artifacts)];
+  const evidence = Array.from(new Map(reports.flatMap((item) => item.evidence ?? []).map((item) => [item.id, item])).values());
+  // Retain the aggregate attempt as well as path attempts. Parent operation
+  // artifacts are legitimately bound to the aggregate attempt, while browser
+  // evidence belongs to the child attempt. Dropping the former made a fully
+  // traceable parent/child result fail the traceability metric.
+  const attempts = [
+    ...(parent.attempts ?? []),
+    ...children.flatMap((item) => item.report.attempts ?? [])
+  ];
+  return { reports, artifacts, attempts, evidence };
+}
 
 const scenarioByBenchmarkId: Record<string, string> = {
   "todo-create-valid": "task_create_success",
@@ -132,13 +252,60 @@ function selectedModels(models: Model[]) {
   return requested.map((id) => byId.get(id)!);
 }
 
+function localTargetUrl(logicalProjectId: string) {
+  const raw = process.env.BENCHMARK_LOCAL_TARGET_URLS;
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const value = parsed[logicalProjectId];
+    return typeof value === "string" && /^https?:\/\//.test(value) ? value : undefined;
+  } catch {
+    throw new Error("benchmark_local_target_urls_invalid");
+  }
+}
+
 async function request<T>(route: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json");
   if (process.env.AGENT_BEARER_TOKEN) headers.set("authorization", `Bearer ${process.env.AGENT_BEARER_TOKEN}`); else headers.set("x-agent-token", token);
-  const response = await fetch(`${apiUrl}${route}`, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(120_000) });
-  if (!response.ok) throw new Error(`benchmark_api_${response.status}:${await response.text()}`);
-  return response.json() as Promise<T>;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(`${apiUrl}${route}`, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(120_000) });
+    } catch (error) {
+      if (attempt === 4) throw error;
+      await new Promise((resolve) => setTimeout(resolve, [250, 1_000, 2_000][attempt - 1]));
+      continue;
+    }
+    if (response.ok) return response.json() as Promise<T>;
+    const retryable = response.status === 408 || response.status === 429 || response.status === 502 || response.status === 503 || response.status === 504;
+    if (!retryable || attempt === 4) throw new Error(`benchmark_api_${response.status}:${await response.text()}`);
+    const retryAfter = Number(response.headers.get("retry-after"));
+    const delayMs = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1_000, 10_000) : [250, 1_000, 2_000][attempt - 1];
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  throw new Error("benchmark_api_retry_exhausted");
+}
+
+/**
+ * Planning is asynchronous in active Graph mode.  A 409 is only exceptional
+ * when the run is still non-terminal; an LLM compilation rejection can move
+ * the run to `blocked` between POST /runs and the approval request.  Preserve
+ * that failed-closed run as a benchmark record instead of aborting the entire
+ * experiment and losing the model-failure diagnosis.
+ */
+async function approveBenchmarkPlan(run: { id: string; state: string; version: number }, body: Record<string, unknown>) {
+  try {
+    return (await request<{ run: typeof run }>(`/v1/runs/${run.id}/plan-approval`, {
+      method: "POST",
+      body: JSON.stringify(body)
+    })).run;
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.startsWith("benchmark_api_409:")) throw error;
+    const latest = (await request<{ run: typeof run }>(`/v1/runs/${run.id}`)).run;
+    if (terminalRunStates.has(latest.state)) return latest;
+    throw error;
+  }
 }
 
 function verdict(value?: string): BenchmarkVerdict {
@@ -169,7 +336,10 @@ export function assessPlannerOutcome(plannerMode: "deterministic" | "llm", prove
 
 /** Keep scheduling, execution, coverage and formal-gate facts separate in every lane. */
 export function deriveBenchmarkExecutionSignals(report: BenchmarkAgentReport, artifacts: ArtifactV2[]) {
-  const riskCoverage = report.riskCoverageMatrix;
+  // Older/blocked runs may not have reached the coverage compiler and therefore
+  // legitimately omit the matrix. Treat that as an unverified coverage gap,
+  // never as a successful empty matrix and never let the evaluator crash.
+  const riskCoverage = Array.isArray(report.riskCoverageMatrix) ? report.riskCoverageMatrix : [];
   const requirementCovered = riskCoverage.length > 0 && riskCoverage.every((risk) => risk.covered === true);
   const requirementPassed = requirementCovered && riskCoverage.every((risk) => risk.passed === true);
   const hasRuntimeArtifacts = artifacts.some((artifact) => artifact.origin === "runtime-captured");
@@ -188,6 +358,22 @@ export function deriveBenchmarkExecutionSignals(report: BenchmarkAgentReport, ar
   const artifactIntegrityVerified = metadataIntegrityVerified && artifactsAreFormal;
   const executionStarted = Boolean(report.attempts?.length || hasRuntimeArtifacts);
   const executionSucceeded = executionStarted && hasRuntimeArtifacts && hasExecutedAssertion && !report.executionError;
+  // Parent aggregate reports attest child evidence through a signed proof
+  // bundle. Their result has a compact aggregate Artifact, while the verified
+  // child coverage facts live in OutcomeSummary v2. Use that authoritative,
+  // Gate-produced summary rather than reclassifying the aggregate as an empty
+  // browser run merely because the top-level report is intentionally compact.
+  if (report.outcomeSummary?.schemaVersion === "2.0") {
+    return {
+      executionStarted: report.outcomeSummary.executionStarted,
+      requirementCovered: report.outcomeSummary.requirementCovered,
+      requirementPassed: report.outcomeSummary.requirementPassed,
+      executionSucceeded: report.outcomeSummary.executionSucceeded,
+      artifactIntegrityVerified: report.outcomeSummary.artifactIntegrityVerified && artifactsAreFormal,
+      evidenceGrounded: report.outcomeSummary.evidenceGrounded,
+      gateEligible: report.outcomeSummary.gateEligible && artifactsAreFormal
+    };
+  }
   return {
     executionStarted,
     requirementCovered,
@@ -325,25 +511,57 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const judgeMode = input.lane === "rules-plan-llm-judge" || input.lane === "full-llm" ? "adaptive" : "deterministic";
   let run = (await request<{ run: { id: string; state: string; version: number; gateStatus?: string; selectedScenarioId?: string } }>("/v1/runs", {
     method: "POST",
-    body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { logicalProjectId: input.item.projectId, appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: requestedScenarioId, requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 2, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 2000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
+    body: JSON.stringify({ organizationId: "benchmark", projectId: input.projectId, actor: "benchmark-runner", idempotencyKey: key, input: { logicalProjectId: input.item.projectId, appUrl: input.appUrl ? `${input.appUrl}/?fixtureVariantId=${encodeURIComponent(input.item.fixtureVariantId ?? "")}` : undefined, scenarioId: requestedScenarioId, requirement: input.item.requirement, diff: input.item.diff, plannerMode, judgeMode, modelProfileId: input.credentialId, experimentId: input.experimentId, repetition: input.repetition, promptVersion: input.promptVersion, cachePolicy: "bypass", executionProfile: "benchmark", llmBudget: { maxPlannerCalls: 2, maxJudgeCalls: 1, maxTotalTokens: 12000, plannerMaxOutputTokens: 2500, judgeMaxOutputTokens: 3000, requestTimeoutMs: 30000, totalTimeoutMs: 90000 }, fixtureVariantId: input.item.fixtureVariantId, executionMode: "trusted-local", capabilities: ["browser"], permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false } } })
   })).run;
   // A rejected LLM plan deliberately blocks the run.  It is an experiment result,
   // not a transport failure: preserve it and do not issue invalid approval events.
   if (!terminalRunStates.has(run.state)) {
-    run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}/plan-approval`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "benchmark-runner", idempotencyKey: `${key}:plan` }) })).run;
+    run = await approveBenchmarkPlan(run, { expectedVersion: run.version, actor: "benchmark-runner", idempotencyKey: `${key}:plan` });
   }
   if (!terminalRunStates.has(run.state)) {
     run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}/permissions`, { method: "POST", body: JSON.stringify({ expectedVersion: run.version, actor: "benchmark-runner", idempotencyKey: `${key}:permission` }) })).run;
   }
   const runDeadline = Date.now() + Number(process.env.BENCHMARK_RUN_TIMEOUT_MS ?? 20 * 60_000);
+  let lastRecoveryProbeAt = 0;
   while (!terminalRunStates.has(run.state)) {
-    if (Date.now() >= runDeadline) throw new Error(`benchmark_run_timeout:${run.id}`);
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    if (Date.now() >= runDeadline) {
+      // Persist the timeout before the background service group is torn down.
+      // A best-effort conflict is acceptable: a worker may have terminalized
+      // this run in the same polling window.
+      try {
+        await request(`/v1/runs/${run.id}/benchmark-timeout`, {
+          method: "POST",
+          body: JSON.stringify({ timeoutMs: Number(process.env.BENCHMARK_RUN_TIMEOUT_MS ?? 20 * 60_000), actor: "benchmark-runner" })
+        });
+      } catch {
+        // The experiment error below retains the run id for post-mortem.
+      }
+      throw new Error(`benchmark_run_timeout:${run.id}`);
+    }
+    // Keep ordinary polling deliberately sparse. A parent run can wait for
+    // many child paths and probing every second would rate-limit the Agent API.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    if (Date.now() - lastRecoveryProbeAt >= 10_000) {
+      lastRecoveryProbeAt = Date.now();
+      const agent = await request<{ agent?: { status?: string; pendingInterrupt?: { id?: string; owner?: string; kind?: string } } }>(`/v1/runs/${run.id}/agent`);
+      if (await dismissUnattendedInterrupt(run.id, agent.agent)) {
+        run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}`)).run;
+        continue;
+      }
+      // Recovery probes fan out to every path child. Keep them bounded so a
+      // large parent run does not trip the Agent API rate limiter while waiting.
+      if (agent.agent?.status === "interrupted") {
+        await dismissUnattendedChildInterrupts(run.id);
+      }
+    }
     run = (await request<{ run: typeof run }>(`/v1/runs/${run.id}`)).run;
   }
   const projection = run;
   const report = (await request<{ report: BenchmarkAgentReport }>(`/v1/runs/${run.id}/report`)).report;
-  const artifacts = (await request<{ artifacts: ArtifactV2[] }>(`/v1/runs/${run.id}/artifacts`)).artifacts;
+  const parentArtifacts = (await request<{ artifacts: ArtifactV2[] }>(`/v1/runs/${run.id}/artifacts`)).artifacts;
+  const executionProjection = await loadExecutionProjection(report, parentArtifacts);
+  const artifacts = executionProjection.artifacts;
+  const childReports = executionProjection.reports.slice(1);
   const judgeCall = report.judgeReport?.llmCall;
   const judgeCalls = Array.isArray(report.judgeReport?.llmCalls) && report.judgeReport.llmCalls.length ? report.judgeReport.llmCalls : judgeCall ? [judgeCall] : [];
   const plannerCall = report.plannerCall;
@@ -365,26 +583,44 @@ async function executeCase(input: { item: Case; projectId: string; appUrl?: stri
   const modelRecommendation = report.judgeReport?.modelRecommendation;
   const judgeRoutedToLlm = report.judgeRouting?.route === "llm";
   const llmVerdict = judgeRoutedToLlm ? verdict(modelRecommendation?.verdict) : deterministicVerdict;
-  const deterministicEvidenceRefs = report.judgeReport?.releaseJudge?.findings?.flatMap((finding) => finding.evidenceRefs ?? [])
-    ?? report.evidence?.filter((item) => item.type === "assertion").map((item) => item.id)
-    ?? [];
+  const deterministicEvidenceRefs = [
+    ...(report.judgeReport?.releaseJudge?.findings?.flatMap((finding) => finding.evidenceRefs ?? []) ?? []),
+    ...childReports.flatMap((child) => child.judgeReport?.releaseJudge?.findings?.flatMap((finding) => finding.evidenceRefs ?? []) ?? []),
+    ...executionProjection.evidence.filter((item) => item.type === "assertion").map((item) => item.id)
+  ].filter((value, index, values) => values.indexOf(value) === index);
   const durationMs = Date.now() - new Date(startedAt).getTime();
   const plannerOutcome = assessPlannerOutcome(plannerMode, report.planProvenance);
   const llmFailed = plannerOutcome.plannerFailed || (plannerMode === "llm" && !plannerCall) || (judgeRoutedToLlm && (!judgeCall || report.judgeReport?.llmStatus !== "passed" || report.judgeReport?.executionMode === "fallback_baseline"));
   const execution = deriveBenchmarkExecutionSignals(report, artifacts);
+  const executedCoverageItem = report.coverageItems?.find((item) => item.childRunId || item.scenarioId);
+  const executedScenarioId = executedCoverageItem?.scenarioId ?? executionProjection.attempts[0]?.scenarioId ?? artifacts[0]?.scenarioId;
+  const evidenceQualityReports = executionProjection.reports
+    .map((item) => item.evidenceQuality)
+    .filter((item): item is NonNullable<BenchmarkAgentReport["evidenceQuality"]> => Boolean(item));
+  const evidenceQuality = evidenceQualityReports.length ? {
+    // One incomplete child makes the aggregate evidence set incomplete. Use
+    // the minimum rather than a misleading average.
+    groundedPassedRate: Math.min(...evidenceQualityReports.map((item) => item.summary.groundedPassedRate)),
+    runtimeArtifactRate: Math.min(...evidenceQualityReports.map((item) => item.summary.runtimeArtifactRate)),
+    crossAttemptViolations: Math.max(...evidenceQualityReports.map((item) => item.summary.crossAttemptViolations))
+  } : report.outcomeSummary?.evidenceGrounded ? {
+    groundedPassedRate: 1,
+    runtimeArtifactRate: 1,
+    crossAttemptViolations: 0
+  } : undefined;
   return {
     benchmarkId: input.item.id, runId: run.id, experimentId: input.experimentId, split: input.item.split, lane: input.lane, modelProfileId: input.model?.id, repetition: input.repetition,
     status: "completed", startedAt, finishedAt: new Date().toISOString(), outcomeSchemaVersion: "2.0", executionStarted: execution.executionStarted, requirementCovered: execution.requirementCovered, requirementPassed: execution.requirementPassed, executionSucceeded: execution.executionSucceeded, retryCount: Math.max(0, (report.attempts?.length ?? 1) - 1), planExecutable: plannerOutcome.planExecutable, planSource: plannerMode,
     requestedScenarioId, projectedScenarioId: projection.selectedScenarioId,
-    executedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId,
-    selectedScenarioId: report.attempts?.[0]?.scenarioId ?? artifacts[0]?.scenarioId, failedStepId: report.executionError?.stepId, executionErrorCode: report.executionError?.code, finalStatus: finalStatus(run.gateStatus),
+    executedScenarioId,
+    selectedScenarioId: executedScenarioId, failedStepId: report.executionError?.stepId, executionErrorCode: report.executionError?.code, finalStatus: finalStatus(run.gateStatus),
     planProvenance: report.planProvenance,
-    attempts: (report.attempts ?? []).map((attempt) => ({ id: attempt.id, runId: attempt.runId, scenarioId: attempt.scenarioId, attempt: attempt.attempt, status: attempt.status })),
+    attempts: executionProjection.attempts.map((attempt) => ({ id: attempt.id, runId: attempt.runId, scenarioId: attempt.scenarioId, attempt: attempt.attempt, status: attempt.status })),
     llmCalls: [...plannerCalls.map((call) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "planning" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage, transportMode: call.transportMode, fallbackReason: call.fallbackReason, transportAttempts: call.transportAttempts })), ...judgeCalls.map((call) => ({ id: call.id, runId: call.runId, experimentId: call.experimentId, purpose: "judging" as const, provider: call.provider, model: call.model, requestId: call.requestId, status: call.status, errorCode: call.errorCode, durationMs: call.durationMs, usage: call.usage, transportMode: call.transportMode, fallbackReason: call.fallbackReason, transportAttempts: call.transportAttempts }))],
     deterministic: { verdict: deterministicVerdict, evidenceRefs: deterministicEvidenceRefs, status: "passed", durationMs },
     llm: plannerMode === "llm" || judgeMode === "adaptive" ? { verdict: llmVerdict, evidenceRefs: judgeRoutedToLlm ? modelRecommendation?.evidenceRefs ?? [] : deterministicEvidenceRefs, failureClass: judgeRoutedToLlm ? modelRecommendation?.failureClass : report.failureAttributions?.[0]?.failureClass, status: llmFailed ? "failed" : "passed", fallback: judgeRoutedToLlm && report.judgeReport?.executionMode === "fallback_baseline", usage, durationMs } : undefined,
-    evidence: (report.evidence ?? []).map((item) => ({ id: item.id, type: item.type })), attribution: { failureClass: report.failureAttributions?.[0]?.failureClass, suspectFiles: report.failureAttributions?.flatMap((entry) => entry.topSuspects?.map((suspect) => suspect.filePath) ?? []) ?? [], evidenceRefs: report.failureAttributions?.flatMap((entry) => entry.evidenceRefs ?? []) ?? [] },
-    executionOrigin: "agent-run", gateEligible: execution.gateEligible, artifactIntegrityVerified: execution.artifactIntegrityVerified, evidenceGrounded: execution.evidenceGrounded, evidenceQuality: report.evidenceQuality ? { groundedPassedRate: report.evidenceQuality.summary.groundedPassedRate, runtimeArtifactRate: report.evidenceQuality.summary.runtimeArtifactRate, crossAttemptViolations: report.evidenceQuality.summary.crossAttemptViolations } : undefined, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified", runId: artifact.runId, scenarioId: artifact.scenarioId, stepId: artifact.stepId, attemptId: artifact.attemptId, attempt: artifact.attempt, capturedAt: artifact.integrity.capturedAt, sizeBytes: artifact.integrity.sizeBytes, mediaType: artifact.integrity.mediaType, storageUri: artifact.storageUri }))
+    evidence: executionProjection.evidence.map((item) => ({ id: item.id, type: item.type })), attribution: { failureClass: [...executionProjection.reports].flatMap((item) => item.failureAttributions ?? [])[0]?.failureClass, suspectFiles: executionProjection.reports.flatMap((item) => item.failureAttributions?.flatMap((entry) => entry.topSuspects?.map((suspect) => suspect.filePath) ?? []) ?? []), evidenceRefs: executionProjection.reports.flatMap((item) => item.failureAttributions?.flatMap((entry) => entry.evidenceRefs ?? []) ?? []) },
+    executionOrigin: "agent-run", gateEligible: execution.gateEligible, artifactIntegrityVerified: execution.artifactIntegrityVerified, evidenceGrounded: execution.evidenceGrounded, evidenceQuality, agentVersion: "0.3.0", configHash: createHash("sha256").update(JSON.stringify({ item: input.item, lane: input.lane, model: input.model, promptVersion: input.promptVersion })).digest("hex"), targetVersion: execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), artifactsV2: artifacts.map((artifact) => ({ id: artifact.id, type: artifact.kind, origin: artifact.origin, sha256: artifact.integrity.sha256, integrityStatus: "verified", runId: artifact.runId, scenarioId: artifact.scenarioId, stepId: artifact.stepId, attemptId: artifact.attemptId, attempt: artifact.attempt, capturedAt: artifact.integrity.capturedAt, sizeBytes: artifact.integrity.sizeBytes, mediaType: artifact.integrity.mediaType, storageUri: artifact.storageUri }))
   };
 }
 
@@ -396,11 +632,12 @@ export async function runBenchmarkExperiment() {
     throw new Error(`benchmark_repetitions_invalid:${process.env.BENCHMARK_REPETITIONS ?? config.repetitions}`);
   }
   const llmEnabled = process.env.BENCHMARK_SKIP_LLM !== "1";
-  const requestedModels = llmEnabled ? selectedModels(config.models) : [];
   const requestedLanes = (process.env.BENCHMARK_LANES ?? supportedLanes.join(",")).split(",").map((item) => item.trim()).filter(Boolean) as Lane[];
   if (!requestedLanes.length || requestedLanes.some((lane) => !supportedLanes.includes(lane))) {
     throw new Error(`benchmark_lanes_invalid:${process.env.BENCHMARK_LANES ?? ""}`);
   }
+  const llmLaneRequested = lanesRequireLlm(requestedLanes);
+  const requestedModels = llmEnabled && llmLaneRequested ? selectedModels(config.models) : [];
   const requestedSplit = process.env.BENCHMARK_SPLIT ?? (process.env.BENCHMARK_ENABLE_BLIND === "1" ? "development+blind" : "development");
   if (!['development', 'blind', 'development+blind', 'holdout', 'development+holdout'].includes(requestedSplit)) {
     throw new Error(`benchmark_split_invalid:${requestedSplit}`);
@@ -441,15 +678,17 @@ export async function runBenchmarkExperiment() {
   const directory = path.join(rootDir, "reports", "benchmarks", "experiments", experimentId);
   const runsDir = path.join(directory, "runs");
   await mkdir(runsDir, { recursive: true });
-  const check = await preflight(requestedModels);
+  const check = llmLaneRequested && llmEnabled
+    ? await preflight(requestedModels)
+    : { failures: llmLaneRequested ? ["llm_disabled"] : [], credentials: new Map<string, string>() };
   const runnableModels = requestedModels.filter((model) => check.credentials.has(model.id));
   const allowPartialModels = process.env.BENCHMARK_ALLOW_PARTIAL_MODELS === "1";
   const deterministicLaneCount = requestedLanes.filter((lane) => lane === "test-command" || lane === "rules-deterministic").length;
   const llmLaneCount = requestedLanes.filter((lane) => lane !== "test-command" && lane !== "rules-deterministic").length;
   const requestedPlannedRuns = cases.length * repetitions * (deterministicLaneCount + requestedModels.length * llmLaneCount);
   const plannedRuns = cases.length * repetitions * (deterministicLaneCount + runnableModels.length * llmLaneCount);
-  const hardBlocked = llmEnabled && (!runnableModels.length || (check.failures.length > 0 && !allowPartialModels));
-  const manifest = { experimentId, createdAt: new Date().toISOString(), split: requestedSplit, suites: [...(includeDevelopment ? ["core"] : []), ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : []), ...(includeHoldout ? ["holdout"] : [])], caseCount: cases.length, caseIds: cases.map((item) => item.id), plannedRuns, requestedPlannedRuns, repetitions, promptVersion: config.promptVersion, lanes: requestedLanes, llmEnabled, models: runnableModels.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), unavailableModels: requestedModels.filter((model) => !check.credentials.has(model.id)).map((model) => ({ id: model.id, provider: model.provider, model: model.model })), developmentGate, status: hardBlocked ? "blocked" : "running", blockers: check.failures, partial: check.failures.length > 0 };
+  const hardBlocked = llmLaneRequested && (!llmEnabled || !runnableModels.length || (check.failures.length > 0 && !allowPartialModels));
+  const manifest = { experimentId, createdAt: new Date().toISOString(), split: requestedSplit, suites: [...(includeDevelopment ? ["core"] : []), ...(includeExtended ? ["extended"] : []), ...(includeBlind ? ["blind"] : []), ...(includeHoldout ? ["holdout"] : [])], caseCount: cases.length, caseIds: cases.map((item) => item.id), plannedRuns, requestedPlannedRuns, repetitions, promptVersion: config.promptVersion, lanes: requestedLanes, llmEnabled: llmEnabled && llmLaneRequested, models: runnableModels.map((model) => ({ id: model.id, provider: model.provider, model: model.model })), unavailableModels: requestedModels.filter((model) => !check.credentials.has(model.id)).map((model) => ({ id: model.id, provider: model.provider, model: model.model })), developmentGate, status: hardBlocked ? "blocked" : "running", blockers: check.failures, partial: check.failures.length > 0 };
   const existingManifestFile = path.join(directory, "manifest.json");
   let existingManifest: Partial<typeof manifest> | undefined;
   try { existingManifest = JSON.parse(await readFile(existingManifestFile, "utf8")) as Partial<typeof manifest>; } catch { /* first run */ }
@@ -473,7 +712,7 @@ export async function runBenchmarkExperiment() {
     const projectId = target?.executionProjectId ?? item.projectId;
     for (let repetition = 1; repetition <= repetitions; repetition += 1) {
       if (requestedLanes.includes("rules-deterministic")) {
-        const rules = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane: "rules-deterministic", repetition, experimentId, promptVersion: config.promptVersion });
+        const rules = await executeCase({ item, projectId, appUrl: localTargetUrl(item.projectId) ?? (process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined), lane: "rules-deterministic", repetition, experimentId, promptVersion: config.promptVersion });
         await writeFile(path.join(runsDir, `${item.id}.rules-deterministic.none.${repetition}.json`), JSON.stringify(rules, null, 2)); completedRuns += 1; await updateProgress();
       }
       if (requestedLanes.includes("test-command")) {
@@ -482,7 +721,7 @@ export async function runBenchmarkExperiment() {
       }
     }
     for (const model of runnableModels) for (let repetition = 1; repetition <= repetitions; repetition += 1) for (const lane of requestedLanes.filter((candidate) => candidate !== "test-command" && candidate !== "rules-deterministic")) {
-      const record = await executeCase({ item, projectId, appUrl: process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined, lane, model, credentialId: check.credentials.get(model.id), repetition, experimentId, promptVersion: config.promptVersion });
+      const record = await executeCase({ item, projectId, appUrl: localTargetUrl(item.projectId) ?? (process.env.BENCHMARK_CONTAINER_TARGETS === "1" ? target?.targetUrl : undefined), lane, model, credentialId: check.credentials.get(model.id), repetition, experimentId, promptVersion: config.promptVersion });
       await writeFile(path.join(runsDir, `${item.id}.${lane}.${model.id}.${repetition}.json`), JSON.stringify(record, null, 2)); completedRuns += 1;
       await updateProgress();
     }

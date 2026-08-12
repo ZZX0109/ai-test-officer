@@ -73,7 +73,6 @@ const INTEGRITY_PROBLEM_KEYS = [
   "missing",
   "unreadable",
   "pathEscapes",
-  "selfReferences",
   "hashMismatches"
 ] as const satisfies readonly (keyof ArtifactIntegrityReport["summary"])[];
 

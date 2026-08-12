@@ -24,8 +24,8 @@ export function testAgentGraphMode() {
     process.env.AGENT_ORCHESTRATION_MODE = "active";
     process.env.AGENT_GRAPH_ACTIVE_PROJECTS = "andflow,psyexpgen";
     assert.equal(agentOrchestrationMode("andflow"), "active");
-    assert.equal(agentOrchestrationMode("unknown-project"), "shadow");
-    assert.equal(agentOrchestrationMode(), "shadow");
+    assert.equal(agentOrchestrationMode("unknown-project"), "active");
+    assert.equal(agentOrchestrationMode(), "active");
     delete process.env.AGENT_GRAPH_ACTIVE_PROJECTS;
     assert.equal(agentOrchestrationMode("unknown-project"), "active");
     process.env.AGENT_ORCHESTRATION_MODE = "shadow";
