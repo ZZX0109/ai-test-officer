@@ -64,7 +64,7 @@ import { decideNextBrowserActions } from "./browser-agent/llmDecision.js";
 import { browserActionPolicy, executeBrowserAgentAction } from "./browser-agent/actionBroker.js";
 import { appendBrowserDecision, readBrowserActionResults, readBrowserArtifacts, readBrowserDecisions } from "./browser-agent/store.js";
 import { persistDynamicBrowserResult } from "./browser-agent/resultBundle.js";
-import { getProjectLoginSecret } from "./projectLoginStore.js";
+import { getProjectLoginSecret, getProjectLoginSummary } from "./projectLoginStore.js";
 import { listCredentials } from "./credentialStore.js";
 import { artifactKindToIntegrityKind } from "./artifactIntegrity.js";
 import { credentialInterruptDecision } from "./browser-agent/login.js";
@@ -358,6 +358,27 @@ function recoveryEvidenceRefs(state: AgentGraphState): string[] {
   const failureRefs = state.failure && Array.isArray(state.failure.evidenceRefs) ? state.failure.evidenceRefs : [];
   for (const ref of failureRefs) if (typeof ref === "string") refs.add(ref);
   return [...refs].slice(0, 20);
+}
+
+/**
+ * Tell the credential interrupt whether the project already has a saved login
+ * account. The operator-facing copy and options branch on this: an existing
+ * account means "use saved account", not "please save one first". Without this
+ * the panel always claimed no account existed while the run record believed
+ * one was saved — the exact contradiction the operator saw.
+ */
+async function credentialInterruptMeta(projectId?: string): Promise<{ hasSavedCredential: boolean; usernameMasked?: string }> {
+  if (!projectId) return { hasSavedCredential: false };
+  try {
+    const project = await getProject(projectId);
+    const credentialId = project?.login?.credentialId;
+    if (!credentialId) return { hasSavedCredential: false };
+    const summary = await getProjectLoginSummary(credentialId);
+    if (!summary) return { hasSavedCredential: false };
+    return { hasSavedCredential: true, usernameMasked: summary.usernameMasked };
+  } catch {
+    return { hasSavedCredential: false };
+  }
 }
 
 function deterministicRecoveryDecision(state: AgentGraphState): RecoveryDecision {
@@ -699,18 +720,27 @@ async function buildService() {
         const decision = state.recoveryDecision ?? deterministicRecoveryDecision(state);
         const answer = (state as AgentGraphState & { interruptAnswer?: Record<string, unknown> }).interruptAnswer;
         if (decision.action === "request-credentials" && !answer) {
+          const meta = await credentialInterruptMeta(state.projectId);
           const pending: AgentInterrupt = {
             id: `interrupt_${randomUUID()}`,
             runId: state.runId,
             kind: "credential",
             status: "pending",
             title: "需要测试账号",
-            detail: decision.userQuestion ?? "当前页面需要登录凭据后才能继续 Discovery。",
+            detail: meta.hasSavedCredential
+              ? `已保存测试账号${meta.usernameMasked ? `（${meta.usernameMasked}）` : ""}。授权后系统仅在当前沙盒会话中注入登录，不会显示或写入报告。`
+              : (decision.userQuestion ?? "当前页面需要登录凭据后才能继续 Discovery。请填写测试账号和密码，或暂不登录。"),
             requestedCapabilities: ["credential"],
             payload: { action: "provide-credentials" },
             owner: "user",
-            context: { recoveryDecision: decision },
-            options: [{ value: "approved", label: "已配置测试账号" }, { value: "dismiss", label: "暂不配置" }],
+            context: {
+              recoveryDecision: decision,
+              hasSavedCredential: meta.hasSavedCredential,
+              ...(meta.usernameMasked ? { usernameMasked: meta.usernameMasked } : {})
+            },
+            options: meta.hasSavedCredential
+              ? [{ value: "approved", label: "使用已保存账号继续" }, { value: "dismiss", label: "暂不登录" }]
+              : [{ value: "approved", label: "保存账号并继续" }, { value: "dismiss", label: "暂不登录" }],
             evidenceRefs: decision.evidenceRefs,
             createdAt: new Date().toISOString()
           };
@@ -1282,25 +1312,36 @@ async function buildService() {
         if (!policy.confirmation && decision.status !== "needs-confirmation") {
           return { browserActionAuthorized: false, browserDecision: { ...decision, status: "blocked", actions: [], summary: "浏览器动作被安全策略拒绝。" } };
         }
-        const interrupt: AgentInterrupt = {
-          id: `interrupt_${randomUUID()}`,
-          runId: state.runId,
-          kind: credentialAction ? "credential" : "dangerous-operation",
-          status: "pending",
-          title: credentialAction ? "需要测试账号" : "需要确认浏览器操作",
-          detail: credentialAction
-            ? "已识别登录页面。请先保存此项目的测试账号，然后授权系统仅在当前沙盒会话中使用它；账号和密码不会显示或写入报告。"
-            : `${action.purpose}。预期变化：${action.expectedChange}`,
-          requestedCapabilities: [credentialAction ? "credential" : "browserControl"],
-          payload: { actionId: action.actionId, action: action.action, policyCode: policy.code },
-          owner: "user",
-          context: { browserDecisionId: decision.decisionId, actionId: action.actionId },
-          options: credentialAction
-            ? [{ value: "approved", label: "已配置并允许使用" }, { value: "dismiss", label: "暂不配置" }]
-            : [{ value: "approved", label: "允许本次操作" }, { value: "dismiss", label: "拒绝" }],
-          evidenceRefs: decision.evidenceRefs,
-          createdAt: new Date().toISOString()
-        };
+        const interrupt: AgentInterrupt = await (async () => {
+          const meta = credentialAction ? await credentialInterruptMeta(state.projectId) : { hasSavedCredential: false };
+          return {
+            id: `interrupt_${randomUUID()}`,
+            runId: state.runId,
+            kind: credentialAction ? "credential" : "dangerous-operation",
+            status: "pending",
+            title: credentialAction ? "需要测试账号" : "需要确认浏览器操作",
+            detail: credentialAction
+              ? meta.hasSavedCredential
+                ? `已识别登录页面，并已保存测试账号${meta.usernameMasked ? `（${meta.usernameMasked}）` : ""}。授权后系统仅在当前沙盒会话中注入登录；账号和密码不会显示或写入报告。`
+                : "已识别登录页面，但尚未配置测试账号。请在下方填写账号和密码，或暂不登录；账号会加密保存并仅注入沙盒，不会显示或写入报告。"
+              : `${action.purpose}。预期变化：${action.expectedChange}`,
+            requestedCapabilities: [credentialAction ? "credential" : "browserControl"],
+            payload: { actionId: action.actionId, action: action.action, policyCode: policy.code },
+            owner: "user",
+            context: {
+              browserDecisionId: decision.decisionId,
+              actionId: action.actionId,
+              ...(credentialAction ? { hasSavedCredential: meta.hasSavedCredential, ...(meta.usernameMasked ? { usernameMasked: meta.usernameMasked } : {}) } : {})
+            },
+            options: credentialAction
+              ? meta.hasSavedCredential
+                ? [{ value: "approved", label: "使用已保存账号继续" }, { value: "dismiss", label: "暂不登录" }]
+                : [{ value: "approved", label: "保存账号并继续" }, { value: "dismiss", label: "暂不登录" }]
+              : [{ value: "approved", label: "允许本次操作" }, { value: "dismiss", label: "拒绝" }],
+            evidenceRefs: decision.evidenceRefs,
+            createdAt: new Date().toISOString()
+          } satisfies AgentInterrupt;
+        })();
         return { browserActionAuthorized: false, browserInterrupt: interrupt };
       },
       executeBrowserAction: node("execute-browser-action", async (state) => {

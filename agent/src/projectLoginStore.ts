@@ -78,3 +78,12 @@ export async function getProjectLoginSecret(id: string) {
     password: await decrypt(record.passwordEncrypted)
   };
 }
+
+/** Read the masked summary without decrypting — used to tell the operator that
+ * an account already exists so the interrupt can offer "use saved account"
+ * instead of incorrectly asking them to save one again. */
+export async function getProjectLoginSummary(id: string) {
+  const record = (await readStore()).find((item) => item.id === id);
+  if (!record) return undefined;
+  return { id: record.id, projectId: record.projectId, usernameMasked: record.usernameMasked, updatedAt: record.updatedAt };
+}

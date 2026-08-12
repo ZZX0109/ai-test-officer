@@ -69,8 +69,17 @@ textarea {
   font: inherit;
 }
 
-input[type="checkbox"] {
+input[type="checkbox"],
+input[type="radio"] {
   width: auto;
+}
+
+/* Decision/option panels render radios next to a label — the global
+   `input { width: 100% }` would otherwise stretch each radio into a giant
+   blank box and push its text out of view. */
+input[type="radio"] {
+  flex: none;
+  margin: 0;
 }
 
 h1, h2, h3, p {
@@ -3238,6 +3247,95 @@ select:focus {
   padding-top: 0;
   padding-bottom: 0;
   overflow: hidden;
+}
+
+/* Collapsed planning sidebar: shrink the first grid column to a narrow handle
+   and hide the dense content so the center stage gets the space back. */
+.minimal-workspace.sidebar-collapsed,
+.minimal-workspace.assistant-focus.sidebar-collapsed {
+  grid-template-columns: 46px minmax(0, 1fr) 270px;
+}
+.minimal-workspace.sidebar-collapsed .simple-sidebar {
+  padding-inline: 4px;
+}
+.minimal-workspace.sidebar-collapsed .simple-sidebar .sidebar-configure-button,
+.minimal-workspace.sidebar-collapsed .simple-sidebar .sidebar-planning-assistant,
+.minimal-workspace.sidebar-collapsed .simple-sidebar .sidebar-footer {
+  display: none;
+}
+.minimal-workspace.sidebar-collapsed .sidebar-collapse-button {
+  writing-mode: vertical-rl;
+  letter-spacing: 2px;
+}
+
+.sidebar-collapse-button {
+  flex: 0 0 auto;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px dashed var(--border, #cddff0);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary, #6a7c93);
+  font-size: 11px;
+  cursor: pointer;
+}
+.sidebar-collapse-button:hover {
+  border-style: solid;
+  color: var(--blue);
+  border-color: rgba(37, 99, 235, 0.4);
+}
+
+/* Business features vs technical coverage: lead with what the operator can
+   confirm, tuck code-structure coverage behind a collapsed disclosure. */
+.sidebar-flow-section-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary, #6a7c93);
+  margin: 2px 0 4px;
+}
+.sidebar-technical-coverage {
+  margin-top: 8px;
+  border: 1px dashed var(--border, #cddff0);
+  border-radius: 8px;
+  background: var(--bg-secondary, #f7f9fc);
+}
+.sidebar-technical-coverage > summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-secondary, #6a7c93);
+  list-style: none;
+}
+.sidebar-technical-coverage > summary::-webkit-details-marker { display: none; }
+.sidebar-technical-coverage > summary::before { content: "▸ "; }
+.sidebar-technical-coverage[open] > summary::before { content: "▾ "; }
+.sidebar-technical-list {
+  display: grid;
+  gap: 6px;
+  padding: 0 8px 8px;
+}
+
+/* Slim center pointer shown while the real decision panel lives in the left
+   planning sidebar — keeps the live browser view unobstructed. */
+.interrupt-pointer-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border-focus, #3b82f6);
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: var(--bg-secondary, #f2f7fd);
+  color: var(--text-primary, #1c2733);
+  font-size: 12px;
+}
+.interrupt-pointer-banner span { font-weight: 600; }
+.interrupt-pointer-banner em {
+  font-style: normal;
+  color: var(--text-secondary, #6a7c93);
 }
 
 .simple-sidebar,
@@ -6831,7 +6929,12 @@ textarea,
   box-shadow: inset 0 0 0 1px var(--border-focus, #3b82f6);
 }
 
-.interrupt-decision-option input { margin-top: 3px; flex: none; }
+.interrupt-decision-option input[type="radio"] {
+  width: auto;
+  flex: none;
+  margin: 3px 0 0;
+  padding: 0;
+}
 .interrupt-decision-option-body { display: grid; gap: 2px; }
 .interrupt-decision-option-body em {
   font-style: normal;
@@ -6849,6 +6952,41 @@ textarea,
   color: inherit;
   font: inherit;
   resize: vertical;
+}
+
+.interrupt-decision-saved-credential {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border-focus, #3b82f6);
+  border-left-width: 3px;
+  border-radius: var(--radius, 6px);
+  background: var(--bg-secondary, #f2f7fd);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.interrupt-decision-saved-credential strong { font-weight: 600; margin: 0 4px; }
+
+.interrupt-decision-credential-form { display: grid; gap: 6px; }
+.interrupt-decision-credential-grid {
+  display: grid;
+  /* The panel lives in the narrow planning sidebar, so stack the two fields. */
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+.interrupt-decision-credential-grid label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary, #6a7c93);
+}
+.interrupt-decision-credential-grid input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border, #cddff0);
+  border-radius: var(--radius, 6px);
+  background: var(--bg-input, #ffffff);
+  color: inherit;
+  font: inherit;
 }
 
 .interrupt-decision-actions { display: flex; flex-wrap: wrap; gap: 8px; }

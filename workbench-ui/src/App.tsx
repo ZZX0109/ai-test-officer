@@ -195,6 +195,7 @@ import type {
   ScenarioSummary,
   SecuritySummary,
   BenchmarkSummary,
+  PlannedBusinessFlow,
   StorageArchive,
   StorageStatus
 } from "./types";
@@ -456,6 +457,9 @@ export function App() {
   const [revealProjectLoginSettings, setRevealProjectLoginSettings] = useState(false);
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
+  /** The planning sidebar is information-dense; let the operator collapse it
+   * to free the center stage while a run is in progress. */
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   /** Evidence id to scroll-to + highlight when the workbench asks to locate one. */
   const [focusEvidenceId, setFocusEvidenceId] = useState<string | null>(null);
   // The graph projection is the only place a *paused* run surfaces. Without it
@@ -570,7 +574,51 @@ export function App() {
     ?? requirementAcceptance?.run?.finalStatus
     ?? requirementAcceptance?.run?.gateStatus
     ?? "未运行";
+  // A run paused on a human decision (credential authorization, dangerous
+  // operation, …) is NOT "queued" — the verdict panel must surface the exact
+  // action the operator owes, otherwise they stare at "queued" with no idea
+  // the graph is actually waiting on them.
+  const pendingInterruptForVerdict = agentProjection?.pendingInterrupt?.status === "pending"
+    ? agentProjection.pendingInterrupt
+    : undefined;
+  const verdictDisplay = pendingInterruptForVerdict
+    ? (pendingInterruptForVerdict.kind === "credential" ? "等待你授权使用测试账号" : "等待你的操作")
+    : latestDecision;
+  // Split the scan inventory into what an operator would call "business
+  // features" (real pages) versus technical coverage (API groups, data
+  // entities, background tasks). The flat list used to mix them, so the plan
+  // read as hundreds of code structures instead of "登录 / 创建订单 / 导出".
+  const businessPageFlows = (planningResult?.businessFlows ?? []).filter((flow) => flow.surfaces?.includes("page"));
+  const technicalCoverageFlows = (planningResult?.businessFlows ?? []).filter((flow) => !flow.surfaces?.includes("page"));
   const planningDraftReady = Boolean(discoveryAllowsPlanning && planningResult && !planningConfirmed && !planningBusy);
+  const renderPlanningFlowItem = (flow: PlannedBusinessFlow) => (
+    <article
+      className={`planning-flow ${flow.status}`}
+      key={flow.id}
+      onMouseEnter={() => scheduleFlowDelete(flow.id)}
+      onMouseLeave={() => hideFlowDelete(flow.id)}
+    >
+      <header>
+        <strong>{flow.title}</strong>
+        <span>{flow.status === "executable" ? "可执行" : flow.status === "auto-bindable" ? "待页面绑定" : flow.status === "needs-input" ? "待补条件" : "覆盖缺口"}</span>
+      </header>
+      <p>{flow.reason}</p>
+      {flow.pathVersion === "2.0" && flow.sourceLocations?.length ? (
+        <LazyDetails
+          className="planning-flow-evidence"
+          summary={<>代码依据{flow.sourceCount ? ` · ${flow.sourceCount} 项` : ""}</>}
+        >
+          {flow.summary ? <p>{flow.summary}</p> : null}
+          <ul>{flow.sourceLocations.slice(0, 8).map((source) => <li key={`${source.file}:${source.line ?? 0}`}>{source.file}{source.line ? `:${source.line}` : ""}</li>)}</ul>
+        </LazyDetails>
+      ) : null}
+      {flowDeleteReadyId === flow.id ? (
+        <button className="planning-flow-delete" type="button" onClick={() => excludePlanningFlow(flow.id)}>
+          <Trash2 size={13} /> 删除
+        </button>
+      ) : null}
+    </article>
+  );
   const nextSuggestion = result?.failureAttributions?.[0]?.suggestedFix ??
     result?.failureAttributions?.[0]?.topSuspects?.[0]?.suggestedFix ??
     (patrolTrend?.riskIncreased ? "风险趋势升高，建议打开历史运行对比失败证据。" : "先确认项目连接、输入来源和浏览器授权，然后运行一次测试。");
@@ -1669,6 +1717,13 @@ export function App() {
     void getRunBrowserSession(activeRunId).then(({ session }) => setBrowserSession(session)).catch(() => setBrowserSession(null));
   }, [activeRunId]);
 
+  // Stall decisions live in the left planning sidebar now. Never let a pending
+  // interrupt stay hidden behind a collapsed sidebar — expand it the moment the
+  // graph pauses and needs the operator.
+  useEffect(() => {
+    if (agentProjection?.pendingInterrupt?.status === "pending") setSidebarCollapsed(false);
+  }, [agentProjection?.pendingInterrupt?.status, agentProjection?.pendingInterrupt?.id]);
+
   /**
    * Hydrate the graph projection whenever the active run changes.
    *
@@ -2679,6 +2734,26 @@ export function App() {
     const response = await stopProject(projectDraft.id);
     setProjectRuntime(response.runtime);
     setMessage(response.runtime.message ?? `项目状态：${response.runtime.status}`);
+  }
+
+  /**
+   * Save a test account from inside the credential interrupt. Unlike
+   * saveCurrentProjectLoginCredential this never auto-retries: resuming the
+   * paused graph is the interrupt decision's job, so firing a separate retry
+   * here would race the resume and start a duplicate run.
+   */
+  async function saveInterruptCredential(username: string, password: string) {
+    if (!projectDraft) throw new Error("请先识别项目。");
+    const usernameEnv = projectDraft.login?.usernameEnv ?? projectDetection?.loginCapability?.usernameEnv ?? "E2E_USERNAME";
+    const passwordEnv = projectDraft.login?.passwordEnv ?? projectDetection?.loginCapability?.passwordEnv ?? "E2E_PASSWORD";
+    const prepared = await saveProject({
+      ...projectDraft,
+      login: { ...projectDraft.login, method: "env", usernameEnv, passwordEnv }
+    });
+    const response = await saveProjectLoginCredential(prepared.project.id, { username, password, usernameEnv, passwordEnv });
+    setProjectDraft(response.project);
+    setSelectedProjectId(response.project.id);
+    setMessage("测试账号已加密保存，正在注入沙盒继续本次测试。");
   }
 
   async function recoverProjectAndRetry(mode: "auto" | "runtime" | "discovery" = "auto"): Promise<ProjectRecoveryResult | undefined> {
@@ -5147,7 +5222,7 @@ export function App() {
         </div>
       ) : null}
 
-      <section className={`workspace minimal-workspace ${projectPreviewReady ? "assistant-focus" : ""}`}>
+      <section className={`workspace minimal-workspace ${projectPreviewReady ? "assistant-focus" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
         <div
           className={`drawer-overlay ${leftDrawerOpen || rightDrawerOpen ? "open" : ""}`}
           onClick={closeDrawers}
@@ -5161,7 +5236,7 @@ export function App() {
           {renderEvidenceDrawer()}
         </aside>
 
-        <aside className="simple-sidebar">
+        <aside className={`simple-sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
           <button
             className="sidebar-configure-button"
             onClick={() => {
@@ -5172,6 +5247,15 @@ export function App() {
           >
             点击配置
           </button>
+          <button
+            className="sidebar-collapse-button"
+            onClick={() => setSidebarCollapsed((v) => !v)}
+            type="button"
+            aria-expanded={!sidebarCollapsed}
+            title={sidebarCollapsed ? "展开计划栏" : "收起计划栏"}
+          >
+            {sidebarCollapsed ? "»" : "« 收起计划栏"}
+          </button>
           <section className="sidebar-planning-assistant" aria-label="AI 测试助手规划">
               <header>
                 <div>
@@ -5179,6 +5263,26 @@ export function App() {
                   <h3>规划测试</h3>
                 </div>
               </header>
+              {/* Stall interaction point: a paused run surfaces here first so the
+                  operator decides in the planning sidebar instead of hunting a
+                  modal over the live browser view. */}
+              {agentProjection?.pendingInterrupt && agentProjection.pendingInterrupt.status === "pending" ? (
+                <InterruptDecisionPanel
+                  interrupt={agentProjection.pendingInterrupt}
+                  busy={interruptBusy}
+                  error={interruptError ?? undefined}
+                  onDecide={(decision, note) => submitInterruptDecision(decision, note)}
+                  onOpenEvidence={openInterruptEvidence}
+                  onSaveCredentials={saveInterruptCredential}
+                  onOpenCredentials={() => {
+                    setLeftDrawerOpen(true);
+                    setMessage("请在项目设置中配置测试账号，配置完成后回到此处提交决策。");
+                  }}
+                  onRecoverSandbox={() => void executeAssistantSuggestedAction("retry-runtime")}
+                  onReopenDiscovery={() => void executeAssistantSuggestedAction("retry-discovery")}
+                  onOpenRepairWorkspace={() => void openCodeRepairWorkspace()}
+                />
+              ) : null}
               <span className="sidebar-current-project">当前项目：{selectedProjectName}</span>
               <div className="sidebar-planning-messages" aria-live="polite">
                 {planningMessages.map((item, index) => {
@@ -5348,46 +5452,28 @@ export function App() {
               {planningResult && discoveryAllowsPlanning ? (
                 <div className="sidebar-planning-result">
                   <span>{planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径 · {planningResult.coverage.executable + (planningResult.coverage.autoBindable ?? 0)} 条确认后可执行（含 {planningResult.coverage.autoBindable ?? 0} 条 AI 动态绑定）</span>
+                  <span className="sidebar-flow-section-label">业务功能（{businessPageFlows.length} 项，确认后执行）</span>
                   <ProgressiveDetailsList
                     className="sidebar-flow-list"
-                    items={planningResult.businessFlows}
+                    items={businessPageFlows}
                     itemKey={(flow) => flow.id}
                     initialCount={20}
                     batchSize={20}
-                    totalCount={planningResult.businessFlowPage?.total}
+                    totalCount={businessPageFlows.length}
                     hasMore={Boolean(planningResult.businessFlowPage?.nextCursor)}
                     loadingMore={planningFlowPageLoading}
                     onLoadMore={async () => { await fetchPlanningFlows(planningResult); }}
                     summary={<>查看本次 {planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径{(planningResult.coverage.sourceCandidates ?? 0) > (planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length) ? `（来自 ${planningResult.coverage.sourceCandidates} 个代码候选）` : ""}</>}
-                    renderItem={(flow) => (
-                        <article
-                          className={`planning-flow ${flow.status}`}
-                          key={flow.id}
-                          onMouseEnter={() => scheduleFlowDelete(flow.id)}
-                          onMouseLeave={() => hideFlowDelete(flow.id)}
-                        >
-                          <header>
-                            <strong>{flow.title}</strong>
-                            <span>{flow.status === "executable" ? "可执行" : flow.status === "auto-bindable" ? "待页面绑定" : flow.status === "needs-input" ? "待补条件" : "覆盖缺口"}</span>
-                          </header>
-                          <p>{flow.reason}</p>
-                          {flow.pathVersion === "2.0" && flow.sourceLocations?.length ? (
-                            <LazyDetails
-                              className="planning-flow-evidence"
-                              summary={<>代码依据{flow.sourceCount ? ` · ${flow.sourceCount} 项` : ""}</>}
-                            >
-                              {flow.summary ? <p>{flow.summary}</p> : null}
-                              <ul>{flow.sourceLocations.slice(0, 8).map((source) => <li key={`${source.file}:${source.line ?? 0}`}>{source.file}{source.line ? `:${source.line}` : ""}</li>)}</ul>
-                            </LazyDetails>
-                          ) : null}
-                          {flowDeleteReadyId === flow.id ? (
-                            <button className="planning-flow-delete" type="button" onClick={() => excludePlanningFlow(flow.id)}>
-                              <Trash2 size={13} /> 删除
-                            </button>
-                          ) : null}
-                        </article>
-                    )}
+                    renderItem={renderPlanningFlowItem}
                   />
+                  {technicalCoverageFlows.length ? (
+                    <details className="sidebar-technical-coverage">
+                      <summary>技术覆盖项（{technicalCoverageFlows.length} 项：接口组 / 数据实体 / 后台任务，非业务功能）</summary>
+                      <div className="sidebar-technical-list">
+                        {technicalCoverageFlows.map((flow) => renderPlanningFlowItem(flow))}
+                      </div>
+                    </details>
+                  ) : null}
                   <button
                     className="primary execute-plan-button"
                     type="button"
@@ -5524,24 +5610,15 @@ export function App() {
             </section>
           ) : null}
 
-          {/* A paused run outranks everything else on screen: the graph is
-              literally blocked until the operator answers, so the decision
-              request sits above the live view rather than inside a drawer. */}
+          {/* A paused run is answered in the left planning sidebar (the stall
+              interaction point). The center keeps only a slim pointer so the
+              live browser view is never occluded by a blocking panel. */}
           {agentProjection?.pendingInterrupt && agentProjection.pendingInterrupt.status === "pending" ? (
-            <InterruptDecisionPanel
-              interrupt={agentProjection.pendingInterrupt}
-              busy={interruptBusy}
-              error={interruptError ?? undefined}
-              onDecide={(decision, note) => submitInterruptDecision(decision, note)}
-              onOpenEvidence={openInterruptEvidence}
-              onOpenCredentials={() => {
-                setLeftDrawerOpen(true);
-                setMessage("请在项目设置中配置测试账号，配置完成后回到此处提交决策。");
-              }}
-              onRecoverSandbox={() => void executeAssistantSuggestedAction("retry-runtime")}
-              onReopenDiscovery={() => void executeAssistantSuggestedAction("retry-discovery")}
-              onOpenRepairWorkspace={() => void openCodeRepairWorkspace()}
-            />
+            <div className="interrupt-pointer-banner" role="status">
+              <Activity size={14} />
+              <span>{agentProjection.pendingInterrupt.kind === "credential" ? "等待你授权使用测试账号" : "测试已暂停，需要你的操作"}</span>
+              <em>请在左侧「AI 测试助手」中处理</em>
+            </div>
           ) : null}
 
           <section className="live-view simple-live-view" aria-label="项目工作区">
@@ -5615,8 +5692,17 @@ export function App() {
                   onLoadIssue={setScreenshotIssue}
                   onImageClick={browserSession.owner === "user" ? (input) => void clickSharedBrowser(input) : undefined}
                 />
-                <span className={`live-capture-badge ${browserSession.owner === "user" ? "waiting" : ""}`}>
-                  <Activity size={13} /> {browserSession.owner === "user" ? "用户控制中" : "AI 正在真实操作"}
+                <span className={`live-capture-badge ${browserSession.owner === "user" || agentProjection?.pendingInterrupt?.status === "pending" ? "waiting" : ""}`}>
+                  <Activity size={13} /> {(() => {
+                    const pending = agentProjection?.pendingInterrupt?.status === "pending";
+                    const pendingCredential = pending && agentProjection?.pendingInterrupt?.kind === "credential";
+                    // A run paused on a credential prompt is waiting on the
+                    // operator, not "AI operating" — saying otherwise hides
+                    // exactly the action the user must take.
+                    if (pendingCredential) return "等待你授权使用测试账号";
+                    if (pending) return "等待你的操作";
+                    return browserSession.owner === "user" ? "用户控制中" : "AI 正在真实操作";
+                  })()}
                 </span>
               </div>
             ) : activeRunId ? (
@@ -5884,9 +5970,9 @@ export function App() {
         </section>
 
         <aside className="simple-right-rail">
-          <section className={`verdict-stage ${String(latestDecision).toLowerCase()}`}>
+          <section className={`verdict-stage ${pendingInterruptForVerdict ? "waiting-on-user" : String(latestDecision).toLowerCase()}`}>
             <p className="eyebrow">测试结论</p>
-            <strong>{latestDecision}</strong>
+            <strong>{verdictDisplay}</strong>
             <p>{result?.summary ?? liveStatusText ?? "运行完成后，系统会在这里给出是否可以继续发布的结论。"}</p>
             <button onClick={() => setRightDrawerOpen(true)} type="button">查看完整证据</button>
           </section>

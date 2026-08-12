@@ -26,6 +26,8 @@ export interface InterruptDecisionPanelProps {
   onOpenEvidence?: (evidenceId: string) => void;
   /** Jumps to the credential manager without losing the pending interrupt. */
   onOpenCredentials?: () => void;
+  /** Saves a test account inline (encrypted) then resumes with "approved". */
+  onSaveCredentials?: (username: string, password: string) => Promise<void>;
   /** Opens the sandbox recovery view for environment-owned failures. */
   onRecoverSandbox?: () => void;
   /** Re-runs discovery once the blocking condition has been cleared. */
@@ -41,6 +43,7 @@ export function InterruptDecisionPanel({
   onDecide,
   onOpenEvidence,
   onOpenCredentials,
+  onSaveCredentials,
   onRecoverSandbox,
   onReopenDiscovery,
   onOpenRepairWorkspace,
@@ -53,18 +56,34 @@ export function InterruptDecisionPanel({
   );
   const [selected, setSelected] = useState<string>(options[0]?.value ?? "dismiss");
   const [message, setMessage] = useState("");
+  const [credUsername, setCredUsername] = useState("");
+  const [credPassword, setCredPassword] = useState("");
+  const [credSaving, setCredSaving] = useState(false);
+  const [credError, setCredError] = useState("");
 
   // A new interrupt is a new question. Never carry the previous answer over —
   // silently resuming with a stale choice is worse than asking again.
   useEffect(() => {
     setSelected(options[0]?.value ?? "dismiss");
     setMessage("");
+    setCredUsername("");
+    setCredPassword("");
+    setCredError("");
   }, [interrupt.id, options]);
 
   const owner = interrupt.owner ?? "agent";
   const ownerLabel = OWNER_LABELS[owner] ?? owner;
   const diagnoses = interrupt.diagnoses ?? [];
   const evidenceRefs = interrupt.evidenceRefs ?? [];
+  const isCredential = interrupt.kind === "credential";
+  const hasSavedCredential = interrupt.context?.hasSavedCredential === true;
+  const usernameMasked = typeof interrupt.context?.usernameMasked === "string"
+    ? (interrupt.context.usernameMasked as string)
+    : undefined;
+  // When no account is saved, the only honest path forward is to provide one
+  // inline — "我已配置账号" without a form is a dead end the user cannot act on.
+  const needsInlineCredentialForm = isCredential && !hasSavedCredential && Boolean(onSaveCredentials);
+  const credFormIncomplete = needsInlineCredentialForm && (!credUsername.trim() || !credPassword.trim());
   const suggested = typeof interrupt.context?.suggestedApproach === "string"
     ? (interrupt.context.suggestedApproach as string)
     : undefined;
@@ -77,8 +96,26 @@ export function InterruptDecisionPanel({
 
   const submit = async (decision: string) => {
     if (busy) return;
+    if (needsInlineCredentialForm && decision === "approved" && onSaveCredentials) {
+      if (credFormIncomplete) {
+        setCredError("请先填写测试账号和密码。");
+        return;
+      }
+      setCredSaving(true);
+      setCredError("");
+      try {
+        await onSaveCredentials(credUsername.trim(), credPassword);
+      } catch (saveError) {
+        setCredSaving(false);
+        setCredError(saveError instanceof Error ? saveError.message : "保存测试账号失败，请重试。");
+        return;
+      }
+      setCredSaving(false);
+    }
     await onDecide(decision as RepairDecisionValue, message.trim() || undefined);
   };
+
+  const primaryBusy = busy || credSaving;
 
   return (
     <section className="interrupt-decision-panel" aria-label="等待你的决策" role="region">
@@ -162,8 +199,46 @@ export function InterruptDecisionPanel({
         </div>
       ) : null}
 
+      {isCredential && hasSavedCredential ? (
+        <p className="interrupt-decision-saved-credential" role="note">
+          已保存测试账号{usernameMasked ? <strong>{usernameMasked}</strong> : null}。
+          选择「使用已保存账号继续」后，系统仅在当前沙盒会话注入登录，不会显示或写入报告。
+        </p>
+      ) : null}
+
+      {needsInlineCredentialForm ? (
+        <div className="interrupt-decision-credential-form">
+          <span className="interrupt-decision-label">填写本次测试账号（加密保存，仅注入沙盒）</span>
+          <div className="interrupt-decision-credential-grid">
+            <label>
+              测试账号
+              <input
+                type="text"
+                autoComplete="off"
+                value={credUsername}
+                disabled={primaryBusy}
+                placeholder="邮箱或用户名"
+                onChange={(event) => setCredUsername(event.target.value)}
+              />
+            </label>
+            <label>
+              测试密码
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={credPassword}
+                disabled={primaryBusy}
+                placeholder="输入测试密码"
+                onChange={(event) => setCredPassword(event.target.value)}
+              />
+            </label>
+          </div>
+          {credError ? <p className="interrupt-decision-error" role="alert">{credError}</p> : null}
+        </div>
+      ) : null}
+
       <fieldset className="interrupt-decision-options" disabled={busy}>
-        <legend className="interrupt-decision-label">需要你选择</legend>
+        <legend className="interrupt-decision-label">{needsInlineCredentialForm ? "填写账号后选择" : "需要你选择"}</legend>
         {options.map((option) => (
           <label
             key={option.value}
@@ -205,15 +280,17 @@ export function InterruptDecisionPanel({
         <button
           type="button"
           className="primary"
-          disabled={busy || messageRequired}
+          disabled={primaryBusy || messageRequired || (needsInlineCredentialForm && selected === "approved" && credFormIncomplete)}
           onClick={() => void submit(selected)}
         >
-          {busy ? "正在恢复测试…" : `确认：${selectedOption?.label ?? "继续"}`}
+          {primaryBusy
+            ? (credSaving ? "正在保存账号…" : "正在恢复测试…")
+            : `确认：${selectedOption?.label ?? "继续"}`}
         </button>
         <button
           type="button"
           className="ghost"
-          disabled={busy}
+          disabled={primaryBusy}
           onClick={() => void submit("dismiss")}
         >
           拒绝修复并保留失败结论
