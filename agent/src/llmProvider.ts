@@ -13,6 +13,7 @@ const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.
 
 export interface LlmCallContext {
   purpose: "planning" | "browser-action" | "judging" | "triage" | "repairing" | "assistant";
+  budgetScopeId?: string;
   runId?: string;
   experimentId?: string;
   modelProfileId?: string;
@@ -389,6 +390,7 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
     budgetReservation = await reserveLlmBudget({
       runId: input.context.runId,
       purpose: input.context.purpose,
+      scopeId: input.context.budgetScopeId,
       budget: input.budget,
       estimatedTokens: Math.ceil(Buffer.byteLength(`${input.system}\n${input.prompt}`, "utf8") / 3) + input.maxTokens,
       estimatedWallClockMs: input.timeoutMs ?? 30_000,
@@ -404,6 +406,7 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
       at: startedAt,
       payload: {
         purpose: input.context.purpose,
+        budgetScopeId: input.context.budgetScopeId,
         provider: input.credential.provider,
         requestedModel: input.credential.model,
         modelProfileId: input.context.modelProfileId,

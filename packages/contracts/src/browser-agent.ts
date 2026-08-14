@@ -89,7 +89,6 @@ export const browserAgentActionSchema = z.discriminatedUnion("action", [
   browserActionBaseSchema.extend({ action: z.literal("wait-for-control"), controlId: z.string().min(1), state: z.enum(["visible", "hidden", "enabled", "disabled"]) }).strict(),
   browserActionBaseSchema.extend({ action: z.literal("navigate-route"), routeId: z.string().min(1) }).strict(),
   browserActionBaseSchema.extend({ action: z.literal("submit-form"), controlId: z.string().min(1) }).strict(),
-  browserActionBaseSchema.extend({ action: z.literal("observe-page") }).strict(),
   browserActionBaseSchema.extend({ action: z.literal("evaluate-oracle"), oracleIds: z.array(z.string().min(1)).min(1).max(6) }).strict()
 ]);
 export type BrowserAgentAction = z.infer<typeof browserAgentActionSchema>;
@@ -112,6 +111,7 @@ export const browserActionDecisionSchema = z.object({
   attemptId: z.string().min(1),
   observationId: z.string().min(1),
   status: z.enum(["act", "complete", "blocked", "needs-confirmation"]),
+  reasonCode: z.enum(["transient-observation", "transient-model", "budget-exhausted", "policy-blocked", "user-input-required"]).optional(),
   summary: z.string().min(1).max(800),
   actions: z.array(browserAgentActionSchema).max(3),
   oracles: z.array(dynamicOracleSchema).max(6),

@@ -66,5 +66,45 @@ export async function testLlmBudgetLedger() {
     }),
     /llm_budget_exceeded:judging_calls/
   );
+
+  const browserBudget = { ...budget, maxBrowserActionCalls: 1 };
+  const firstPath = await reserveLlmBudget({
+    runId,
+    scopeId: "coverage-path-a",
+    purpose: "browser-action",
+    budget: browserBudget,
+    estimatedTokens: 800,
+    estimatedWallClockMs: 500,
+    estimatedCostUsd: null
+  });
+  await finalizeLlmBudget(firstPath, { tokens: 700, wallClockMs: 100, estimatedCostUsd: null });
+  await assert.rejects(
+    reserveLlmBudget({
+      runId,
+      scopeId: "coverage-path-a",
+      purpose: "browser-action",
+      budget: browserBudget,
+      estimatedTokens: 10,
+      estimatedWallClockMs: 10,
+      estimatedCostUsd: null
+    }),
+    /llm_budget_exceeded:browser-action_calls/,
+    "one path must retain its own bounded model-call allowance"
+  );
+  const secondPath = await reserveLlmBudget({
+    runId,
+    scopeId: "coverage-path-b",
+    purpose: "browser-action",
+    budget: browserBudget,
+    estimatedTokens: 800,
+    estimatedWallClockMs: 500,
+    estimatedCostUsd: null
+  });
+  await finalizeLlmBudget(secondPath, { tokens: 650, wallClockMs: 90, estimatedCostUsd: null });
+  const scopedLedger = await readLlmBudgetLedger(runId, budget);
+  assert.equal(scopedLedger.scopes["coverage-path-a"]?.consumed.browserActionCalls, 1);
+  assert.equal(scopedLedger.scopes["coverage-path-b"]?.consumed.browserActionCalls, 1);
+  assert.equal(scopedLedger.consumed.browserActionCalls, 2, "Run totals must still aggregate actual browser usage");
+  assert.equal(scopedLedger.consumed.tokens, 1_530, "Run totals remain transparent even when path budgets are isolated");
   await rm(path.resolve(process.cwd(), "..", "reports", "llm-budgets", `${runId}.json`), { force: true });
 }

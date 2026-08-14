@@ -101,7 +101,7 @@ export function AssistantConversationMessage({
   const assistant = message.role === "assistant";
 
   return (
-    <article className={`${message.role} assistant-conversation-message${message.id.includes("pending") ? " pending" : ""}`}>
+    <article className={`${message.role} assistant-conversation-message${message.id.includes("pending") || message.streaming ? " pending" : ""}`}>
       <header className="assistant-message-header">
         <span className="assistant-message-avatar" aria-hidden="true">
           {assistant ? <Bot size={14} /> : <UserRound size={14} />}
@@ -114,8 +114,10 @@ export function AssistantConversationMessage({
           <p key={`${paragraph}-${index}`}>{paragraph}</p>
         ))}
       </div>
-      {message.id.includes("pending") ? (
-        <span className="assistant-typing" aria-label="AI 正在回复"><i /><i /><i /></span>
+      {message.id.includes("pending") || message.streaming ? (
+        <span className="assistant-typing" aria-label="AI 正在思考并执行">
+          <b>{message.streaming ? "正在思考" : "正在回复"}</b><i /><i /><i />
+        </span>
       ) : null}
       {assistant && message.llmTrace ? (
         <details className="assistant-call-details">

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   agentOrchestrationMode,
+  discoveryCanHandOffToDynamicBrowser,
   requiresActiveBrowserDiscovery
 } from "../src/agentGraphService.js";
 import type { RunProjection } from "../src/runEventStore.js";
@@ -53,6 +54,21 @@ export function testAgentGraphMode() {
       coverageMode: "full",
       capabilities: ["browser"]
     }, "path")), false, "child path runs must not repeat parent Discovery");
+
+    assert.equal(discoveryCanHandOffToDynamicBrowser({
+      dynamicBrowser: true,
+      documentCommitted: true,
+      httpStatus: 200
+    }), true, "a committed SPA must continue to the long-lived browser Agent even before controls appear");
+    assert.equal(discoveryCanHandOffToDynamicBrowser({
+      dynamicBrowser: true,
+      documentCommitted: false
+    }), false, "an uncommitted document still requires runtime recovery");
+    assert.equal(discoveryCanHandOffToDynamicBrowser({
+      dynamicBrowser: true,
+      documentCommitted: true,
+      httpStatus: 500
+    }), false, "an upstream failure must not be treated as an executable page");
   } finally {
     if (previousMode === undefined) delete process.env.AGENT_ORCHESTRATION_MODE;
     else process.env.AGENT_ORCHESTRATION_MODE = previousMode;

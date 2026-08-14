@@ -14,9 +14,11 @@ import { KnowledgeBasis } from "../src/components/KnowledgeBasis";
 import { AssistantReasoningSummary } from "../src/components/AssistantReasoningSummary";
 import { AssistantConversationMessage } from "../src/components/AssistantConversationMessage";
 import { DiscoveryPanel } from "../src/components/DiscoveryPanel";
-import { chatWithTestAssistant, generatePlan, subscribeRunEvents } from "../src/api";
-import { commandFallbackAction } from "../src/App";
+import { chatWithTestAssistant, createVisualRun, generatePlan, subscribeRunEvents } from "../src/api";
+import { commandFallbackAction, describeRunActivity, isUserActionableInterrupt, upsertAssistantProgress } from "../src/workbenchLogic";
+import { isRestorableProjectRun, rankProjectRunCandidates } from "../src/activeRunCache";
 import type { DiscoveryScanResult } from "../src/types";
+import { pointInSharedBrowser } from "../src/sharedBrowserGeometry";
 
 vi.mock("@monaco-editor/react", () => ({
   DiffEditor: ({ original, modified }: { original: string; modified: string }) => (
@@ -30,12 +32,205 @@ vi.mock("@monaco-editor/react", () => ({
 import { RepairWorkspace } from "../src/components/RepairWorkspace";
 
 describe("Workbench interactions", () => {
+  it("keeps one visible thinking state until the Graph reaches a real terminal state", () => {
+    const activity = describeRunActivity({
+      runId: "run-1",
+      runState: "running",
+      isRunning: true,
+      planningPhase: "running",
+      projection: {
+        schemaVersion: "1.0",
+        runId: "run-1",
+        threadId: "run-1",
+        mode: "active",
+        status: "running",
+        currentNode: "execute-browser-action",
+        completedNodes: [],
+        progress: 0.5,
+        tokenUsage: 100,
+        updatedAt: "2026-08-14T02:00:00.000Z"
+      }
+    });
+    expect(activity).toMatchObject({
+      action: "操作当前页面",
+      streaming: true,
+      phase: "acting"
+    });
+    expect(activity?.content).toContain("测试尚未结束");
+    expect(describeRunActivity({
+      runId: "run-1",
+      runState: "completed",
+      isRunning: false,
+      planningPhase: "ready",
+      projection: null
+    })).toBeNull();
+  });
+
+  it("presents provider throttling as an in-progress retry rather than a conclusion", () => {
+    const activity = describeRunActivity({
+      runId: "run-rate-limited",
+      runState: "running",
+      isRunning: true,
+      planningPhase: "running",
+      projection: {
+        schemaVersion: "1.0",
+        runId: "run-rate-limited",
+        threadId: "run-rate-limited",
+        mode: "active",
+        status: "running",
+        currentNode: "decide-browser-action",
+        completedNodes: [],
+        progress: 0.5,
+        tokenUsage: 100,
+        lastError: { code: "provider_http_429", message: "Rate limit exceeded", node: "decide-browser-action" },
+        updatedAt: "2026-08-14T02:00:00.000Z"
+      }
+    });
+    expect(activity?.streaming).toBe(true);
+    expect(activity?.content).toContain("正在退避");
+    expect(activity?.action).toContain("限流");
+  });
+
+  it("renders a streaming assistant activity as a labelled thinking row", () => {
+    render(<AssistantConversationMessage message={{
+      id: "progress:run:run-1",
+      role: "assistant",
+      content: "正在思考 · 操作当前页面\n测试尚未结束。",
+      createdAt: "2026-08-14T02:00:00.000Z",
+      streaming: true
+    }} />);
+    expect(screen.getByLabelText("AI 正在思考并执行")).toBeTruthy();
+    expect(screen.getByText("正在思考")).toBeTruthy();
+    expect(screen.getByText("测试尚未结束。")).toBeTruthy();
+  });
+
+  it("updates one browser progress message instead of repeating observations", () => {
+    const first = upsertAssistantProgress([], {
+      id: "ignored",
+      role: "assistant",
+      content: "正在观察登录页",
+      createdAt: "2026-08-13T01:00:00.000Z"
+    }, "browser:run-1");
+    const second = upsertAssistantProgress(first, {
+      id: "ignored-again",
+      role: "assistant",
+      content: "正在点击登录按钮",
+      createdAt: "2026-08-13T01:00:01.000Z"
+    }, "browser:run-1");
+    expect(second).toHaveLength(1);
+    expect(second[0]?.id).toBe("progress:browser:run-1");
+    expect(second[0]?.content).toBe("正在点击登录按钮");
+  });
+
+  it("maps live canvas clicks back to Playwright viewport coordinates", () => {
+    const bounds = { left: 10, top: 20 } as DOMRect;
+    expect(pointInSharedBrowser(410, 270, bounds, {
+      left: 0,
+      top: 0,
+      width: 800,
+      height: 500,
+      x: 0,
+      y: 0,
+      imageWidth: 1600,
+      imageHeight: 1000
+    })).toMatchObject({ x: 800, y: 500, imageWidth: 1600, imageHeight: 1000 });
+  });
+
+  it("never restores terminal history as the current project's active run", () => {
+    expect(rankProjectRunCandidates("run_cached_active", [
+      { runId: "run_new_pass", timestamp: "2026-08-12T15:04:38.568Z" },
+      { runId: "run_older_failure", timestamp: "2026-08-12T13:53:37.328Z" }
+    ])).toEqual(["run_cached_active"]);
+    expect(rankProjectRunCandidates(undefined, [
+      { runId: "run_new_pass", timestamp: "2026-08-12T15:04:38.568Z" }
+    ])).toEqual([]);
+  });
+
+  it("restores only fresh nonterminal runs from the same project", () => {
+    const now = Date.parse("2026-08-13T08:00:00.000Z");
+    expect(isRestorableProjectRun({
+      id: "run_current",
+      state: "running",
+      updatedAt: "2026-08-13T07:59:00.000Z",
+      input: { projectId: "andflow_current" }
+    }, "andflow_current", now)).toBe(true);
+    expect(isRestorableProjectRun({
+      id: "run_other",
+      state: "running",
+      updatedAt: "2026-08-13T07:59:00.000Z",
+      input: { projectId: "another_project" }
+    }, "andflow_current", now)).toBe(false);
+    expect(isRestorableProjectRun({
+      id: "run_stale",
+      state: "queued",
+      updatedAt: "2026-08-13T03:21:20.296Z",
+      input: { projectId: "andflow_current" }
+    }, "andflow_current", now)).toBe(false);
+  });
+
+  it("never presents the Worker's execution-result rendezvous as a user decision", () => {
+    expect(isUserActionableInterrupt({
+      id: "interrupt-worker",
+      runId: "run-worker",
+      kind: "execution-result",
+      status: "pending",
+      title: "等待执行 Worker",
+      detail: "等待结果",
+      requestedCapabilities: [],
+      payload: {},
+      createdAt: "2026-08-13T07:00:00.000Z"
+    })).toBe(false);
+    expect(isUserActionableInterrupt({
+      id: "interrupt-credential",
+      runId: "run-worker",
+      kind: "credential",
+      status: "pending",
+      title: "需要测试账号",
+      detail: "登录后继续",
+      requestedCapabilities: ["credential"],
+      payload: {},
+      createdAt: "2026-08-13T07:00:00.000Z"
+    })).toBe(true);
+  });
+
   it("turns plain-language test commands into confirmable actions", () => {
     expect(commandFallbackAction("先继续其他可以执行的测试")).toBe("continue-safe-paths");
     expect(commandFallbackAction("请重试刚才失败的链路")).toBe("retry-failed-path");
     expect(commandFallbackAction("把测试暂停一下", "running")).toBe("pause-run");
     expect(commandFallbackAction("继续测试", "paused")).toBe("resume-run");
     expect(commandFallbackAction("为什么会失败？", "blocked")).toBeUndefined();
+  });
+
+  it("normalizes runtime-only coverage before creating a Run", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      run: { id: "run_runtime_login", state: "queued", version: 1 }
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    await createVisualRun("http://127.0.0.1:55531/", {
+      observe: true,
+      browserControl: true,
+      sourceRead: false,
+      sandboxWrite: false,
+      sandboxCommand: false,
+      networkInstall: false,
+      hostApply: false,
+      artifactExport: false
+    }, undefined, {
+      projectId: "andflow_current",
+      coverageInventory: [{
+        id: "flow_login_gate",
+        title: "登录并进入应用",
+        status: "auto-bindable",
+        kind: "page",
+        target: "/signin",
+        sourceNodeIds: [],
+        sourceCount: 0
+      }],
+      dynamicBrowser: true
+    });
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(request.body));
+    expect(body.input.coverageInventory[0].sourceCount).toBe(1);
   });
 
   it("generates a plan through the real project-scoped API contract", async () => {

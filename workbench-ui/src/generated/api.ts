@@ -250,6 +250,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/runs/{id}/browser-live": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Length-prefixed live Playwright compositor stream */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/x-ai-test-officer-browser-stream": string;
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/runs/{id}/browser-control/acquire": {
         parameters: {
             query?: never;
@@ -1577,6 +1614,8 @@ export interface components {
                     label?: string;
                     testId?: string;
                     inputType?: string;
+                    /** @enum {string} */
+                    valueState?: "empty" | "nonempty";
                     /** @default [] */
                     framePath: string[];
                     /** @default [] */
@@ -1622,6 +1661,8 @@ export interface components {
                 observationId: string;
                 /** @enum {string} */
                 status: "act" | "complete" | "blocked" | "needs-confirmation";
+                /** @enum {string} */
+                reasonCode?: "transient-observation" | "transient-model" | "budget-exhausted" | "policy-blocked" | "user-input-required";
                 summary: string;
                 actions: ({
                     actionId: string;
@@ -1801,23 +1842,6 @@ export interface components {
                     sourcePageFingerprint: string;
                     purpose: string;
                     expectedChange: string;
-                    /** @default [] */
-                    oracleIds: string[];
-                    /** @enum {string} */
-                    risk: "low" | "medium" | "high" | "forbidden";
-                    /** @default 10000 */
-                    timeoutMs: number;
-                    /** @enum {string} */
-                    action: "observe-page";
-                } | {
-                    actionId: string;
-                    runId: string;
-                    attemptId: string;
-                    coverageItemId: string;
-                    sourceObservationId: string;
-                    sourcePageFingerprint: string;
-                    purpose: string;
-                    expectedChange: string;
                     oracleIds: string[];
                     /** @enum {string} */
                     risk: "low" | "medium" | "high" | "forbidden";
@@ -1872,6 +1896,14 @@ export interface components {
                     type: "dom-change";
                     /** @enum {string} */
                     expected: "changed" | "unchanged";
+                    description: string;
+                } | {
+                    id: string;
+                    /** @enum {string} */
+                    type: "input-state";
+                    controlId: string;
+                    /** @enum {string} */
+                    expected: "empty" | "nonempty";
                     description: string;
                 })[];
                 /** @default [] */
@@ -2030,6 +2062,33 @@ export interface components {
                  * @enum {string}
                  */
                 coverageMode: "targeted" | "full";
+                /** @default [] */
+                coverageInventory: {
+                    id: string;
+                    title: string;
+                    /**
+                     * @default auto-bindable
+                     * @enum {string}
+                     */
+                    status: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
+                    /** @enum {string} */
+                    kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
+                    target: string;
+                    /** @default [] */
+                    sourceNodeIds: string[];
+                    /** @default 1 */
+                    sourceCount: number;
+                    /** @default [] */
+                    surfaces: ("page" | "api" | "data" | "background-task")[];
+                    /** @default [] */
+                    requiredEvidenceKinds: ("screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log")[];
+                    /** @default [] */
+                    preconditions: string[];
+                }[];
+                /** @default false */
+                dynamicBrowser: boolean;
+                /** @default false */
+                confirmedExecution: boolean;
                 /**
                  * @default interactive
                  * @enum {string}
@@ -2062,6 +2121,8 @@ export interface components {
                 llmBudget: {
                     /** @default 2 */
                     maxPlannerCalls: number;
+                    /** @default 12 */
+                    maxBrowserActionCalls: number;
                     /** @default 1 */
                     maxJudgeCalls: number;
                     /** @default 1 */
@@ -2236,7 +2297,8 @@ export interface components {
             runId?: string;
             experimentId?: string;
             /** @enum {string} */
-            purpose: "planning" | "judging" | "triage" | "repairing" | "assistant";
+            purpose: "planning" | "browser-action" | "judging" | "triage" | "repairing" | "assistant";
+            budgetScopeId?: string;
             /** @enum {string} */
             provider: "openai-compatible" | "openai" | "anthropic" | "openrouter" | "custom";
             model: string;
@@ -2442,7 +2504,7 @@ export interface components {
             runId?: string;
             invocationId?: string;
             /** @enum {string} */
-            purpose: "planning" | "judging" | "triage" | "repairing" | "assistant";
+            purpose: "planning" | "browser-action" | "judging" | "triage" | "repairing" | "assistant";
             projectSnapshot?: {
                 projectId: string;
                 commitSha?: string;
@@ -2748,6 +2810,8 @@ export interface components {
                 label?: string;
                 testId?: string;
                 inputType?: string;
+                /** @enum {string} */
+                valueState?: "empty" | "nonempty";
                 /** @default [] */
                 framePath: string[];
                 /** @default [] */
@@ -2793,6 +2857,8 @@ export interface components {
             observationId: string;
             /** @enum {string} */
             status: "act" | "complete" | "blocked" | "needs-confirmation";
+            /** @enum {string} */
+            reasonCode?: "transient-observation" | "transient-model" | "budget-exhausted" | "policy-blocked" | "user-input-required";
             summary: string;
             actions: ({
                 actionId: string;
@@ -2972,23 +3038,6 @@ export interface components {
                 sourcePageFingerprint: string;
                 purpose: string;
                 expectedChange: string;
-                /** @default [] */
-                oracleIds: string[];
-                /** @enum {string} */
-                risk: "low" | "medium" | "high" | "forbidden";
-                /** @default 10000 */
-                timeoutMs: number;
-                /** @enum {string} */
-                action: "observe-page";
-            } | {
-                actionId: string;
-                runId: string;
-                attemptId: string;
-                coverageItemId: string;
-                sourceObservationId: string;
-                sourcePageFingerprint: string;
-                purpose: string;
-                expectedChange: string;
                 oracleIds: string[];
                 /** @enum {string} */
                 risk: "low" | "medium" | "high" | "forbidden";
@@ -3043,6 +3092,14 @@ export interface components {
                 type: "dom-change";
                 /** @enum {string} */
                 expected: "changed" | "unchanged";
+                description: string;
+            } | {
+                id: string;
+                /** @enum {string} */
+                type: "input-state";
+                controlId: string;
+                /** @enum {string} */
+                expected: "empty" | "nonempty";
                 description: string;
             })[];
             /** @default [] */

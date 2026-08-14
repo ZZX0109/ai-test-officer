@@ -22,6 +22,7 @@ import {
   updateCredential
 } from "./credentialStore.js";
 import { buildScenarioGrayPlan } from "./plan.js";
+import { planRunFromDurableInput } from "./runPlanningService.js";
 import { generatePlan } from "./llmPlanner.js";
 import { analyzeIntake } from "./intakeAnalyzer.js";
 import { routePlanner } from "./llmRoutingPolicy.js";
@@ -221,7 +222,8 @@ import {
 import {
   acquireBrowserControl,
   executeUserBrowserInput,
-  releaseBrowserControl
+  releaseBrowserControl,
+  subscribeBrowserLiveFrames
 } from "./browser-agent/sessionManager.js";
 
 const app = express();
@@ -654,6 +656,19 @@ async function readAuthorizedLegacyRun(req: express.Request, runId: string, scop
   return bundle;
 }
 
+/** Authorize a live control-plane Run without requiring its final bundle.
+ * Browser evidence is streamed before judging commits run_bundle.json; using
+ * the legacy bundle reader here turned every in-progress poll into ENOENT. */
+async function assertAuthorizedRun(req: express.Request, runId: string, scope: ProjectScope = "read_artifacts") {
+  const run = await runEventStore.get(runId);
+  if (run) {
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, scope);
+    return;
+  }
+  await readAuthorizedLegacyRun(req, runId, scope);
+}
+
 function isMissingRunBundle(error: unknown) {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }
@@ -1003,8 +1018,35 @@ app.post("/v1/runs", async (req, res, next) => {
       }
     });
     if (agentOrchestrationMode(body.projectId) === "active") {
-      startAgentGraphInBackground(created);
-      res.status(201).json({ run: created });
+      let run = created;
+      if (body.input.confirmedExecution) {
+        // "确认并执行" is already the operator's plan/capability decision.
+        // Persist planning and both approvals before the Graph can race into
+        // runtime recovery, rather than asking the same user a second time.
+        run = await planRunFromDurableInput(run.id);
+        if (run.state === "awaiting-plan-approval") {
+          run = await runEventStore.append({
+            runId: run.id,
+            type: "plan_approved",
+            expectedVersion: run.version,
+            actor: body.actor,
+            idempotencyKey: `${body.idempotencyKey}:confirmed-plan`,
+            payload: { source: "confirmed-execution" }
+          });
+        }
+        if (run.state === "awaiting-permission") {
+          run = await runEventStore.append({
+            runId: run.id,
+            type: "permission_granted",
+            expectedVersion: run.version,
+            actor: body.actor,
+            idempotencyKey: `${body.idempotencyKey}:confirmed-permissions`,
+            payload: { permissionProfile: body.input.permissionProfile, source: "confirmed-execution" }
+          });
+        }
+      }
+      startAgentGraphInBackground(run);
+      res.status(201).json({ run });
       return;
     }
     let planPayload: Record<string, unknown> = {};
@@ -1421,6 +1463,53 @@ app.get("/v1/runs/:id/browser-frame", async (req, res, next) => {
       if (error && !res.headersSent) res.status(404).json({ error: "browser_frame_not_available" });
     });
   } catch (error) { next(error); }
+});
+
+app.get("/v1/runs/:id/browser-live", async (req, res, next) => {
+  try {
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "read_artifacts");
+
+    // The Workbench consumes this as a binary canvas stream. Evidence files
+    // remain immutable artifacts, while this endpoint only mirrors the latest
+    // compositor frame from the same Playwright BrowserContext the Agent uses.
+    let closed = false;
+    let responseReady = false;
+    const queuedFrames: Buffer[] = [];
+    const writeFrame = (frame: Buffer) => {
+      if (closed || res.writableEnded) return;
+      const header = Buffer.allocUnsafe(4);
+      header.writeUInt32BE(frame.length, 0);
+      res.write(header);
+      res.write(frame);
+    };
+    // Subscribe before committing the HTTP status. If the in-memory
+    // Playwright session has already closed, this lets us return a useful 409
+    // instead of first sending 200 and then crashing with ERR_HTTP_HEADERS_SENT.
+    const unsubscribe = await subscribeBrowserLiveFrames(run.id, (frame) => {
+      if (!responseReady) queuedFrames.push(frame);
+      else writeFrame(frame);
+    });
+    res.status(200);
+    res.setHeader("Content-Type", "application/x-ai-test-officer-browser-stream");
+    res.setHeader("Cache-Control", "no-store, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    responseReady = true;
+    for (const frame of queuedFrames.splice(0)) writeFrame(frame);
+    req.on("close", () => {
+      closed = true;
+      void unsubscribe();
+    });
+  } catch (error) {
+    if (!res.headersSent && error instanceof Error && error.message === "browser_session_not_active") {
+      return void res.status(409).json({ error: "browser_session_not_active", message: "共享浏览器会话尚未建立或已经结束。" });
+    }
+    next(error);
+  }
 });
 
 app.post("/v1/runs/:id/browser-control/acquire", async (req, res, next) => {
@@ -2059,6 +2148,17 @@ app.post("/v1/runs/:id/interrupts/:interruptId/resume", async (req, res, next) =
       return void res.status(409).json({ error: "agent_interrupt_conflict" });
     }
     agentInterruptSchema.parse(interrupt);
+    // `execution-result` is a private Graph/Worker rendezvous. A user response
+    // cannot contain the signed execution generation, Attempt and artifacts
+    // required to resume it safely. Older Workbench builds incorrectly showed
+    // this as a generic repair choice, which appeared to do nothing and could
+    // leave the graph checkpoint inconsistent.
+    if (interrupt.kind === "execution-result") {
+      return void res.status(409).json({
+        error: "execution_result_worker_owned",
+        message: "该等待项由执行 Worker 自动完成，不需要用户处理。"
+      });
+    }
     // The graph node that raised the interrupt decides how to interpret the
     // resume value. plan-approval / browser-permission / execution-result nodes
     // expect `{ approved, ...input }`; the repair-decision node expects a
@@ -2916,10 +3016,23 @@ app.post("/api/projects/:id/start", async (req, res, next) => {
 // The interactive Workbench must not hold the browser request open while an
 // install or health check runs. The task is still owned by the Agent; clients
 // observe it through the runtime endpoint until a terminal status is reached.
-app.post("/api/projects/:id/start-async", (req, res, next) => {
+app.post("/api/projects/:id/start-async", async (req, res, next) => {
   try {
+    const current = await getProjectRuntimeStatusWithRecovery(req.params.id);
+    // This endpoint is an idempotent "ensure running" operation. A healthy
+    // project sandbox is reusable across diagnosis and test Runs; overwriting
+    // it with a synthetic `starting` record discarded the owned container
+    // handles and made every imported project appear to require a restart.
+    if (current.status === "running") {
+      res.status(200).json({ accepted: false, reused: true, runtime: current });
+      return;
+    }
+    if (["installing", "starting"].includes(current.status)) {
+      res.status(202).json({ accepted: true, reused: true, runtime: current });
+      return;
+    }
     if (!projectStartTasks.has(req.params.id)) {
-      const previous = getProjectRuntimeStatus(req.params.id);
+      const previous = current;
       // Return a fresh in-progress state immediately. Without this marker the
       // first poll after a retry can receive a failed status from an earlier
       // attempt and the Workbench appears to flash/exit before the new task
@@ -2959,7 +3072,7 @@ app.post("/api/projects/:id/start-async", (req, res, next) => {
       projectStartTasks.set(req.params.id, task);
       task.catch(() => undefined);
     }
-    res.status(202).json({ accepted: true, runtime: getProjectRuntimeStatus(req.params.id) });
+    res.status(202).json({ accepted: true, reused: false, runtime: getProjectRuntimeStatus(req.params.id) });
   } catch (error) {
     next(error);
   }
@@ -3810,7 +3923,7 @@ app.get("/api/runs/:runId", async (req, res, next) => {
 
 app.get("/api/runs/:runId/evidence", async (req, res, next) => {
   try {
-    await readAuthorizedLegacyRun(req, req.params.runId);
+    await assertAuthorizedRun(req, req.params.runId);
     const evidence = readEvidenceFromAuditStore(req.params.runId);
     // Loop events are written throughout browser execution, while the final
     // run bundle is only committed after judging. Returning both lets the
@@ -3827,7 +3940,7 @@ app.get("/api/runs/:runId/evidence", async (req, res, next) => {
 
 app.get("/api/runs/:runId/findings", async (req, res, next) => {
   try {
-    await readAuthorizedLegacyRun(req, req.params.runId);
+    await assertAuthorizedRun(req, req.params.runId);
     res.json({ findings: readFindingsFromAuditStore(req.params.runId) });
   } catch (error) {
     next(error);
@@ -3836,7 +3949,7 @@ app.get("/api/runs/:runId/findings", async (req, res, next) => {
 
 app.get("/api/runs/:runId/judge-summary", async (req, res, next) => {
   try {
-    await readAuthorizedLegacyRun(req, req.params.runId);
+    await assertAuthorizedRun(req, req.params.runId);
     res.json({ judge: readJudgeSummaryFromAuditStore(req.params.runId) });
   } catch (error) {
     next(error);
@@ -3869,7 +3982,7 @@ app.post("/api/runs/:runId/download-bundle", async (req, res, next) => {
 
 app.get("/api/runs/:runId/loop-events", async (req, res, next) => {
   try {
-    await readAuthorizedLegacyRun(req, req.params.runId);
+    await assertAuthorizedRun(req, req.params.runId);
     res.json({ events: await readLoopEvents(req.params.runId) });
   } catch (error) {
     next(error);

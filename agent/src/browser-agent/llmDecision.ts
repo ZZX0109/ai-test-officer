@@ -4,6 +4,7 @@ import {
   browserActionDecisionSchema,
   dynamicOracleSchema,
   knowledgeBoundaryOutputSchema,
+  llmBudgetSchema,
   type BrowserActionDecision,
   type BrowserAgentAction,
   type BrowserObservation
@@ -17,7 +18,7 @@ import {
 import { executeKnowledgeBoundedLlm } from "../knowledge-boundary/executeKnowledgeBoundedLlm.js";
 
 const proposedActionSchema = z.object({
-  action: z.enum(["click-control", "fill-control", "select-control", "check-control", "press-key", "scroll-to-control", "wait-for-control", "navigate-route", "submit-form", "observe-page", "evaluate-oracle"]),
+  action: z.enum(["click-control", "fill-control", "select-control", "check-control", "press-key", "scroll-to-control", "wait-for-control", "navigate-route", "submit-form", "evaluate-oracle"]),
   controlId: z.string().min(1).optional(),
   valueRef: z.string().min(1).optional(),
   checked: z.boolean().optional(),
@@ -59,6 +60,30 @@ const actionJsonSchema = {
   }
 } as const;
 
+// Keep the provider-facing Oracle schema flat. SophNet's Responses-compatible
+// endpoint is reliable with required nullable fields, but has intermittently
+// rejected nested oneOf/discriminated-union schemas. Requiring every key here
+// prevents a structurally incomplete Oracle from consuming the one permitted
+// semantic-repair call; null placeholders are removed before the deterministic
+// dynamicOracleSchema validates the selected Oracle type.
+const oracleJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "type", "description", "controlId", "operator", "expected", "operationId", "expectedStatus"],
+  properties: {
+    id: { type: "string" },
+    type: { type: "string", enum: ["element-state", "text", "url", "count-change", "network", "dom-change", "input-state"] },
+    description: { type: "string" },
+    controlId: { type: ["string", "null"] },
+    operator: { type: ["string", "null"], enum: ["equals", "contains", "not-contains", null] },
+    // Text and URL Oracles accept a bounded literal, while the deterministic
+    // union below restricts the other Oracle types to their allowed enums.
+    expected: { type: ["string", "null"], maxLength: 500 },
+    operationId: { type: ["string", "null"] },
+    expectedStatus: { type: ["integer", "null"], minimum: 100, maximum: 599 }
+  }
+} as const;
+
 const outputJsonSchema = {
   type: "object",
   additionalProperties: false,
@@ -67,119 +92,91 @@ const outputJsonSchema = {
     status: { type: "string", enum: ["act", "complete", "blocked", "needs-confirmation"] },
     summary: { type: "string", maxLength: 800 },
     actions: { type: "array", maxItems: 1, items: actionJsonSchema },
-    // Oracle objects are validated again by the deterministic contract. The
-    // compatible provider receives a permissive JSON container here because
-    // it does not consistently accept a deeply nested oneOf schema.
-    oracles: { type: "array", maxItems: 6, items: { type: "object" } },
+    // Oracle objects are validated again by the deterministic discriminated
+    // union after nullable provider placeholders are removed.
+    oracles: { type: "array", maxItems: 6, items: oracleJsonSchema },
     evidenceRefs: { type: "array", maxItems: 20, items: { type: "string" } },
     userQuestion: { type: ["string", "null"], maxLength: 500 },
     knowledge: knowledgeBoundaryJsonSchemaV2
   }
 } as const;
 
-function normalizeNullableFields(value: unknown, fallbackEvidenceRefs: string[] = []) {
+function removeNullFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(removeNullFields);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([, field]) => field !== null)
+    .map(([key, field]) => [key, removeNullFields(field)]));
+}
+
+/** The provider JSON schema requires nullable placeholders for optional
+ * properties. Convert only those nulls back to omitted fields. Historical
+ * aliases and misspelled Oracle types are intentionally not repaired here:
+ * invalid model output gets the single semantic-repair attempt owned by the
+ * knowledge-bounded LLM wrapper. */
+function normalizeProviderOutput(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const record = value as Record<string, unknown>;
-  const fallbackKnowledge = {
-    schemaVersion: "2.0",
-    factsUsed: [],
-    inferences: [],
-    assumptions: [],
-    unknowns: [],
-    toolRequests: [],
-    blockingQuestions: [],
-    proposedActions: []
-  };
-  const normalizedOracles = Array.isArray(record.oracles)
-    ? record.oracles.map((oracle) => {
-      if (!oracle || typeof oracle !== "object" || Array.isArray(oracle)) return oracle;
-      const raw = oracle as Record<string, unknown>;
-      const type = String(raw.type ?? "").toLowerCase().replace(/[_\s]+/g, "-");
-      // Accept only spelling variants of a known deterministic Oracle.  This
-      // does not invent an assertion or grant the model a new evaluator.
-      if (["input-value", "input-filled", "value", "value-state"].includes(type) && typeof raw.controlId === "string") {
-        return {
-          ...raw,
-          type: "input-state",
-          expected: raw.expected === "empty" ? "empty" : "nonempty",
-          description: typeof raw.description === "string" ? raw.description : "Input value state is verified without retaining its contents."
-        };
-      }
-      if (["element-visible", "element-exists", "visibility"].includes(type) && typeof raw.controlId === "string") {
-        return {
-          ...raw,
-          type: "element-state",
-          expected: ["visible", "hidden", "enabled", "disabled"].includes(String(raw.expected)) ? raw.expected : "visible",
-          description: typeof raw.description === "string" ? raw.description : "Observed control state is verified."
-        };
-      }
-      if (type === "text-contains") return { ...raw, type: "text", operator: "contains" };
-      if (type === "url-contains") return { ...raw, type: "url", operator: "contains" };
-      if (["dom-changed", "page-change"].includes(type)) return { ...raw, type: "dom-change", expected: "changed" };
-      if (type === "dom-change") {
-        return {
-          ...raw,
-          expected: raw.expected === "unchanged" ? "unchanged" : "changed",
-          description: typeof raw.description === "string" ? raw.description : "Page DOM change is verified after the bounded action."
-        };
-      }
-      if (type === "input-state" && typeof raw.controlId === "string") {
-        return {
-          ...raw,
-          expected: raw.expected === "empty" ? "empty" : "nonempty",
-          description: typeof raw.description === "string" ? raw.description : "Input value state is verified without retaining its contents."
-        };
-      }
-      if (type === "element-state" && typeof raw.controlId === "string") {
-        return {
-          ...raw,
-          expected: ["visible", "hidden", "enabled", "disabled"].includes(String(raw.expected)) ? raw.expected : "visible",
-          description: typeof raw.description === "string" ? raw.description : "Observed control state is verified."
-        };
-      }
-      return raw;
-    })
-    : [];
   return {
     ...record,
-    actions: Array.isArray(record.actions) ? record.actions.map((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return item;
-      const action = item as Record<string, unknown>;
-      // Earlier browser prompts used `boundOracles` and omitted the metadata
-      // now required by the executable Action DSL.  This compatibility layer
-      // never broadens a model capability: it merely converts safe legacy
-      // shape into an action which is re-authorized and re-bound below.
-      const legacyOracleIds = Array.isArray(action.boundOracles)
-        ? action.boundOracles.flatMap((oracle) => typeof oracle === "string"
-          ? [oracle]
-          : oracle && typeof oracle === "object" && typeof (oracle as { id?: unknown }).id === "string"
-            ? [(oracle as { id: string }).id]
-            : [])
-        : [];
-      const inferredRisk = action.action === "fill-control" && typeof action.valueRef === "string" && action.valueRef.startsWith("credential.")
-        ? "medium"
-        : "low";
-      return {
-        ...Object.fromEntries(Object.entries(action).filter(([key, field]) => key !== "boundOracles" && field !== null)),
-        expectedChange: typeof action.expectedChange === "string" && action.expectedChange.trim()
-          ? action.expectedChange
-          : "Verify the declared page state after this bounded action.",
-        oracleIds: Array.isArray(action.oracleIds)
-          ? action.oracleIds.filter((id): id is string => typeof id === "string")
-          : legacyOracleIds,
-        risk: ["low", "medium", "high", "forbidden"].includes(String(action.risk)) ? action.risk : inferredRisk
-      };
-    }) : record.actions
-    ,
-    oracles: normalizedOracles,
-    evidenceRefs: Array.isArray(record.evidenceRefs)
-      ? record.evidenceRefs.filter((id): id is string => typeof id === "string")
-      : fallbackEvidenceRefs,
-    userQuestion: typeof record.userQuestion === "string" ? record.userQuestion : null,
-    knowledge: record.knowledge && typeof record.knowledge === "object" ? record.knowledge : fallbackKnowledge
+    actions: removeNullFields(record.actions),
+    oracles: removeNullFields(record.oracles)
   };
 }
 
+/** Validate every model-selected runtime binding inside the knowledge-boundary
+ * wrapper. Throwing after the wrapper returned used to bypass its one bounded
+ * semantic-repair attempt, so a one-character controlId typo immediately
+ * blocked an otherwise healthy page path. */
+export function parseBrowserDecisionProviderOutput(text: string, observation: BrowserObservation) {
+  const parsed = outputSchema.parse(normalizeProviderOutput(JSON.parse(text)));
+  const parsedOracles = parsed.oracles.map((oracle) => dynamicOracleSchema.parse(oracle));
+  const oracleIds = new Set(parsedOracles.map((oracle) => oracle.id));
+  const allowedControlIds = new Set(observation.controls.map((control) => control.controlId));
+  for (const proposal of parsed.actions) {
+    if (proposal.controlId && !allowedControlIds.has(proposal.controlId)) {
+      throw new Error(`browser_llm_unknown_control:${proposal.controlId}`);
+    }
+    const unknownOracle = proposal.oracleIds.find((id) => !oracleIds.has(id));
+    if (unknownOracle) throw new Error(`browser_llm_unknown_oracle:${unknownOracle}`);
+  }
+  const invalidEvidence = parsed.evidenceRefs.find((id) => !observation.evidenceRefs.includes(id));
+  if (invalidEvidence) throw new Error(`browser_llm_invalid_evidence_ref:${invalidEvidence}`);
+  return { ...parsed, oracles: parsedOracles };
+}
+
+export function compactBrowserObservationForDecision(observation: BrowserObservation) {
+  const boundedText = (value: string | null | undefined, maximum: number) => value ? value.slice(0, maximum) : value;
+  const controls = [...observation.controls]
+    .sort((left, right) => Number(right.visible && !right.disabled && !right.obscured) - Number(left.visible && !left.disabled && !left.obscured))
+    .slice(0, 80)
+    .map((control) => ({
+      controlId: control.controlId,
+      kind: control.kind,
+      role: control.role,
+      name: boundedText(control.accessibleName, 180),
+      label: boundedText(control.label, 180),
+      inputType: control.inputType,
+      visible: control.visible,
+      disabled: control.disabled,
+      obscured: control.obscured
+    }));
+  return {
+    url: observation.finalUrl,
+    title: boundedText(observation.title, 300),
+    readyState: observation.readyState,
+    bodyTextSample: boundedText(observation.bodyTextSample, 2_000),
+    accessibilityTree: boundedText(observation.accessibilityTree, 4_000),
+    controls,
+    consoleErrors: observation.consoleErrors.slice(-12).map((value) => boundedText(value, 500)),
+    pageErrors: observation.pageErrors.slice(-12).map((value) => boundedText(value, 500)),
+    failedRequests: observation.failedRequests.slice(-20).map((request) => ({
+      ...request,
+      url: boundedText(request.url, 500),
+      failure: boundedText(request.failure, 500)
+    }))
+  };
+}
 function toExecutableAction(input: {
   proposal: z.infer<typeof proposedActionSchema>;
   observation: BrowserObservation;
@@ -227,11 +224,8 @@ function toExecutableAction(input: {
     return { ...base, action: input.proposal.action, routeId: input.proposal.routeId };
   }
   if (input.proposal.action === "evaluate-oracle") return { ...base, action: input.proposal.action, oracleIds: input.proposal.oracleIds };
-  // Observation is performed by the graph before every decision and after
-  // every browser mutation.  Letting the model choose it creates a costly
-  // no-op loop that never advances the test.
-  if (input.proposal.action === "observe-page") throw new Error("browser_llm_redundant_observe_action");
-  return { ...base, action: "observe-page" };
+  const unsupported: never = input.proposal.action;
+  throw new Error(`browser_llm_action_not_supported:${unsupported}`);
 }
 
 export async function decideNextBrowserActions(input: {
@@ -271,19 +265,11 @@ export async function decideNextBrowserActions(input: {
     unknowns: [],
     untrustedInputKinds: ["dom", "console", "network", "requirement", "prior-model-output"]
   });
-  const controls = input.observation.controls.map((control) => ({
-    controlId: control.controlId, kind: control.kind, role: control.role, name: control.accessibleName,
-    label: control.label, inputType: control.inputType, visible: control.visible, disabled: control.disabled, obscured: control.obscured
-  }));
+  const page = compactBrowserObservationForDecision(input.observation);
   const prompt = JSON.stringify({
     task: "Choose the single next safe browser action required to test the supplied goal.",
     goal: input.goal,
-    page: {
-      url: input.observation.finalUrl, title: input.observation.title, readyState: input.observation.readyState,
-      bodyTextSample: input.observation.bodyTextSample, accessibilityTree: input.observation.accessibilityTree,
-      controls, consoleErrors: input.observation.consoleErrors, pageErrors: input.observation.pageErrors,
-      failedRequests: input.observation.failedRequests
-    },
+    page,
     allowedRouteIds: input.allowedRouteIds,
     previousResults: input.previousResults.slice(-8),
     rules: [
@@ -291,7 +277,7 @@ export async function decideNextBrowserActions(input: {
       "Never output selectors, JavaScript, shell commands, SQL, arbitrary URLs, raw credentials, or literal secrets.",
       "Values must be opaque refs prefixed testData., credential., or fixture.; credential refs require user confirmation.",
       "Propose at most one action. The page will be observed again before you choose another action.",
-      "The current page has already been observed by the system. Never propose observe-page; choose a real bounded action, complete, blocked, or needs-confirmation.",
+      "The current page has already been observed by the system; choose a real bounded action, complete, blocked, or needs-confirmation.",
       "Every action that claims a result must bind at least one deterministic oracle.",
       "If the goal is complete return complete. If facts are insufficient return blocked or needs-confirmation.",
       "Knowledge toolRequests and proposedActions must be empty; browser actions belong only in actions."
@@ -300,7 +286,7 @@ export async function decideNextBrowserActions(input: {
       status: "act | complete | blocked | needs-confirmation",
       summary: "short plain-language sentence",
       actions: [{
-        action: "click-control | fill-control | select-control | check-control | press-key | scroll-to-control | wait-for-control | navigate-route | submit-form | observe-page | evaluate-oracle",
+        action: "click-control | fill-control | select-control | check-control | press-key | scroll-to-control | wait-for-control | navigate-route | submit-form | evaluate-oracle",
         controlId: "a supplied controlId or null",
         valueRef: "testData.* | credential.* | fixture.* | null",
         checked: "boolean or null",
@@ -313,7 +299,16 @@ export async function decideNextBrowserActions(input: {
         risk: "low | medium | high | forbidden",
         timeoutMs: "integer or null"
       }],
-      oracles: [{ id: "oracle id", type: "allowed dynamic oracle type", description: "machine-checkable assertion" }],
+      oracles: [{
+        id: "oracle id",
+        type: "allowed dynamic oracle type",
+        description: "machine-checkable assertion",
+        controlId: "supplied controlId or null",
+        operator: "equals | contains | not-contains | null",
+        expected: "the exact allowed expected value for this oracle type; null only for network",
+        operationId: "registered operation id for network, otherwise null",
+        expectedStatus: "HTTP status for network or null"
+      }],
       evidenceRefs: "only supplied evidence ids",
       userQuestion: "string or null",
       knowledge: {
@@ -321,7 +316,7 @@ export async function decideNextBrowserActions(input: {
         toolRequests: [], blockingQuestions: [], proposedActions: []
       }
     },
-    forbiddenLegacyFields: ["boundOracles", "selector", "xpath", "javascript", "command", "url"],
+    forbiddenFields: ["selector", "xpath", "javascript", "command", "url"],
     allowedOracleTypes: {
       "element-state": { controlId: "supplied controlId", expected: "visible | hidden | enabled | disabled" },
       text: { controlId: "optional supplied controlId", operator: "equals | contains | not-contains", expected: "text" },
@@ -347,10 +342,26 @@ export async function decideNextBrowserActions(input: {
     totalTimeoutMs: 35_000,
     transportPreference: "non-stream-retry",
     jsonSchema: { name: "browser_action_decision", schema: outputJsonSchema },
-    context: { purpose: "browser-action", runId: input.observation.runId },
+    context: {
+      purpose: "browser-action",
+      runId: input.observation.runId,
+      budgetScopeId: input.coverageItemId
+    },
+    // Browser decisions are budgeted per CoverageItem. The parent Run still
+    // aggregates actual usage for observability, but a planning/login call can
+    // no longer exhaust every later business path before it is attempted.
+    budget: llmBudgetSchema.parse({
+      maxBrowserActionCalls: 6,
+      // This is an independent per-CoverageItem allowance, not the parent
+      // run's aggregate usage. A normal page path needs several
+      // observe/decide cycles; 12k allowed one complete Codex decision but
+      // rejected the second during conservative preflight reservation.
+      maxTotalTokens: 30_000,
+      totalTimeoutMs: 120_000
+    }),
     knowledgeContext: context,
     maxToolRounds: 0,
-    parseOutput: (text) => outputSchema.parse(normalizeNullableFields(JSON.parse(text), input.observation.evidenceRefs))
+    parseOutput: (text) => parseBrowserDecisionProviderOutput(text, input.observation)
   });
   const parsedOracles = result.value.oracles.map((oracle) => dynamicOracleSchema.parse(oracle));
   const oracleIds = new Set(parsedOracles.map((oracle) => oracle.id));

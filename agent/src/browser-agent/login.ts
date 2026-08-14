@@ -1,13 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { browserActionDecisionSchema, type BrowserObservation } from "@ai-test-officer/contracts";
 
-function observedLoginForm(observation: BrowserObservation) {
+export function observedLoginForm(observation: BrowserObservation) {
   const actionable = observation.controls.filter((control) => control.visible && !control.disabled && !control.obscured);
   const password = actionable.find((control) => control.kind === "input" && control.inputType === "password");
   if (!password) return undefined;
   const username = actionable.find((control) => control.kind === "input" && control.controlId !== password.controlId && control.valueState !== "nonempty" && /email|user|account|login|账号|邮箱/i.test([control.inputType, control.accessibleName, control.label, control.testId].filter(Boolean).join(" ")));
   const submit = actionable.find((control) => control.kind === "button" && /sign\s*in|log\s*in|login|登录/i.test([control.accessibleName, control.label, control.testId].filter(Boolean).join(" ")));
   return submit ? { username, password, submit, passwordNeedsValue: password.valueState !== "nonempty" } : undefined;
+}
+
+/** Single evidence-grounded authentication classifier shared by browser
+ * planning and Graph recovery. A flow title or an LLM explanation is not
+ * authentication evidence. */
+export function observationShowsAuthenticationBoundary(observation?: BrowserObservation) {
+  if (!observation) return false;
+  if (observation.failedRequests.some((request) => request.status === 401 || request.status === 403)) return true;
+  if (observedLoginForm(observation)) return true;
+  const pageSignal = [observation.finalUrl, observation.title, observation.bodyTextSample].join(" ");
+  return /\/(?:sign[\s-]?in|login|auth)(?:[/?#]|$)|\bsign[\s-]?in\b|\blog[\s-]?in\b|登录|账号登录|身份验证/i.test(pageSignal);
 }
 
 /** Deterministic, evidence-grounded login continuation. The LLM never

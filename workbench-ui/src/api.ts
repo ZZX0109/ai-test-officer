@@ -98,6 +98,43 @@ export function sendRunBrowserInput(runId: string, input: { kind: "click" | "typ
   return request<{ observation: BrowserObservation }>(`/v1/runs/${encodeURIComponent(runId)}/browser-input`, { method: "POST", body: JSON.stringify(input) });
 }
 
+/**
+ * Opens the authoritative Playwright frame stream. Frames are length-prefixed
+ * JPEG payloads drawn directly onto a canvas by the Workbench; this is not the
+ * evidence screenshot endpoint and does not poll or mount image URLs.
+ */
+export async function streamRunBrowserFrames(
+  runId: string,
+  onFrame: (frame: Uint8Array) => Promise<void> | void,
+  signal: AbortSignal
+) {
+  const response = await fetch(`${AGENT_URL}/v1/runs/${encodeURIComponent(runId)}/browser-live`, {
+    credentials: "include",
+    headers: authenticatedHeaders(),
+    signal
+  });
+  if (!response.ok || !response.body) throw new Error(`共享浏览器连接失败（${response.status}）`);
+  const reader = response.body.getReader();
+  let pending = new Uint8Array(0);
+  while (!signal.aborted) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value?.length) continue;
+    const merged = new Uint8Array(pending.length + value.length);
+    merged.set(pending);
+    merged.set(value, pending.length);
+    pending = merged;
+    while (pending.length >= 4) {
+      const length = new DataView(pending.buffer, pending.byteOffset, 4).getUint32(0);
+      if (length <= 0 || length > 16 * 1024 * 1024) throw new Error("共享浏览器返回了无效画面");
+      if (pending.length < length + 4) break;
+      const frame = pending.slice(4, length + 4);
+      pending = pending.slice(length + 4);
+      await onFrame(frame);
+    }
+  }
+}
+
 export function getRunRecoveryActions(runId: string) {
   return request<{
     decisions: Array<Record<string, unknown>>;
@@ -433,12 +470,17 @@ interface RunTargetPayload {
   executionMode?: "oci" | "trusted-local";
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const headers = new Headers(options?.headers);
-  headers.set("content-type", "application/json");
+function authenticatedHeaders(initial?: HeadersInit) {
+  const headers = new Headers(initial);
   if (AGENT_TOKEN) headers.set("x-agent-token", AGENT_TOKEN);
   const accessToken = getAccessToken();
   if (accessToken) headers.set("authorization", `Bearer ${accessToken}`);
+  return headers;
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers = authenticatedHeaders(options?.headers);
+  headers.set("content-type", "application/json");
   const method = (options?.method ?? "GET").toUpperCase();
   const assistantMessageRequest = path === "/api/assistant/chat";
   // During local development the Agent can briefly restart after a contracts
@@ -842,6 +884,7 @@ export function createVisualRun(
     coverageInventory?: Array<{
       id: string;
       title: string;
+      status?: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
       kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
       target: string;
       sourceNodeIds: string[];
@@ -869,8 +912,18 @@ export function createVisualRun(
         scenarioId,
         coverageScenarioIds: context.coverageScenarioIds ?? (scenarioId ? [scenarioId] : []),
         coverageMode: context.coverageMode ?? ((context.coverageScenarioIds?.length ?? 0) > 1 ? "full" : "targeted"),
-        coverageInventory: context.coverageInventory ?? [],
+        coverageInventory: (context.coverageInventory ?? []).map((item) => ({
+          ...item,
+          // Runtime-observed paths (for example an injected login gate) may
+          // have no static code node. They still have one observation source;
+          // normalize legacy cached plans before they reach the strict Run
+          // contract instead of rejecting the entire automation batch.
+          sourceCount: Math.max(1, item.sourceCount || item.sourceNodeIds.length || 1)
+        })),
         dynamicBrowser: context.dynamicBrowser ?? false,
+        // This API is called only after the operator pressed "确认并执行".
+        // Persist that decision atomically with the active Graph run.
+        confirmedExecution: true,
         requirement: context.requirement,
         diff: context.diff,
         // The conversation planner and the durable Graph must use the same
@@ -1279,7 +1332,7 @@ export async function startProjectAsync(id: string) {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       await waitForAgentReady(4_000);
-      return await request<{ accepted: boolean; runtime: ProjectRuntimeStatus }>(`/api/projects/${id}/start-async`, { method: "POST" });
+      return await request<{ accepted: boolean; reused?: boolean; runtime: ProjectRuntimeStatus }>(`/api/projects/${id}/start-async`, { method: "POST" });
     } catch (error) {
       lastError = error;
       if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 500));

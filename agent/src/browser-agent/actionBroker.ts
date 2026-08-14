@@ -12,7 +12,7 @@ import {
 } from "@ai-test-officer/contracts";
 import { appendEvidence, getReportsDir } from "../evidenceStore.js";
 import {
-  acquireBrowserControl,
+  acquireBrowserControlWhenAvailable,
   commitBrowserAgentArtifact,
   dynamicBrowserScenarioId,
   getManagedBrowserSession,
@@ -35,9 +35,11 @@ function controlDescription(control: BrowserControl) {
 export function browserActionPolicy(action: BrowserAgentAction, control?: BrowserControl) {
   if (action.risk === "forbidden") return { allowed: false, confirmation: false, code: "browser_action_forbidden" };
   if (action.action === "fill-control" && credentialPattern.test(action.valueRef)) return { allowed: false, confirmation: true, code: "browser_credential_confirmation_required" };
-  if (action.action === "navigate-route" && action.risk !== "low") return { allowed: false, confirmation: true, code: "browser_navigation_confirmation_required" };
   if (control && destructivePattern.test(`${controlDescription(control)} ${action.purpose}`)) return { allowed: false, confirmation: true, code: "browser_destructive_confirmation_required" };
-  if (action.risk === "high") return { allowed: false, confirmation: true, code: "browser_high_risk_confirmation_required" };
+  // Registered routes are checked again against the session's allowed origins
+  // by executeAction. Ordinary observed controls therefore do not need a
+  // second confirmation merely because the model conservatively labelled the
+  // action as medium/high risk. Irreversible controls are still caught above.
   return { allowed: true, confirmation: false };
 }
 
@@ -192,7 +194,7 @@ async function executeAction(action: BrowserAgentAction, before: BrowserObservat
   const managed = getManagedBrowserSession(action.runId);
   if (!managed) throw new Error("browser_session_not_active");
   const page = managed.runtime.page;
-  if (action.action === "observe-page" || action.action === "evaluate-oracle") return;
+  if (action.action === "evaluate-oracle") return;
   if (action.action === "navigate-route") {
     const route = managed.routes.get(action.routeId);
     if (!route) throw new Error("browser_route_not_allowed");
@@ -221,6 +223,82 @@ async function executeAction(action: BrowserAgentAction, before: BrowserObservat
   }
 }
 
+/**
+ * Wait for the concrete state change promised by the action before minting the
+ * authoritative "after" observation.  A generic network-idle wait is not
+ * sufficient for SPA forms: it can resolve before React starts the request.
+ * That used to produce a stale /signin DOM followed by a post-login screenshot
+ * and made a successful login look like an Oracle failure.
+ */
+async function waitForExpectedPageChange(
+  action: BrowserAgentAction,
+  before: BrowserObservation,
+  oracles: DynamicOracle[]
+) {
+  const managed = getManagedBrowserSession(action.runId);
+  if (!managed) throw new Error("browser_session_not_active");
+  const page = managed.runtime.page;
+  const relevant = oracles.filter((oracle) => action.oracleIds.includes(oracle.id));
+  const timeout = Math.max(500, Math.min(action.timeoutMs, 10_000));
+  const waits: Array<Promise<unknown>> = [];
+
+  for (const oracle of relevant) {
+    if (oracle.type === "url") {
+      waits.push(page.waitForFunction(
+        ({ operator, expected }) => {
+          const actual = window.location.href;
+          if (operator === "equals") return actual === expected;
+          if (operator === "contains") return actual.includes(expected);
+          return !actual.includes(expected);
+        },
+        { operator: oracle.operator, expected: oracle.expected },
+        { timeout }
+      ));
+      continue;
+    }
+    if (oracle.type === "element-state" || oracle.type === "input-state" || (oracle.type === "text" && oracle.controlId)) {
+      const controlId = oracle.controlId;
+      if (!controlId) continue;
+      const resolved = await resolveControlLocator(before, controlId).catch(() => undefined);
+      if (!resolved) continue;
+      if (oracle.type === "element-state") {
+        if (oracle.expected === "hidden") waits.push(resolved.locator.waitFor({ state: "hidden", timeout }));
+        else if (oracle.expected === "visible") waits.push(resolved.locator.waitFor({ state: "visible", timeout }));
+        else if (oracle.expected === "enabled") waits.push(resolved.locator.waitFor({ state: "visible", timeout }).then(() => resolved.locator.isEnabled({ timeout })).then((enabled) => { if (!enabled) throw new Error("browser_control_not_enabled"); }));
+        else waits.push(resolved.locator.waitFor({ state: "visible", timeout }).then(() => resolved.locator.isDisabled({ timeout })).then((disabled) => { if (!disabled) throw new Error("browser_control_not_disabled"); }));
+      } else if (oracle.type === "input-state") {
+        // `fill()` itself waits for the value assignment. Keep the locator
+        // alive through the next paint; the persisted after-observation owns
+        // the actual nonempty/empty assertion without reading secret content.
+        waits.push(resolved.locator.waitFor({ state: "visible", timeout }));
+      } else {
+        waits.push(resolved.locator.waitFor({ state: "visible", timeout }));
+      }
+    }
+  }
+
+  // When no Oracle exposes a directly waitable locator, wait for a real URL
+  // or visible document change.  This is deliberately based on browser facts,
+  // not a fixed sleep.
+  if (!waits.length && ["click-control", "submit-form", "navigate-route", "press-key"].includes(action.action)) {
+    waits.push(page.waitForFunction(
+      ({ url, text }) => {
+        const current = (document.body?.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 4_000);
+        return window.location.href !== url || current !== text;
+      },
+      { url: before.finalUrl, text: before.bodyTextSample },
+      { timeout }
+    ));
+  }
+
+  if (waits.length) await Promise.allSettled(waits);
+  await page.waitForLoadState("domcontentloaded", { timeout: Math.min(timeout, 3_000) }).catch(() => undefined);
+  await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 3_000) }).catch(() => undefined);
+  // Give React one paint after the awaited state change so DOM and screenshot
+  // are sampled from the same rendered state.
+  await page.waitForTimeout(150);
+}
+
 export async function executeBrowserAgentAction(input: {
   action: BrowserAgentAction;
   oracles: DynamicOracle[];
@@ -235,9 +313,7 @@ export async function executeBrowserAgentAction(input: {
   if (source.attemptId !== action.attemptId) throw new Error("browser_action_cross_attempt");
   const managed = getManagedBrowserSession(action.runId);
   if (!managed) throw new Error("browser_session_not_active");
-  await acquireBrowserControl(action.runId, "agent").catch((error) => {
-    if (!(error instanceof Error) || error.message !== "browser_control_owned_by_agent") throw error;
-  });
+  await acquireBrowserControlWhenAvailable(action.runId, "agent");
   const controlId = "controlId" in action ? action.controlId : undefined;
   const control = controlId ? source.controls.find((item) => item.controlId === controlId) : undefined;
   const policy = browserActionPolicy(action, control);
@@ -267,8 +343,7 @@ export async function executeBrowserAgentAction(input: {
       throw new Error("browser_control_binding_stale");
     }
     await executeAction(action, fresh, input.resolveValue);
-    await managed.runtime.page.waitForLoadState("domcontentloaded", { timeout: 2_000 }).catch(() => undefined);
-    await managed.runtime.page.waitForTimeout(250);
+    await waitForExpectedPageChange(action, fresh, input.oracles);
     const after = await observeManagedBrowserSession({ runId: action.runId, coverageItemId: action.coverageItemId });
     const afterDom = await observationEvidence(after, action.actionId, "after");
     const afterScreenshot = await screenshotEvidence(action.runId, action.attemptId, action.actionId, "after").catch(() => undefined);

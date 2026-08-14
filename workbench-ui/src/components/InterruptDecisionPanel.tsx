@@ -93,6 +93,15 @@ export function InterruptDecisionPanel({
   const sandboxBlocked = interrupt.context?.sandboxBlocked === true;
   const selectedOption = options.find((option) => option.value === selected);
   const messageRequired = REQUIRES_MESSAGE.has(selected) && message.trim().length === 0;
+  const userAction = isCredential
+    ? (hasSavedCredential ? "确认使用已保存的测试账号，系统会继续登录。" : "填写本次测试账号和密码后确认。")
+    : owner === "agent"
+      ? "选择是否允许系统在沙盒中处理；原项目不会被修改。"
+      : owner === "environment"
+        ? "确认恢复沙盒，或补充项目启动所需条件。"
+        : owner === "developer"
+          ? "查看修改原因与验证范围，再决定是否进入沙盒修复。"
+          : "选择下面的处理方式后继续。";
 
   const submit = async (decision: string) => {
     if (busy) return;
@@ -128,8 +137,15 @@ export function InterruptDecisionPanel({
         <span className={`interrupt-decision-owner interrupt-decision-owner-${owner}`}>{ownerLabel}</span>
       </header>
 
-      <p className="interrupt-decision-problem">{interrupt.detail}</p>
+      <div className="interrupt-decision-user-summary">
+        <p><strong>遇到的问题：</strong>{interrupt.detail}</p>
+        <p><strong>为什么暂停：</strong>{ownerLabel}必须在继续前处理这个条件，系统没有把它算作测试通过。</p>
+        <p><strong>需要你做什么：</strong>{userAction}</p>
+      </div>
 
+      {(diagnoses.length || suggested || validation || evidenceRefs.length) ? (
+        <details className="interrupt-decision-technical">
+          <summary>查看诊断与证据</summary>
       {diagnoses.length ? (
         <div className="interrupt-decision-block">
           <span className="interrupt-decision-label">系统已完成的诊断</span>
@@ -159,6 +175,21 @@ export function InterruptDecisionPanel({
         </p>
       ) : null}
 
+      {evidenceRefs.length && onOpenEvidence ? (
+        <div className="interrupt-decision-block">
+          <span className="interrupt-decision-label">支撑证据</span>
+          <ul className="interrupt-decision-evidence">
+            {evidenceRefs.slice(0, 8).map((evidenceId) => (
+              <li key={evidenceId}>
+                <button type="button" onClick={() => onOpenEvidence(evidenceId)}>{evidenceId}</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+        </details>
+      ) : null}
+
       {sandboxBlocked ? (
         <p className="interrupt-decision-warning" role="note">
           自动修复需要沙盒写入权限。请在权限配置中放行后再选择「由系统修复」。
@@ -183,21 +214,6 @@ export function InterruptDecisionPanel({
           </div>
         ) : null}
       </dl>
-
-      {evidenceRefs.length && onOpenEvidence ? (
-        <div className="interrupt-decision-block">
-          <span className="interrupt-decision-label">支撑证据</span>
-          <ul className="interrupt-decision-evidence">
-            {evidenceRefs.slice(0, 8).map((evidenceId) => (
-              <li key={evidenceId}>
-                <button type="button" onClick={() => onOpenEvidence(evidenceId)}>
-                  {evidenceId}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
 
       {isCredential && hasSavedCredential ? (
         <p className="interrupt-decision-saved-credential" role="note">

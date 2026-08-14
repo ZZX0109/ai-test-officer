@@ -83,11 +83,9 @@ export interface AgentGraphState extends AgentGraphInput {
   /** Pending independent coverage paths after a repair/retry. */
   remainingPathCount?: number;
   planningTerminal?: boolean;
-  /**
-   * Discovery is a hard precondition for active full-browser planning.  A
-   * blocked/failed smoke probe ends the planning branch before coverage or an
-   * LLM planner can expand it.
-   */
+  /** True only when no application document can be handed to execution. A
+   * committed SPA with controls still loading is not terminal; the long-lived
+   * browser Agent performs the authoritative runtime observation. */
   discoveryTerminal?: boolean;
   nodeAttempt?: number;
   inputHash?: string;
@@ -373,12 +371,9 @@ function discoveryStatus(state: Pick<AgentGraphState, "coverageMap">) {
   return typeof status === "string" ? status : undefined;
 }
 
-/**
- * Active mode must not fan out coverage from a page which has not completed a
- * real browser smoke.  "waiting" is recoverable and therefore checkpoints as
- * an interrupt; "blocked"/"failed" are routed straight to finalize.  Shadow
- * mode intentionally keeps the historical linear flow for comparison.
- */
+/** Active mode preserves the static plan even when runtime Discovery needs
+ * recovery. Only an actual terminal runtime condition is routed away from the
+ * browser Agent; a committed cold-loading SPA is handled by execution. */
 function discoveryNode(hooks: AgentGraphHooks) {
   return async (state: AgentGraphState) => {
     if (state.mode === "shadow") return makeNode("discover", hooks.discover, hooks)(state);
@@ -890,10 +885,21 @@ export function createAgentOrchestrationGraph(input: {
         progress: 0,
         tokenUsage: 0,
         updatedAt: now()
-      }, { configurable: { thread_id: payload.runId } });
+      }, {
+        configurable: { thread_id: payload.runId },
+        // One browser action spans observe/decide/authorize/execute/verify/
+        // route nodes. The product budget permits up to 20 actions, so the
+        // LangGraph default of 25 supersteps terminated valid autonomous runs
+        // after merely filling login fields. Business budgets remain the
+        // authoritative loop bound; this ceiling only stays above them.
+        recursionLimit: 200
+      });
     },
     async resume(runId: string, value: Record<string, unknown>) {
-      return graph.invoke(new Command({ resume: value }), { configurable: { thread_id: runId } });
+      return graph.invoke(new Command({ resume: value }), {
+        configurable: { thread_id: runId },
+        recursionLimit: 200
+      });
     },
     async state(runId: string) {
       const snapshot = await graph.getState({ configurable: { thread_id: runId } });

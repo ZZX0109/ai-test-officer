@@ -269,7 +269,12 @@ export type ProjectManifest = z.infer<typeof projectManifestSchema>;
 const transitions: Record<RunState, Partial<Record<RunEventType, RunState>>> = {
   draft: { run_cancelled: "cancelled" },
   planning: { plan_generated: "awaiting-plan-approval", human_review_requested: "awaiting-human-review", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
-  "awaiting-plan-approval": { plan_approved: "awaiting-permission", run_cancelled: "cancelled" },
+  "awaiting-plan-approval": {
+    plan_approved: "awaiting-permission",
+    run_failed: "failed",
+    run_blocked: "blocked",
+    run_cancelled: "cancelled"
+  },
   "awaiting-permission": { permission_granted: "queued", run_cancelled: "cancelled", run_blocked: "blocked" },
   // Queueing is a durable checkpoint. Pausing here prevents a worker race and
   // lets a user approve a resume after a service restart without pretending a
@@ -415,6 +420,7 @@ export const llmCallSchema = z.object({
   runId: z.string().min(1).optional(),
   experimentId: z.string().min(1).optional(),
   purpose: z.enum(["planning", "browser-action", "judging", "triage", "repairing", "assistant"]),
+  budgetScopeId: z.string().min(1).max(300).optional(),
   provider: z.enum(["openai-compatible", "openai", "anthropic", "openrouter", "custom"]),
   model: z.string().min(1),
   requestedModel: z.string().min(1).optional(),
@@ -844,7 +850,12 @@ export function resolveFinalStatus(input: {
   if (input.machineGate.status === "blocked") return "blocked";
   if (input.machineGate.status === "needs-human-review") return "needs-human-review";
   if (input.humanDecision?.status === "blocked") return "fail";
-  if (!input.judgeRecommendation || input.judgeRecommendation.status === "needs-human-review") {
+  // Judge is selective advisory logic, not a mandatory approval hop. A fully
+  // grounded passing Machine Gate completes deterministically when no Judge
+  // was routed. Only an actual conflicting/uncertain Judge recommendation
+  // creates a human-review state.
+  if (!input.judgeRecommendation) return "pass";
+  if (input.judgeRecommendation.status === "needs-human-review") {
     return input.humanDecision?.status === "approved" || input.humanDecision?.status === "accepted-risk" ? "pass" : "needs-human-review";
   }
   if (input.judgeRecommendation.status === "fail") return "needs-human-review";
@@ -1243,6 +1254,28 @@ export const llmBudgetLedgerSchema = z.object({
     wallClockMs: z.number().int().nonnegative(),
     estimatedCostUsd: z.number().nonnegative().nullable()
   }),
+  scopes: z.record(z.object({
+    reserved: z.object({
+      plannerCalls: z.number().int().nonnegative(),
+      browserActionCalls: z.number().int().nonnegative().default(0),
+      judgeCalls: z.number().int().nonnegative(),
+      triageCalls: z.number().int().nonnegative(),
+      repairCalls: z.number().int().nonnegative(),
+      tokens: z.number().int().nonnegative(),
+      wallClockMs: z.number().int().nonnegative(),
+      estimatedCostUsd: z.number().nonnegative().nullable()
+    }),
+    consumed: z.object({
+      plannerCalls: z.number().int().nonnegative(),
+      browserActionCalls: z.number().int().nonnegative().default(0),
+      judgeCalls: z.number().int().nonnegative(),
+      triageCalls: z.number().int().nonnegative(),
+      repairCalls: z.number().int().nonnegative(),
+      tokens: z.number().int().nonnegative(),
+      wallClockMs: z.number().int().nonnegative(),
+      estimatedCostUsd: z.number().nonnegative().nullable()
+    })
+  })).default({}),
   updatedAt: z.string().datetime()
 });
 export type LlmBudgetLedger = z.infer<typeof llmBudgetLedgerSchema>;
@@ -1287,6 +1320,10 @@ export const createRunRequestSchema = z.object({
     coverageInventory: z.array(z.object({
       id: z.string().min(1),
       title: z.string().min(1).max(500),
+      /** Static planning disposition. Only executable/auto-bindable entries
+       * may enter the browser action loop; the other entries stay visible in
+       * the coverage ledger as explicit blocked work. */
+      status: z.enum(["executable", "auto-bindable", "needs-input", "coverage-gap"]).default("auto-bindable"),
       kind: z.enum(["page", "component", "api", "scenario", "data", "background-task"]),
       target: z.string().min(1).max(1_000),
       sourceNodeIds: z.array(z.string().min(1)).max(2_000).default([]),
@@ -1298,6 +1335,9 @@ export const createRunRequestSchema = z.object({
     /** Force an uploaded project through the observation/action/oracle loop
      * instead of binding a stale registry scenario in the Workbench. */
     dynamicBrowser: z.boolean().default(false),
+    /** The operator already confirmed the Workbench plan and the low-risk
+     * capabilities carried by permissionProfile. */
+    confirmedExecution: z.boolean().default(false),
     /** Benchmark runs execute exactly one selected scenario so lane results remain comparable. */
     executionProfile: z.enum(["interactive", "benchmark"]).default("interactive"),
     requirement: z.string().optional(),

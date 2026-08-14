@@ -19,6 +19,8 @@ import {
   ,normalizeKnowledgeBoundaryOutput
   ,runOutcomeSummaryV2Schema
   ,agentMessageSchema
+  ,browserActionDecisionSchema
+  ,browserAgentActionSchema
 } from "../src/index.js";
 
 const artifact = artifactV2Schema.parse({
@@ -58,8 +60,13 @@ assert.deepEqual(validateEvidenceArtifactLinks({
 }, [artifact]), { valid: false, errors: [`${artifact.id}:run_mismatch`] });
 assert.equal(normalizeLegacyGateStatus("hold_for_review"), "needs-human-review");
 assert.equal(transitionRunState("awaiting-plan-approval", "plan_approved"), "awaiting-permission");
+assert.equal(transitionRunState("awaiting-plan-approval", "run_blocked"), "blocked");
+assert.equal(transitionRunState("awaiting-plan-approval", "run_failed"), "failed");
 assert.equal(transitionRunState("planning", "plan_generated"), "awaiting-plan-approval");
 assert.equal(transitionRunState("judging", "run_retrying"), "queued");
+assert.equal(resolveFinalStatus({
+  machineGate: { status: "pass", reasons: [], assertionFailures: [], evidenceComplete: true }
+}), "pass");
 assert.equal(resolveFinalStatus({
   machineGate: { status: "pass", reasons: [], assertionFailures: [], evidenceComplete: true },
   judgeRecommendation: { status: "needs-human-review", summary: "uncertain", evidenceRefs: [] }
@@ -70,6 +77,35 @@ assert.equal(resolveFinalStatus({
   humanDecision: { status: "approved", actor: "reviewer", reason: "override", decidedAt: "2026-07-14T00:00:00.000Z" }
 }), "fail");
 assert.equal(defaultResourceBudget.maxAttempts, 2);
+const browserDecisionWithReason = browserActionDecisionSchema.parse({
+  schemaVersion: "1.0",
+  decisionId: "decision-transient",
+  runId: "run-1",
+  attemptId: "attempt-1",
+  observationId: "observation-1",
+  status: "blocked",
+  reasonCode: "transient-observation",
+  summary: "The page is still settling.",
+  actions: [],
+  oracles: [],
+  evidenceRefs: [],
+  createdAt: "2026-07-14T00:00:00.000Z"
+});
+assert.equal(browserDecisionWithReason.reasonCode, "transient-observation");
+assert.equal(browserAgentActionSchema.safeParse({
+  actionId: "action-observe",
+  action: "observe-page",
+  runId: "run-1",
+  attemptId: "attempt-1",
+  coverageItemId: "coverage-1",
+  sourceObservationId: "observation-1",
+  sourcePageFingerprint: "a".repeat(64),
+  purpose: "legacy no-op",
+  expectedChange: "none",
+  oracleIds: [],
+  risk: "low",
+  timeoutMs: 1000
+}).success, false);
 const assistantMessage = agentMessageSchema.parse({
   id: "message-1",
   runId: "run-1",
@@ -112,6 +148,7 @@ const dynamicBrowserRun = createRunRequestSchema.parse({
     coverageInventory: [{
       id: "flow-auth",
       title: "登录业务路径",
+      status: "executable",
       kind: "page",
       target: "pages/auth",
       sourceNodeIds: ["node-login", "node-session"],
@@ -121,6 +158,7 @@ const dynamicBrowserRun = createRunRequestSchema.parse({
 });
 assert.equal(dynamicBrowserRun.input.dynamicBrowser, true);
 assert.equal(dynamicBrowserRun.input.coverageInventory[0]?.sourceCount, 2);
+assert.equal(dynamicBrowserRun.input.coverageInventory[0]?.status, "executable");
 assert.throws(() => createRunRequestSchema.parse({ idempotencyKey: "bad-budget", projectId: "demo", input: { llmBudget: { maxPlannerCalls: 3 } } }));
 assert.equal(fixtureVariantIdSchema.parse("fxv_0123456789abcdef"), "fxv_0123456789abcdef");
 assert.throws(() => fixtureVariantIdSchema.parse("wrong-status"));

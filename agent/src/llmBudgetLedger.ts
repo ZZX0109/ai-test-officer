@@ -42,6 +42,7 @@ function createLedger(runId: string, budget: LlmBudget): LlmBudgetLedger {
     budget,
     reserved: emptyUsage(),
     consumed: emptyUsage(),
+    scopes: {},
     updatedAt: new Date().toISOString()
   });
 }
@@ -50,30 +51,35 @@ function assertCapacity(
   ledger: LlmBudgetLedger,
   purpose: LlmCall["purpose"],
   estimate: { tokens: number; wallClockMs: number; estimatedCostUsd?: number | null },
-  countLogicalCall: boolean
+  countLogicalCall: boolean,
+  budget: LlmBudget,
+  scopeId?: string
 ) {
+  const usage = scopeId
+    ? ledger.scopes[scopeId] ?? { reserved: emptyUsage(), consumed: emptyUsage() }
+    : { reserved: ledger.reserved, consumed: ledger.consumed };
   const key = counterFor(purpose);
   if (key && countLogicalCall) {
-    const maximum = purpose === "planning" ? ledger.budget.maxPlannerCalls
-      : purpose === "browser-action" ? ledger.budget.maxBrowserActionCalls
-        : purpose === "judging" ? ledger.budget.maxJudgeCalls
-        : purpose === "triage" ? ledger.budget.maxTriageCalls
-          : ledger.budget.maxRepairCallsPerRound * ledger.budget.maxRepairRounds;
-    if ((ledger.reserved[key] ?? 0) + (ledger.consumed[key] ?? 0) + 1 > maximum) {
+    const maximum = purpose === "planning" ? budget.maxPlannerCalls
+      : purpose === "browser-action" ? budget.maxBrowserActionCalls
+        : purpose === "judging" ? budget.maxJudgeCalls
+        : purpose === "triage" ? budget.maxTriageCalls
+          : budget.maxRepairCallsPerRound * budget.maxRepairRounds;
+    if ((usage.reserved[key] ?? 0) + (usage.consumed[key] ?? 0) + 1 > maximum) {
       throw new Error(`llm_budget_exceeded:${purpose}_calls`);
     }
   }
-  if (ledger.reserved.tokens + ledger.consumed.tokens + estimate.tokens > ledger.budget.maxTotalTokens) {
+  if (usage.reserved.tokens + usage.consumed.tokens + estimate.tokens > budget.maxTotalTokens) {
     throw new Error("llm_budget_exceeded:total_tokens");
   }
-  if (ledger.reserved.wallClockMs + ledger.consumed.wallClockMs + estimate.wallClockMs > ledger.budget.totalTimeoutMs) {
+  if (usage.reserved.wallClockMs + usage.consumed.wallClockMs + estimate.wallClockMs > budget.totalTimeoutMs) {
     throw new Error("llm_budget_exceeded:wall_clock");
   }
   if (
-    ledger.budget.maxEstimatedCostUsd !== undefined
+    budget.maxEstimatedCostUsd !== undefined
     && estimate.estimatedCostUsd !== null
     && estimate.estimatedCostUsd !== undefined
-    && (ledger.reserved.estimatedCostUsd ?? 0) + (ledger.consumed.estimatedCostUsd ?? 0) + estimate.estimatedCostUsd > ledger.budget.maxEstimatedCostUsd
+    && (usage.reserved.estimatedCostUsd ?? 0) + (usage.consumed.estimatedCostUsd ?? 0) + estimate.estimatedCostUsd > budget.maxEstimatedCostUsd
   ) {
     throw new Error("llm_budget_exceeded:estimated_cost");
   }
@@ -83,9 +89,11 @@ function reserveInLedger(
   ledger: LlmBudgetLedger,
   purpose: LlmCall["purpose"],
   estimate: { tokens: number; wallClockMs: number; estimatedCostUsd?: number | null },
-  countLogicalCall: boolean
+  countLogicalCall: boolean,
+  budget: LlmBudget,
+  scopeId?: string
 ) {
-  assertCapacity(ledger, purpose, estimate, countLogicalCall);
+  assertCapacity(ledger, purpose, estimate, countLogicalCall, budget, scopeId);
   const reserved = { ...ledger.reserved };
   const key = counterFor(purpose);
   if (key && countLogicalCall) reserved[key] += 1;
@@ -94,7 +102,19 @@ function reserveInLedger(
   reserved.estimatedCostUsd = estimate.estimatedCostUsd === null || reserved.estimatedCostUsd === null
     ? null
     : (reserved.estimatedCostUsd ?? 0) + (estimate.estimatedCostUsd ?? 0);
-  return llmBudgetLedgerSchema.parse({ ...ledger, reserved, updatedAt: new Date().toISOString() });
+  const scopes = { ...ledger.scopes };
+  if (scopeId) {
+    const current = scopes[scopeId] ?? { reserved: emptyUsage(), consumed: emptyUsage() };
+    const scopedReserved = { ...current.reserved };
+    if (key && countLogicalCall) scopedReserved[key] += 1;
+    scopedReserved.tokens += estimate.tokens;
+    scopedReserved.wallClockMs += estimate.wallClockMs;
+    scopedReserved.estimatedCostUsd = estimate.estimatedCostUsd === null || scopedReserved.estimatedCostUsd === null
+      ? null
+      : (scopedReserved.estimatedCostUsd ?? 0) + (estimate.estimatedCostUsd ?? 0);
+    scopes[scopeId] = { ...current, reserved: scopedReserved };
+  }
+  return llmBudgetLedgerSchema.parse({ ...ledger, reserved, scopes, updatedAt: new Date().toISOString() });
 }
 
 function finalizeInLedger(
@@ -102,7 +122,8 @@ function finalizeInLedger(
   purpose: LlmCall["purpose"],
   estimate: { tokens: number; wallClockMs: number; estimatedCostUsd?: number | null },
   actual: { tokens: number; wallClockMs: number; estimatedCostUsd?: number | null },
-  countLogicalCall: boolean
+  countLogicalCall: boolean,
+  scopeId?: string
 ) {
   const reserved = { ...ledger.reserved };
   const consumed = { ...ledger.consumed };
@@ -121,7 +142,28 @@ function finalizeInLedger(
   consumed.estimatedCostUsd = actual.estimatedCostUsd === null || consumed.estimatedCostUsd === null
     ? null
     : (consumed.estimatedCostUsd ?? 0) + (actual.estimatedCostUsd ?? 0);
-  return llmBudgetLedgerSchema.parse({ ...ledger, reserved, consumed, updatedAt: new Date().toISOString() });
+  const scopes = { ...ledger.scopes };
+  if (scopeId) {
+    const current = scopes[scopeId] ?? { reserved: emptyUsage(), consumed: emptyUsage() };
+    const scopedReserved = { ...current.reserved };
+    const scopedConsumed = { ...current.consumed };
+    if (key && countLogicalCall) {
+      scopedReserved[key] = Math.max(0, (scopedReserved[key] ?? 0) - 1);
+      scopedConsumed[key] = (scopedConsumed[key] ?? 0) + 1;
+    }
+    scopedReserved.tokens = Math.max(0, scopedReserved.tokens - estimate.tokens);
+    scopedReserved.wallClockMs = Math.max(0, scopedReserved.wallClockMs - estimate.wallClockMs);
+    if (scopedReserved.estimatedCostUsd !== null && estimate.estimatedCostUsd !== null) {
+      scopedReserved.estimatedCostUsd = Math.max(0, scopedReserved.estimatedCostUsd - (estimate.estimatedCostUsd ?? 0));
+    }
+    scopedConsumed.tokens += actual.tokens;
+    scopedConsumed.wallClockMs += actual.wallClockMs;
+    scopedConsumed.estimatedCostUsd = actual.estimatedCostUsd === null || scopedConsumed.estimatedCostUsd === null
+      ? null
+      : (scopedConsumed.estimatedCostUsd ?? 0) + (actual.estimatedCostUsd ?? 0);
+    scopes[scopeId] = { reserved: scopedReserved, consumed: scopedConsumed };
+  }
+  return llmBudgetLedgerSchema.parse({ ...ledger, reserved, consumed, scopes, updatedAt: new Date().toISOString() });
 }
 
 async function withLocalLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
@@ -158,11 +200,13 @@ export interface LlmBudgetReservation {
   estimate: { tokens: number; wallClockMs: number; estimatedCostUsd?: number | null };
   budget: LlmBudget;
   countLogicalCall: boolean;
+  scopeId?: string;
 }
 
 export async function reserveLlmBudget(input: {
   runId: string;
   purpose: LlmCall["purpose"];
+  scopeId?: string;
   budget?: LlmBudget;
   estimatedTokens: number;
   estimatedWallClockMs: number;
@@ -179,7 +223,8 @@ export async function reserveLlmBudget(input: {
       wallClockMs: input.estimatedWallClockMs,
       estimatedCostUsd: input.estimatedCostUsd
     },
-    countLogicalCall: input.countLogicalCall !== false
+    countLogicalCall: input.countLogicalCall !== false,
+    ...(input.scopeId ? { scopeId: input.scopeId } : {})
   };
   if (process.env.DATABASE_URL) {
     const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
@@ -191,7 +236,7 @@ export async function reserveLlmBudget(input: {
         [input.runId]
       );
       const current = result.rows[0] ? llmBudgetLedgerSchema.parse(result.rows[0].payload) : createLedger(input.runId, budget);
-      const next = reserveInLedger(current, input.purpose, reservation.estimate, reservation.countLogicalCall);
+      const next = reserveInLedger(current, input.purpose, reservation.estimate, reservation.countLogicalCall, budget, reservation.scopeId);
       await client.query(
         `INSERT INTO llm_budget_ledger_v1 (run_id,payload,updated_at) VALUES ($1,$2::jsonb,$3)
          ON CONFLICT (run_id) DO UPDATE SET payload=EXCLUDED.payload,updated_at=EXCLUDED.updated_at`,
@@ -207,7 +252,7 @@ export async function reserveLlmBudget(input: {
     }
   } else {
     await withLocalLock(input.runId, async () => {
-      const next = reserveInLedger(await readLocal(input.runId, budget), input.purpose, reservation.estimate, reservation.countLogicalCall);
+      const next = reserveInLedger(await readLocal(input.runId, budget), input.purpose, reservation.estimate, reservation.countLogicalCall, budget, reservation.scopeId);
       await writeLocal(next);
     });
   }
@@ -233,7 +278,7 @@ export async function finalizeLlmBudget(
         [reservation.runId]
       );
       const current = result.rows[0] ? llmBudgetLedgerSchema.parse(result.rows[0].payload) : createLedger(reservation.runId, reservation.budget);
-      const next = finalizeInLedger(current, reservation.purpose, reservation.estimate, value, reservation.countLogicalCall);
+      const next = finalizeInLedger(current, reservation.purpose, reservation.estimate, value, reservation.countLogicalCall, reservation.scopeId);
       await client.query("UPDATE llm_budget_ledger_v1 SET payload=$2::jsonb,updated_at=$3 WHERE run_id=$1", [reservation.runId, JSON.stringify(next), next.updatedAt]);
       await client.query("COMMIT");
       return next;
@@ -251,7 +296,8 @@ export async function finalizeLlmBudget(
       reservation.purpose,
       reservation.estimate,
       value,
-      reservation.countLogicalCall
+      reservation.countLogicalCall,
+      reservation.scopeId
     );
     await writeLocal(next);
     return next;

@@ -7,7 +7,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { projectManifestSchema } from "@ai-test-officer/contracts";
 import { executeStructuredAction } from "../src/structuredActionExecutors.js";
-import { createManifestCoverageItems } from "../src/coverageStore.js";
+import { createDynamicBrowserCoverageItems, createManifestCoverageItems } from "../src/coverageStore.js";
 import type { ProjectConfig } from "../src/types.js";
 
 function sha256(value: string) {
@@ -15,6 +15,20 @@ function sha256(value: string) {
 }
 
 export async function testStructuredActionExecutors() {
+  const dynamicCoverage = createDynamicBrowserCoverageItems({
+    runId: "run-dynamic-dispositions",
+    paths: [
+      { id: "login", title: "登录", status: "auto-bindable" },
+      { id: "approval", title: "审批", status: "needs-input", riskReason: "需要审批人账号" },
+      { id: "unknown", title: "未知功能", status: "coverage-gap", riskReason: "缺少机器 Oracle" }
+    ]
+  });
+  assert.equal(dynamicCoverage.find((item) => item.flowId === "login")?.disposition, "pending");
+  assert.equal(dynamicCoverage.find((item) => item.flowId === "approval")?.disposition, "blocked");
+  assert.match(dynamicCoverage.find((item) => item.flowId === "approval")?.dispositionReason ?? "", /business_path_needs_input/);
+  assert.equal(dynamicCoverage.find((item) => item.flowId === "unknown")?.disposition, "blocked");
+  assert.match(dynamicCoverage.find((item) => item.flowId === "unknown")?.dispositionReason ?? "", /business_path_coverage_gap/);
+
   const directory = await mkdtemp(path.join(tmpdir(), "ato-structured-"));
   const databasePath = path.join(directory, "fixture.sqlite");
   const fixtureText = JSON.stringify({ query: "active" });

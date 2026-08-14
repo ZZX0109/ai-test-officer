@@ -56,6 +56,7 @@ import {
   ensureBrowserAgentSession,
   observeManagedBrowserSession,
   updateManagedBrowserSession,
+  reloadManagedBrowserSession,
   finalizeBrowserAgentTrace,
   dynamicBrowserScenarioId,
   closeBrowserAgentSession
@@ -67,10 +68,11 @@ import { persistDynamicBrowserResult } from "./browser-agent/resultBundle.js";
 import { getProjectLoginSecret, getProjectLoginSummary } from "./projectLoginStore.js";
 import { listCredentials } from "./credentialStore.js";
 import { artifactKindToIntegrityKind } from "./artifactIntegrity.js";
-import { credentialInterruptDecision } from "./browser-agent/login.js";
+import { credentialInterruptDecision, observationShowsAuthenticationBoundary } from "./browser-agent/login.js";
 
 type InteractiveCoverageInventoryItem = {
   id: string;
+  status?: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
   surfaces?: Array<"page" | "api" | "data" | "background-task">;
   preconditions?: string[];
   requiredEvidenceKinds?: Array<"screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log">;
@@ -91,8 +93,160 @@ function interactiveCoverageInventory(value: unknown): InteractiveCoverageInvent
     const requiredEvidenceKinds = Array.isArray(candidate.requiredEvidenceKinds)
       ? candidate.requiredEvidenceKinds.filter((kind): kind is NonNullable<InteractiveCoverageInventoryItem["requiredEvidenceKinds"]>[number] => ["screenshot", "dom", "network", "console", "trace", "video", "download", "operation-log", "report", "attachment", "source-patch", "changed-files-archive", "repair-validation-log"].includes(String(kind)))
       : undefined;
-    return [{ id: candidate.id, surfaces, preconditions, requiredEvidenceKinds }];
+    const status = candidate.status === "executable" || candidate.status === "auto-bindable"
+      || candidate.status === "needs-input" || candidate.status === "coverage-gap"
+      ? candidate.status
+      : undefined;
+    return [{ id: candidate.id, status, surfaces, preconditions, requiredEvidenceKinds }];
   });
+}
+
+export function coverageItemRepresentsAuthentication(item: { flowId: string; module: string } | undefined) {
+  if (!item) return false;
+  const text = `${item.flowId} ${item.module}`.trim();
+  const authSignal = /login|log-in|sign[ -]?in|auth(?:entication)?|登录|登陆|认证/i.test(text);
+  if (!authSignal) return false;
+  // "登录后创建订单" and "sign in then open settings" describe a business
+  // path whose prerequisite is authentication. Completing the login boundary
+  // must not complete that downstream path.
+  const downstreamSignal = /(?:登录|登陆|认证)(?:成功)?后|(?:after|then|post)[ _-]?(?:login|log-in|sign[ -]?in|auth)/i.test(text)
+    || /(?:login|log-in|sign[ -]?in|auth(?:entication)?)[ _-]?(?:then|and)[ _-]?(?:open|create|edit|delete|export|approve|view|search)/i.test(text);
+  return !downstreamSignal;
+}
+
+export function browserPathResultsAreGrounded(results: Array<{
+  status: string;
+  errorCode?: string;
+  oracleResults: Array<{ passed: boolean }>;
+}>) {
+  const authoritative = results.filter((item) => item.errorCode !== "browser_control_binding_stale");
+  return authoritative.length > 0
+    && authoritative.some((item) => item.oracleResults.length > 0)
+    && authoritative.every((item) => item.status === "completed" && item.oracleResults.every((oracle) => oracle.passed));
+}
+
+export function browserActionCompletesBusinessPath(result: {
+  status: string;
+  oracleResults: Array<{ oracleId: string; passed: boolean }>;
+} | undefined) {
+  if (!result || result.status !== "completed" || result.oracleResults.length === 0) return false;
+  // Username/password population and login submission are prerequisites. They
+  // must never be mistaken for proof that an unrelated business path was
+  // exercised. The submit boundary has its own explicit handling below.
+  if (result.oracleResults.some((oracle) => oracle.oracleId.startsWith("oracle_login_"))) return false;
+  return result.oracleResults.every((oracle) => oracle.passed);
+}
+
+async function finalizeBrowserExecutionProof(input: {
+  state: AgentGraphState;
+  coverageScope: "all" | "browser";
+  integrityId: string;
+  reasonPrefix?: "browser_";
+}) {
+  const [allCoverage, decisions, results, evidence, artifacts] = await Promise.all([
+    readCoverageItems(input.state.runId),
+    readBrowserDecisions(input.state.runId),
+    readBrowserActionResults(input.state.runId),
+    readEvidence(input.state.runId),
+    readBrowserArtifacts(input.state.runId)
+  ]);
+  const coverage = input.coverageScope === "browser"
+    ? allCoverage.filter((item) => item.surface === "page")
+    : allCoverage;
+  const coverageComplete = coverage.length > 0 && coverage.every((item) => item.disposition !== "pending");
+  const blockedCoverage = coverage.filter((item) => item.disposition === "blocked");
+  const executedResults = results.filter((item) => item.status === "completed");
+  const failedOracles = executedResults.flatMap((item) => item.oracleResults.filter((oracle) => !oracle.passed));
+  // A stale binding which is followed by a successful re-observation is an
+  // auditable retry, not a second terminal result. Both mixed and browser-only
+  // runs must apply this rule identically.
+  const nonRetryableFailures = results.filter((item) =>
+    item.status !== "completed" && item.errorCode !== "browser_control_binding_stale"
+  );
+  const executionSucceeded = executedResults.length > 0 && nonRetryableFailures.length === 0;
+  const requirementCovered = coverageComplete && blockedCoverage.length === 0
+    && coverage.every((item) => item.disposition === "executed");
+  const artifactKinds = new Set(artifacts.map((artifact) => artifact.kind));
+  const requiredKinds = ["screenshot", "dom", "trace", "operation-log"] as const;
+  const missingKinds = requiredKinds.filter((kind) => !artifactKinds.has(kind));
+  const evidenceByArtifact = new Map<string, string>();
+  for (const item of evidence) for (const artifactId of item.artifactIds ?? []) evidenceByArtifact.set(artifactId, item.id);
+  const artifactIntegrity = {
+    id: input.integrityId,
+    runId: input.state.runId,
+    generatedAt: new Date().toISOString(),
+    artifactRoot: "/artifacts" as const,
+    summary: { total: artifacts.length, present: artifacts.length, missing: 0, unreadable: 0, pathEscapes: 0, selfReferences: 0, hashMismatches: 0, hashed: artifacts.length },
+    items: artifacts.map((artifact) => ({
+      id: artifact.id,
+      artifactUri: artifact.storageUri,
+      kind: artifactKindToIntegrityKind(artifact.kind),
+      evidenceId: evidenceByArtifact.get(artifact.id),
+      status: "present" as const,
+      origin: artifact.origin,
+      sizeBytes: artifact.integrity.sizeBytes,
+      sha256: artifact.integrity.sha256
+    }))
+  };
+  const status: MachineGate["status"] = !coverageComplete || blockedCoverage.length > 0 || !executionSucceeded || missingKinds.length > 0
+    ? "blocked"
+    : failedOracles.length > 0 ? "fail" : "pass";
+  const failedEvidenceRefs = results
+    .filter((item) => item.status !== "completed" || item.oracleResults.some((oracle) => !oracle.passed))
+    .flatMap((item) => item.evidenceRefs);
+  const decisionEvidenceRefs = decisions.flatMap((item) => item.evidenceRefs);
+  const reasonEvidence = [...new Set([...failedEvidenceRefs, ...decisionEvidenceRefs])].slice(0, 8);
+  const prefix = input.reasonPrefix ?? "";
+  const reasons = [
+    ...(!coverageComplete ? [`${prefix}coverage_disposition_incomplete`] : []),
+    ...blockedCoverage.map((item) => `${prefix}coverage_blocked:${item.flowId}`),
+    ...(!executionSucceeded ? ["browser_action_execution_incomplete"] : []),
+    ...missingKinds.map((kind) => `required_artifact_missing:${kind}`),
+    ...failedOracles.map((oracle) => `oracle_failed:${oracle.oracleId}`)
+  ];
+  const draft: MachineGateDraft = {
+    status,
+    reasons,
+    reasonDetails: reasons.map((reason) => ({
+      code: reason.split(":")[0],
+      summary: reason,
+      evidenceRefs: reasonEvidence
+    })).filter((item) => item.evidenceRefs.length > 0),
+    assertionFailures: failedOracles.map((oracle) => oracle.oracleId)
+  };
+  const finalized = finalizeProofBundle({
+    draft,
+    runId: input.state.runId,
+    scenarioId: artifacts[0]?.scenarioId,
+    attemptId: input.state.currentAttemptId,
+    evidence,
+    artifactsV2: artifacts,
+    artifactIntegrity,
+    requiredArtifactKinds: [...requiredKinds],
+    machineGate: draft,
+    gateEligibleFacts: { executionSucceeded, requirementCovered }
+  });
+  const outcomeSummary = runOutcomeSummaryV2Schema.parse({
+    schemaVersion: "2.0",
+    schedulingCompleted: true,
+    executionStarted: results.length > 0,
+    executionSucceeded,
+    requirementCovered,
+    requirementPassed: requirementCovered && failedOracles.length === 0,
+    ...proofCredibility(finalized.verdict, finalized.machineGate, finalized.gateEligible),
+    finalStatus: finalized.machineGate.status
+  });
+  return {
+    coverage,
+    decisions,
+    results,
+    evidence,
+    artifacts,
+    artifactIntegrity,
+    finalized,
+    outcomeSummary,
+    executionSucceeded
+  };
 }
 
 /**
@@ -119,89 +273,11 @@ async function persistBrowserPhaseForAggregate(state: AgentGraphState) {
       payload: { browserAgent: true, mixedParentPhase: true }
     });
   }
-  const [coverage, decisions, results, evidence, artifacts] = await Promise.all([
-    readCoverageItems(state.runId),
-    readBrowserDecisions(state.runId),
-    readBrowserActionResults(state.runId),
-    readEvidence(state.runId),
-    readBrowserArtifacts(state.runId)
-  ]);
-  const browserCoverage = coverage.filter((item) => item.surface === "page");
-  const browserComplete = browserCoverage.length > 0 && browserCoverage.every((item) => item.disposition !== "pending");
-  const blockedCoverage = browserCoverage.filter((item) => item.disposition === "blocked");
-  const executedResults = results.filter((item) => item.status === "completed");
-  const failedOracles = executedResults.flatMap((item) => item.oracleResults.filter((oracle) => !oracle.passed));
-  const executionSucceeded = results.length > 0 && results.every((item) => item.status === "completed");
-  const requirementCovered = browserComplete && blockedCoverage.length === 0
-    && browserCoverage.every((item) => item.disposition === "executed");
-  const artifactKinds = new Set(artifacts.map((artifact) => artifact.kind));
-  const requiredKinds = ["screenshot", "dom", "trace", "operation-log"] as const;
-  const missingKinds = requiredKinds.filter((kind) => !artifactKinds.has(kind));
-  const evidenceByArtifact = new Map<string, string>();
-  for (const item of evidence) for (const artifactId of item.artifactIds ?? []) evidenceByArtifact.set(artifactId, item.id);
-  const artifactIntegrity = {
-    id: `${state.runId}_browser_phase_artifact_integrity`,
-    runId: state.runId,
-    generatedAt: new Date().toISOString(),
-    artifactRoot: "/artifacts" as const,
-    summary: { total: artifacts.length, present: artifacts.length, missing: 0, unreadable: 0, pathEscapes: 0, selfReferences: 0, hashMismatches: 0, hashed: artifacts.length },
-    items: artifacts.map((artifact) => ({
-      id: artifact.id,
-      artifactUri: artifact.storageUri,
-      kind: artifactKindToIntegrityKind(artifact.kind),
-      evidenceId: evidenceByArtifact.get(artifact.id),
-      status: "present" as const,
-      origin: artifact.origin,
-      sizeBytes: artifact.integrity.sizeBytes,
-      sha256: artifact.integrity.sha256
-    }))
-  };
-  const status: MachineGate["status"] = !browserComplete || blockedCoverage.length > 0 || !executionSucceeded || missingKinds.length > 0
-    ? "blocked"
-    : failedOracles.length > 0 ? "fail" : "pass";
-  const failedEvidenceRefs = results
-    .filter((item) => item.status !== "completed" || item.oracleResults.some((oracle) => !oracle.passed))
-    .flatMap((item) => item.evidenceRefs);
-  const fallbackEvidence = evidence.slice(-4).map((item) => item.id);
-  const reasonEvidence = [...new Set([...failedEvidenceRefs, ...fallbackEvidence])].slice(0, 8);
-  const reasons = [
-    ...(!browserComplete ? ["browser_coverage_disposition_incomplete"] : []),
-    ...blockedCoverage.map((item) => `browser_coverage_blocked:${item.flowId}`),
-    ...(!executionSucceeded ? ["browser_action_execution_incomplete"] : []),
-    ...missingKinds.map((kind) => `required_artifact_missing:${kind}`),
-    ...failedOracles.map((oracle) => `oracle_failed:${oracle.oracleId}`)
-  ];
-  const draft: MachineGateDraft = {
-    status,
-    reasons,
-    reasonDetails: reasons.map((reason) => ({
-      code: reason.split(":")[0],
-      summary: reason,
-      evidenceRefs: reasonEvidence.length ? reasonEvidence : evidence.map((item) => item.id).slice(-1)
-    })).filter((item) => item.evidenceRefs.length > 0),
-    assertionFailures: failedOracles.map((oracle) => oracle.oracleId)
-  };
-  const finalized = finalizeProofBundle({
-    draft,
-    runId: state.runId,
-    scenarioId: artifacts[0]?.scenarioId,
-    attemptId: state.currentAttemptId,
-    evidence,
-    artifactsV2: artifacts,
-    artifactIntegrity,
-    requiredArtifactKinds: [...requiredKinds],
-    machineGate: draft,
-    gateEligibleFacts: { executionSucceeded, requirementCovered }
-  });
-  const outcomeSummary = runOutcomeSummaryV2Schema.parse({
-    schemaVersion: "2.0",
-    schedulingCompleted: true,
-    executionStarted: results.length > 0,
-    executionSucceeded,
-    requirementCovered,
-    requirementPassed: requirementCovered && failedOracles.length === 0,
-    ...proofCredibility(finalized.verdict, finalized.machineGate, finalized.gateEligible),
-    finalStatus: finalized.machineGate.status
+  const { coverage: browserCoverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary, executionSucceeded } = await finalizeBrowserExecutionProof({
+    state,
+    coverageScope: "browser",
+    integrityId: `${state.runId}_browser_phase_artifact_integrity`,
+    reasonPrefix: "browser_"
   });
   const currentRun = await runEventStore.get(state.runId);
   const currentProject = state.projectId ? await getProject(state.projectId) : undefined;
@@ -341,6 +417,18 @@ export function requiresActiveBrowserDiscovery(
     && manifestBrowserCapability;
 }
 
+export function discoveryCanHandOffToDynamicBrowser(input: {
+  dynamicBrowser: boolean;
+  documentCommitted: boolean;
+  httpStatus?: number;
+}) {
+  const status = input.httpStatus ?? 200;
+  return input.dynamicBrowser
+    && input.documentCommitted
+    && status >= 200
+    && status < 400;
+}
+
 const MAX_RECOVERY_ATTEMPTS = {
   "retry-runtime": 2,
   "retry-discovery": 2,
@@ -416,7 +504,8 @@ function deterministicRecoveryDecision(state: AgentGraphState): RecoveryDecision
   } else if (/artifact[_-]?object|object[ _-]?store|minio|\bs3\b|econnrefused|fetch failed/i.test(lower)) {
     action = "blocked";
     userQuestion = "测试步骤已执行，但证据对象存储当前不可用；系统已阻止正式提交，不会将此问题归为被测项目缺陷。请恢复对象存储后新建或重试该路径。";
-  } else if (/login|sign in|登录|credential|凭据|401|403|unauthorized|未登录/i.test(lower)) {
+  } else if (observationShowsAuthenticationBoundary(state.browserObservation)
+    || (/credential|凭据|401|403|unauthorized|未登录/i.test(lower) && Boolean(state.browserObservation))) {
     action = "request-credentials";
     userQuestion = "页面要求登录，请配置测试账号后继续 Discovery。";
   } else if (state.discoveryTerminal === true) {
@@ -907,7 +996,7 @@ async function buildService() {
           smokeAttempts: 2,
           discoveryAttempts: 2
         });
-        const discovery = discoveryState(result);
+        let discovery = discoveryState(result);
         // Build the immutable run evidence before publishing the graph-level
         // observation so its references point to real Evidence IDs rather than
         // the page observation record itself.
@@ -954,6 +1043,26 @@ async function buildService() {
             createdAt: page.capturedAt
           }).catch(() => undefined);
         }
+        // A committed application document is sufficient to hand the page to
+        // the dynamic browser Agent. Static Discovery is an observation aid,
+        // not the execution authority: a cold SPA can legitimately expose no
+        // controls during this short probe and become actionable in the
+        // long-lived Playwright session. Requiring controls here trapped the
+        // Graph in retry-discovery/finalize before the browser Agent (and its
+        // LLM action loop) was ever created.
+        if (discoveryCanHandOffToDynamicBrowser({
+          dynamicBrowser: run.input.dynamicBrowser === true,
+          documentCommitted: result.observation?.navigation.documentCommitted === true,
+          httpStatus: result.observation?.navigation.httpStatus
+        })) {
+          discovery = {
+            ...discovery,
+            status: "ready",
+            reason: result.observation.document.interactiveElementCount > 0
+              ? `runtime_controls_ready:${discovery.reason ?? "page-observed"}`
+              : `runtime_document_committed_dynamic_binding:${discovery.reason ?? "controls-pending"}`
+          };
+        }
         // Promote the scan's real observations into evidence so the blocked gate
         // below is grounded rather than an evidence-free assertion.
         if (discovery.status === "ready") {
@@ -963,8 +1072,24 @@ async function buildService() {
           };
         }
         if (discovery.status === "waiting") {
-          // A login wall is a non-terminal, owner-tagged failure: persist a
-          // durable "configure credentials" plan so the workbench can reopen it.
+          const dynamicBrowserCanOwnLogin = run?.input.dynamicBrowser === true
+            && run.input.confirmedExecution === true
+            && state.permissionProfile.browserControl !== false;
+          // A login page is an observed application state, not a runtime
+          // failure. Once the operator confirmed a dynamic browser run, the
+          // shared Playwright session must continue into the browser Agent so
+          // it can use an already saved project credential or raise the real
+          // credential interrupt. The former compatibility branch stopped
+          // here and made the UI claim that testing was blocked before the
+          // login action broker was ever reached.
+          if (dynamicBrowserCanOwnLogin) {
+            return {
+              coverageMap: { ...baseCoverageMap, discovery: { ...discovery, evidence: discoveryEvidence } },
+              discoveryTerminal: false
+            };
+          }
+          // Non-interactive callers still need a durable owner-tagged repair
+          // plan because they cannot safely cross an authentication boundary.
           await persistRepairPlan({
             runId: state.runId,
             projectId: typeof run?.input.projectId === "string" ? run.input.projectId : undefined,
@@ -984,9 +1109,6 @@ async function buildService() {
           }).catch(() => undefined);
           return {
             coverageMap: { ...baseCoverageMap, discovery: { ...discovery, evidence: discoveryEvidence } },
-            // Preserve and show the static plan, but do not prepare the
-            // sandbox or execute browser actions until the credential/runtime
-            // recovery loop has produced a fresh ready observation.
             discoveryTerminal: true
           };
         }
@@ -1087,6 +1209,7 @@ async function buildService() {
               paths: run.plan.levels.flatMap((level) => level.paths).map((path) => ({
                 id: path.id,
                 title: path.title,
+                status: inventory.find((item) => item.id === path.id)?.status,
                 riskReason: `由动态浏览器 Agent 执行：${path.riskReason || path.steps.join(" → ")}`,
                 surface: inventory.find((item) => item.id === path.id)?.surfaces?.includes("page")
                   ? "page"
@@ -1217,7 +1340,7 @@ async function buildService() {
           const decision = browserActionDecisionSchema.parse({
             schemaVersion: "1.0", decisionId: `browser_decision_${randomUUID()}`,
             runId: state.runId, attemptId: observation.attemptId, observationId: observation.observationId,
-            status: "blocked", summary: "动态浏览器 Agent 已达到动作或重新绑定预算，停止循环以避免误操作。",
+            status: "blocked", reasonCode: "budget-exhausted", summary: "动态浏览器 Agent 已达到动作或重新绑定预算，停止循环以避免误操作。",
             actions: [], oracles: [], evidenceRefs: observation.evidenceRefs,
             userQuestion: "请查看当前页面和失败证据后决定是否继续。", createdAt: new Date().toISOString()
           });
@@ -1254,7 +1377,24 @@ async function buildService() {
         const item = coverage.find((entry) => entry.id === state.currentCoverageItemId);
         const prior = await readBrowserActionResults(state.runId);
         let decision: BrowserActionDecision;
-        try {
+        const transientPageFault = observation.controls.length === 0
+          && observation.failedRequests.some((request) => /ERR_NETWORK_CHANGED|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_TIMED_OUT|ERR_INTERNET_DISCONNECTED/i.test(request.failure ?? ""));
+        if (transientPageFault) {
+          decision = browserActionDecisionSchema.parse({
+            schemaVersion: "1.0",
+            decisionId: `browser_decision_${randomUUID()}`,
+            runId: state.runId,
+            attemptId: observation.attemptId,
+            observationId: observation.observationId,
+            status: "blocked",
+            reasonCode: "transient-observation",
+            summary: "页面资源加载期间网络发生变化，自动刷新同一浏览器会话后重新观测。",
+            actions: [],
+            oracles: [],
+            evidenceRefs: observation.evidenceRefs,
+            createdAt: new Date().toISOString()
+          });
+        } else try {
           decision = await decideNextBrowserActions({
             observation,
             coverageItemId: state.currentCoverageItemId,
@@ -1265,6 +1405,7 @@ async function buildService() {
           });
         } catch (error) {
           const code = error instanceof Error ? error.message : "browser_llm_decision_failed";
+          const retryableModelFailure = /fetch_failed|provider_|timeout|network|empty_response|responses_incomplete/i.test(code);
           decision = browserActionDecisionSchema.parse({
             schemaVersion: "1.0",
             decisionId: `browser_decision_${randomUUID()}`,
@@ -1272,14 +1413,19 @@ async function buildService() {
             attemptId: observation.attemptId,
             observationId: observation.observationId,
             status: "blocked",
+            reasonCode: retryableModelFailure ? "transient-model" : code.startsWith("llm_budget_exceeded") ? "budget-exhausted" : undefined,
             summary: code.startsWith("llm_budget_exceeded")
-              ? `浏览器 AI 已达到本次运行预算（${code}），剩余路径将明确标记为阻塞，不会伪装成已测试。`
-              : `浏览器 AI 决策失败：${code}`,
+              ? `当前业务路径已达到独立的浏览器 AI 预算（${code}），系统会保留该路径证据并继续处理其他路径。`
+              : retryableModelFailure
+                ? `浏览器模型调用暂时失败：${code}`
+                : `浏览器 AI 决策失败：${code}`,
             actions: [],
             oracles: [],
             evidenceRefs: observation.evidenceRefs,
-            userQuestion: code.startsWith("llm_budget_exceeded")
-              ? "如需继续，可新建一次定向测试运行，缩小测试范围。"
+            userQuestion: retryableModelFailure
+              ? undefined
+              : code.startsWith("llm_budget_exceeded")
+              ? "当前路径不会继续消耗预算；其他业务路径将继续执行。"
               : "系统已保留页面观测，请查看模型调用错误后重试。",
             createdAt: new Date().toISOString()
           });
@@ -1308,9 +1454,36 @@ async function buildService() {
         if (credentialAction && state.browserCredentialAuthorized === true) {
           return { browserActionAuthorized: true, browserDecision: { ...decision, status: "act" } };
         }
-        if (policy.allowed && decision.status !== "needs-confirmation") return { browserActionAuthorized: false };
+        if (credentialAction) {
+          const credentialMeta = await credentialInterruptMeta(state.projectId);
+          if (credentialMeta.hasSavedCredential) {
+            // The operator already granted browser control for this run and
+            // explicitly saved a project-scoped test account. Requiring a
+            // second confirmation for each username/password field leaves the
+            // autonomous loop parked on login even though all prerequisites
+            // are satisfied. The secret remains server-side and is injected
+            // only into this sandbox BrowserContext.
+            return {
+              browserActionAuthorized: true,
+              browserCredentialAuthorized: true,
+              browserDecision: { ...decision, status: "act", userQuestion: undefined }
+            };
+          }
+        }
+        if (policy.allowed) {
+          // The deterministic broker owns capability policy. A model may label
+          // an ordinary observed control conservatively as
+          // `needs-confirmation`, but that must not pause an autonomous test
+          // when the action is neither credential-bearing nor destructive.
+          // Sensitive cases have already been separated above and destructive
+          // controls produce `policy.confirmation=true`.
+          return {
+            browserActionAuthorized: true,
+            browserDecision: { ...decision, status: "act", userQuestion: undefined }
+          };
+        }
         if (!policy.confirmation && decision.status !== "needs-confirmation") {
-          return { browserActionAuthorized: false, browserDecision: { ...decision, status: "blocked", actions: [], summary: "浏览器动作被安全策略拒绝。" } };
+          return { browserActionAuthorized: false, browserDecision: { ...decision, status: "blocked", reasonCode: "policy-blocked", actions: [], summary: "浏览器动作被安全策略拒绝。" } };
         }
         const interrupt: AgentInterrupt = await (async () => {
           const meta = credentialAction ? await credentialInterruptMeta(state.projectId) : { hasSavedCredential: false };
@@ -1393,12 +1566,55 @@ async function buildService() {
         const priorResults = (await readBrowserActionResults(state.runId))
           .filter((item) => item.coverageItemId === state.currentCoverageItemId && (decision ? item.attemptId === decision.attemptId : true));
         const pathResults = priorResults;
+        const transientDecision = decision?.status === "blocked"
+          && (decision.reasonCode === "transient-observation" || decision.reasonCode === "transient-model");
+        if (transientDecision && (state.browserSession?.rebindCount ?? 0) < 2) {
+          const session = await reloadManagedBrowserSession(state.runId);
+          return {
+            browserSession: session,
+            browserDecision: undefined,
+            browserActionResult: undefined,
+            browserLoopComplete: false,
+            failure: undefined
+          };
+        }
         let terminalDisposition: "executed" | "blocked" | undefined;
         let dispositionReason: string | undefined;
-        if (decision?.status === "complete") {
-          const grounded = pathResults.length > 0
-            && pathResults.some((item) => item.oracleResults.length > 0)
-            && pathResults.every((item) => item.status === "completed" && item.oracleResults.every((oracle) => oracle.passed));
+        const completedLoginBoundary = result?.status === "completed"
+          && result.oracleResults.length > 0
+          && result.oracleResults.every((oracle) => oracle.passed)
+          && result.oracleResults.some((oracle) => oracle.oracleId === "oracle_login_submit_changes_page");
+        const currentCoverage = coverage[currentIndex];
+        const currentPathIsAuthentication = coverageItemRepresentsAuthentication(currentCoverage);
+        if (completedLoginBoundary && !currentPathIsAuthentication) {
+          // Authentication is a session prerequisite, not proof that an
+          // arbitrary business flow (approval, order creation, export, ...)
+          // was tested. Keep the current CoverageItem pending and observe the
+          // post-login page before asking for the first action of that flow.
+          return {
+            browserDecision: undefined,
+            browserActionResult: undefined,
+            browserLoopComplete: false,
+            failure: undefined
+          };
+        }
+        if (completedLoginBoundary) {
+          // The deterministic login helper has a terminal machine Oracle. Once
+          // it proves that the password field disappeared, this authentication
+          // path is complete. Asking the model for another action made it log
+          // out again and turned a successful login into a false blocker.
+          terminalDisposition = "executed";
+          dispositionReason = "已使用保存的测试账号登录，并验证登录页面已退出";
+        } else if (browserActionCompletesBusinessPath(result)) {
+          // A dynamic CoverageItem compiles to one bounded browser action and
+          // its declared machine Oracle. Once that proof is present, the path
+          // is complete. Previously the graph kept asking the model to explore
+          // unrelated controls until its budget expired, converting successful
+          // automation into a false blocked result.
+          terminalDisposition = "executed";
+          dispositionReason = "动态浏览器动作已执行，绑定的机器 Oracle 已通过";
+        } else if (decision?.status === "complete") {
+          const grounded = browserPathResultsAreGrounded(pathResults);
           terminalDisposition = grounded ? "executed" : "blocked";
           dispositionReason = grounded ? "动态浏览器动作和确定性 Oracle 已完成" : "浏览器 Agent 宣布完成，但缺少通过的确定性 Oracle";
         } else if (result?.status === "completed" && result.oracleResults.some((oracle) => !oracle.passed)) {
@@ -1423,19 +1639,6 @@ async function buildService() {
           attemptId: state.currentAttemptId,
           updatedAt: new Date().toISOString()
         };
-        if (decision?.status === "blocked" && /llm_budget_exceeded|达到本次运行预算/.test(decision.summary)) {
-          for (let index = 0; index < coverage.length; index += 1) {
-            if (coverage[index]?.disposition !== "pending" || coverage[index]?.surface !== "page") continue;
-            coverage[index] = {
-              ...coverage[index]!,
-              disposition: "blocked",
-              dispositionReason: "browser_agent_budget_exhausted",
-              scenarioId: dynamicBrowserScenarioId(state.runId),
-              attemptId: state.currentAttemptId,
-              updatedAt: new Date().toISOString()
-            };
-          }
-        }
         await saveCoverageItems(state.runId, coverage);
         // API/data/background items belong to their deterministic executors;
         // never ask the browser model to fake those checks through UI clicks.
@@ -1479,90 +1682,12 @@ async function buildService() {
               payload: { browserAgent: true }
             });
           }
-          const [coverage, decisions, results, evidence, artifacts] = await Promise.all([
-            readCoverageItems(state.runId),
-            readBrowserDecisions(state.runId),
-            readBrowserActionResults(state.runId),
-            readEvidence(state.runId),
-            readBrowserArtifacts(state.runId)
-          ]);
-          const coverageComplete = coverage.length > 0 && coverage.every((item) => item.disposition !== "pending");
-          const blockedCoverage = coverage.filter((item) => item.disposition === "blocked");
-          const executedResults = results.filter((item) => item.status === "completed");
-          const failedOracles = executedResults.flatMap((item) => item.oracleResults.filter((oracle) => !oracle.passed));
-          const executionSucceeded = results.length > 0 && results.every((item) => item.status === "completed");
-          const requirementCovered = coverageComplete && blockedCoverage.length === 0
-            && coverage.every((item) => item.disposition === "executed");
-          const artifactKinds = new Set(artifacts.map((artifact) => artifact.kind));
-          const requiredKinds = ["screenshot", "dom", "trace", "operation-log"] as const;
-          const missingKinds = requiredKinds.filter((kind) => !artifactKinds.has(kind));
-          const evidenceByArtifact = new Map<string, string>();
-          for (const item of evidence) for (const artifactId of item.artifactIds ?? []) evidenceByArtifact.set(artifactId, item.id);
-          const artifactIntegrity = {
-            id: `${state.runId}_dynamic_artifact_integrity`,
-            runId: state.runId,
-            generatedAt: new Date().toISOString(),
-            artifactRoot: "/artifacts" as const,
-            summary: { total: artifacts.length, present: artifacts.length, missing: 0, unreadable: 0, pathEscapes: 0, selfReferences: 0, hashMismatches: 0, hashed: artifacts.length },
-            items: artifacts.map((artifact) => ({
-              id: artifact.id,
-              artifactUri: artifact.storageUri,
-              kind: artifactKindToIntegrityKind(artifact.kind),
-              evidenceId: evidenceByArtifact.get(artifact.id),
-              status: "present" as const,
-              origin: artifact.origin,
-              sizeBytes: artifact.integrity.sizeBytes,
-              sha256: artifact.integrity.sha256
-            }))
-          };
-          const status: MachineGate["status"] = !coverageComplete || blockedCoverage.length > 0 || !executionSucceeded || missingKinds.length > 0
-            ? "blocked"
-            : failedOracles.length > 0 ? "fail" : "pass";
-          const failedEvidenceRefs = results
-            .filter((item) => item.status !== "completed" || item.oracleResults.some((oracle) => !oracle.passed))
-            .flatMap((item) => item.evidenceRefs);
-          const fallbackEvidence = evidence.slice(-4).map((item) => item.id);
-          const reasonEvidence = [...new Set([...failedEvidenceRefs, ...fallbackEvidence])].slice(0, 8);
-          const reasons = [
-            ...(!coverageComplete ? ["coverage_disposition_incomplete"] : []),
-            ...blockedCoverage.map((item) => `coverage_blocked:${item.flowId}`),
-            ...(!executionSucceeded ? ["browser_action_execution_incomplete"] : []),
-            ...missingKinds.map((kind) => `required_artifact_missing:${kind}`),
-            ...failedOracles.map((oracle) => `oracle_failed:${oracle.oracleId}`)
-          ];
-          const draft: MachineGateDraft = {
-            status,
-            reasons,
-            reasonDetails: reasons.map((reason) => ({
-              code: reason.split(":")[0],
-              summary: reason,
-              evidenceRefs: reasonEvidence.length ? reasonEvidence : evidence.map((item) => item.id).slice(-1)
-            })).filter((item) => item.evidenceRefs.length > 0),
-            assertionFailures: failedOracles.map((oracle) => oracle.oracleId)
-          };
-          const finalized = finalizeProofBundle({
-            draft,
-            runId: state.runId,
-            scenarioId: artifacts[0]?.scenarioId,
-            attemptId: state.currentAttemptId,
-            evidence,
-            artifactsV2: artifacts,
-            artifactIntegrity,
-            requiredArtifactKinds: [...requiredKinds],
-            machineGate: draft,
-            gateEligibleFacts: { executionSucceeded, requirementCovered }
+          const { coverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary } = await finalizeBrowserExecutionProof({
+            state,
+            coverageScope: "all",
+            integrityId: `${state.runId}_dynamic_artifact_integrity`
           });
           const finalStatus = finalized.machineGate.status;
-          const outcomeSummary = runOutcomeSummaryV2Schema.parse({
-            schemaVersion: "2.0",
-            schedulingCompleted: true,
-            executionStarted: results.length > 0,
-            executionSucceeded,
-            requirementCovered,
-            requirementPassed: requirementCovered && failedOracles.length === 0,
-            ...proofCredibility(finalized.verdict, finalized.machineGate, finalized.gateEligible),
-            finalStatus
-          });
           const currentRun = await runEventStore.get(state.runId);
           const currentProject = state.projectId ? await getProject(state.projectId) : undefined;
           const attemptId = state.currentAttemptId ?? artifacts[0]?.attemptId;

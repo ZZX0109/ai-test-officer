@@ -44,12 +44,20 @@ import { RunTimeline } from "./components/RunTimeline";
 import { RunAssistantPanel } from "./components/RunAssistantPanel";
 import { KnowledgeBasis } from "./components/KnowledgeBasis";
 import { AssistantConversationMessage } from "./components/AssistantConversationMessage";
+import { SharedBrowserCanvas } from "./components/SharedBrowserCanvas";
 import { BusinessFlowList } from "./components/BusinessFlowList";
 import { LazyDetails, ProgressiveDetailsList } from "./components/ProgressiveDetailsList";
 import { SecurityPanel } from "./components/SecurityPanel";
 import { SourceStatusPanel } from "./components/SourceStatusPanel";
 import { StoragePanel } from "./components/StoragePanel";
-import { AuthenticatedArtifactImage, AuthenticatedArtifactLink } from "./components/AuthenticatedArtifact";
+import { AuthenticatedArtifactLink } from "./components/AuthenticatedArtifact";
+import {
+  forgetProjectActiveRun,
+  isRestorableProjectRun,
+  rankProjectRunCandidates,
+  readProjectActiveRun,
+  rememberProjectActiveRun
+} from "./activeRunCache";
 import { useWorkbenchState } from "./hooks/useWorkbenchState";
 import {
   initialWorkspaceState,
@@ -58,6 +66,13 @@ import {
 } from "./state/workspaceReducer";
 import { readProjectHistoryCache, writeProjectHistoryCache } from "./projectHistoryCache";
 import { planRequiresLoginCredentials } from "./loginPlan";
+import {
+  commandFallbackAction,
+  describeRunActivity,
+  isExplicitAssistantActionConfirmation,
+  isUserActionableInterrupt,
+  upsertAssistantProgress
+} from "./workbenchLogic";
 
 const RepairWorkspace = React.lazy(() => import("./components/MonacoRepairWorkspace")
   .then((module) => ({ default: module.RepairWorkspace })));
@@ -232,10 +247,21 @@ function userFacingAutomationError(raw: string) {
   if (/Scenario draft probe failed|fix missingInfo|probe\.page_|selectorProbeStatus/i.test(raw)) {
     return "真实页面路径暂未通过可执行性校验。缺少的入口、控件或预期结果已交给左侧 AI 测试助手处理。";
   }
-  if (/^\s*[\[{]|\"(?:draft|gapId|scenario|missingInfo)\"\s*:/.test(raw)) {
-    return "自动生成的测试路径没有通过安全校验。详细诊断已保存，左侧 AI 测试助手会提示需要补充的内容。";
+  if (/compiled_plan_missing|plan(?:ning)?[_ -](?:contract|schema|validation)|action[_ -]?dsl|invalid[_ -]?(?:plan|dsl)|zod/i.test(raw)) {
+    return "测试运行没有成功创建：计划数据未通过契约校验。系统不会把它误报为浏览器安全拦截，请重新生成计划后继续。";
   }
-  return raw.length > 260 ? `${raw.slice(0, 257)}…` : raw;
+  let detail = raw;
+  if (/^\s*[\[{]/.test(raw)) {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const candidate = [parsed.message, parsed.detail, parsed.reason, parsed.error]
+        .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+      detail = candidate ?? "自动化执行未完成；系统已保留当前阶段和证据，请查看处理依据。";
+    } catch {
+      detail = "自动化执行未完成；后端返回了无法解析的错误信息，系统已保留原始诊断。";
+    }
+  }
+  return detail.length > 260 ? `${detail.slice(0, 257)}…` : detail;
 }
 
 function boundedAssistantText(value: unknown, limit: number) {
@@ -264,42 +290,6 @@ function userFacingAssistantError(error: unknown) {
     return "模型服务本次没有在时限内完成回答。可以直接重试，机器结论和已保存证据不会变化。";
   }
   return "AI 测试官本次没有返回有效回答。系统已保留运行状态和证据，你可以重新发送问题或查看技术详情。";
-}
-
-export function commandFallbackAction(
-  message: string,
-  runState?: string
-): Exclude<AssistantSuggestedAction, "none"> | undefined {
-  const normalized = message.replace(/\s+/g, "").toLowerCase();
-  if (/查看.*(证据|截图|日志|trace)|打开.*(证据|截图|日志)/i.test(normalized)) return "open-evidence";
-  if (/docker|podman|沙盒|启动.*项目|前端.*打不开|端口.*不可达/i.test(normalized)) return "retry-runtime";
-  if (/重新扫描|扫描页面|discovery/i.test(normalized)) return "retry-discovery";
-  if (/暂停|先停一下|等一下/i.test(normalized)) return "pause-run";
-  if (/取消|终止|停止测试/i.test(normalized)) return "cancel-run";
-  if (/重试.*失败|重新.*失败|修复.*失败|重新绑定/i.test(normalized)) return "retry-failed-path";
-  if (/继续.*(其他|剩余|安全|可执行)|跳过.*继续/i.test(normalized)) return "continue-safe-paths";
-  if (/修改.*计划|调整.*计划|修改.*范围|调整.*范围/i.test(normalized)) return "revise-plan";
-  if (/恢复|继续测试/i.test(normalized) && runState === "paused") return "resume-run";
-  if (/开始测试|执行计划|开始执行/i.test(normalized)) return "start-run";
-  return undefined;
-}
-
-export function isExplicitAssistantActionConfirmation(
-  message: string,
-  action: Exclude<AssistantSuggestedAction, "none"> | undefined
-) {
-  if (!action || ![
-    "retry-runtime",
-    "retry-discovery",
-    "retry-failed-path",
-    "continue-safe-paths"
-  ].includes(action)) return false;
-  const normalized = message.replace(/\s+/g, "").toLowerCase();
-  if (/(?:为什么|怎么|如何|是什么|能否|是否|可以吗|需要做什么|该怎么办|\?|？)/i.test(normalized)) {
-    return false;
-  }
-  return /^(?:请)?(?:确认|同意|可以|继续|执行|重试|重新|再试|修复|扫描|启动)/i.test(normalized)
-    || /(?:重新尝试即可|继续处理|继续执行|重试失败链路|重新扫描页面|重新绑定路径)/i.test(normalized);
 }
 
 function auditStoreSummary(auditStore: AuditStoreStatus | null) {
@@ -405,9 +395,11 @@ export function App() {
   const surfacedAssistantNotices = useRef(new Set<string>());
   const surfacedProjectDiagnostics = useRef(new Set<string>());
   const hydratedAgentThreads = useRef(new Set<string>());
+  const hydratedRunReports = useRef(new Set<string>());
   const surfacedObservationIds = useRef(new Set<string>());
   const generationRequestRef = useRef<{ id: string; projectId: string; controller: AbortController } | null>(null);
   const diagnosisOperationRef = useRef<{ id: string; projectId: string } | null>(null);
+  const activeRunRestoreEpochRef = useRef(0);
   const [flowDeleteReadyId, setFlowDeleteReadyId] = useState<string | null>(null);
   const flowDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
@@ -460,20 +452,24 @@ export function App() {
   /** The planning sidebar is information-dense; let the operator collapse it
    * to free the center stage while a run is in progress. */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [planningSummaryCollapsed, setPlanningSummaryCollapsed] = useState(false);
   /** Evidence id to scroll-to + highlight when the workbench asks to locate one. */
   const [focusEvidenceId, setFocusEvidenceId] = useState<string | null>(null);
   // The graph projection is the only place a *paused* run surfaces. Without it
   // an interrupted run is indistinguishable from a stalled one.
   const [agentProjection, setAgentProjection] = useState<AgentGraphProjection | null>(null);
   const [browserSession, setBrowserSession] = useState<BrowserSession | null>(null);
-  const [browserFrameRevision, setBrowserFrameRevision] = useState(0);
+  const [, setBrowserFrameRevision] = useState(0);
   const [browserControlBusy, setBrowserControlBusy] = useState(false);
   const [browserManualInput, setBrowserManualInput] = useState("");
   const [interruptBusy, setInterruptBusy] = useState(false);
   const [interruptError, setInterruptError] = useState<string | null>(null);
   const [permissionProfile, setPermissionProfile] = useState<PermissionProfile>({
     observe: true,
-    browserControl: false,
+    // Uploaded projects run in an isolated browser sandbox, so normal page
+    // observation/click/input is enabled for the run by default. Sensitive or
+    // irreversible actions still create their own Graph interrupt.
+    browserControl: true,
     workspaceControl: false,
     ideTerminalControl: false,
     systemControl: false
@@ -541,7 +537,11 @@ export function App() {
   const canStartRun = hasSelectedProject
     && discoveryAllowsPlanning
     && Boolean(requirementText.trim())
-    && Boolean(scenarioId)
+    // Uploaded OCI projects intentionally do not use a fixture Scenario ID;
+    // their confirmed Business Capability plan is compiled at runtime by the
+    // dynamic browser Graph. Requiring scenarioId here disabled the only
+    // visible Start button after the planning sidebar was collapsed.
+    && Boolean(scenarioId || (planningResult && selectedProjectExecutionMode === "oci"))
     && planningConfirmed
     && !isRunning;
   // A sandbox target is only ever rendered through the port allocated to its
@@ -578,12 +578,18 @@ export function App() {
   // operation, …) is NOT "queued" — the verdict panel must surface the exact
   // action the operator owes, otherwise they stare at "queued" with no idea
   // the graph is actually waiting on them.
-  const pendingInterruptForVerdict = agentProjection?.pendingInterrupt?.status === "pending"
-    ? agentProjection.pendingInterrupt
+  const pendingInterruptForVerdict = isUserActionableInterrupt(agentProjection?.pendingInterrupt)
+    ? agentProjection?.pendingInterrupt
     : undefined;
   const verdictDisplay = pendingInterruptForVerdict
     ? (pendingInterruptForVerdict.kind === "credential" ? "等待你授权使用测试账号" : "等待你的操作")
     : latestDecision;
+  const finalVerdictReady = Boolean(
+    result
+    && !isRunning
+    && (!activeRunId || result.id === activeRunId)
+    && (result.finalStatus || result.gateStatus || result.verdict)
+  );
   // Split the scan inventory into what an operator would call "business
   // features" (real pages) versus technical coverage (API groups, data
   // entities, background tasks). The flat list used to mix them, so the plan
@@ -722,6 +728,36 @@ export function App() {
     : runIsBlocked
       ? (concreteRunFailureMessage || planningAutomation.detail || nextSuggestion || "本次测试遇到阻塞。你可以补充入口、运行条件或预期结果，我会据此修订计划。")
       : (latestPlanningAssistantMessage ?? "可以随时补充测试目标、页面入口或预期结果。");
+  const runActivity = describeRunActivity({
+    runId: activeRunId,
+    runState: activeRun?.state,
+    isRunning,
+    planningPhase: planningAutomation.phase,
+    projection: agentProjection
+  });
+
+  useEffect(() => {
+    if (!activeRunId || !runActivity) {
+      setPlanningMessages((current) => current.filter((item) => !item.id.startsWith("progress:run:")));
+      return;
+    }
+    setPlanningMessages((current) => upsertAssistantProgress(
+      current.filter((item) => !item.id.startsWith("progress:run:") || item.id === `progress:run:${activeRunId}`), {
+      id: "run-progress",
+      role: "assistant",
+      content: runActivity.content,
+      createdAt: new Date().toISOString(),
+      streaming: runActivity.streaming,
+      reasoningSummary: {
+        phase: runActivity.phase,
+        observations: [agentProjection?.currentNode ? `当前 Graph 节点：${agentProjection.currentNode}` : "测试运行正在准备"],
+        assessment: "当前 Run 尚未进入机器终态。",
+        nextStep: runActivity.action,
+        userAction: runActivity.streaming ? "无需操作" : "请完成当前确认",
+        confidence: "high"
+      }
+    }, `run:${activeRunId}`));
+  }, [activeRunId, runActivity?.signature]);
 
   function runResultFromBundle(bundle: RunBundle): RunResult {
     return {
@@ -1063,9 +1099,10 @@ export function App() {
     const visibleFailures = failures.slice(0, 2).map((failure, index) =>
       `${index + 1}. ${failure.title ?? failure.scenarioId}：${userFacingAutomationError(failure.detail)}`
     );
-    const userAction = failures.some((failure) => failure.requiredInformation?.length)
+    const requiresUserInput = failures.some((failure) => failure.requiredInformation?.length);
+    const userAction = requiresUserInput
       ? `请补充：${failures.flatMap((failure) => failure.requiredInformation ?? []).slice(0, 3).join("、")}。`
-      : "你可以直接回复“重试失败链路”，系统会只重新绑定和复验这些路径；也可以回复“继续其他可执行测试”。";
+      : "无需补充资料。本次 Graph 已完成有限重试并保留真实原因；其余可执行路径会继续处理。";
     setPlanningMessages((current) => [...current, {
       id: `automation_failure_analysis_${Date.now()}`,
       role: "assistant",
@@ -1077,15 +1114,20 @@ export function App() {
       ].join("\n"),
       createdAt: new Date().toISOString(),
       reasoningSummary: {
-        phase: "waiting-user",
+        // Never render “等待你的决定” when there is no decision for the
+        // operator to make. This was the source of the contradictory blocked
+        // card shown after the autonomous retry budget had already ended.
+        phase: requiresUserInput ? "waiting-user" : "completed",
         observations: visibleFailures,
         assessment: `${failures.length} 条路径尚未形成可验证闭环，不能计为通过。`,
-        nextStep: "只重试失败路径，已完成路径不会重复执行。",
+        nextStep: requiresUserInput
+          ? "收到补充信息后只重试失败路径。"
+          : "保留该路径的阻塞证据，并继续其余可执行路径。",
         userAction,
         confidence: "high"
       },
-      suggestedAction: "retry-failed-path",
-      requiresConfirmation: true
+      suggestedAction: undefined,
+      requiresConfirmation: false
     }]);
     return analysis;
   }
@@ -1610,12 +1652,13 @@ export function App() {
         }
         if (type === "browser.action.proposed") {
           const decision = payload as { decisionId?: string; summary?: string; actions?: Array<{ purpose?: string; expectedChange?: string }> };
-          if (decision.decisionId) setPlanningMessages((current) => current.some((message) => message.id === `browser-decision-${decision.decisionId}`) ? current : [...current, {
-            id: `browser-decision-${decision.decisionId}`,
+          if (decision.decisionId) setPlanningMessages((current) => upsertAssistantProgress(current, {
+            id: "browser-progress",
             role: "assistant",
-            content: [`AI 当前准备执行：${decision.actions?.[0]?.purpose ?? decision.summary ?? "分析页面"}`, `预期结果：${decision.actions?.[0]?.expectedChange ?? "执行后重新观察页面并验证"}`, "需要你做什么：低风险操作会自动执行；敏感操作会先请求确认。"].join("\n"),
-            createdAt: new Date().toISOString()
-          }]);
+            content: [`正在思考 · ${decision.actions?.[0]?.purpose ?? decision.summary ?? "分析页面"}`, "测试尚未结束。", `当前动作：${decision.actions?.[0]?.expectedChange ?? "执行后重新观察页面并验证"}`].join("\n"),
+            createdAt: new Date().toISOString(),
+            streaming: true
+          }, `run:${activeRunId}`));
         }
         return;
       }
@@ -1648,8 +1691,8 @@ export function App() {
               ...(observation.pageErrors ?? []).slice(0, 2).map((item) => `页面：${item}`),
               ...(observation.failedRequests ?? []).slice(0, 2).map((item) => `网络：${item.url ?? "请求"}${item.status ? ` (${item.status})` : ""}`)
             ];
-            setPlanningMessages((current) => [...current, {
-              id: `agent_observation_message_${observation.id}`,
+            setPlanningMessages((current) => upsertAssistantProgress(current, {
+              id: "browser-progress",
               role: "assistant",
               content: [
                 `遇到的问题：${observation.summary ?? "系统正在读取页面状态。"}`,
@@ -1657,6 +1700,7 @@ export function App() {
                 `需要你做什么：${observation.userActionRequired ? "请根据上面的阻塞提示补充授权或凭据。" : observation.retryable ? "无需操作，系统将按有限次数继续恢复并重试。" : "无需操作，系统会保留当前证据并进入下一步。"}`
               ].join("\n"),
               createdAt: new Date().toISOString(),
+              streaming: !observation.userActionRequired,
               reasoningSummary: {
                 phase: observation.userActionRequired ? "waiting-user" : "diagnosing",
                 observations: failures.length ? failures : [observation.summary ?? "页面观测已保存"],
@@ -1665,7 +1709,7 @@ export function App() {
                 userAction: observation.userActionRequired ? "请完成授权或凭据配置。" : "无需操作",
                 confidence: failures.length ? "high" : "medium"
               }
-            }]);
+            }, `run:${activeRunId}`));
           }
         }
         if (isProjectionEvent && candidate?.runId === activeRunId) {
@@ -1714,15 +1758,169 @@ export function App() {
       setBrowserSession(null);
       return;
     }
-    void getRunBrowserSession(activeRunId).then(({ session }) => setBrowserSession(session)).catch(() => setBrowserSession(null));
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refreshSession = async () => {
+      let nextSession: BrowserSession | null = null;
+      try {
+        nextSession = (await getRunBrowserSession(activeRunId)).session;
+        if (disposed) return;
+        // A transient empty response during Graph startup must not erase a
+        // session/frame that is already visible.
+        if (nextSession) {
+          setBrowserSession(nextSession);
+          setBrowserFrameRevision((current) => current + 1);
+        }
+      } catch {
+        // SSE and the next bounded poll can recover. Keep the last frame on
+        // screen instead of falling back to the unrelated passive iframe.
+      }
+      if (disposed) return;
+      const terminal = nextSession && ["closed", "failed"].includes(nextSession.status);
+      if (!terminal) timer = setTimeout(refreshSession, nextSession ? 1_500 : 600);
+    };
+    void refreshSession();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
   }, [activeRunId]);
+
+  // A terminal Run is authoritative even when React preserved an old
+  // planningAutomation state during HMR, tab restore, or an SSE reconnect.
+  // Hydrate its report for every active Run, not only in the project-restore
+  // branch below. Otherwise a successful retry can keep displaying the prior
+  // “safety validation blocked” assistant card indefinitely.
+  useEffect(() => {
+    if (!activeRunId || hydratedRunReports.current.has(activeRunId)) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const hydrateTerminalReport = async () => {
+      try {
+        const projection = (await getRunProjection(activeRunId)).run;
+        if (disposed) return;
+        setActiveRun(projection);
+        const terminal = ["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(projection.state);
+        if (!terminal) {
+          timer = setTimeout(hydrateTerminalReport, 1_500);
+          return;
+        }
+        if (projection.state === "cancelled") {
+          hydratedRunReports.current.add(activeRunId);
+          return;
+        }
+        const report = await waitForRunReport(activeRunId);
+        if (disposed) return;
+        const finalStatus = report.finalStatus ?? report.gateStatus
+          ?? (report.verdict === "continue" ? "pass" : report.verdict === "stop_and_fix" ? "fail" : "needs-human-review");
+        const succeeded = finalStatus === "pass";
+        hydratedRunReports.current.add(activeRunId);
+        setIsRunning(false);
+        setResult(report);
+        setAutomationFailures([]);
+        setPlanningAutomation({ phase: succeeded ? "ready" : "blocked", detail: report.summary });
+        setMessage(report.summary);
+        setPlanningMessages((current) => {
+          const withoutSupersededDiagnostics = current.filter((item) => (
+            !item.id.startsWith("automation_failure_analysis_")
+            && !item.id.startsWith("run_failure_analysis_")
+            && !item.id.startsWith("preparation_blocked_")
+            && !item.id.startsWith("progress:run:")
+          ));
+          if (withoutSupersededDiagnostics.some((item) => item.id === `run_outcome_${activeRunId}`)) {
+            return withoutSupersededDiagnostics;
+          }
+          return [...withoutSupersededDiagnostics, {
+            id: `run_outcome_${activeRunId}`,
+            role: "assistant",
+            content: succeeded
+              ? `本次测试已经完成。机器结论：通过。${report.summary}`
+              : `本次测试已经结束。机器结论：${finalStatus}。${report.summary}`,
+            createdAt: new Date().toISOString(),
+            reasoningSummary: {
+              phase: "completed",
+              observations: [`Run ${activeRunId} 已进入终态 ${projection.state}`],
+              assessment: report.summary,
+              nextStep: succeeded ? "可以查看本次证据和测试报告。" : "只处理报告中仍未完成的路径。",
+              userAction: "无需处理已被本次终态取代的临时阻塞提示。",
+              confidence: "high"
+            },
+            requiresConfirmation: false
+          }];
+        });
+      } catch {
+        if (!disposed) timer = setTimeout(hydrateTerminalReport, 2_000);
+      }
+    };
+    void hydrateTerminalReport();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [activeRunId]);
+
+  // A project switch or a Workbench refresh used to discard the Run id even
+  // though the Playwright session and its last frame were still persisted by
+  // the Agent. Keep one authoritative Run pointer per project and rehydrate it
+  // before mounting a passive iframe.
+  useEffect(() => {
+    if (!selectedProjectId || !activeRunId) return;
+    rememberProjectActiveRun(selectedProjectId, activeRunId);
+  }, [selectedProjectId, activeRunId]);
+
+  useEffect(() => {
+    if (!selectedProjectId || activeRunId) return;
+    const cachedRunId = readProjectActiveRun(selectedProjectId);
+    if (!cachedRunId) return;
+    const restoreEpoch = activeRunRestoreEpochRef.current;
+    let disposed = false;
+    const restore = async () => {
+      // Only an explicitly remembered active Run may be resumed here. Durable
+      // history is terminal audit data and must never be projected into a new
+      // diagnosis/planning session as if the user had just run a test.
+      const candidates = rankProjectRunCandidates(cachedRunId, []);
+      for (const runId of candidates) {
+        try {
+          const projection = await getRunProjection(runId);
+          if (disposed || restoreEpoch !== activeRunRestoreEpochRef.current) return;
+          if (!isRestorableProjectRun(projection.run, selectedProjectId)) {
+            forgetProjectActiveRun(selectedProjectId, runId);
+            continue;
+          }
+          const sessionResponse = await getRunBrowserSession(runId).catch(() => ({ session: undefined }));
+          if (disposed || restoreEpoch !== activeRunRestoreEpochRef.current) return;
+          setActiveRunId(runId);
+          setActiveRun(projection.run);
+          if (sessionResponse.session) {
+            setBrowserSession(sessionResponse.session);
+            setBrowserFrameRevision((current) => current + 1);
+            setCentreSurface("preview");
+          }
+          rememberProjectActiveRun(selectedProjectId, runId);
+          return;
+        } catch {
+          if (runId === cachedRunId) forgetProjectActiveRun(selectedProjectId, runId);
+        }
+      }
+    };
+    void restore();
+    return () => { disposed = true; };
+  }, [selectedProjectId, activeRunId]);
 
   // Stall decisions live in the left planning sidebar now. Never let a pending
   // interrupt stay hidden behind a collapsed sidebar — expand it the moment the
   // graph pauses and needs the operator.
   useEffect(() => {
-    if (agentProjection?.pendingInterrupt?.status === "pending") setSidebarCollapsed(false);
+    if (isUserActionableInterrupt(agentProjection?.pendingInterrupt)) setSidebarCollapsed(false);
   }, [agentProjection?.pendingInterrupt?.status, agentProjection?.pendingInterrupt?.id]);
+
+  // Once execution has been confirmed the business-path inventory is no
+  // longer the operator's primary task. Collapse the complete card (not only
+  // its inner list) so it cannot cover the assistant conversation. The header
+  // remains available for an explicit re-open.
+  useEffect(() => {
+    if (planningConfirmed) setPlanningSummaryCollapsed(true);
+  }, [planningConfirmed]);
 
   /**
    * Hydrate the graph projection whenever the active run changes.
@@ -1803,8 +2001,8 @@ export function App() {
     ].join(":");
     if (surfacedAssistantNotices.current.has(noticeKey)) return;
     surfacedAssistantNotices.current.add(noticeKey);
-    setPlanningMessages((current) => [...current, {
-      id: `assistant_notice_${Date.now()}`,
+    setPlanningMessages((current) => upsertAssistantProgress(current, {
+      id: "run-notice",
       role: "assistant",
       content: runAssistantMessage,
       createdAt: new Date().toISOString(),
@@ -1836,7 +2034,7 @@ export function App() {
               : "无需操作；持续超过一分钟时再打开证据详情。",
         confidence: "high"
       }
-    }]);
+    }, `notice:${activeRunId ?? selectedProjectId ?? "pre-run"}`));
   }, [
     activeRunId,
     selectedProjectId,
@@ -1862,13 +2060,13 @@ export function App() {
     ].join(":");
     if (analyzedBlockedRuns.current.has(analysisKey)) return;
     analyzedBlockedRuns.current.add(analysisKey);
-    const messageId = `run_failure_analysis_${Date.now()}`;
-    setPlanningMessages((current) => [...current, {
+    const messageId = `progress:diagnosis:${analysisId}`;
+    setPlanningMessages((current) => upsertAssistantProgress(current, {
       id: messageId,
       role: "assistant",
       content: "正在读取机器结论、失败证据和已有修复记录，整理这次问题与下一步操作…",
       createdAt: new Date().toISOString()
-    }]);
+    }, `diagnosis:${analysisId}`));
     setAssistantChatBusy(true);
     const failurePacket = {
       finalStatus: result?.finalStatus ?? result?.gateStatus ?? latestDecision ?? "blocked",
@@ -2166,6 +2364,7 @@ export function App() {
   }
 
   function selectProject(projectId: string) {
+    activeRunRestoreEpochRef.current += 1;
     generationRequestRef.current?.controller.abort();
     generationRequestRef.current = null;
     // Invalidate an in-flight startup/diagnosis operation. Its network work
@@ -2311,6 +2510,23 @@ export function App() {
       setMessage("请先识别或选择一个项目。");
       return;
     }
+    // Diagnosis starts a fresh lifecycle. Never let an unfinished historical
+    // Run, its interrupt, or its browser lease masquerade as work created by
+    // this click. The backend record remains immutable and available in history.
+    activeRunRestoreEpochRef.current += 1;
+    forgetProjectActiveRun(selectedCandidate.id);
+    setActiveRunId(null);
+    setActiveRun(null);
+    setAgentProjection(null);
+    setBrowserSession(null);
+    setLiveRun(null);
+    setResult(null);
+    setRepairSession(null);
+    setInterruptError(null);
+    setInterruptBusy(false);
+    setIsRunning(false);
+    setRunPreviewModalOpen(false);
+    setScreenshotIssue(null);
     const diagnosisOperationId = crypto.randomUUID();
     diagnosisOperationRef.current = {
       id: diagnosisOperationId,
@@ -2344,7 +2560,7 @@ export function App() {
     setProjectDiagnosis(null);
     setRuntimeRecoveryAdvice(null);
     setProjectLaunchPhase("正在确认项目设置…");
-    setMessage("正在保存设置、启动项目并检查运行条件。");
+    setMessage("正在保存设置并检查可复用的项目沙盒。");
     try {
       if (projectDetection?.executionReady === false) {
         setProjectLaunchPhase("正在确认项目文件夹…");
@@ -2368,11 +2584,15 @@ export function App() {
       setProjectPathInput(saved.project.projectPath);
       setAppUrl(saved.project.frontendUrl);
 
-      setProjectLaunchPhase("正在请求 Agent 启动项目…");
+      setProjectLaunchPhase("正在检查已有沙盒；仅在未运行时启动项目…");
       const accepted = await startProjectAsync(saved.project.id);
       if (!isCurrentDiagnosis()) return;
       setProjectRuntime(accepted.runtime);
-      setProjectLaunchPhase("启动任务已提交，正在等待项目响应…");
+      setProjectLaunchPhase(accepted.reused && accepted.runtime.status === "running"
+        ? "已复用正在运行的项目沙盒，正在检查页面…"
+        : accepted.reused
+          ? "项目沙盒已在准备中，继续等待运行状态…"
+          : "启动任务已提交，正在等待项目响应…");
       const sandboxPrepareTimeout = saved.project.manifest?.execution.mode === "oci"
         ? (saved.project.manifest.budget.prepareTimeoutMs ?? 300_000)
         : 0;
@@ -3548,6 +3768,7 @@ export function App() {
       coverageInventory?: Array<{
         id: string;
         title: string;
+        status?: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
         kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
         target: string;
         sourceNodeIds: string[];
@@ -3590,12 +3811,23 @@ export function App() {
         dynamicBrowser: targetOverride?.dynamicBrowser,
         modelProfileId: defaultCredential?.id
       });
+      // A new Run owns a new Playwright session. Drop only the previous live
+      // session metadata; the persistent project iframe stays mounted beneath
+      // the canvas until the new Run publishes its first frame.
+      setBrowserSession(null);
       setActiveRunId(created.run.id);
       setActiveRun(created.run);
-      const approved = await approveRunPlan(created.run.id, created.run.version);
-      setActiveRun(approved.run);
-      const granted = await grantRunPermissions(created.run.id, approved.run.version);
-      setActiveRun(granted.run);
+      let runnable = created.run;
+      // Compatibility for older servers/manual callers. New servers return a
+      // queued Run because this click already confirmed the plan and low-risk
+      // browser capabilities atomically.
+      if (runnable.state === "awaiting-plan-approval") {
+        runnable = (await approveRunPlan(runnable.id, runnable.version)).run;
+      }
+      if (runnable.state === "awaiting-permission") {
+        runnable = (await grantRunPermissions(runnable.id, runnable.version)).run;
+      }
+      setActiveRun(runnable);
       setPlanningAutomation({ phase: "running", detail: "AI 正在操作浏览器并采集截图、DOM、网络和 Trace。", scenarioId: selectedScenarioId });
       setMessage("计划已确认，AI 正在自动执行测试。");
       const report = await waitForRunReport(created.run.id);
@@ -3610,6 +3842,28 @@ export function App() {
       setMessage(report.summary);
       const finalStatus = report.finalStatus ?? report.gateStatus
         ?? (report.verdict === "continue" ? "pass" : report.verdict === "stop_and_fix" ? "fail" : "needs-human-review");
+      setAutomationFailures([]);
+      setPlanningMessages((current) => {
+        const withoutSupersededFailure = current.filter((item) => !item.id.startsWith("automation_failure_analysis_") && !item.id.startsWith("progress:run:"));
+        if (withoutSupersededFailure.some((item) => item.id === `run_outcome_${created.run.id}`)) return withoutSupersededFailure;
+        return [...withoutSupersededFailure, {
+          id: `run_outcome_${created.run.id}`,
+          role: "assistant",
+          content: finalStatus === "pass"
+            ? `本次测试已经完成。机器结论：通过。${report.summary}`
+            : `本次测试已经结束。机器结论：${finalStatus}。${report.summary}`,
+          createdAt: new Date().toISOString(),
+          reasoningSummary: {
+            phase: "completed",
+            observations: [`Run ${created.run.id} 已完成`],
+            assessment: report.summary,
+            nextStep: finalStatus === "pass" ? "可以查看本次证据和测试报告。" : "继续处理报告中仍未完成的路径。",
+            userAction: "无需处理先前的临时阻塞提示。",
+            confidence: "high"
+          },
+          requiresConfirmation: false
+        }];
+      });
       return {
         scenarioId: selectedScenarioId,
         success: finalStatus === "pass",
@@ -3687,18 +3941,21 @@ export function App() {
         const coverageInventory = activePlanning.businessFlows.map((flow) => ({
           id: flow.id,
           title: flow.title,
+          status: flow.status,
           kind: flow.kind,
           target: flow.target,
           sourceNodeIds: flow.sourceNodeIds ?? [],
-          sourceCount: flow.sourceCount ?? 1,
+          sourceCount: Math.max(1, flow.sourceCount || flow.sourceNodeIds?.length || 1),
           surfaces: flow.surfaces,
           requiredEvidenceKinds: flow.requiredEvidenceKinds,
           preconditions: flow.requiredInformation
         }));
+        const runnableCoverageCount = coverageInventory.filter((item) => item.status === "executable" || item.status === "auto-bindable").length;
+        const explicitBlockedCoverageCount = coverageInventory.length - runnableCoverageCount;
         setPlanningMessages((current) => [...current, {
           id: `dynamic_browser_handoff_${Date.now()}`,
           role: "assistant",
-          content: `项目服务已连通。${coverageInventory.length} 条归并业务路径现在交给 LangGraph：AI 会观察真实页面、选择受限动作、执行机器 oracle，并在需要账号或高风险操作时再询问你。`,
+          content: `项目服务已连通。${coverageInventory.length} 条归并业务路径已写入 Coverage 账本，其中 ${runnableCoverageCount} 条进入运行时绑定与执行，${explicitBlockedCoverageCount} 条保留为待补条件或覆盖缺口，不会冒充已测试。AI 会观察真实页面、选择受限动作、执行机器 Oracle，并仅在需要账号或高风险操作时询问你。`,
           createdAt: new Date().toISOString()
         }]);
         setPlanningAutomation({
@@ -4147,6 +4404,10 @@ export function App() {
       setMessage("请先在规划对话中确认测试计划。");
       return;
     }
+    if (planningResult && selectedProjectExecutionMode === "oci") {
+      await confirmPlanningResult(planningResult);
+      return;
+    }
     if (!scenarioId) {
       setLeftDrawerOpen(true);
       setMessage("请先点击“分析输入”，让系统生成本次测试内容。");
@@ -4481,6 +4742,15 @@ export function App() {
     try {
       const bundle = await getRunBundle(runId);
       setResult(runResultFromBundle(bundle));
+      setActiveRunId(runId);
+      setCentreSurface("preview");
+      const [projection, sessionResponse] = await Promise.all([
+        getRunProjection(runId),
+        getRunBrowserSession(runId)
+      ]);
+      setActiveRun(projection.run);
+      setBrowserSession(sessionResponse.session);
+      setBrowserFrameRevision((current) => current + 1);
       setLiveRun(null);
       setCommitCheck(null);
       setRequirementAcceptance(null);
@@ -5049,8 +5319,15 @@ export function App() {
   }
 
   async function clickSharedBrowser(input: { x: number; y: number; imageWidth: number; imageHeight: number }) {
-    if (!activeRunId || browserSession?.owner !== "user") return;
+    if (!activeRunId || !browserSession || ["closed", "failed"].includes(browserSession.status)) return;
     try {
+      // Clicking the shared canvas is an explicit user takeover. Acquire the
+      // same Playwright session before forwarding coordinates so the user can
+      // intervene immediately instead of clicking an inert screenshot.
+      if (browserSession.owner !== "user") {
+        const acquired = await acquireRunBrowserControl(activeRunId);
+        setBrowserSession(acquired.session);
+      }
       await sendRunBrowserInput(activeRunId, {
         kind: "click",
         x: Math.max(0, Math.min(Math.round(input.x), Math.round(input.imageWidth) - 1)),
@@ -5059,6 +5336,32 @@ export function App() {
       setBrowserFrameRevision((current) => current + 1);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "页面操作失败");
+    }
+  }
+
+  async function pressSharedBrowserKey(key: "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown" | "Space") {
+    if (!activeRunId || !browserSession || ["closed", "failed"].includes(browserSession.status)) return;
+    try {
+      if (browserSession.owner !== "user") {
+        const acquired = await acquireRunBrowserControl(activeRunId);
+        setBrowserSession(acquired.session);
+      }
+      await sendRunBrowserInput(activeRunId, { kind: "press", key });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "键盘操作失败");
+    }
+  }
+
+  async function typeSharedBrowserText(text: string) {
+    if (!activeRunId || !browserSession || !text || ["closed", "failed"].includes(browserSession.status)) return;
+    try {
+      if (browserSession.owner !== "user") {
+        const acquired = await acquireRunBrowserControl(activeRunId);
+        setBrowserSession(acquired.session);
+      }
+      await sendRunBrowserInput(activeRunId, { kind: "type", text });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "页面输入失败");
     }
   }
 
@@ -5263,26 +5566,6 @@ export function App() {
                   <h3>规划测试</h3>
                 </div>
               </header>
-              {/* Stall interaction point: a paused run surfaces here first so the
-                  operator decides in the planning sidebar instead of hunting a
-                  modal over the live browser view. */}
-              {agentProjection?.pendingInterrupt && agentProjection.pendingInterrupt.status === "pending" ? (
-                <InterruptDecisionPanel
-                  interrupt={agentProjection.pendingInterrupt}
-                  busy={interruptBusy}
-                  error={interruptError ?? undefined}
-                  onDecide={(decision, note) => submitInterruptDecision(decision, note)}
-                  onOpenEvidence={openInterruptEvidence}
-                  onSaveCredentials={saveInterruptCredential}
-                  onOpenCredentials={() => {
-                    setLeftDrawerOpen(true);
-                    setMessage("请在项目设置中配置测试账号，配置完成后回到此处提交决策。");
-                  }}
-                  onRecoverSandbox={() => void executeAssistantSuggestedAction("retry-runtime")}
-                  onReopenDiscovery={() => void executeAssistantSuggestedAction("retry-discovery")}
-                  onOpenRepairWorkspace={() => void openCodeRepairWorkspace()}
-                />
-              ) : null}
               <span className="sidebar-current-project">当前项目：{selectedProjectName}</span>
               <div className="sidebar-planning-messages" aria-live="polite">
                 {planningMessages.map((item, index) => {
@@ -5445,43 +5728,85 @@ export function App() {
                     createdAt: new Date().toISOString()
                   }} />
                 ) : null}
+                {/* A pending decision is part of the conversation chronology,
+                    not a persistent widget above it. New assistant messages
+                    and the decision now share the same scroll flow. */}
+                {isUserActionableInterrupt(agentProjection?.pendingInterrupt) ? (
+                  <InterruptDecisionPanel
+                    interrupt={agentProjection!.pendingInterrupt!}
+                    busy={interruptBusy}
+                    error={interruptError ?? undefined}
+                    onDecide={(decision, note) => submitInterruptDecision(decision, note)}
+                    onOpenEvidence={openInterruptEvidence}
+                    onSaveCredentials={saveInterruptCredential}
+                    onOpenCredentials={() => {
+                      setLeftDrawerOpen(true);
+                      setMessage("请在项目设置中配置测试账号，配置完成后回到此处提交决策。");
+                    }}
+                    onRecoverSandbox={() => void executeAssistantSuggestedAction("retry-runtime")}
+                    onReopenDiscovery={() => void executeAssistantSuggestedAction("retry-discovery")}
+                    onOpenRepairWorkspace={() => void openCodeRepairWorkspace()}
+                  />
+                ) : null}
               </div>
               {discovery?.orchestration && discovery.orchestration.status !== "ready" ? (
                 <DiscoveryOrchestrationNotice discovery={discovery} />
               ) : null}
               {planningResult && discoveryAllowsPlanning ? (
-                <div className="sidebar-planning-result">
-                  <span>{planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径 · {planningResult.coverage.executable + (planningResult.coverage.autoBindable ?? 0)} 条确认后可执行（含 {planningResult.coverage.autoBindable ?? 0} 条 AI 动态绑定）</span>
-                  <span className="sidebar-flow-section-label">业务功能（{businessPageFlows.length} 项，确认后执行）</span>
-                  <ProgressiveDetailsList
-                    className="sidebar-flow-list"
-                    items={businessPageFlows}
-                    itemKey={(flow) => flow.id}
-                    initialCount={20}
-                    batchSize={20}
-                    totalCount={businessPageFlows.length}
-                    hasMore={Boolean(planningResult.businessFlowPage?.nextCursor)}
-                    loadingMore={planningFlowPageLoading}
-                    onLoadMore={async () => { await fetchPlanningFlows(planningResult); }}
-                    summary={<>查看本次 {planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径{(planningResult.coverage.sourceCandidates ?? 0) > (planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length) ? `（来自 ${planningResult.coverage.sourceCandidates} 个代码候选）` : ""}</>}
-                    renderItem={renderPlanningFlowItem}
-                  />
-                  {technicalCoverageFlows.length ? (
-                    <details className="sidebar-technical-coverage">
-                      <summary>技术覆盖项（{technicalCoverageFlows.length} 项：接口组 / 数据实体 / 后台任务，非业务功能）</summary>
-                      <div className="sidebar-technical-list">
-                        {technicalCoverageFlows.map((flow) => renderPlanningFlowItem(flow))}
-                      </div>
-                    </details>
-                  ) : null}
+                <div className={`sidebar-planning-result ${planningSummaryCollapsed ? "collapsed" : ""}`}>
                   <button
-                    className="primary execute-plan-button"
+                    className="sidebar-planning-result-toggle"
                     type="button"
-                    disabled={planningHasBlockingQuestions || planningConfirmed || planningAutomationBusy}
-                    onClick={() => void confirmPlanningDraft()}
+                    aria-expanded={!planningSummaryCollapsed}
+                    onClick={() => setPlanningSummaryCollapsed((current) => !current)}
                   >
-                    {planningAutomationBusy ? "准备执行中" : planningConfirmed ? "计划已确认" : planningHasBlockingQuestions ? "请先补充信息" : "确认并执行"}
+                    <span>
+                      <strong>{planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径</strong>
+                      <small>{planningResult.coverage.executable + (planningResult.coverage.autoBindable ?? 0)} 条可自动执行</small>
+                    </span>
+                    <span>{planningSummaryCollapsed ? "展开" : "收起"}</span>
                   </button>
+                  {!planningSummaryCollapsed ? (
+                    <>
+                      <span className="sidebar-flow-section-label">业务功能（{businessPageFlows.length} 项，确认后执行）</span>
+                      <ProgressiveDetailsList
+                        className="sidebar-flow-list"
+                        items={businessPageFlows}
+                        itemKey={(flow) => flow.id}
+                        initialCount={20}
+                        batchSize={20}
+                        defaultOpen={false}
+                        totalCount={businessPageFlows.length}
+                        hasMore={Boolean(planningResult.businessFlowPage?.nextCursor)}
+                        loadingMore={planningFlowPageLoading}
+                        onLoadMore={async () => { await fetchPlanningFlows(planningResult); }}
+                        summary={<>查看本次 {planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径{(planningResult.coverage.sourceCandidates ?? 0) > (planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length) ? `（来自 ${planningResult.coverage.sourceCandidates} 个代码候选）` : ""}</>}
+                        renderItem={renderPlanningFlowItem}
+                      />
+                      {technicalCoverageFlows.length ? (
+                        <details className="sidebar-technical-coverage">
+                          <summary>技术覆盖项（{technicalCoverageFlows.length} 项：接口组 / 数据实体 / 后台任务，非业务功能）</summary>
+                          <div className="sidebar-technical-list">
+                            {technicalCoverageFlows.map((flow) => renderPlanningFlowItem(flow))}
+                          </div>
+                        </details>
+                      ) : null}
+                      <button
+                        className="primary execute-plan-button"
+                        type="button"
+                        disabled={planningHasBlockingQuestions || planningAutomationBusy || isRunning}
+                        onClick={() => void confirmPlanningDraft()}
+                      >
+                        {planningAutomationBusy || isRunning
+                          ? "自动测试进行中"
+                          : planningHasBlockingQuestions
+                            ? "请先补充信息"
+                            : planningConfirmed && planningAutomation.phase === "blocked"
+                              ? "继续自动测试"
+                              : planningConfirmed ? "重新执行计划" : "确认并执行"}
+                      </button>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
               <form className="sidebar-planning-composer" onSubmit={(event) => {
@@ -5613,10 +5938,10 @@ export function App() {
           {/* A paused run is answered in the left planning sidebar (the stall
               interaction point). The center keeps only a slim pointer so the
               live browser view is never occluded by a blocking panel. */}
-          {agentProjection?.pendingInterrupt && agentProjection.pendingInterrupt.status === "pending" ? (
+          {isUserActionableInterrupt(agentProjection?.pendingInterrupt) ? (
             <div className="interrupt-pointer-banner" role="status">
               <Activity size={14} />
-              <span>{agentProjection.pendingInterrupt.kind === "credential" ? "等待你授权使用测试账号" : "测试已暂停，需要你的操作"}</span>
+              <span>{agentProjection!.pendingInterrupt!.kind === "credential" ? "等待你授权使用测试账号" : "测试已暂停，需要你的操作"}</span>
               <em>请在左侧「AI 测试助手」中处理</em>
             </div>
           ) : null}
@@ -5633,10 +5958,10 @@ export function App() {
                 <button type="button" role="tab" aria-selected={centreSurface === "code"} className={centreSurface === "code" ? "active" : ""} onClick={() => void openProjectCodeWorkspace()}><Code2 size={14} />代码</button>
               </div>
               <span className="live-view-mode">
-                {centreSurface === "code" ? "项目代码（沙盒副本）" : activeRunId && browserSession ? "AI 共享浏览器现场" : latestScreenshot ? "沙盒执行画面" : projectPreviewReady ? "项目被动预览 · 非 AI 操作现场" : "沙盒测试现场"}
+                {centreSurface === "code" ? "项目代码（沙盒副本）" : projectPreviewReady || activeRunId ? "项目浏览器现场" : "沙盒测试现场"}
               </span>
-              {centreSurface === "preview" ? <code title={previewUrl}>{previewUrl || "尚未启动项目"}</code> : <code>{selectedProjectName || "未选择项目"}</code>}
-              {centreSurface === "preview" && projectPreviewReady && !latestScreenshot && (
+              {centreSurface === "preview" ? <code title={browserSession?.currentUrl ?? previewUrl}>{(browserSession?.currentUrl ?? previewUrl) || "尚未启动项目"}</code> : <code>{selectedProjectName || "未选择项目"}</code>}
+              {centreSurface === "preview" && !browserSession && projectPreviewReady && (
                 <button type="button" onClick={() => setPreviewRevision((current) => current + 1)} aria-label="刷新项目预览">
                   <RefreshCw size={14} />
                   刷新
@@ -5684,58 +6009,34 @@ export function App() {
                   <p>{repairBusy ? "正在载入项目代码…" : "选择项目后即可在这里查看受控代码副本。"}</p>
                 </div>
               )
-            ) : activeRunId && browserSession && !["closed", "failed"].includes(browserSession.status) ? (
-              <div className={`live-view-content shared-browser-view ${browserSession.owner === "user" ? "user-controlled" : "agent-controlled"}`}>
-                <AuthenticatedArtifactImage
-                  artifactUrl={`/v1/runs/${encodeURIComponent(activeRunId)}/browser-frame?revision=${browserFrameRevision}`}
-                  alt="AI 与用户共享的 Playwright 测试现场"
+            ) : projectPreviewReady || activeRunId ? (
+              <div className={`live-view-content shared-browser-view ${browserSession?.owner === "user" ? "user-controlled" : "agent-controlled"} ${browserSession && ["closed", "failed"].includes(browserSession.status) ? "session-ended" : ""}`}>
+                <SharedBrowserCanvas
+                  runId={activeRunId ?? undefined}
+                  session={browserSession}
+                  fallbackUrl={projectPreviewReady ? previewUrl : undefined}
+                  refreshRevision={previewRevision}
                   onLoadIssue={setScreenshotIssue}
-                  onImageClick={browserSession.owner === "user" ? (input) => void clickSharedBrowser(input) : undefined}
+                  onInteract={clickSharedBrowser}
+                  onPressKey={pressSharedBrowserKey}
+                  onTypeText={typeSharedBrowserText}
                 />
-                <span className={`live-capture-badge ${browserSession.owner === "user" || agentProjection?.pendingInterrupt?.status === "pending" ? "waiting" : ""}`}>
+                <span className={`live-capture-badge ${browserSession?.owner === "user" || isUserActionableInterrupt(agentProjection?.pendingInterrupt) || !browserSession ? "waiting" : ""}`}>
                   <Activity size={13} /> {(() => {
-                    const pending = agentProjection?.pendingInterrupt?.status === "pending";
+                    const pending = isUserActionableInterrupt(agentProjection?.pendingInterrupt);
                     const pendingCredential = pending && agentProjection?.pendingInterrupt?.kind === "credential";
                     // A run paused on a credential prompt is waiting on the
                     // operator, not "AI operating" — saying otherwise hides
                     // exactly the action the user must take.
                     if (pendingCredential) return "等待你授权使用测试账号";
                     if (pending) return "等待你的操作";
+                    if (!activeRunId) return "项目已加载 · 等待开始测试";
+                    if (!browserSession) return "测试准备中 · 当前页面保持可用";
+                    if (browserSession.status === "closed") return "本次测试最后画面";
+                    if (browserSession.status === "failed") return "浏览器会话已结束 · 保留最后画面";
                     return browserSession.owner === "user" ? "用户控制中" : "AI 正在真实操作";
                   })()}
                 </span>
-              </div>
-            ) : activeRunId ? (
-              <div className="live-view-placeholder shared-browser-starting" role="status" aria-live="polite">
-                <div className="live-view-grid" />
-                <div className="live-view-scanner" />
-                <div className="live-view-dots"><span /><span /><span /></div>
-                <p>正在建立本次运行的共享 Playwright 会话…</p>
-                <small>会话建立前不会切换到另一个 iframe；AI 与你将操作同一组页面、Cookie 和登录状态。</small>
-              </div>
-            ) : latestScreenshot ? (
-              <div className="live-view-content">
-                <AuthenticatedArtifactImage artifactUrl={latestScreenshot} alt="Agent 最新测试画面" onLoadIssue={setScreenshotIssue} />
-                {isRunning && <span className="live-capture-badge"><Activity size={13} /> 正在执行</span>}
-              </div>
-            ) : projectPreviewReady ? (
-              <div className="live-view-content">
-                <iframe
-                  key={`${previewUrl}:${previewRevision}`}
-                  className="live-view-passive-frame"
-                  src={previewUrl}
-                  title={`${selectedProjectName} 项目预览`}
-                  sandbox="allow-downloads allow-forms allow-modals allow-same-origin allow-scripts"
-                  tabIndex={0}
-                  ref={(frame) => {
-                    // Before a Run exists this is only a passive project
-                    // preview. Once execution begins the branch above replaces
-                    // it with the authoritative Playwright session.
-                    frame?.removeAttribute("inert");
-                  }}
-                />
-                {isRunning && <span className="live-capture-badge waiting"><Activity size={13} /> 等待第一帧执行证据</span>}
-                {!isRunning && <span className="live-capture-badge waiting">被动预览 · AI 测试在独立沙盒浏览器中进行</span>}
               </div>
             ) : (
               <div className="live-view-placeholder">
@@ -5969,60 +6270,22 @@ export function App() {
           </details>
         </section>
 
-        <aside className="simple-right-rail">
-          <section className={`verdict-stage ${pendingInterruptForVerdict ? "waiting-on-user" : String(latestDecision).toLowerCase()}`}>
+        {finalVerdictReady ? (
+          <aside
+            className={`final-verdict-float ${String(result?.finalStatus ?? result?.gateStatus ?? latestDecision).toLowerCase()}`}
+            aria-live="polite"
+            aria-label="测试结论"
+          >
             <p className="eyebrow">测试结论</p>
             <strong>{verdictDisplay}</strong>
-            <p>{result?.summary ?? liveStatusText ?? "运行完成后，系统会在这里给出是否可以继续发布的结论。"}</p>
+            <p>{result?.summary}</p>
+            <div className="final-verdict-metrics">
+              <span>证据 {evidenceCount}</span>
+              <span>{nextSuggestion}</span>
+            </div>
             <button onClick={() => setRightDrawerOpen(true)} type="button">查看完整证据</button>
-          </section>
-
-          <section className="insight-stage">
-            <div>
-              <span>已收集证据</span>
-              <strong>{evidenceCount}</strong>
-            </div>
-            <div>
-              <span>下一步建议</span>
-              <p>{nextSuggestion}</p>
-            </div>
-          </section>
-
-          <section className="rail-permission-card">
-            <span className="section-kicker">本次运行</span>
-            <h3>浏览器控制权限</h3>
-            <label className="permission-toggle-row">
-              <input
-                checked={permissionProfile.browserControl}
-                onChange={(event) =>
-                  setPermissionProfile((current) => ({
-                    ...current,
-                    observe: true,
-                    browserControl: event.target.checked
-                  }))
-                }
-                type="checkbox"
-              />
-              <span className="permission-toggle" aria-hidden="true"><span /></span>
-              <span>
-                <strong>允许 Agent 操作内置测试画面</strong>
-                <small>仅对本次运行生效，可随时关闭。</small>
-              </span>
-            </label>
-          </section>
-
-          <div className="rail-utility">
-            <button disabled={isCommitChecking} onClick={runCommitFlow} type="button">
-              {isCommitChecking ? <Activity size={15} /> : <CheckCircle2 size={15} />}
-              提交检查
-            </button>
-            <button disabled={isAcceptingRequirement} onClick={runRequirementAcceptanceFlow} type="button">
-              {isAcceptingRequirement ? <Activity size={15} /> : <FileSearch size={15} />}
-              需求验收
-            </button>
-            <span>风险趋势：{patrolTrend?.riskTrend ?? "暂无变化"}</span>
-          </div>
-        </aside>
+          </aside>
+        ) : null}
       </section>
     </main>
   );

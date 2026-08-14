@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { BrowserContextOptions } from "playwright";
+import type { BrowserContextOptions, CDPSession } from "playwright";
 import {
   browserObservationSchema,
   browserSessionSchema,
@@ -40,6 +40,10 @@ type ManagedSession = {
   clock: AttemptClock;
   trace: PlaywrightAttemptTrace;
   traceFinalized: boolean;
+  liveSubscribers: Set<(frame: Buffer) => void>;
+  liveCdp?: CDPSession;
+  liveCdpStarting?: Promise<void>;
+  lastLiveFrame?: Buffer;
 };
 
 const sessions = new Map<string, ManagedSession>();
@@ -62,8 +66,96 @@ async function saveLiveFrame(managed: ManagedSession) {
   const finalPath = browserSessionFramePath(managed.state.runId);
   const temporary = `${finalPath}.${process.pid}.partial`;
   await mkdir(path.dirname(finalPath), { recursive: true });
-  await managed.runtime.page.screenshot({ path: temporary, type: "jpeg", quality: 75, timeout: 5_000, animations: "disabled" });
+  await capturePageImage(managed, temporary, "jpeg", 92);
   await rename(temporary, finalPath);
+}
+
+async function capturePageImage(managed: ManagedSession, outputPath: string, format: "png" | "jpeg", quality?: number) {
+  try {
+    await managed.runtime.page.screenshot({
+      path: outputPath,
+      type: format,
+      ...(format === "jpeg" ? { quality } : {}),
+      timeout: 5_000,
+      animations: "disabled"
+    });
+    return;
+  } catch (playwrightError) {
+    // Playwright waits for web fonts before screenshotting. A broken font or
+    // Vite dependency request can therefore time out even though Chromium has
+    // already painted a useful frame. CDP captures that actual compositor
+    // frame without converting an observability delay into a Graph failure.
+    try {
+      const cdp = await managed.runtime.context.newCDPSession(managed.runtime.page);
+      const captured = await cdp.send("Page.captureScreenshot", {
+        format,
+        ...(format === "jpeg" ? { quality } : {}),
+        fromSurface: true,
+        captureBeyondViewport: false
+      });
+      await cdp.detach().catch(() => undefined);
+      await writeFile(outputPath, Buffer.from(captured.data, "base64"));
+    } catch {
+      throw playwrightError;
+    }
+  }
+}
+
+async function startBrowserScreencast(managed: ManagedSession) {
+  if (managed.liveCdp || managed.liveCdpStarting) return managed.liveCdpStarting;
+  managed.liveCdpStarting = (async () => {
+    const cdp = await managed.runtime.context.newCDPSession(managed.runtime.page);
+    cdp.on("Page.screencastFrame", (event: { data: string; sessionId: number }) => {
+      const frame = Buffer.from(event.data, "base64");
+      managed.lastLiveFrame = frame;
+      for (const subscriber of managed.liveSubscribers) subscriber(frame);
+      void cdp.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => undefined);
+    });
+    await cdp.send("Page.startScreencast", {
+      format: "jpeg",
+      // The Workbench is commonly rendered on a Retina display. Chromium's
+      // old 1600x1000/quality-90 stream made small labels visibly fuzzy after
+      // the canvas was scaled. Keep the transport as JPEG (the stream
+      // protocol is intentionally tiny), but preserve the compositor at a
+      // desktop resolution and avoid an additional lossy quality step.
+      quality: 100,
+      maxWidth: 1920,
+      maxHeight: 1080,
+      everyNthFrame: 1
+    });
+    managed.liveCdp = cdp;
+  })().finally(() => {
+    managed.liveCdpStarting = undefined;
+  });
+  return managed.liveCdpStarting;
+}
+
+async function stopBrowserScreencast(managed: ManagedSession) {
+  const cdp = managed.liveCdp;
+  managed.liveCdp = undefined;
+  if (!cdp) return;
+  await cdp.send("Page.stopScreencast").catch(() => undefined);
+  await cdp.detach().catch(() => undefined);
+}
+
+/** Subscribe to Chromium's compositor stream for the Workbench canvas. These
+ * transient frames are never registered as Artifacts and cannot satisfy a
+ * Gate; formal before/after screenshots continue through the evidence path. */
+export async function subscribeBrowserLiveFrames(runId: string, subscriber: (frame: Buffer) => void) {
+  const managed = sessions.get(runId);
+  if (!managed) throw new Error("browser_session_not_active");
+  managed.liveSubscribers.add(subscriber);
+  if (managed.lastLiveFrame) subscriber(managed.lastLiveFrame);
+  try {
+    await startBrowserScreencast(managed);
+  } catch (error) {
+    managed.liveSubscribers.delete(subscriber);
+    throw error;
+  }
+  return async () => {
+    managed.liveSubscribers.delete(subscriber);
+    if (!managed.liveSubscribers.size) await stopBrowserScreencast(managed);
+  };
 }
 
 function encryptedStorageStatePath(runId: string) {
@@ -107,6 +199,34 @@ function bindTelemetry(managed: ManagedSession) {
   });
 }
 
+async function waitForObservableDocument(runtime: PlaywrightRuntimeSession) {
+  // `domcontentloaded` only proves that the HTML shell exists. React/Vue/Next
+  // applications commonly mount their first useful controls afterwards. If
+  // the first Agent observation is taken in that gap, the LLM sees an empty
+  // page and can incorrectly block an otherwise healthy run.
+  // This is an IIFE string on purpose. Passing the textual arrow function
+  // itself makes Playwright evaluate the function object (truthy) instead of
+  // invoking it, so the wait would finish immediately on an empty SPA shell.
+  await runtime.page.waitForFunction(`(() => {
+    const body = document.body;
+    if (!body || document.readyState === "loading") return false;
+    const interactive = body.querySelector(
+      "a,button,input,textarea,select,summary,[role=button],[role=link],[role=textbox],[role=combobox],[role=tab],[data-testid],canvas,iframe"
+    );
+    // textContent includes inline script source and can make an empty SPA
+    // shell appear meaningful. innerText only represents rendered text.
+    const text = (body.innerText || "").replace(/\\s+/g, "").trim();
+    // Script/style/root shell nodes are implementation scaffolding, not an
+    // observable application. Counting body children made an empty Vite or
+    // Next shell look ready before the framework mounted its first screen.
+    return Boolean(interactive) || text.length > 0;
+  })()`, undefined, { timeout: 10_000 }).catch(() => undefined);
+  await runtime.page.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => undefined);
+  // Give the framework one paint after the observable state is reached so
+  // the DOM model and the screenshot describe the same page generation.
+  await runtime.page.waitForTimeout(100);
+}
+
 export async function ensureBrowserAgentSession(input: {
   runId: string;
   attemptId: string;
@@ -128,7 +248,10 @@ export async function ensureBrowserAgentSession(input: {
   const runtime = await createPlaywrightRuntimeSession({
     headless: input.headless ?? true,
     contextOptions: {
-      viewport: { width: 1280, height: 820 },
+      // Keep a desktop-sized compositor surface so the shared Workbench canvas
+      // remains crisp on Retina/high-DPI displays. The canvas is only a live
+      // transport; immutable evidence is still captured separately per step.
+      viewport: { width: 1920, height: 1080 },
       ...(recoveredStorageState ? { storageState: recoveredStorageState } : {})
     }
   });
@@ -160,14 +283,38 @@ export async function ensureBrowserAgentSession(input: {
     operation: Promise.resolve(),
     clock: new AttemptClock(),
     trace: new PlaywrightAttemptTrace(runtime.context),
-    traceFinalized: false
+    traceFinalized: false,
+    liveSubscribers: new Set()
   };
   sessions.set(input.runId, managed);
   bindTelemetry(managed);
   try {
     await managed.trace.start();
-    await runtime.page.goto(input.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await runtime.page.waitForLoadState("networkidle", { timeout: 3_000 }).catch(() => undefined);
+    let navigationError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await runtime.page.goto(input.url, { waitUntil: "domcontentloaded", timeout: 15_000 });
+        navigationError = undefined;
+        break;
+      } catch (error) {
+        navigationError = error;
+        // Vite/large apps can commit a usable document while a dependency
+        // request keeps Playwright's navigation promise open. Preserve that
+        // observable page instead of terminating the Graph on a clock edge.
+        const committed = await runtime.page.evaluate(() => ({
+          readyState: document.readyState,
+          hasDocument: Boolean(document.documentElement),
+          hasHeadOrBody: Boolean(document.head || document.body)
+        })).then((value) => value.hasDocument && value.hasHeadOrBody && value.readyState !== "loading").catch(() => false);
+        if (committed) {
+          navigationError = undefined;
+          break;
+        }
+        if (attempt === 0) await runtime.page.waitForTimeout(350);
+      }
+    }
+    if (navigationError) throw navigationError;
+    await waitForObservableDocument(runtime);
     managed.state = browserSessionSchema.parse({ ...managed.state, status: "ready", currentUrl: runtime.page.url(), updatedAt: new Date().toISOString() });
     await writeBrowserSession(managed.state);
     await saveLiveFrame(managed).catch(() => undefined);
@@ -255,12 +402,7 @@ export async function observeManagedBrowserSession(input: { runId: string; cover
     await mkdir(observationDirectory, { recursive: true });
     const screenshotPath = path.join(observationDirectory, `${observed.observationId}.png`);
     const screenshotTemporary = `${screenshotPath}.${process.pid}.partial`;
-    await managed.runtime.page.screenshot({
-      path: screenshotTemporary,
-      type: "png",
-      animations: "disabled",
-      timeout: 5_000
-    });
+    await capturePageImage(managed, screenshotTemporary, "png");
     await rename(screenshotTemporary, screenshotPath);
     const screenshotArtifact = await commitBrowserAgentArtifact({
       runId: input.runId,
@@ -354,6 +496,33 @@ export async function updateManagedBrowserSession(runId: string, update: Partial
   return managed.state;
 }
 
+/** Reload the current managed page after a transient browser/network fault.
+ * This stays inside the same BrowserContext so cookies and encrypted
+ * storageState survive, while stale request errors do not poison the next
+ * observation. */
+export async function reloadManagedBrowserSession(runId: string) {
+  const managed = sessions.get(runId);
+  if (!managed) throw new Error("browser_session_not_active");
+  return serialize(managed, async () => {
+    managed.consoleErrors.length = 0;
+    managed.pageErrors.length = 0;
+    managed.failedRequests.length = 0;
+    await managed.runtime.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+    await managed.runtime.page.waitForLoadState("networkidle", { timeout: 3_000 }).catch(() => undefined);
+    managed.state = browserSessionSchema.parse({
+      ...managed.state,
+      status: "ready",
+      currentUrl: managed.runtime.page.url(),
+      rebindCount: managed.state.rebindCount + 1,
+      updatedAt: new Date().toISOString(),
+      leaseExpiresAt: isoAfter(30_000)
+    });
+    await writeBrowserSession(managed.state);
+    await saveLiveFrame(managed).catch(() => undefined);
+    return managed.state;
+  });
+}
+
 export async function acquireBrowserControl(runId: string, owner: "agent" | "user", options: { force?: boolean } = {}) {
   const managed = sessions.get(runId);
   if (!managed) throw new Error("browser_session_not_active");
@@ -363,6 +532,59 @@ export async function acquireBrowserControl(runId: string, owner: "agent" | "use
   const session = await updateManagedBrowserSession(runId, { owner, status: owner === "user" ? "waiting-user" : "ready" });
   publishBrowserAgentLifecycle({ runId, type: "browser.control.changed", payload: { owner, reason: options.force ? "explicit_user_takeover" : "lease_acquired" } });
   return session;
+}
+
+/**
+ * An explicit user takeover is a pause in the browser action loop, not a test
+ * failure. The Agent waits for the operator to click "交还 AI" and then
+ * continues the exact pending action in the same BrowserContext. Keeping this
+ * wait here also closes the race where authorization completed immediately
+ * before the operator acquired the lease.
+ */
+export async function acquireBrowserControlWhenAvailable(
+  runId: string,
+  owner: "agent",
+  options: { timeoutMs?: number; pollMs?: number } = {}
+) {
+  const timeoutMs = options.timeoutMs ?? 10 * 60_000;
+  const pollMs = options.pollMs ?? 200;
+  const deadline = Date.now() + timeoutMs;
+  let announced = false;
+  while (true) {
+    const managed = sessions.get(runId);
+    if (!managed) throw new Error("browser_session_not_active");
+    // A user takeover is explicit and must end explicitly. Do not use the
+    // short Agent lease expiry to steal control back while the operator is
+    // still completing a login, consent screen or manual inspection.
+    if (managed.state.owner === "user") {
+      if (!announced) {
+        announced = true;
+        publishBrowserAgentLifecycle({
+          runId,
+          type: "browser.control.changed",
+          payload: { owner: "user", reason: "agent_waiting_for_user_release" }
+        });
+      }
+      if (Date.now() >= deadline) throw new Error("browser_control_wait_timeout");
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      continue;
+    }
+    try {
+      return await acquireBrowserControl(runId, owner);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "browser_control_owned_by_user") throw error;
+      if (!announced) {
+        announced = true;
+        publishBrowserAgentLifecycle({
+          runId,
+          type: "browser.control.changed",
+          payload: { owner: "user", reason: "agent_waiting_for_user_release" }
+        });
+      }
+      if (Date.now() >= deadline) throw new Error("browser_control_wait_timeout");
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
 }
 
 export async function releaseBrowserControl(runId: string, owner: "agent" | "user") {
@@ -409,6 +631,7 @@ export async function executeUserBrowserInput(input: {
 export async function closeBrowserAgentSession(runId: string) {
   const managed = sessions.get(runId);
   if (!managed) return readBrowserSession(runId);
+  await stopBrowserScreencast(managed).catch(() => undefined);
   await finalizeBrowserAgentTrace(runId).catch(() => undefined);
   await saveEncryptedStorageState(managed).catch(() => undefined);
   await managed.runtime.close();

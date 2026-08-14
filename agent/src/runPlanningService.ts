@@ -43,6 +43,7 @@ type PlanningInput = {
   coverageInventory?: Array<{
     id: string;
     title: string;
+    status?: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
     kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
     target: string;
     sourceNodeIds: string[];
@@ -396,7 +397,17 @@ export async function planRunFromDurableInput(runId: string): Promise<RunProject
       } else {
         const review = reason.startsWith("llm_plan_") || reason.includes("schema") || reason.includes("parse");
         if (input.executionProfile !== "benchmark" && input.permissionProfile?.browserControl !== false) {
-          payload = dynamicBrowserPlan({ requirement: input.requirement, impactAnalysis, promptVersion, modelProfileId: input.modelProfileId });
+          // Preserve the code-derived business inventory when the semantic
+          // planner is unavailable. Dropping it here used to replace a full
+          // scan with one generic `dynamic-browser-path`, which looked like a
+          // successful fallback while silently abandoning the user's plan.
+          payload = dynamicBrowserPlan({
+            requirement: input.requirement,
+            impactAnalysis,
+            promptVersion,
+            modelProfileId: input.modelProfileId,
+            coverageInventory: input.coverageInventory
+          });
           return appendPlanningEvent(runId, "plan_generated", "dynamic-browser-fallback", payload as unknown as Record<string, unknown>);
         }
         return appendPlanningEvent(runId, review ? "human_review_requested" : "run_blocked", "planner-failed", {

@@ -249,7 +249,7 @@ const browserDecision = browserActionDecisionSchema.parse({
   attemptId: browserAttemptId,
   observationId: browserObservation.observationId,
   status: "act",
-  summary: "Collect a fresh observation.",
+  summary: "Evaluate the declared page state.",
   actions: [{
     actionId: "action_browser_loop",
     runId: browserRunId,
@@ -257,14 +257,14 @@ const browserDecision = browserActionDecisionSchema.parse({
     coverageItemId: "coverage_browser_loop",
     sourceObservationId: browserObservation.observationId,
     sourcePageFingerprint: browserObservation.pageFingerprint,
-    action: "observe-page",
-    purpose: "Verify the live browser action loop.",
-    expectedChange: "A fresh observation is available.",
-    oracleIds: [],
+    action: "evaluate-oracle",
+    purpose: "Verify the live browser action loop without a no-op observation action.",
+    expectedChange: "The declared page state is evaluated.",
+    oracleIds: ["oracle_browser_loop"],
     risk: "low",
     timeoutMs: 1_000
   }],
-  oracles: [],
+  oracles: [{ id: "oracle_browser_loop", type: "text", operator: "contains", expected: "Ready", description: "Page reports ready." }],
   evidenceRefs: browserObservation.evidenceRefs,
   createdAt: new Date().toISOString()
 });
@@ -276,11 +276,11 @@ const browserActionResult = browserActionResultSchema.parse({
   attemptId: browserAttemptId,
   coverageItemId: "coverage_browser_loop",
   status: "completed",
-  summary: "Observation completed.",
+  summary: "Oracle evaluation completed.",
   beforeObservationId: browserObservation.observationId,
   afterObservationId: browserObservation.observationId,
   evidenceRefs: browserObservation.evidenceRefs,
-  oracleResults: [],
+  oracleResults: [{ oracleId: "oracle_browser_loop", passed: true, actual: "Ready", evidenceRefs: browserObservation.evidenceRefs }],
   startedAt: new Date().toISOString(),
   completedAt: new Date().toISOString()
 });

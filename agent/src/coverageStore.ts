@@ -100,6 +100,7 @@ export function createDynamicBrowserCoverageItems(input: {
   paths: Array<{
     id: string;
     title: string;
+    status?: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
     riskReason?: string;
     surface?: CoverageItem["surface"];
     preconditions?: string[];
@@ -111,6 +112,14 @@ export function createDynamicBrowserCoverageItems(input: {
   return input.paths.map((path) => {
     const surface = path.surface ?? "page";
     const browserPath = surface === "page";
+    const staticallyBlocked = path.status === "needs-input" || path.status === "coverage-gap";
+    const dispositionReason = path.status === "needs-input"
+      ? `business_path_needs_input:${path.riskReason ?? "缺少执行前置条件"}`
+      : path.status === "coverage-gap"
+        ? `business_path_coverage_gap:${path.riskReason ?? "尚未形成安全动作与机器 Oracle"}`
+        : browserPath
+          ? path.riskReason
+          : "static_business_path_requires_manifest_executor_binding";
     return coverageItemSchema.parse({
     schemaVersion: "1.0",
     id: stableId(input.runId, path.id),
@@ -130,8 +139,8 @@ export function createDynamicBrowserCoverageItems(input: {
     // job entries must be rebound to their allow-listed manifest executor;
     // retaining them as blocked is safer than silently passing or pretending
     // a browser click exercised a backend-only path.
-    disposition: browserPath ? "pending" : "blocked",
-    dispositionReason: browserPath ? path.riskReason : "static_business_path_requires_manifest_executor_binding",
+    disposition: browserPath && !staticallyBlocked ? "pending" : "blocked",
+    dispositionReason,
     scenarioId: `dynamic_${path.id.replace(/[^a-zA-Z0-9_-]+/g, "_")}`,
     createdAt: now,
     updatedAt: now

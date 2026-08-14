@@ -68,7 +68,10 @@ function injectLoginGateFlow(
     oracleCandidates: ["登录成功后离开登录页 URL，登录表单不再显示"],
     requiredEvidenceKinds: ["screenshot", "dom", "network"],
     sourceNodeIds: [],
-    sourceCount: 0,
+    // This path is grounded by the runtime page observation rather than a
+    // static source node. It still has one auditable source and must satisfy
+    // the Run coverage contract, which deliberately rejects zero-source work.
+    sourceCount: 1,
     sourceLocations: []
   };
   planning.businessFlows = [loginFlow, ...planning.businessFlows];

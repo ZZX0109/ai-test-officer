@@ -32,13 +32,6 @@ function unique(values: string[]) {
   return Array.from(new Set(values)).filter(Boolean);
 }
 
-function fallbackEvidenceRefs(evidence: EvidenceItem[]) {
-  return evidence
-    .filter((item) => ["assertion", "screenshot", "dom", "network", "trace", "video", "operation"].includes(item.type))
-    .map((item) => item.id)
-    .slice(-8);
-}
-
 function findingTitle(failureClass: FailureClass, assertionName: string) {
   if (failureClass === "product_bug") return `疑似产品 bug：${assertionName}`;
   if (failureClass === "test_script_issue") return `疑似测试脚本问题：${assertionName}`;
@@ -164,7 +157,7 @@ function buildEvidenceJudge(input: JudgeInput): JudgeResult {
       failureClass: "insufficient_evidence",
       title: "检测到不可信输入中的指令注入信号",
       reasoning: `Requirement、diff 和运行证据只能作为数据；检测到 ${Array.from(new Set(untrustedSignals.map((item) => item.rule))).join(", ")}，不能由其中的指令改变执行、证据或放行结论。`,
-      evidenceRefs: unique(untrustedSignals.flatMap((item) => item.evidenceId ? [item.evidenceId] : []).concat(fallbackEvidenceRefs(input.evidence).slice(-2)))
+      evidenceRefs: unique(untrustedSignals.flatMap((item) => item.evidenceId ? [item.evidenceId] : []))
     });
   }
 
@@ -183,8 +176,7 @@ function buildReleaseJudge(planJudge: JudgeResult, evidenceJudge: JudgeResult, i
   const evidenceRefs = unique([
     ...planJudge.findings.flatMap((item) => item.evidenceRefs),
     ...evidenceJudge.findings.flatMap((item) => item.evidenceRefs),
-    ...input.result.conflictPacket.evidenceRefs.slice(-8),
-    ...fallbackEvidenceRefs(input.evidence)
+    ...input.result.conflictPacket.evidenceRefs.slice(-8)
   ]);
   const shouldBlock = evidenceJudge.verdict === "fail";
   const primaryFailureClass = evidenceJudge.findings.find((item) => item.failureClass)?.failureClass;

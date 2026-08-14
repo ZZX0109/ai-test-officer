@@ -52,6 +52,9 @@ export interface RunProjection {
   id: string;
   state: string;
   version: number;
+  createdAt?: string;
+  updatedAt?: string;
+  input?: Record<string, unknown>;
   gateStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
   finalStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
   humanDecision?: { status: string; reason: string; newLabel?: string };
@@ -362,6 +365,10 @@ export interface PlanningMessage {
   };
   suggestedAction?: AssistantSuggestedAction;
   requiresConfirmation?: boolean;
+  /** A durable assistant activity row that is updated in place while the
+   * Graph is still working. This is presentation state only; terminal truth
+   * continues to come from the Run/Graph projection. */
+  streaming?: boolean;
   /** Structured, owner-aware repair plan surfaced from the failure-attribution
    * + repair-decision chain, rendered by RepairPlanPanel. */
   repairPlan?: RepairPlanData;
@@ -1589,6 +1596,7 @@ export interface BrowserObservation {
 export interface BrowserActionDecision {
   decisionId: string;
   status: "act" | "complete" | "blocked" | "needs-confirmation";
+  reasonCode?: "transient-observation" | "transient-model" | "budget-exhausted" | "policy-blocked" | "user-input-required";
   summary: string;
   actions: Array<{ actionId: string; action: string; purpose: string; expectedChange: string; risk: string }>;
   evidenceRefs: string[];

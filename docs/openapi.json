@@ -1148,6 +1148,13 @@
                       "type": "string",
                       "maxLength": 80
                     },
+                    "valueState": {
+                      "type": "string",
+                      "enum": [
+                        "empty",
+                        "nonempty"
+                      ]
+                    },
                     "framePath": {
                       "type": "array",
                       "items": {
@@ -1367,6 +1374,16 @@
                   "complete",
                   "blocked",
                   "needs-confirmation"
+                ]
+              },
+              "reasonCode": {
+                "type": "string",
+                "enum": [
+                  "transient-observation",
+                  "transient-model",
+                  "budget-exhausted",
+                  "policy-blocked",
+                  "user-input-required"
                 ]
               },
               "summary": {
@@ -2239,88 +2256,6 @@
                             "type": "string",
                             "minLength": 1
                           },
-                          "maxItems": 6,
-                          "default": []
-                        },
-                        "risk": {
-                          "type": "string",
-                          "enum": [
-                            "low",
-                            "medium",
-                            "high",
-                            "forbidden"
-                          ]
-                        },
-                        "timeoutMs": {
-                          "type": "integer",
-                          "minimum": 250,
-                          "maximum": 45000,
-                          "default": 10000
-                        },
-                        "action": {
-                          "type": "string",
-                          "enum": [
-                            "observe-page"
-                          ]
-                        }
-                      },
-                      "required": [
-                        "actionId",
-                        "runId",
-                        "attemptId",
-                        "coverageItemId",
-                        "sourceObservationId",
-                        "sourcePageFingerprint",
-                        "purpose",
-                        "expectedChange",
-                        "risk",
-                        "action"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "actionId": {
-                          "type": "string",
-                          "minLength": 1
-                        },
-                        "runId": {
-                          "type": "string",
-                          "minLength": 1
-                        },
-                        "attemptId": {
-                          "type": "string",
-                          "minLength": 1
-                        },
-                        "coverageItemId": {
-                          "type": "string",
-                          "minLength": 1
-                        },
-                        "sourceObservationId": {
-                          "type": "string",
-                          "minLength": 1
-                        },
-                        "sourcePageFingerprint": {
-                          "type": "string",
-                          "pattern": "^[a-f0-9]{64}$"
-                        },
-                        "purpose": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 500
-                        },
-                        "expectedChange": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 500
-                        },
-                        "oracleIds": {
-                          "type": "array",
-                          "items": {
-                            "type": "string",
-                            "minLength": 1
-                          },
                           "minItems": 1,
                           "maxItems": 6
                         },
@@ -2592,6 +2527,44 @@
                       "required": [
                         "id",
                         "type",
+                        "expected",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "input-state"
+                          ]
+                        },
+                        "controlId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "expected": {
+                          "type": "string",
+                          "enum": [
+                            "empty",
+                            "nonempty"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "type",
+                        "controlId",
                         "expected",
                         "description"
                       ],
@@ -3169,6 +3142,128 @@
                 ],
                 "default": "targeted"
               },
+              "coverageInventory": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "executable",
+                        "auto-bindable",
+                        "needs-input",
+                        "coverage-gap"
+                      ],
+                      "default": "auto-bindable"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "page",
+                        "component",
+                        "api",
+                        "scenario",
+                        "data",
+                        "background-task"
+                      ]
+                    },
+                    "target": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1000
+                    },
+                    "sourceNodeIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "maxItems": 2000,
+                      "default": []
+                    },
+                    "sourceCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "exclusiveMinimum": true,
+                      "default": 1
+                    },
+                    "surfaces": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "page",
+                          "api",
+                          "data",
+                          "background-task"
+                        ]
+                      },
+                      "maxItems": 4,
+                      "default": []
+                    },
+                    "requiredEvidenceKinds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "screenshot",
+                          "dom",
+                          "network",
+                          "console",
+                          "trace",
+                          "video",
+                          "download",
+                          "operation-log",
+                          "report",
+                          "attachment",
+                          "source-patch",
+                          "changed-files-archive",
+                          "repair-validation-log"
+                        ]
+                      },
+                      "maxItems": 20,
+                      "default": []
+                    },
+                    "preconditions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "maxItems": 30,
+                      "default": []
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "title",
+                    "kind",
+                    "target"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 5000,
+                "default": []
+              },
+              "dynamicBrowser": {
+                "type": "boolean",
+                "default": false
+              },
+              "confirmedExecution": {
+                "type": "boolean",
+                "default": false
+              },
               "executionProfile": {
                 "type": "string",
                 "enum": [
@@ -3239,6 +3334,12 @@
                     "minimum": 1,
                     "maximum": 2,
                     "default": 2
+                  },
+                  "maxBrowserActionCalls": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60,
+                    "default": 12
                   },
                   "maxJudgeCalls": {
                     "type": "integer",
@@ -3908,11 +4009,17 @@
             "type": "string",
             "enum": [
               "planning",
+              "browser-action",
               "judging",
               "triage",
               "repairing",
               "assistant"
             ]
+          },
+          "budgetScopeId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
           },
           "provider": {
             "type": "string",
@@ -4689,6 +4796,7 @@
             "type": "string",
             "enum": [
               "planning",
+              "browser-action",
               "judging",
               "triage",
               "repairing",
@@ -5932,6 +6040,13 @@
                   "type": "string",
                   "maxLength": 80
                 },
+                "valueState": {
+                  "type": "string",
+                  "enum": [
+                    "empty",
+                    "nonempty"
+                  ]
+                },
                 "framePath": {
                   "type": "array",
                   "items": {
@@ -6151,6 +6266,16 @@
               "complete",
               "blocked",
               "needs-confirmation"
+            ]
+          },
+          "reasonCode": {
+            "type": "string",
+            "enum": [
+              "transient-observation",
+              "transient-model",
+              "budget-exhausted",
+              "policy-blocked",
+              "user-input-required"
             ]
           },
           "summary": {
@@ -7023,88 +7148,6 @@
                         "type": "string",
                         "minLength": 1
                       },
-                      "maxItems": 6,
-                      "default": []
-                    },
-                    "risk": {
-                      "type": "string",
-                      "enum": [
-                        "low",
-                        "medium",
-                        "high",
-                        "forbidden"
-                      ]
-                    },
-                    "timeoutMs": {
-                      "type": "integer",
-                      "minimum": 250,
-                      "maximum": 45000,
-                      "default": 10000
-                    },
-                    "action": {
-                      "type": "string",
-                      "enum": [
-                        "observe-page"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "actionId",
-                    "runId",
-                    "attemptId",
-                    "coverageItemId",
-                    "sourceObservationId",
-                    "sourcePageFingerprint",
-                    "purpose",
-                    "expectedChange",
-                    "risk",
-                    "action"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "actionId": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "runId": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "attemptId": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "coverageItemId": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "sourceObservationId": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "sourcePageFingerprint": {
-                      "type": "string",
-                      "pattern": "^[a-f0-9]{64}$"
-                    },
-                    "purpose": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 500
-                    },
-                    "expectedChange": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 500
-                    },
-                    "oracleIds": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "minLength": 1
-                      },
                       "minItems": 1,
                       "maxItems": 6
                     },
@@ -7376,6 +7419,44 @@
                   "required": [
                     "id",
                     "type",
+                    "expected",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "input-state"
+                      ]
+                    },
+                    "controlId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "expected": {
+                      "type": "string",
+                      "enum": [
+                        "empty",
+                        "nonempty"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "controlId",
                     "expected",
                     "description"
                   ],
@@ -7774,6 +7855,32 @@
                     "decisions",
                     "actions"
                   ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/browser-live": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Length-prefixed live Playwright compositor stream",
+            "content": {
+              "application/x-ai-test-officer-browser-stream": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
