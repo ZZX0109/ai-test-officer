@@ -3563,8 +3563,10 @@ select:focus {
   gap: 7px;
   min-height: 120px;
   overflow: auto;
+  overflow-anchor: none;
   overscroll-behavior: contain;
   padding-right: 2px;
+  scrollbar-gutter: stable;
 }
 
 .sidebar-planning-messages article {
@@ -3639,6 +3641,13 @@ select:focus {
   margin-bottom: 0;
 }
 
+/* A Graph run owns one live message. Reuse its layout box while the current
+   action changes so streaming status updates do not make the conversation
+   jump or visually flash. */
+.assistant-conversation-message.is-progress {
+  min-height: 96px;
+}
+
 .assistant-typing {
   align-items: center;
   display: inline-flex !important;
@@ -3671,7 +3680,7 @@ select:focus {
 }
 
 @keyframes assistantTyping {
-  to { opacity: 0.25; transform: translateY(-2px); }
+  to { opacity: 0.62; }
 }
 
 .assistant-call-details,
@@ -5368,6 +5377,29 @@ select:focus {
 .workbench-crash-state p { color: #526071; line-height: 1.65; }
 .workbench-crash-state button { padding: 9px 14px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; }
 .workbench-crash-state pre { overflow: auto; white-space: pre-wrap; }
+
+.workbench-section-error {
+  min-height: 120px;
+  display: grid;
+  place-content: center;
+  justify-items: start;
+  gap: 8px;
+  padding: 18px;
+  border: 1px solid #d9e2ef;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #172033;
+}
+
+.workbench-section-error > span { color: #64748b; font-size: 13px; }
+.workbench-section-error button {
+  padding: 7px 11px;
+  border: 1px solid #bdd0ef;
+  border-radius: 8px;
+  background: #fff;
+  color: #2457a6;
+}
+.workbench-section-error pre { max-width: 100%; overflow: auto; white-space: pre-wrap; }
 
 .live-capture-badge {
   position: absolute;

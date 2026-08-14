@@ -496,6 +496,37 @@ export async function updateManagedBrowserSession(runId: string, update: Partial
   return managed.state;
 }
 
+/** Keep the Playwright CSS viewport aligned with the Workbench surface.
+ *
+ * Before this is called the project preview is a responsive iframe, while the
+ * live Agent session historically used a fixed 1920x1080 viewport. Drawing
+ * that fixed desktop onto a smaller Workbench canvas made the entire tested
+ * application appear to shrink as soon as a Run started. Viewport changes are
+ * serialized with browser actions so a resize can never race a click or an
+ * observation.
+ */
+export async function resizeManagedBrowserViewport(runId: string, viewport: { width: number; height: number }) {
+  const managed = sessions.get(runId);
+  if (!managed) throw new Error("browser_session_not_active");
+  const width = Math.max(640, Math.min(1920, Math.round(viewport.width)));
+  const height = Math.max(480, Math.min(1080, Math.round(viewport.height)));
+  return serialize(managed, async () => {
+    const current = managed.runtime.page.viewportSize();
+    if (!current || Math.abs(current.width - width) > 8 || Math.abs(current.height - height) > 8) {
+      await managed.runtime.page.setViewportSize({ width, height });
+      await managed.runtime.page.waitForTimeout(50);
+    }
+    managed.state = browserSessionSchema.parse({
+      ...managed.state,
+      currentUrl: managed.runtime.page.url(),
+      updatedAt: new Date().toISOString(),
+      leaseExpiresAt: isoAfter(30_000)
+    });
+    await writeBrowserSession(managed.state);
+    return managed.state;
+  });
+}
+
 /** Reload the current managed page after a transient browser/network fault.
  * This stays inside the same BrowserContext so cookies and encrypted
  * storageState survive, while stale request errors do not poison the next

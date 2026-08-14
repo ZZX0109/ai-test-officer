@@ -322,6 +322,55 @@ for (const expected of [
 ]) assert.ok(browserLoopNodes.includes(expected), `browser loop did not visit ${expected}`);
 assert.equal((await browserLoopService.state(browserRunId))?.status, "completed");
 
+// A large full scan must not put every dynamic page path into a single graph
+// invocation. The browser batch handshake checkpoints after a bounded group,
+// then resumes the same thread before continuing the loop.
+const browserBatchNodes: string[] = [];
+let browserBatchSteps = 0;
+const browserBatchRunId = "run_active_browser_batch";
+const browserBatchService = createAgentOrchestrationGraph({
+  checkpointer: new MemorySaver(),
+  hooks: {
+    plan: async () => ({
+      browserAgentRequired: true,
+      currentCoverageItemId: "coverage_browser_batch",
+      currentAttemptId: browserAttemptId
+    }),
+    observeBrowser: async () => ({
+      browserSession: { ...browserSession, runId: browserBatchRunId },
+      browserObservation: { ...browserObservation, runId: browserBatchRunId }
+    }),
+    decideBrowserAction: async () => ({ browserDecision: { ...browserDecision, runId: browserBatchRunId } }),
+    authorizeBrowserAction: async () => ({ browserActionAuthorized: true }),
+    executeBrowserAction: async () => ({ browserActionResult: { ...browserActionResult, runId: browserBatchRunId } }),
+    decideNextStep: async () => {
+      browserBatchSteps += 1;
+      return browserBatchSteps === 1
+        ? { browserBatchPending: true, browserBatchDelayMs: 5_000, browserLoopComplete: false, browserBatchPathCount: 3 }
+        : { browserBatchPending: false, browserLoopComplete: true };
+    },
+    collectAndGate: async () => ({ gate: { machineGate: { status: "pass" } }, failure: {} }),
+    onProjection: async (item) => {
+      if (item.currentNode) browserBatchNodes.push(item.currentNode);
+    }
+  }
+});
+await browserBatchService.start({
+  runId: browserBatchRunId,
+  mode: "active",
+  planApproved: true,
+  capabilitiesApproved: true,
+  permissionProfile: agentPermissionProfileSchema.parse({ browserControl: true })
+});
+const browserBatchPaused = await browserBatchService.state(browserBatchRunId);
+assert.equal(browserBatchPaused?.pendingInterrupt?.kind, "execution-result");
+assert.equal(browserBatchPaused?.pendingInterrupt?.payload.phase, "browser-batch");
+assert.equal(browserBatchPaused?.pendingInterrupt?.payload.delayMs, 5_000);
+await browserBatchService.resume(browserBatchRunId, { execution: { phase: "browser-batch" } });
+assert.equal((await browserBatchService.state(browserBatchRunId))?.status, "completed");
+assert.equal(browserBatchSteps, 2);
+assert.ok(browserBatchNodes.filter((node) => node === "observe-browser").length >= 2);
+
 // A full-scan run can contain page paths plus manifest-bound API/data/job
 // paths. Finishing the browser loop must hand the remaining structured paths
 // to the Worker instead of jumping directly to the gate.

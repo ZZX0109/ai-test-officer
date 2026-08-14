@@ -94,6 +94,13 @@ export function releaseRunBrowserControl(runId: string) {
   return request<{ session: BrowserSession }>(`/v1/runs/${encodeURIComponent(runId)}/browser-control/release`, { method: "POST", body: JSON.stringify({}) });
 }
 
+export function resizeRunBrowserViewport(runId: string, viewport: { width: number; height: number }) {
+  return request<{ session: BrowserSession }>(`/v1/runs/${encodeURIComponent(runId)}/browser-viewport`, {
+    method: "POST",
+    body: JSON.stringify(viewport)
+  });
+}
+
 export function sendRunBrowserInput(runId: string, input: { kind: "click" | "type" | "press" | "scroll"; x?: number; y?: number; text?: string; key?: "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown" | "Space"; deltaY?: number }) {
   return request<{ observation: BrowserObservation }>(`/v1/runs/${encodeURIComponent(runId)}/browser-input`, { method: "POST", body: JSON.stringify(input) });
 }

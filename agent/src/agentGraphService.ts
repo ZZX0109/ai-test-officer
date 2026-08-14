@@ -70,6 +70,22 @@ import { listCredentials } from "./credentialStore.js";
 import { artifactKindToIntegrityKind } from "./artifactIntegrity.js";
 import { credentialInterruptDecision, observationShowsAuthenticationBoundary } from "./browser-agent/login.js";
 
+/**
+ * One LangGraph invoke must never try to walk an entire full-scan inventory.
+ * Keep this deliberately small: a page path costs several graph nodes and a
+ * model call, while the checkpoint between batches makes progress durable.
+ */
+const browserPathsPerGraphTurn = Math.max(1, Math.min(
+  Number.parseInt(process.env.BROWSER_GRAPH_PATHS_PER_TURN ?? "3", 10) || 3,
+  8
+));
+const browserModelCooldownMs = Math.max(1_000, Math.min(
+  Number.parseInt(process.env.BROWSER_MODEL_COOLDOWN_MS ?? "5000", 10) || 5_000,
+  30_000
+));
+const scheduledBrowserBatchResumes = new Set<string>();
+const browserModelCooldownUntil = new Map<string, number>();
+
 type InteractiveCoverageInventoryItem = {
   id: string;
   status?: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
@@ -1329,7 +1345,9 @@ async function buildService() {
           browserSession: session,
           browserObservation: observation,
           browserActionAuthorized: false,
-          browserLoopComplete: false
+          browserLoopComplete: false,
+          browserBatchResumed: false,
+          browserBatchDelayMs: undefined
         };
       }),
       decideBrowserAction: node("decide-browser-action", async (state) => {
@@ -1377,9 +1395,26 @@ async function buildService() {
         const item = coverage.find((entry) => entry.id === state.currentCoverageItemId);
         const prior = await readBrowserActionResults(state.runId);
         let decision: BrowserActionDecision;
+        const modelCooldownKey = modelProfileId ?? "default";
+        const cooldownRemainingMs = Math.max(0, (browserModelCooldownUntil.get(modelCooldownKey) ?? 0) - Date.now());
         const transientPageFault = observation.controls.length === 0
           && observation.failedRequests.some((request) => /ERR_NETWORK_CHANGED|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_TIMED_OUT|ERR_INTERNET_DISCONNECTED/i.test(request.failure ?? ""));
-        if (transientPageFault) {
+        if (cooldownRemainingMs > 0) {
+          decision = browserActionDecisionSchema.parse({
+            schemaVersion: "1.0",
+            decisionId: `browser_decision_${randomUUID()}`,
+            runId: state.runId,
+            attemptId: observation.attemptId,
+            observationId: observation.observationId,
+            status: "blocked",
+            reasonCode: "model-rate-limited",
+            summary: `模型服务正在冷却，${Math.ceil(cooldownRemainingMs / 1000)} 秒后会自动继续当前页面路径。`,
+            actions: [],
+            oracles: [],
+            evidenceRefs: observation.evidenceRefs,
+            createdAt: new Date().toISOString()
+          });
+        } else if (transientPageFault) {
           decision = browserActionDecisionSchema.parse({
             schemaVersion: "1.0",
             decisionId: `browser_decision_${randomUUID()}`,
@@ -1405,7 +1440,9 @@ async function buildService() {
           });
         } catch (error) {
           const code = error instanceof Error ? error.message : "browser_llm_decision_failed";
+          const rateLimitedModelFailure = /(?:provider_http_429|http_429|rate[ _-]?limit|too many requests)/i.test(code);
           const retryableModelFailure = /fetch_failed|provider_|timeout|network|empty_response|responses_incomplete/i.test(code);
+          if (rateLimitedModelFailure) browserModelCooldownUntil.set(modelCooldownKey, Date.now() + browserModelCooldownMs);
           decision = browserActionDecisionSchema.parse({
             schemaVersion: "1.0",
             decisionId: `browser_decision_${randomUUID()}`,
@@ -1413,16 +1450,18 @@ async function buildService() {
             attemptId: observation.attemptId,
             observationId: observation.observationId,
             status: "blocked",
-            reasonCode: retryableModelFailure ? "transient-model" : code.startsWith("llm_budget_exceeded") ? "budget-exhausted" : undefined,
+            reasonCode: rateLimitedModelFailure ? "model-rate-limited" : retryableModelFailure ? "transient-model" : code.startsWith("llm_budget_exceeded") ? "budget-exhausted" : undefined,
             summary: code.startsWith("llm_budget_exceeded")
               ? `当前业务路径已达到独立的浏览器 AI 预算（${code}），系统会保留该路径证据并继续处理其他路径。`
+              : rateLimitedModelFailure
+                ? `模型服务暂时限流，系统会在 ${Math.ceil(browserModelCooldownMs / 1000)} 秒后自动重试当前页面路径。`
               : retryableModelFailure
                 ? `浏览器模型调用暂时失败：${code}`
                 : `浏览器 AI 决策失败：${code}`,
             actions: [],
             oracles: [],
             evidenceRefs: observation.evidenceRefs,
-            userQuestion: retryableModelFailure
+            userQuestion: retryableModelFailure || rateLimitedModelFailure
               ? undefined
               : code.startsWith("llm_budget_exceeded")
               ? "当前路径不会继续消耗预算；其他业务路径将继续执行。"
@@ -1578,6 +1617,24 @@ async function buildService() {
             failure: undefined
           };
         }
+        if (decision?.status === "blocked" && decision.reasonCode === "model-rate-limited" && (state.browserRateLimitRetries ?? 0) < 1) {
+          return {
+            browserDecision: undefined,
+            browserActionResult: undefined,
+            browserLoopComplete: false,
+            browserBatchPending: true,
+            browserBatchDelayMs: browserModelCooldownMs,
+            browserBatchResumed: false,
+            browserRateLimitRetries: (state.browserRateLimitRetries ?? 0) + 1,
+            failure: undefined,
+            observation: {
+              ...(state.observation ?? {}),
+              stage: "model-cooldown",
+              status: "waiting",
+              summary: `模型服务限流，正在等待 ${Math.ceil(browserModelCooldownMs / 1000)} 秒后自动继续当前路径。`
+            }
+          };
+        }
         let terminalDisposition: "executed" | "blocked" | undefined;
         let dispositionReason: string | undefined;
         const completedLoginBoundary = result?.status === "completed"
@@ -1645,12 +1702,27 @@ async function buildService() {
         const next = coverage.find((item) => item.disposition === "pending" && item.surface === "page");
         if (next) {
           const session = await updateManagedBrowserSession(state.runId, { actionCount: 0, decisionCount: 0, rebindCount: 0 });
+          const pathsInBatch = (state.browserBatchPathCount ?? 0) + 1;
+          const yieldBatch = pathsInBatch >= browserPathsPerGraphTurn;
           return {
             currentCoverageItemId: next.id,
             browserSession: session,
             browserDecision: undefined,
             browserActionResult: undefined,
-            browserLoopComplete: false
+            browserLoopComplete: false,
+            browserBatchPathCount: pathsInBatch,
+            browserBatchPending: yieldBatch,
+            browserBatchDelayMs: undefined,
+            browserBatchResumed: false,
+            browserRateLimitRetries: 0,
+            observation: {
+              ...(state.observation ?? {}),
+              stage: "browser-batch",
+              status: yieldBatch ? "waiting" : "running",
+              summary: yieldBatch
+                ? `已完成本批 ${pathsInBatch} 条页面路径，正在保存进度并自动继续下一批。`
+                : `已完成本批第 ${pathsInBatch} 条页面路径，继续处理下一条。`
+            }
           };
         }
         const remainingStructuredPaths = coverage.filter((item) =>
@@ -1660,6 +1732,9 @@ async function buildService() {
         ).length;
         return {
           browserLoopComplete: true,
+          browserBatchPending: false,
+          browserBatchDelayMs: undefined,
+          browserBatchResumed: false,
           remainingPathCount: remainingStructuredPaths
         };
       }),
@@ -2234,6 +2309,13 @@ async function buildService() {
       }),
       onProjection: async (projection) => {
         await saveAgentGraphProjection(projection);
+        const payload = projection.pendingInterrupt?.payload;
+        const phase = payload && typeof payload === "object"
+          ? (payload as Record<string, unknown>).phase
+          : undefined;
+        if (projection.pendingInterrupt?.kind === "execution-result" && phase === "browser-batch") {
+          scheduleBrowserBatchResume(projection.runId);
+        }
       }
     }
   });
@@ -2470,6 +2552,78 @@ async function repairOperation(
 async function graphService() {
   servicePromise ??= buildService();
   return servicePromise;
+}
+
+/**
+ * A full scan can contain hundreds of page paths. The graph checkpoints after
+ * a small browser batch and this internal scheduler resumes that checkpoint
+ * once it is durable. It is deliberately not a user-facing approval or a
+ * Worker result, so it must never be rendered as a blocking decision card.
+ */
+function scheduleBrowserBatchResume(runId: string) {
+  if (scheduledBrowserBatchResumes.has(runId)) return;
+  scheduledBrowserBatchResumes.add(runId);
+  const resume = (delayMs: number) => {
+    const timer = setTimeout(() => void attempt(20), delayMs);
+    timer.unref?.();
+  };
+  const attempt = async (remaining: number): Promise<void> => {
+    let finished = false;
+    try {
+      const projection = await getAgentGraphProjection(runId);
+      const pending = projection?.pendingInterrupt;
+      const phase = pending?.payload && typeof pending.payload === "object"
+        ? (pending.payload as Record<string, unknown>).phase
+        : undefined;
+      if (pending?.kind === "execution-result" && phase === "browser-batch") {
+        const requestedDelay = (pending.payload as Record<string, unknown>).delayMs;
+        const delayMs = typeof requestedDelay === "number"
+          ? Math.max(0, Math.min(requestedDelay, 30_000))
+          : 0;
+        if (delayMs > 0) {
+          // Consume the persisted delay before resuming. Rewriting the
+          // interrupt is unnecessary: this scheduler runs once per durable
+          // checkpoint and the in-memory dedupe prevents duplicate resumes.
+          const timer = setTimeout(() => void resumeAfterCooldown(), delayMs);
+          timer.unref?.();
+          return;
+        }
+        await resumeAgentGraph(runId, { execution: { phase: "browser-batch" } });
+        finished = true;
+        return;
+      }
+      if (remaining > 0) {
+        resume(40);
+        return;
+      }
+      finished = true;
+    } catch {
+      // A short-lived checkpoint race must not turn a valid Run into failed.
+      // A subsequent durable projection refresh will schedule again.
+      finished = true;
+    } finally {
+      if (finished) scheduledBrowserBatchResumes.delete(runId);
+    }
+  };
+  const resumeAfterCooldown = async (): Promise<void> => {
+    try {
+      const projection = await getAgentGraphProjection(runId);
+      const pending = projection?.pendingInterrupt;
+      const phase = pending?.payload && typeof pending.payload === "object"
+        ? (pending.payload as Record<string, unknown>).phase
+        : undefined;
+      if (pending?.kind === "execution-result" && phase === "browser-batch") {
+        await resumeAgentGraph(runId, { execution: { phase: "browser-batch" } });
+      }
+    } catch {
+      // The durable interrupt remains available for a later projection
+      // refresh. A scheduling failure must not become an unhandled runtime
+      // rejection in the API process.
+    } finally {
+      scheduledBrowserBatchResumes.delete(runId);
+    }
+  };
+  resume(40);
 }
 
 function permissionProfile(run: RunProjection) {

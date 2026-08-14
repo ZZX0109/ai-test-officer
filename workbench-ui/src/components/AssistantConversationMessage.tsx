@@ -99,9 +99,10 @@ export function AssistantConversationMessage({
 }) {
   const presentation = assistantPresentation(message.content);
   const assistant = message.role === "assistant";
+  const progress = message.id.startsWith("progress:");
 
   return (
-    <article className={`${message.role} assistant-conversation-message${message.id.includes("pending") || message.streaming ? " pending" : ""}`}>
+    <article className={`${message.role} assistant-conversation-message${message.id.includes("pending") || message.streaming ? " pending" : ""}${progress ? " is-progress" : ""}`}>
       <header className="assistant-message-header">
         <span className="assistant-message-avatar" aria-hidden="true">
           {assistant ? <Bot size={14} /> : <UserRound size={14} />}
@@ -111,7 +112,7 @@ export function AssistantConversationMessage({
       </header>
       <div className="assistant-message-copy">
         {presentation.visible.split(/\n+/).map((paragraph, index) => (
-          <p key={`${paragraph}-${index}`}>{paragraph}</p>
+          <p key={index}>{paragraph}</p>
         ))}
       </div>
       {message.id.includes("pending") || message.streaming ? (

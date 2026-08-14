@@ -1,4 +1,4 @@
-import React, { useEffect, useReducer, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { initializeOidc, oidcConfigured } from "./auth";
 import { OidcSessionPanel } from "./components/OidcSessionPanel";
 import {
@@ -30,9 +30,9 @@ import { BotDeliveryPanel } from "./components/BotDeliveryPanel";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import {
   DiscoveryOrchestrationNotice,
-  DiscoveryPanel,
-  discoveryOrchestrationCopy
+  DiscoveryPanel
 } from "./components/DiscoveryPanel";
+import { discoveryOrchestrationCopy } from "./discoveryOrchestrationCopy";
 import { EvidencePanel } from "./components/EvidencePanel";
 import { InterruptDecisionPanel } from "./components/InterruptDecisionPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
@@ -40,6 +40,7 @@ import { ImpactPanel } from "./components/ImpactPanel";
 import { PatrolPanel } from "./components/PatrolPanel";
 import { ProjectPanel } from "./components/ProjectPanel";
 import { ProjectWizardPanel } from "./components/ProjectWizardPanel";
+import { WorkbenchSectionBoundary } from "./components/WorkbenchSectionBoundary";
 import { RunTimeline } from "./components/RunTimeline";
 import { RunAssistantPanel } from "./components/RunAssistantPanel";
 import { KnowledgeBasis } from "./components/KnowledgeBasis";
@@ -117,6 +118,7 @@ import {
   getRunBrowserSession,
   acquireRunBrowserControl,
   releaseRunBrowserControl,
+  resizeRunBrowserViewport,
   sendRunBrowserInput,
   resumeRepairDecision,
   listRunRepairs,
@@ -367,6 +369,7 @@ export function App() {
     content: "输入“全面扫描”或“灰度测试”可直接列出完整测试清单；也可以描述一个具体的验证目标。",
     createdAt: new Date().toISOString()
   }]);
+  const planningMessagesViewportRef = useRef<HTMLDivElement | null>(null);
   const [planningInput, setPlanningInput] = useState("");
   const [planningResult, setPlanningResult] = useState<PlanningConversationResult | null>(null);
   const [planningFlowPageLoading, setPlanningFlowPageLoading] = useState(false);
@@ -396,7 +399,6 @@ export function App() {
   const surfacedProjectDiagnostics = useRef(new Set<string>());
   const hydratedAgentThreads = useRef(new Set<string>());
   const hydratedRunReports = useRef(new Set<string>());
-  const surfacedObservationIds = useRef(new Set<string>());
   const generationRequestRef = useRef<{ id: string; projectId: string; controller: AbortController } | null>(null);
   const diagnosisOperationRef = useRef<{ id: string; projectId: string } | null>(null);
   const activeRunRestoreEpochRef = useRef(0);
@@ -697,6 +699,22 @@ export function App() {
   const assistantFeedbackRequired = runIsBlocked || runtimeRecoveryAvailable || discoveryRecoveryAvailable || authFeedbackRequired || credentialReadyForRetry || apiCredentialFeedbackRequired || screenshotRateLimited || reviewRequired || codeRepairAvailable || startupRepairAvailable;
   const latestPlanningAssistant = [...planningMessages].reverse().find((item) => item.role === "assistant");
   const latestPlanningAssistantMessage = latestPlanningAssistant?.content;
+  const planningTail = planningMessages.at(-1);
+
+  useLayoutEffect(() => {
+    const viewport = planningMessagesViewportRef.current;
+    if (!viewport) return;
+    // The assistant is a live chronological feed. Keep the newest message
+    // fully visible in the scroll viewport before the browser paints it; this
+    // avoids the one-frame clipped state that looked like a flash.
+    viewport.scrollTop = viewport.scrollHeight;
+  }, [
+    planningMessages.length,
+    planningTail?.id,
+    planningTail?.content,
+    planningTail?.streaming,
+    planningSummaryCollapsed
+  ]);
   const assistantQuickCommands = runIsBlocked || reviewRequired
     ? ["用简单的话解释失败原因", "重试失败链路", "继续其他可执行测试"]
     : isRunning
@@ -1650,16 +1668,9 @@ export function App() {
           setBrowserFrameRevision((current) => current + 1);
           void getRunBrowserSession(activeRunId).then(({ session }) => setBrowserSession(session)).catch(() => undefined);
         }
-        if (type === "browser.action.proposed") {
-          const decision = payload as { decisionId?: string; summary?: string; actions?: Array<{ purpose?: string; expectedChange?: string }> };
-          if (decision.decisionId) setPlanningMessages((current) => upsertAssistantProgress(current, {
-            id: "browser-progress",
-            role: "assistant",
-            content: [`正在思考 · ${decision.actions?.[0]?.purpose ?? decision.summary ?? "分析页面"}`, "测试尚未结束。", `当前动作：${decision.actions?.[0]?.expectedChange ?? "执行后重新观察页面并验证"}`].join("\n"),
-            createdAt: new Date().toISOString(),
-            streaming: true
-          }, `run:${activeRunId}`));
-        }
+        // The Graph projection owns the single live assistant message. Browser
+        // events update the canvas/session only; writing the same message from
+        // both sources made the sidebar alternate several times per second.
         return;
       }
       // Graph lifecycle frames carry the projection itself. `agent.interrupt.*`
@@ -1668,50 +1679,6 @@ export function App() {
       if (type.startsWith("agent.")) {
         const candidate = payload as unknown as AgentGraphProjection;
         const isProjectionEvent = type.startsWith("agent.node.") || type.startsWith("agent.interrupt");
-        if (type === "agent.observation.created") {
-          const observation = payload as unknown as {
-            id?: string;
-            status?: string;
-            summary?: string;
-            finalUrl?: string;
-            httpStatus?: number;
-            controls?: Array<{ name?: string; role?: string; visible?: boolean }>;
-            consoleErrors?: string[];
-            pageErrors?: string[];
-            failedRequests?: Array<{ url?: string; status?: number; failure?: string }>;
-            userActionRequired?: boolean;
-            retryable?: boolean;
-          };
-          if (observation.id && !surfacedObservationIds.current.has(observation.id)) {
-            surfacedObservationIds.current.add(observation.id);
-            const controls = observation.controls?.filter((item) => item.visible !== false).slice(0, 5)
-              .map((item) => item.name || item.role).filter(Boolean).join("、");
-            const failures = [
-              ...(observation.consoleErrors ?? []).slice(0, 2).map((item) => `控制台：${item}`),
-              ...(observation.pageErrors ?? []).slice(0, 2).map((item) => `页面：${item}`),
-              ...(observation.failedRequests ?? []).slice(0, 2).map((item) => `网络：${item.url ?? "请求"}${item.status ? ` (${item.status})` : ""}`)
-            ];
-            setPlanningMessages((current) => upsertAssistantProgress(current, {
-              id: "browser-progress",
-              role: "assistant",
-              content: [
-                `遇到的问题：${observation.summary ?? "系统正在读取页面状态。"}`,
-                `系统已经做了什么：已采集页面地址${observation.finalUrl ? ` ${observation.finalUrl}` : ""}${observation.httpStatus ? `、HTTP ${observation.httpStatus}` : ""}${controls ? `，发现控件：${controls}` : ""}${failures.length ? `。${failures.join("；")}` : "。暂未发现控制台或网络错误"}`,
-                `需要你做什么：${observation.userActionRequired ? "请根据上面的阻塞提示补充授权或凭据。" : observation.retryable ? "无需操作，系统将按有限次数继续恢复并重试。" : "无需操作，系统会保留当前证据并进入下一步。"}`
-              ].join("\n"),
-              createdAt: new Date().toISOString(),
-              streaming: !observation.userActionRequired,
-              reasoningSummary: {
-                phase: observation.userActionRequired ? "waiting-user" : "diagnosing",
-                observations: failures.length ? failures : [observation.summary ?? "页面观测已保存"],
-                assessment: observation.status === "ready" ? "页面已具备可观察状态。" : "页面观测未达到可执行条件。",
-                nextStep: observation.retryable ? "有限恢复或重新 Discovery" : "保留证据并等待下一节点",
-                userAction: observation.userActionRequired ? "请完成授权或凭据配置。" : "无需操作",
-                confidence: failures.length ? "high" : "medium"
-              }
-            }, `run:${activeRunId}`));
-          }
-        }
         if (isProjectionEvent && candidate?.runId === activeRunId) {
           setAgentProjection(candidate);
           if (candidate.pendingInterrupt) setInterruptError(null);
@@ -2065,7 +2032,8 @@ export function App() {
       id: messageId,
       role: "assistant",
       content: "正在读取机器结论、失败证据和已有修复记录，整理这次问题与下一步操作…",
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      streaming: true
     }, `diagnosis:${analysisId}`));
     setAssistantChatBusy(true);
     const failurePacket = {
@@ -2110,6 +2078,7 @@ export function App() {
             ? {
               ...item,
               content: response.assistant.reply,
+              streaming: false,
               repairPlan: response.assistant.repairPlan,
               reasoningSummary: response.assistant.reasoningSummary,
               knowledge: response.assistant.knowledge,
@@ -2182,6 +2151,7 @@ export function App() {
           ? {
             ...item,
             content: response.assistant.reply,
+            streaming: false,
             repairPlan: response.assistant.repairPlan,
             reasoningSummary: response.assistant.reasoningSummary,
             knowledge: response.assistant.knowledge,
@@ -2221,6 +2191,7 @@ export function App() {
           ? {
             ...item,
             content: userFacingAssistantError(error),
+            streaming: false,
             reasoningSummary: {
               phase: "waiting-user",
               observations: [
@@ -5318,6 +5289,20 @@ export function App() {
     }
   }
 
+  async function syncSharedBrowserViewport(viewport: { width: number; height: number }) {
+    if (!activeRunId || !browserSession || ["closed", "failed"].includes(browserSession.status)) return;
+    try {
+      const response = await resizeRunBrowserViewport(activeRunId, viewport);
+      setBrowserSession(response.session);
+    } catch (error) {
+      // Resizing is a display enhancement. A short race while the worker is
+      // creating/closing its page must not turn into a user-facing test error.
+      if (error instanceof Error && !/browser_session_not_active|409/.test(error.message)) {
+        setScreenshotIssue(error.message);
+      }
+    }
+  }
+
   async function clickSharedBrowser(input: { x: number; y: number; imageWidth: number; imageHeight: number }) {
     if (!activeRunId || !browserSession || ["closed", "failed"].includes(browserSession.status)) return;
     try {
@@ -5567,7 +5552,7 @@ export function App() {
                 </div>
               </header>
               <span className="sidebar-current-project">当前项目：{selectedProjectName}</span>
-              <div className="sidebar-planning-messages" aria-live="polite">
+              <div ref={planningMessagesViewportRef} className="sidebar-planning-messages" aria-live="polite">
                 {planningMessages.map((item, index) => {
                   const attachesRunActions = assistantFeedbackRequired
                     && item.role === "assistant"
@@ -5578,9 +5563,9 @@ export function App() {
                     : undefined;
                   const isLatestAssistant = item.id === latestPlanningAssistant?.id;
                   return (
+                    <WorkbenchSectionBoundary label="这条助手消息" key={item.id}>
                     <AssistantConversationMessage
                       message={item}
-                      key={item.id}
                       // Only the latest assistant message may act: re-running a
                       // stale plan would fight the current run state.
                       onRepairPlanAction={isLatestAssistant ? executeRepairPlanAction : undefined}
@@ -5718,6 +5703,7 @@ export function App() {
                         </div>
                       ) : undefined}
                     />
+                    </WorkbenchSectionBoundary>
                   );
                 })}
                 {planningBusy ? (
@@ -6011,6 +5997,7 @@ export function App() {
               )
             ) : projectPreviewReady || activeRunId ? (
               <div className={`live-view-content shared-browser-view ${browserSession?.owner === "user" ? "user-controlled" : "agent-controlled"} ${browserSession && ["closed", "failed"].includes(browserSession.status) ? "session-ended" : ""}`}>
+                <WorkbenchSectionBoundary label="实时浏览器">
                 <SharedBrowserCanvas
                   runId={activeRunId ?? undefined}
                   session={browserSession}
@@ -6020,7 +6007,9 @@ export function App() {
                   onInteract={clickSharedBrowser}
                   onPressKey={pressSharedBrowserKey}
                   onTypeText={typeSharedBrowserText}
+                  onViewportChange={syncSharedBrowserViewport}
                 />
+                </WorkbenchSectionBoundary>
                 <span className={`live-capture-badge ${browserSession?.owner === "user" || isUserActionableInterrupt(agentProjection?.pendingInterrupt) || !browserSession ? "waiting" : ""}`}>
                   <Activity size={13} /> {(() => {
                     const pending = isUserActionableInterrupt(agentProjection?.pendingInterrupt);

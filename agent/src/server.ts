@@ -223,6 +223,7 @@ import {
   acquireBrowserControl,
   executeUserBrowserInput,
   releaseBrowserControl,
+  resizeManagedBrowserViewport,
   subscribeBrowserLiveFrames
 } from "./browser-agent/sessionManager.js";
 
@@ -1532,6 +1533,20 @@ app.post("/v1/runs/:id/browser-control/release", async (req, res, next) => {
     assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, run.input.projectId, "run_tests");
     res.json({ session: await releaseBrowserControl(run.id, "user") });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/runs/:id/browser-viewport", async (req, res, next) => {
+  try {
+    const body = z.object({
+      width: z.number().finite().int().min(320).max(3_840),
+      height: z.number().finite().int().min(240).max(2_160)
+    }).strict().parse(req.body);
+    const run = await runEventStore.get(req.params.id);
+    if (!run) return void res.status(404).json({ error: "run_not_found" });
+    assertOrganizationAccess(req, run.input.organizationId);
+    await assertProjectAccess(req, run.input.projectId, "run_tests");
+    res.json({ session: await resizeManagedBrowserViewport(run.id, body) });
   } catch (error) { next(error); }
 });
 

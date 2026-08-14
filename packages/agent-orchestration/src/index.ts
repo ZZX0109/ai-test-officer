@@ -78,6 +78,21 @@ export interface AgentGraphState extends AgentGraphInput {
   browserCredentialAuthorized?: boolean;
   browserAgentRequired?: boolean;
   browserLoopComplete?: boolean;
+  /**
+   * Dynamic browser paths are intentionally processed in small graph turns.
+   * A large full-scan can contain hundreds of page paths; keeping all of them
+   * inside one `graph.invoke()` exhausts LangGraph's recursion counter before
+   * a Worker or the Workbench gets a chance to observe durable progress.
+   */
+  browserBatchPathCount?: number;
+  /** True while the graph is checkpointed between automatic browser batches. */
+  browserBatchPending?: boolean;
+  /** Optional backoff before resuming a browser batch (for example provider 429). */
+  browserBatchDelayMs?: number;
+  /** Set only by the automatic batch-resume handshake. */
+  browserBatchResumed?: boolean;
+  /** Bounded per-path retry count for provider rate limits. */
+  browserRateLimitRetries?: number;
   /** Number of parent-path continuation passes already dispatched. */
   continuationPasses?: number;
   /** Pending independent coverage paths after a repair/retry. */
@@ -197,6 +212,11 @@ const GraphState = Annotation.Root({
   browserCredentialAuthorized: Annotation<boolean>({ reducer: (left, right) => right ?? left ?? false, default: () => false }),
   browserAgentRequired: Annotation<boolean>({ reducer: (_left, right) => right ?? false, default: () => false }),
   browserLoopComplete: Annotation<boolean>({ reducer: (_left, right) => right ?? false, default: () => false }),
+  browserBatchPathCount: Annotation<number>({ reducer: (_left, right) => right ?? 0, default: () => 0 }),
+  browserBatchPending: Annotation<boolean>({ reducer: (_left, right) => right ?? false, default: () => false }),
+  browserBatchDelayMs: Annotation<number | undefined>(),
+  browserBatchResumed: Annotation<boolean>({ reducer: (_left, right) => right ?? false, default: () => false }),
+  browserRateLimitRetries: Annotation<number>({ reducer: (_left, right) => right ?? 0, default: () => 0 }),
   continuationPasses: Annotation<number>({ reducer: (_left, right) => right ?? 0, default: () => 0 }),
   remainingPathCount: Annotation<number>({ reducer: (_left, right) => right ?? 0, default: () => 0 }),
   planningTerminal: Annotation<boolean | undefined>(),
@@ -450,15 +470,21 @@ function executionNode(hooks: AgentGraphHooks) {
       updatedAt: now()
     };
     await hooks.onProjection?.(projection(started));
+    const browserBatch = state.browserBatchPending === true;
     const pending: AgentInterrupt = {
       id: `interrupt_${randomUUID()}`,
       runId: state.runId,
       kind: "execution-result",
       status: "pending",
-      title: "等待执行 Worker",
-      detail: "任务已进入 BullMQ；浏览器、API 和证据结果提交后会自动恢复。",
+      title: browserBatch ? "继续下一批页面测试" : "等待执行 Worker",
+      detail: browserBatch
+        ? "当前页面批次已持久化，系统将自动恢复下一批，避免长流程占用同一次图调用。"
+        : "任务已进入 BullMQ；浏览器、API 和证据结果提交后会自动恢复。",
       requestedCapabilities: [],
-      payload: {},
+      payload: browserBatch ? {
+        phase: "browser-batch",
+        delayMs: Math.max(0, Math.min(state.browserBatchDelayMs ?? 0, 30_000))
+      } : {},
       createdAt: now()
     };
     await hooks.onProjection?.(projection({
@@ -468,6 +494,21 @@ function executionNode(hooks: AgentGraphHooks) {
       updatedAt: now()
     }));
     const answer = interrupt(pending) as { execution?: Record<string, unknown> };
+    if (browserBatch) {
+      if (answer?.execution?.phase !== "browser-batch") throw new Error("browser_batch_resume_missing");
+      return {
+        browserBatchPending: false,
+        browserBatchDelayMs: undefined,
+        browserBatchResumed: true,
+        browserBatchPathCount: 0,
+        currentNode: "execute" as const,
+        completedNodes: ["execute" as const],
+        pendingInterrupt: undefined,
+        status: "running" as const,
+        progress: (orderedNodes.indexOf("execute") + 1) / orderedNodes.length,
+        updatedAt: now()
+      };
+    }
     if (!answer?.execution) throw new Error("execution_result_missing");
     const update = await hooks.execute?.({ ...started, execution: answer.execution }) ?? {};
     return {
@@ -837,6 +878,7 @@ export function createAgentOrchestrationGraph(input: {
       return "decide-next-step";
     }, ["observe-browser", "decide-next-step"])
     .addConditionalEdges("decide-next-step", (state) => {
+      if (state.browserBatchPending === true) return "execute";
       if (state.browserLoopComplete === true) {
         return (state.remainingPathCount ?? 0) > 0
           || (state.compiledPlan && Object.keys(state.compiledPlan).length > 0)
@@ -845,7 +887,9 @@ export function createAgentOrchestrationGraph(input: {
       }
       return "observe-browser";
     }, ["observe-browser", "execute", "collect-and-gate"])
-    .addEdge("execute", "collect-and-gate")
+    .addConditionalEdges("execute", (state) =>
+      state.browserBatchResumed === true ? "observe-browser" : "collect-and-gate",
+    ["observe-browser", "collect-and-gate"])
     .addEdge("collect-and-gate", "triage-failure")
     .addConditionalEdges("triage-failure", (state) => {
       const failure = state.failure ?? {};

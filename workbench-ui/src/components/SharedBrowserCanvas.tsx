@@ -11,6 +11,7 @@ export function SharedBrowserCanvas({
   onInteract,
   onPressKey,
   onTypeText,
+  onViewportChange,
   onLoadIssue
 }: {
   runId?: string;
@@ -20,6 +21,7 @@ export function SharedBrowserCanvas({
   onInteract: (point: PagePoint) => Promise<void> | void;
   onPressKey?: (key: "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown" | "Space") => Promise<void> | void;
   onTypeText?: (text: string) => Promise<void> | void;
+  onViewportChange?: (viewport: { width: number; height: number }) => Promise<void> | void;
   onLoadIssue?: (message: string | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -31,6 +33,36 @@ export function SharedBrowserCanvas({
   const sessionStatusRef = useRef(session?.status);
   const typedTextRef = useRef("");
   const typeTimerRef = useRef<number | undefined>(undefined);
+  const viewportTimerRef = useRef<number | undefined>(undefined);
+  const viewportCallbackRef = useRef(onViewportChange);
+  const activeSessionRef = useRef({ runId, session });
+  const lastViewportRef = useRef<{ width: number; height: number } | null>(null);
+
+  useEffect(() => {
+    viewportCallbackRef.current = onViewportChange;
+  }, [onViewportChange]);
+
+  useEffect(() => {
+    activeSessionRef.current = { runId, session };
+  }, [runId, session]);
+
+  const reportViewport = () => {
+    const host = hostRef.current;
+    const callback = viewportCallbackRef.current;
+    if (!host || !callback || !activeSessionRef.current.runId || !activeSessionRef.current.session) return;
+    const width = Math.round(host.clientWidth);
+    const height = Math.round(host.clientHeight);
+    if (width < 320 || height < 240) return;
+    const previous = lastViewportRef.current;
+    if (previous && Math.abs(previous.width - width) <= 8 && Math.abs(previous.height - height) <= 8) return;
+    lastViewportRef.current = { width, height };
+    void callback({ width, height });
+  };
+
+  const scheduleViewportReport = () => {
+    if (viewportTimerRef.current) window.clearTimeout(viewportTimerRef.current);
+    viewportTimerRef.current = window.setTimeout(reportViewport, 180);
+  };
 
   const flushTypedText = () => {
     if (typeTimerRef.current) window.clearTimeout(typeTimerRef.current);
@@ -73,10 +105,21 @@ export function SharedBrowserCanvas({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const observer = new ResizeObserver(drawLatest);
-    observer.observe(host);
-    return () => observer.disconnect();
+    const viewportObserver = new ResizeObserver(() => {
+      drawLatest();
+      scheduleViewportReport();
+    });
+    viewportObserver.observe(host);
+    return () => {
+      viewportObserver.disconnect();
+      if (viewportTimerRef.current) window.clearTimeout(viewportTimerRef.current);
+    };
   }, []);
+
+  useEffect(() => {
+    lastViewportRef.current = null;
+    scheduleViewportReport();
+  }, [runId, session?.sessionId]);
 
   useEffect(() => {
     if (!runId || !session) {

@@ -111,7 +111,7 @@ export const browserActionDecisionSchema = z.object({
   attemptId: z.string().min(1),
   observationId: z.string().min(1),
   status: z.enum(["act", "complete", "blocked", "needs-confirmation"]),
-  reasonCode: z.enum(["transient-observation", "transient-model", "budget-exhausted", "policy-blocked", "user-input-required"]).optional(),
+  reasonCode: z.enum(["transient-observation", "transient-model", "model-rate-limited", "budget-exhausted", "policy-blocked", "user-input-required"]).optional(),
   summary: z.string().min(1).max(800),
   actions: z.array(browserAgentActionSchema).max(3),
   oracles: z.array(dynamicOracleSchema).max(6),

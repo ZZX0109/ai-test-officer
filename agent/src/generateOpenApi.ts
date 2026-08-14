@@ -62,6 +62,18 @@ registry.registerPath({ method: "post", path: "/v1/runs/{id}/browser-control/acq
 registry.registerPath({ method: "post", path: "/v1/runs/{id}/browser-control/release", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Return the shared browser to the Agent", content: { "application/json": { schema: z.object({ session: BrowserSession }) } } } } });
 registry.registerPath({
   method: "post",
+  path: "/v1/runs/{id}/browser-viewport",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: { content: { "application/json": { schema: z.object({
+      width: z.number().int().min(320).max(3_840),
+      height: z.number().int().min(240).max(2_160)
+    }).strict() } } }
+  },
+  responses: { 200: { description: "Align the shared Playwright viewport with the Workbench surface", content: { "application/json": { schema: z.object({ session: BrowserSession }) } } } }
+});
+registry.registerPath({
+  method: "post",
   path: "/v1/runs/{id}/browser-input",
   request: {
     params: z.object({ id: z.string() }),
