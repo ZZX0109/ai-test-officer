@@ -7,9 +7,11 @@ import {
 } from "../src/assistantFallback.js";
 
 export function testAssistantFallback() {
-  assert.equal(requestedAssistantAction("重新启动 Docker 沙盒"), "retry-runtime");
-  assert.equal(requestedAssistantAction("重新扫描页面并绑定路径"), "retry-discovery");
-  assert.equal(requestedAssistantAction("重试失败链路"), "retry-failed-path");
+  assert.equal(requestedAssistantAction("重新启动 Docker 沙盒"), undefined);
+  assert.equal(requestedAssistantAction("重新扫描页面并绑定路径"), undefined);
+  assert.equal(requestedAssistantAction("重试失败链路"), undefined);
+  assert.equal(requestedAssistantAction("开始测试"), "start-run");
+  assert.equal(requestedAssistantAction("查看本次证据"), "open-evidence");
   const binding = buildDeterministicAssistantFallback({
     userMessage: "重试失败链路",
     projectName: "PsyExpGen",
@@ -35,8 +37,8 @@ export function testAssistantFallback() {
   assert.match(binding.reply, /没有找到可提交实验的按钮/);
   assert.match(binding.reply, /系统已经做了什么：/);
   assert.match(binding.reply, /需要你做什么：/);
-  assert.equal(binding.suggestedAction, "retry-failed-path");
-  assert.equal(binding.requiresConfirmation, true);
+  assert.equal(binding.suggestedAction, "none");
+  assert.equal(binding.requiresConfirmation, false);
 
   const timeoutBinding = buildDeterministicAssistantFallback({
     userMessage: "用简单的话解释失败原因",
@@ -161,7 +163,7 @@ export function testAssistantFallback() {
   });
   assert.match(execution.reply, /保存后显示实验编号/);
   assert.match(execution.reply, /页面仍停留在编辑表单/);
-  assert.equal(execution.suggestedAction, "open-evidence");
+  assert.equal(execution.suggestedAction, "none");
 
   const proofLink = buildDeterministicAssistantFallback({
     userMessage: "分析失败原因并告诉我下一步",
@@ -173,15 +175,31 @@ export function testAssistantFallback() {
   assert.match(proofLink.reply, /无需上传附件/);
   assert.doesNotMatch(proofLink.reply, /proof_bundle|operation_/);
   assert.doesNotMatch(proofLink.reasoningSummary.observations.join(" "), /proof_bundle|operation_/);
-  assert.equal(proofLink.suggestedAction, "retry-failed-path");
-  assert.equal(proofLink.requiresConfirmation, true);
+  assert.equal(proofLink.suggestedAction, "none");
+  assert.equal(proofLink.requiresConfirmation, false);
 
   const recoveryQuestion = buildDeterministicAssistantFallback({
     userMessage: "系统能否自动恢复，我需要做什么？",
     finalStatus: "blocked",
     summary: "proof_invalid:proof_bundle_missing_artifact"
   });
-  assert.equal(recoveryQuestion.suggestedAction, "retry-failed-path");
+  assert.equal(recoveryQuestion.suggestedAction, "none");
+
+  const graphAuthorizedRecovery = buildDeterministicAssistantFallback({
+    userMessage: "系统能否自动恢复？",
+    finalStatus: "blocked",
+    summary: "页面绑定失败",
+    repairDecision: {
+      owner: "agent",
+      type: "discovery_incomplete",
+      executable: true,
+      userMessage: "Graph 已确认可重新扫描当前页面。",
+      steps: ["重新观察页面", "重新绑定控件"],
+      validation: "产生新的页面观测和绑定结果"
+    }
+  });
+  assert.equal(graphAuthorizedRecovery.suggestedAction, "retry-discovery");
+  assert.equal(graphAuthorizedRecovery.requiresConfirmation, true);
 
   const startupFailure = buildDeterministicAssistantFallback({
     userMessage: "为什么 ANDFlow 没办法运行？",

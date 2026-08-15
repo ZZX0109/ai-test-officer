@@ -1,16 +1,12 @@
 import type { ConnectorContext, ImpactAnalysis, ImpactAnalysisItem, SourceReadEnvelope } from "./types.js";
 import type { CodeImpactGraph } from "./codeImpactGraph.js";
 import { buildDiffImpactGraph } from "./codeImpactGraph.js";
-import { listExecutableScenarios, matchScenariosForContext } from "./scenarios.js";
+import { matchScenariosForContext } from "./scenarios.js";
 
 function sourceIds(context: ConnectorContext, pattern: RegExp) {
   return context.sourceContexts
     .filter((source) => pattern.test(`${source.kind}\n${source.title}\n${source.summary}\n${source.uri ?? ""}`))
     .map((source) => source.id);
-}
-
-function matches(text: string, pattern: RegExp) {
-  return pattern.test(text);
 }
 
 function item(input: Omit<ImpactAnalysisItem, "id">): ImpactAnalysisItem {
@@ -35,31 +31,21 @@ function buildAffectedComponents(context: ConnectorContext): ImpactAnalysisItem[
   }));
 }
 
-function buildAffectedPages(context: ConnectorContext): ImpactAnalysisItem[] {
-  const text = `${context.requirement}\n${context.diff}\n${context.bugTicket}`; 
-  const pages: ImpactAnalysisItem[] = [];
-  if (matches(text, /task|任务|filter|筛选|search|搜索|status=/i)) {
-    pages.push(item({
+function buildAffectedPages(context: ConnectorContext, graph: CodeImpactGraph): ImpactAnalysisItem[] {
+  return graph.nodes
+    .filter((node) => node.kind === "page")
+    .map((node) => item({
       kind: "page",
-      target: "/tasks",
-      reason: "需求或 diff 命中任务列表、筛选、搜索或状态关键词。",
-      sourceContextIds: sourceIds(context, /requirement|bug|issue|jira|diff|openapi/i),
-      confidence: "high"
+      target: node.label,
+      reason: node.file
+        ? `代码图在 ${node.file}${node.line ? `:${node.line}` : ""} 识别到页面或路由。`
+        : "代码图识别到页面或路由。",
+      sourceContextIds: sourceIds(context, /requirement|bug|issue|jira|diff|pull request|pr/i),
+      confidence: node.confidence
     }));
-  }
-  if (matches(text, /login|登录|auth|权限|permission|session/i)) {
-    pages.push(item({
-      kind: "page",
-      target: "/login",
-      reason: "输入上下文命中登录、会话或权限关键词。",
-      sourceContextIds: sourceIds(context, /requirement|bug|issue|jira|diff/i),
-      confidence: "high"
-    }));
-  }
-  return pages;
 }
 
-function buildAffectedApis(context: ConnectorContext): ImpactAnalysisItem[] {
+function buildAffectedApis(context: ConnectorContext, graph: CodeImpactGraph): ImpactAnalysisItem[] {
   const text = `${context.requirement}\n${context.diff}\n${context.bugTicket}`;
   const apis = new Map<string, Omit<ImpactAnalysisItem, "id">>();
   for (const source of context.sourceContexts) {
@@ -86,22 +72,16 @@ function buildAffectedApis(context: ConnectorContext): ImpactAnalysisItem[] {
       });
     }
   }
-  if (matches(text, /status=|keyword=|fetchTasks|tasks/i) && !apis.has("/api/tasks")) {
-    apis.set("/api/tasks", {
+  for (const node of graph.nodes.filter((candidate) => candidate.kind === "api-route" || candidate.kind === "frontend-call")) {
+    if (apis.has(node.label)) continue;
+    apis.set(node.label, {
       kind: "api",
-      target: "/api/tasks",
-      reason: "输入上下文命中任务接口、筛选、搜索或 fetchTasks 关键词。",
-      sourceContextIds: sourceIds(context, /diff|openapi|requirement|bug|issue|jira/i),
-      confidence: "high"
-    });
-  }
-  if (matches(text, /login|auth|session|权限/i) && !apis.has("/api/auth/session")) {
-    apis.set("/api/auth/session", {
-      kind: "api",
-      target: "/api/auth/session",
-      reason: "输入上下文命中登录、会话或权限关键词。",
-      sourceContextIds: sourceIds(context, /diff|openapi|requirement|bug|issue|jira/i),
-      confidence: "high"
+      target: node.label,
+      reason: node.file
+        ? `代码图在 ${node.file}${node.line ? `:${node.line}` : ""} 识别到接口声明或调用。`
+        : "代码图识别到接口声明或调用。",
+      sourceContextIds: sourceIds(context, /diff|openapi|requirement|bug|issue|jira|pull request|pr/i),
+      confidence: node.confidence
     });
   }
   return Array.from(apis.values()).map((api) => item(api));
@@ -132,8 +112,7 @@ function priorityFor(score: number): "critical" | "high" | "medium" | "low" {
 }
 
 export function buildImpactAnalysis(context: ConnectorContext, suppliedGraph?: CodeImpactGraph): ImpactAnalysis {
-  const scenarioContracts = listExecutableScenarios().map((scenario) => ({ id: scenario.id, keywords: scenario.matcher?.keywords ?? [scenario.id, scenario.title] }));
-  const codeGraph = suppliedGraph ?? buildDiffImpactGraph({ diff: context.diff, scenarios: scenarioContracts });
+  const codeGraph = suppliedGraph ?? buildDiffImpactGraph({ diff: context.diff });
   const scenarioMatches = matchScenariosForContext({
     requirement: context.requirement,
     diff: context.diff,
@@ -162,10 +141,15 @@ export function buildImpactAnalysis(context: ConnectorContext, suppliedGraph?: C
       riskDrivers: [...relevantSignals.map((signal) => signal.id), ...(graphReasons.length ? ["code_graph"] : [])],
       sourceContextIds: sourceIds(context, /diff|requirement|bug|issue|jira|openapi|pull request|pr/i)
     };
-  }).sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+  })
+    // Registry keywords can rank an already grounded scenario, but cannot
+    // manufacture a production business fact. Only an explicit code-graph
+    // relationship may promote a fixed scenario into the impact result.
+    .filter((candidate) => candidate.riskDrivers.includes("code_graph"))
+    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
   const affectedComponents = buildAffectedComponents(context);
-  const affectedApis = buildAffectedApis(context);
-  const affectedPages = buildAffectedPages(context);
+  const affectedApis = buildAffectedApis(context, codeGraph);
+  const affectedPages = buildAffectedPages(context, codeGraph);
   const uncoveredRisks = recommendedScenarios.length
     ? []
     : [{

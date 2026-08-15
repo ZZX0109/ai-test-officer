@@ -370,6 +370,7 @@ export function App() {
     createdAt: new Date().toISOString()
   }]);
   const planningMessagesViewportRef = useRef<HTMLDivElement | null>(null);
+  const planningMessagesPinnedRef = useRef(true);
   const [planningInput, setPlanningInput] = useState("");
   const [planningResult, setPlanningResult] = useState<PlanningConversationResult | null>(null);
   const [planningFlowPageLoading, setPlanningFlowPageLoading] = useState(false);
@@ -586,12 +587,40 @@ export function App() {
   const verdictDisplay = pendingInterruptForVerdict
     ? (pendingInterruptForVerdict.kind === "credential" ? "等待你授权使用测试账号" : "等待你的操作")
     : latestDecision;
+  const executionStatus = activeRun?.executionStatus ?? result?.executionStatus;
+  const executionFinished = executionStatus
+    ? ["completed", "completed-with-gaps", "cancelled", "infrastructure-failed"].includes(executionStatus)
+    : Boolean(activeRun?.state && ["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(activeRun.state));
   const finalVerdictReady = Boolean(
     result
     && !isRunning
+    && executionFinished
     && (!activeRunId || result.id === activeRunId)
     && (result.finalStatus || result.gateStatus || result.verdict)
   );
+  const collapseRunAssistantStatus = Boolean(planningConfirmed && activeRunId && !executionFinished);
+  const liveAssistantPhases = new Set(["observing", "diagnosing", "planning", "acting"]);
+  const runProgressMessageId = activeRunId ? `progress:run:${activeRunId}` : undefined;
+  const latestLiveAssistantId = [...planningMessages].reverse().find((candidate) => (
+    candidate.role === "assistant"
+    && candidate.reasoningSummary
+    && liveAssistantPhases.has(candidate.reasoningSummary.phase)
+  ))?.id;
+  const visiblePlanningMessages = planningMessages.filter((item) => {
+    if (item.role !== "assistant") return true;
+    if (collapseRunAssistantStatus) {
+      // A running Graph owns one stable status row. Diagnostic/model requests
+      // may finish in parallel, but they must not replace this row and make
+      // the sidebar alternate between several spinners. Their durable result
+      // is shown after the run pauses or reaches a terminal state.
+      const transient = item.streaming
+        || item.id.startsWith("progress:")
+        || Boolean(item.reasoningSummary && liveAssistantPhases.has(item.reasoningSummary.phase));
+      return !transient || item.id === runProgressMessageId;
+    }
+    if (!item.reasoningSummary || !liveAssistantPhases.has(item.reasoningSummary.phase)) return true;
+    return item.id === latestLiveAssistantId;
+  });
   // Split the scan inventory into what an operator would call "business
   // features" (real pages) versus technical coverage (API groups, data
   // entities, background tasks). The flat list used to mix them, so the plan
@@ -699,20 +728,18 @@ export function App() {
   const assistantFeedbackRequired = runIsBlocked || runtimeRecoveryAvailable || discoveryRecoveryAvailable || authFeedbackRequired || credentialReadyForRetry || apiCredentialFeedbackRequired || screenshotRateLimited || reviewRequired || codeRepairAvailable || startupRepairAvailable;
   const latestPlanningAssistant = [...planningMessages].reverse().find((item) => item.role === "assistant");
   const latestPlanningAssistantMessage = latestPlanningAssistant?.content;
-  const planningTail = planningMessages.at(-1);
+  const visiblePlanningTail = visiblePlanningMessages.at(-1);
 
   useLayoutEffect(() => {
     const viewport = planningMessagesViewportRef.current;
-    if (!viewport) return;
-    // The assistant is a live chronological feed. Keep the newest message
-    // fully visible in the scroll viewport before the browser paints it; this
-    // avoids the one-frame clipped state that looked like a flash.
+    if (!viewport || !planningMessagesPinnedRef.current) return;
+    // Only a newly inserted visible row may move the scroll position. Updating
+    // the text inside the stable live row must not keep forcing scrollTop on
+    // every Graph/SSE frame — that was the visible sidebar flash.
     viewport.scrollTop = viewport.scrollHeight;
   }, [
-    planningMessages.length,
-    planningTail?.id,
-    planningTail?.content,
-    planningTail?.streaming,
+    visiblePlanningMessages.length,
+    visiblePlanningTail?.id,
     planningSummaryCollapsed
   ]);
   const assistantQuickCommands = runIsBlocked || reviewRequired
@@ -2019,12 +2046,11 @@ export function App() {
     const analysisId = activeRunId ?? result?.id ?? planningResult?.id;
     const projectId = selectedProjectId || projectDraft?.id;
     if (!needsExplanation || !analysisId || !defaultCredential?.id || !projectId || assistantChatBusy) return;
-    const analysisKey = [
-      analysisId,
-      latestDecision,
-      planningAutomation.phase,
-      result?.summary ?? planningAutomation.detail
-    ].join(":");
+    // One durable conclusion gets one automatic explanation. Polling may
+    // enrich summary text/evidence several times after the same terminal
+    // decision; treating each enrichment as a new analysis restarted the
+    // typing row and produced the visible flash reported by operators.
+    const analysisKey = [analysisId, latestDecision, planningAutomation.phase].join(":");
     if (analyzedBlockedRuns.current.has(analysisKey)) return;
     analyzedBlockedRuns.current.add(analysisKey);
     const messageId = `progress:diagnosis:${analysisId}`;
@@ -5552,18 +5578,29 @@ export function App() {
                 </div>
               </header>
               <span className="sidebar-current-project">当前项目：{selectedProjectName}</span>
-              <div ref={planningMessagesViewportRef} className="sidebar-planning-messages" aria-live="polite">
-                {planningMessages.map((item, index) => {
+              <div
+                ref={planningMessagesViewportRef}
+                className="sidebar-planning-messages"
+                aria-live="polite"
+                onScroll={(event) => {
+                  const viewport = event.currentTarget;
+                  planningMessagesPinnedRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 48;
+                }}
+              >
+                {visiblePlanningMessages.map((item, index) => {
                   const attachesRunActions = assistantFeedbackRequired
                     && item.role === "assistant"
                     && item.content === runAssistantMessage
-                    && !planningMessages.slice(index + 1).some((candidate) => candidate.content === runAssistantMessage);
+                    && !visiblePlanningMessages.slice(index + 1).some((candidate) => candidate.content === runAssistantMessage);
                   const attachedSuggestedAction = item.suggestedAction && item.suggestedAction !== "none"
                     ? item.suggestedAction
                     : undefined;
                   const isLatestAssistant = item.id === latestPlanningAssistant?.id;
                   return (
-                    <WorkbenchSectionBoundary label="这条助手消息" key={item.id}>
+                    <WorkbenchSectionBoundary
+                      label="这条助手消息"
+                      key={item.id}
+                    >
                     <AssistantConversationMessage
                       message={item}
                       // Only the latest assistant message may act: re-running a

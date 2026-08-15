@@ -119,8 +119,11 @@ async function startBrowserScreencast(managed: ManagedSession) {
       // protocol is intentionally tiny), but preserve the compositor at a
       // desktop resolution and avoid an additional lossy quality step.
       quality: 100,
-      maxWidth: 1920,
-      maxHeight: 1080,
+      // The context renders at deviceScaleFactor=2. Do not cap the compositor
+      // back to CSS-pixel dimensions or Chromium will downsample before the
+      // lossless canvas scaling stage in Workbench.
+      maxWidth: 3840,
+      maxHeight: 2160,
       everyNthFrame: 1
     });
     managed.liveCdp = cdp;
@@ -249,9 +252,12 @@ export async function ensureBrowserAgentSession(input: {
     headless: input.headless ?? true,
     contextOptions: {
       // Keep a desktop-sized compositor surface so the shared Workbench canvas
-      // remains crisp on Retina/high-DPI displays. The canvas is only a live
-      // transport; immutable evidence is still captured separately per step.
+      // remains crisp on Retina/high-DPI displays. Matching the common 2x
+      // device scale is essential: otherwise a CSS-pixel frame is enlarged by
+      // the Workbench's 2x canvas and becomes visibly soft as soon as testing
+      // switches from the local iframe to the authoritative Playwright view.
       viewport: { width: 1920, height: 1080 },
+      deviceScaleFactor: 2,
       ...(recoveredStorageState ? { storageState: recoveredStorageState } : {})
     }
   });

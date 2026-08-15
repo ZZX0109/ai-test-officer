@@ -279,11 +279,10 @@ export function requestedAssistantAction(message: string): AssistantFallbackActi
   const normalized = message.replace(/\s+/g, "");
   const asksAQuestion = /(?:能否|是否|为什么|怎么|如何|是什么|可以吗|该怎么办|需要做什么|\?|？)/i.test(normalized);
   if (/查看.*(证据|截图|日志|trace)|打开.*(证据|截图|日志)/i.test(normalized)) return "open-evidence";
-  if (/docker|podman|沙盒|启动.*项目|前端.*打不开|端口.*不可达/i.test(normalized)) return "retry-runtime";
-  if (/重新扫描|扫描页面|discovery/i.test(normalized)) return "retry-discovery";
-  if (/重试.*失败|重新.*失败|修复.*失败|重新绑定/i.test(normalized)) return "retry-failed-path";
-  if (/继续.*(其他|剩余|安全|可执行)|跳过.*继续/i.test(normalized)) return "continue-safe-paths";
-  if (/修改.*(计划|范围)|调整.*(计划|范围)/i.test(normalized)) return "revise-plan";
+  // Free-form chat must not manufacture recovery or repair actions. Those
+  // actions are only exposed from a persisted Graph RecoveryDecision. This
+  // parser intentionally retains only deterministic run controls and the
+  // read-only evidence affordance.
   if (!asksAQuestion && /暂停|先停一下/i.test(normalized)) return "pause-run";
   if (!asksAQuestion && /恢复|继续测试/i.test(normalized)) return "resume-run";
   if (!asksAQuestion && /取消|终止|停止测试/i.test(normalized)) return "cancel-run";
@@ -470,12 +469,10 @@ export function buildDeterministicAssistantFallback(input: AssistantFailureConte
           ? blockedReply(input)
           : neutralReply(input);
   const explicitAction = requestedAssistantAction(input.userMessage);
-  // Precedence: what the user explicitly asked for > what the owner-aware repair
-  // decision says is actually possible > the template heuristic. Without the
-  // middle term the chat kept offering "重试失败链路" for credential- and
-  // environment-owned failures that a retry can never clear.
+  // Recovery authority belongs to the persisted Graph decision. Explanation
+  // templates are presentation only and may never make a Run actionable.
   const decisionAction = assistantActionForRepairDecision(input.repairDecision);
-  const action = explicitAction ?? decisionAction ?? explanation.action;
+  const action = explicitAction ?? decisionAction ?? "none";
   const intent = ["pause-run", "resume-run", "cancel-run", "start-run"].includes(action)
     ? "execution-control"
     : action === "revise-plan"

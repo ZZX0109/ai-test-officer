@@ -337,11 +337,42 @@ export type MachineGate = z.infer<typeof machineGateSchema>;
 export type JudgeRecommendation = z.infer<typeof judgeRecommendationSchema>;
 export type HumanDecision = z.infer<typeof humanDecisionSchema>;
 
+/**
+ * Describes whether the test workflow finished processing its declared paths.
+ * This is deliberately independent from GateStatus: a run may finish all
+ * possible work while still producing a fail, blocked, or review verdict.
+ */
+export const executionStatusSchema = z.enum([
+  "running",
+  "waiting-user",
+  "completed",
+  "completed-with-gaps",
+  "cancelled",
+  "infrastructure-failed"
+]);
+export type ExecutionStatus = z.infer<typeof executionStatusSchema>;
+
+/** The only result a Worker may return to LangGraph. It describes one
+ * execution attempt and deliberately contains no Run-level verdict. */
+export const pathExecutionResultSchema = z.object({
+  runId: z.string().min(1),
+  attemptId: z.string().min(1),
+  executionGeneration: z.number().int().nonnegative(),
+  status: z.enum(["executed", "failed", "blocked"]),
+  resultRunId: z.string().min(1).optional(),
+  executionSucceeded: z.boolean(),
+  error: z.string().optional()
+}).strict();
+export type PathExecutionResult = z.infer<typeof pathExecutionResultSchema>;
+
 /** UI/API-safe outcome facts. Completion, coverage, correctness and release are
  * deliberately independent so a fully executed product failure remains
  * auditable without being presented as a successful release. */
 export const runOutcomeSummaryV2Schema = z.object({
   schemaVersion: z.literal("2.0"),
+  // Additive during the v2 rollout: old persisted bundles remain readable,
+  // while all newly finalized Graph runs write this field explicitly.
+  executionStatus: executionStatusSchema.optional(),
   schedulingCompleted: z.boolean(),
   executionStarted: z.boolean(),
   executionSucceeded: z.boolean(),
@@ -1126,7 +1157,7 @@ export const coverageItemSchema = z.object({
    * against ProjectManifest before a path child run is created.
    */
   structuredPlan: compiledPlanSchema.optional(),
-  disposition: z.enum(["executed", "excluded", "blocked", "pending"]),
+  disposition: z.enum(["pending", "binding", "executing", "executed", "failed", "blocked", "excluded"]),
   dispositionReason: z.string().optional(),
   scenarioId: z.string().optional(),
   attemptId: z.string().optional(),

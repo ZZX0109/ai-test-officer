@@ -214,17 +214,19 @@ export async function planRunFromDurableInput(runId: string): Promise<RunProject
   }
   const diff = input.diff ?? "";
   const project = input.projectId ? await getProject(input.projectId) : undefined;
-  const scenarioContracts = listExecutableScenarios().map((scenario) => ({
-    id: scenario.id,
-    keywords: scenario.matcher?.keywords ?? [scenario.id, scenario.title]
-  }));
+  const scenarioContracts = input.executionProfile === "benchmark"
+    ? listExecutableScenarios().map((scenario) => ({
+      id: scenario.id,
+      keywords: scenario.matcher?.keywords ?? [scenario.id, scenario.title]
+    }))
+    : [];
   const repositoryGraph = project && diff
     ? await buildCodeImpactGraph({
       repositoryRoot: toTargetProjectConfig(project).rootDir,
       files: changedFilesFromDiff(diff),
       diff,
       cacheFile: path.join(reportsDir, "impact-cache", `${project.id}.json`),
-      scenarios: scenarioContracts
+      ...(scenarioContracts.length ? { scenarios: scenarioContracts } : {})
     })
     : undefined;
   const codeGraph = repositoryGraph && project

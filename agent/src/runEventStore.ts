@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Pool } from "pg";
-import { runEventSchema, transitionRunState, type CompiledPlan, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunKind, type RunOutcomeSummaryV2, type RunState } from "@ai-test-officer/contracts";
+import { runEventSchema, transitionRunState, type CompiledPlan, type ExecutionStatus, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunKind, type RunOutcomeSummaryV2, type RunState } from "@ai-test-officer/contracts";
 import type { GrayPlan, ImpactAnalysis } from "./types.js";
 
 export interface RunProjection {
@@ -21,6 +21,7 @@ export interface RunProjection {
   /** Worker lease attempt allowed to publish the next execution result. */
   activeExecutionAttemptId?: string;
   gateStatus?: GateStatus;
+  executionStatus?: ExecutionStatus;
   machineGate?: MachineGate;
   judgeRecommendation?: JudgeRecommendation;
   humanDecision?: HumanDecision;
@@ -123,6 +124,11 @@ function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
   if (event.payload.machineGate) projection.machineGate = event.payload.machineGate as MachineGate;
   if (event.payload.judgeRecommendation) projection.judgeRecommendation = event.payload.judgeRecommendation as JudgeRecommendation;
   if (event.payload.outcomeSummary) projection.outcomeSummary = event.payload.outcomeSummary as RunOutcomeSummaryV2;
+  if (typeof event.payload.executionStatus === "string") {
+    projection.executionStatus = event.payload.executionStatus as ExecutionStatus;
+  } else if (event.payload.outcomeSummary && typeof (event.payload.outcomeSummary as Record<string, unknown>).executionStatus === "string") {
+    projection.executionStatus = (event.payload.outcomeSummary as Record<string, unknown>).executionStatus as ExecutionStatus;
+  }
   if (event.payload.resultRunId) projection.resultRunId = String(event.payload.resultRunId);
   // Planning can terminate before plan_generated. Preserve rejection provenance
   // and its provider call on review/terminal events for audit and benchmarks.
@@ -139,10 +145,25 @@ function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
   // Older event streams used `run_completed` without an explicit Gate result.
   // Never infer a pass during replay: a legacy completion proves only that the
   // scheduler finished, not coverage, evidence integrity, or a final decision.
-  if (event.type === "run_completed") projection.gateStatus = (event.payload.finalStatus as GateStatus | undefined) ?? "needs-human-review";
-  if (event.type === "run_failed") projection.gateStatus = "fail";
-  if (event.type === "run_blocked") projection.gateStatus = "blocked";
+  if (event.type === "run_completed") {
+    projection.gateStatus = (event.payload.finalStatus as GateStatus | undefined) ?? "needs-human-review";
+    if (typeof event.payload.executionStatus !== "string") projection.executionStatus = "completed";
+  }
+  if (event.type === "run_failed") {
+    projection.gateStatus = "fail";
+    if (typeof event.payload.executionStatus !== "string") projection.executionStatus = "completed";
+  }
+  if (event.type === "run_blocked") {
+    projection.gateStatus = "blocked";
+    if (typeof event.payload.executionStatus !== "string") projection.executionStatus = "completed-with-gaps";
+  }
   if (event.type === "human_review_requested") projection.gateStatus = "needs-human-review";
+  if (event.type === "run_cancelled") projection.executionStatus = "cancelled";
+  if (["awaiting-plan-approval", "awaiting-permission", "paused", "awaiting-human-review"].includes(projection.state)) {
+    projection.executionStatus = "waiting-user";
+  } else if (!["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(projection.state)) {
+    projection.executionStatus = "running";
+  }
   if (event.type === "decision_overridden") {
     projection.humanDecision = {
       status: String(event.payload.status ?? "approved") as HumanDecision["status"],

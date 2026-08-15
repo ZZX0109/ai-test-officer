@@ -674,6 +674,46 @@ function isMissingRunBundle(error: unknown) {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }
 
+function releaseRecommendation(input: {
+  executionStatus?: string;
+  finalStatus?: string;
+}) {
+  if (input.executionStatus === "cancelled" || input.executionStatus === "infrastructure-failed") {
+    return {
+      decision: "无法判断，需要补充条件" as const,
+      reason: "本次执行未完成，不能据此作出发布判断。"
+    };
+  }
+  if (input.finalStatus === "fail") {
+    return {
+      decision: "不建议发布" as const,
+      reason: "至少一个核心业务 Oracle 已真实执行且未通过。"
+    };
+  }
+  if (input.finalStatus === "blocked" || input.finalStatus === "needs-human-review") {
+    return {
+      decision: "无法判断，需要补充条件" as const,
+      reason: "核心路径未执行，或现有证据不足以形成可信发布结论。"
+    };
+  }
+  if (input.finalStatus === "pass" && input.executionStatus === "completed") {
+    return {
+      decision: "可以发布" as const,
+      reason: "全部核心路径已执行，Oracle 通过且 Proof Bundle 完整。"
+    };
+  }
+  if (input.finalStatus === "pass" && input.executionStatus === "completed-with-gaps") {
+    return {
+      decision: "有条件发布" as const,
+      reason: "已执行的核心路径通过，但报告仍包含明确的非关键覆盖缺口。"
+    };
+  }
+  return {
+    decision: "无法判断，需要补充条件" as const,
+    reason: "测试执行尚未形成可信的完成态结论。"
+  };
+}
+
 function unavailableRunReport(run: NonNullable<Awaited<ReturnType<typeof runEventStore.get>>>) {
   const finalStatus = run.gateStatus ?? (run.state === "blocked" ? "blocked" : run.state === "failed" ? "fail" : "needs-human-review");
   // Even the "bundle unavailable" fallback must mint its gate through the
@@ -696,10 +736,16 @@ function unavailableRunReport(run: NonNullable<Awaited<ReturnType<typeof runEven
   return {
     runId: run.id,
     state: run.state,
+    executionStatus: run.executionStatus,
     finalStatus,
     gateStatus: finalStatus,
+    releaseRecommendation: releaseRecommendation({
+      executionStatus: run.executionStatus,
+      finalStatus
+    }),
     outcomeSummary: {
       schemaVersion: "2.0",
+      executionStatus: run.executionStatus,
       schedulingCompleted: ["completed", "failed", "blocked", "cancelled"].includes(run.state),
       executionStarted: ["running", "collecting", "judging", "awaiting-human-review", "completed", "failed", "blocked"].includes(run.state),
       executionSucceeded: false,
@@ -1374,6 +1420,8 @@ app.get("/v1/runs/:id/report", async (req, res, next) => {
     try {
       const bundle = await readRunBundle(run?.resultRunId ?? req.params.id);
       const result = bundle.result;
+      const executionStatus = run.executionStatus ?? result.outcomeSummary?.executionStatus;
+      const finalStatus = run?.gateStatus ?? result.finalStatus;
       // RunBundle keeps evidence-bearing collections at its immutable top
       // level to avoid duplicating large payloads in `result`. Rehydrate the
       // public report projection here. Returning only `result` made parent
@@ -1394,8 +1442,10 @@ app.get("/v1/runs/:id/report", async (req, res, next) => {
         proofNodes: bundle.proofNodes ?? result.proofNodes,
         proofEdges: bundle.proofEdges ?? result.proofEdges,
         evidenceManifest: bundle.evidenceManifest ?? result.evidenceManifest,
+        executionStatus,
         gateStatus: run?.gateStatus ?? result.gateStatus,
-        finalStatus: run?.gateStatus ?? result.finalStatus,
+        finalStatus,
+        releaseRecommendation: releaseRecommendation({ executionStatus, finalStatus }),
         machineGate: run?.machineGate ?? result.machineGate,
         judgeRecommendation: run?.judgeRecommendation ?? result.judgeRecommendation,
         humanDecision: run?.humanDecision,

@@ -32,6 +32,9 @@ const violations = [];
 for (const relative of files) {
   const text = await readFile(path.join(root, relative), "utf8");
   if (/\bz\.any\s*\(/.test(text)) violations.push(`${relative}: z.any() is forbidden; use a concrete schema or z.unknown() plus narrowing`);
+  if (relative === "agent/src/runOrchestrator.ts" && /\b(?:finalStatus|machineGate|judgeRecommendation)\b/.test(text)) {
+    violations.push(`${relative}: Worker may only publish PathExecutionResult; Run verdicts belong to LangGraph finalize`);
+  }
   const source = ts.createSourceFile(relative, text, ts.ScriptTarget.Latest, true, relative.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
   const visit = (node) => {
     if (node.kind === ts.SyntaxKind.AnyKeyword) {

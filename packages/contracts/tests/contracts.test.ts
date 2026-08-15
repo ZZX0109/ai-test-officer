@@ -21,6 +21,8 @@ import {
   ,agentMessageSchema
   ,browserActionDecisionSchema
   ,browserAgentActionSchema
+  ,executionStatusSchema
+  ,pathExecutionResultSchema
 } from "../src/index.js";
 
 const artifact = artifactV2Schema.parse({
@@ -200,12 +202,36 @@ const structuredManifest = projectManifestSchema.parse({
 });
 assert.equal(structuredManifest.backgroundTasks[0]?.statusField, "status");
 const failedProductSummary = runOutcomeSummaryV2Schema.parse({
-  schemaVersion: "2.0", schedulingCompleted: true, executionStarted: true, executionSucceeded: true,
+  schemaVersion: "2.0", executionStatus: "completed", schedulingCompleted: true, executionStarted: true, executionSucceeded: true,
   requirementCovered: true, requirementPassed: false, artifactIntegrityVerified: true, evidenceGrounded: true,
   gateEligible: true, machineGate: { status: "fail", reasons: ["assertion"], assertionFailures: ["permission"], evidenceComplete: true }, finalStatus: "fail"
 });
 assert.equal(failedProductSummary.requirementCovered, true);
 assert.equal(failedProductSummary.requirementPassed, false);
+assert.equal(executionStatusSchema.parse("completed-with-gaps"), "completed-with-gaps");
+assert.deepEqual(pathExecutionResultSchema.parse({
+  runId: "run-path",
+  attemptId: "attempt-path-1",
+  executionGeneration: 3,
+  status: "blocked",
+  executionSucceeded: false,
+  error: "credentials_missing"
+}), {
+  runId: "run-path",
+  attemptId: "attempt-path-1",
+  executionGeneration: 3,
+  status: "blocked",
+  executionSucceeded: false,
+  error: "credentials_missing"
+});
+assert.throws(() => pathExecutionResultSchema.parse({
+  runId: "run-path",
+  attemptId: "attempt-path-1",
+  executionGeneration: 3,
+  status: "executed",
+  executionSucceeded: true,
+  finalStatus: "pass"
+}), /unrecognized/i);
 assert.throws(() => runOutcomeSummaryV2Schema.parse({ ...failedProductSummary, requirementCovered: false, requirementPassed: true }));
 assert.throws(() => runOutcomeSummaryV2Schema.parse({ ...failedProductSummary, requirementPassed: false, finalStatus: "pass" }));
 assert.equal(llmCallSchema.parse({

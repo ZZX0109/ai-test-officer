@@ -14,6 +14,22 @@ import { getScenario, hasScenario } from "./scenarios.js";
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const localLocks = new Map<string, Promise<void>>();
 
+const terminalCoverageDispositions = new Set<CoverageItem["disposition"]>([
+  "executed",
+  "failed",
+  "blocked",
+  "excluded"
+]);
+
+export function isCoverageTerminal(item: Pick<CoverageItem, "disposition">) {
+  return terminalCoverageDispositions.has(item.disposition);
+}
+
+/** A failed Oracle still means the path was genuinely exercised. */
+export function isCoverageExercised(item: Pick<CoverageItem, "disposition">) {
+  return item.disposition === "executed" || item.disposition === "failed";
+}
+
 function coverageFile(runId: string) {
   return path.join(rootDir, "reports", "runs", runId, "coverage.json");
 }
@@ -135,11 +151,11 @@ export function createDynamicBrowserCoverageItems(input: {
     requiredEvidenceKinds: path.requiredEvidenceKinds?.length
       ? path.requiredEvidenceKinds
       : browserPath ? ["screenshot", "dom", "trace", "operation-log"] : ["operation-log"],
-    // Dynamic controls are presently a browser executor contract. API/data/
-    // job entries must be rebound to their allow-listed manifest executor;
-    // retaining them as blocked is safer than silently passing or pretending
-    // a browser click exercised a backend-only path.
-    disposition: browserPath && !staticallyBlocked ? "pending" : "blocked",
+    // The complete inventory is created before runtime binding. Non-page
+    // candidates remain pending until the manifest executor either binds them
+    // or records a concrete blocked reason; their mere presence must not stop
+    // already executable browser paths from starting.
+    disposition: !staticallyBlocked ? "pending" : "blocked",
     dispositionReason,
     scenarioId: `dynamic_${path.id.replace(/[^a-zA-Z0-9_-]+/g, "_")}`,
     createdAt: now,

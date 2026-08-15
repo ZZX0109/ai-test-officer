@@ -16,6 +16,7 @@ export async function testRunEventStore() {
   run = await runEventStore.append({ runId, type: "plan_approved", expectedVersion: 2, actor: "tester", idempotencyKey: `plan-${suffix}` });
   run = await runEventStore.append({ runId, type: "permission_granted", expectedVersion: 3, actor: "tester", idempotencyKey: `permission-${suffix}` });
   assert.equal(run.state, "queued");
+  assert.equal(run.executionStatus, "running");
   const duplicate = await runEventStore.append({ runId, type: "permission_granted", expectedVersion: 3, actor: "tester", idempotencyKey: `permission-${suffix}` });
   assert.equal(duplicate.version, 4);
   assert.equal(isIdempotentReplay(duplicate), true);
@@ -38,8 +39,10 @@ export async function testRunEventStore() {
   assert.equal(acceptsExecutionResult(run, { workerAttemptId: `attempt-${suffix}`, executionGeneration: 4 }), false, "a Worker result is accepted only after evidence collection is durably published");
   run = await runEventStore.append({ runId, type: "run_paused", expectedVersion: 6, actor: "tester", idempotencyKey: `pause-${suffix}` });
   assert.equal(run.state, "paused");
+  assert.equal(run.executionStatus, "waiting-user");
   run = await runEventStore.append({ runId, type: "run_resumed", expectedVersion: 7, actor: "tester", idempotencyKey: `resume-${suffix}` });
   assert.equal(run.state, "running");
+  assert.equal(run.executionStatus, "running");
   assert.equal((await runEventStore.events(runId)).length, 8);
 
   const legacyCompletedId = `legacy_completed_${suffix}`;
@@ -53,6 +56,7 @@ export async function testRunEventStore() {
   legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "run_judging", expectedVersion: legacyCompleted.version, actor: "worker", idempotencyKey: `legacy-judge-${suffix}` });
   legacyCompleted = await runEventStore.append({ runId: legacyCompletedId, type: "run_completed", expectedVersion: legacyCompleted.version, actor: "worker", idempotencyKey: `legacy-complete-${suffix}`, payload: {} });
   assert.equal(legacyCompleted.gateStatus, "needs-human-review", "legacy completion without an explicit final status must not replay as pass");
+  assert.equal(legacyCompleted.executionStatus, "completed");
 
   const queuedPauseId = `queued_pause_${suffix}`;
   let queuedPause = await runEventStore.create({ runId: queuedPauseId, actor: "tester", idempotencyKey: `queued-create-${suffix}` });
@@ -109,6 +113,7 @@ export async function testRunEventStore() {
     });
     assert.equal(rejected.state, expectedState);
     assert.equal(rejected.gateStatus, expectedGate);
+    assert.equal(rejected.executionStatus, eventType === "human_review_requested" ? "waiting-user" : "completed-with-gaps");
     assert.equal(rejected.planProvenance?.compilationStatus, "rejected");
     assert.equal(rejected.planProvenance?.fallbackReason, "invalid_dsl");
     assert.equal(rejected.plannerCall?.id, llmCall.id);

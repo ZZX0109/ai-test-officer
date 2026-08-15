@@ -57,6 +57,7 @@ export interface RunProjection {
   input?: Record<string, unknown>;
   gateStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
   finalStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
+  executionStatus?: "running" | "waiting-user" | "completed" | "completed-with-gaps" | "cancelled" | "infrastructure-failed";
   humanDecision?: { status: string; reason: string; newLabel?: string };
 }
 
@@ -123,12 +124,17 @@ export interface CoverageItem {
   module: string;
   surface: string;
   risk: string;
-  disposition: "executed" | "excluded" | "blocked" | "pending";
+  disposition: "pending" | "binding" | "executing" | "executed" | "failed" | "blocked" | "excluded";
   dispositionReason?: string;
 }
 
 export interface RunResult {
   id: string;
+  executionStatus?: "running" | "waiting-user" | "completed" | "completed-with-gaps" | "cancelled" | "infrastructure-failed";
+  releaseRecommendation?: {
+    decision: "可以发布" | "不建议发布" | "有条件发布" | "无法判断，需要补充条件";
+    reason: string;
+  };
   scenarioFingerprint?: string;
   verdict: "continue" | "hold_for_review" | "stop_and_fix";
   summary: string;

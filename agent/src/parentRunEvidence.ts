@@ -29,6 +29,7 @@ import type {
   RunBundle,
   VisualRunResult
 } from "./types.js";
+import { isCoverageExercised, isCoverageTerminal } from "./coverageStore.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
@@ -142,7 +143,7 @@ export async function persistParentAggregateEvidence(input: {
     payload: {
       childRunIds: input.children.map((item) => item.id),
       childEvidenceRoots: input.children.map((item) => item.evidenceSetRoot).filter(Boolean),
-      coverageDispositionComplete: input.coverage.every((item) => item.disposition !== "pending")
+      coverageDispositionComplete: input.coverage.every(isCoverageTerminal)
     }
   });
   const artifactIntegrity: ArtifactIntegrityReport = {
@@ -222,10 +223,12 @@ export async function persistParentAggregateEvidence(input: {
   const finalStatus = resolvedFinalStatus === "pass" && !finalized.gateEligible
     ? "needs-human-review"
     : resolvedFinalStatus;
-  const covered = input.coverage.length > 0 && input.coverage.every((item) => item.disposition !== "pending");
+  const covered = input.coverage.length > 0 && input.coverage.every(isCoverageExercised);
+  const hasGaps = input.coverage.some((item) => item.disposition === "blocked" || item.disposition === "excluded");
   const requirementPassed = machineGate.status === "pass";
   const outcomeSummary = runOutcomeSummaryV2Schema.parse({
     schemaVersion: "2.0",
+    executionStatus: hasGaps ? "completed-with-gaps" : "completed",
     schedulingCompleted: true,
     executionStarted: true,
     executionSucceeded: input.gateEligibleFacts.executionSucceeded,
@@ -256,7 +259,7 @@ export async function persistParentAggregateEvidence(input: {
       name: "All required coverage paths have terminal, evidence-backed results",
       passed: requirementPassed,
       expected: "Every required coverage item has a terminal child run and verified evidence.",
-      actual: `${input.coverage.filter((item) => item.disposition !== "pending").length}/${input.coverage.length} dispositions; gate=${machineGate.status}`,
+      actual: `${input.coverage.filter(isCoverageTerminal).length}/${input.coverage.length} terminal dispositions; gate=${machineGate.status}`,
       fact: {
         kind: "state.equals",
         target: "parent_coverage_gate",

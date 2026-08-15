@@ -30,7 +30,11 @@ export function testPlanStepSchema() {
   };
   const impact = buildImpactAnalysis(context);
   assert.ok(impact.affectedApis.some((item) => item.target === "/api/tasks"));
-  assert.ok(impact.recommendedScenarios.some((item) => item.riskDrivers?.includes("api")));
+  assert.equal(
+    impact.recommendedScenarios.length,
+    0,
+    "requirement keywords and an API literal must not manufacture a fixed production scenario without a code-graph edge"
+  );
   assert.ok(impact.recommendedScenarios.every((item) => item.priority && typeof item.score === "number"));
   const plan = buildExecutablePlan({
     plan: buildScenarioGrayPlan(getScenario("task_api_failure")),

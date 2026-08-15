@@ -52,6 +52,17 @@ function sendJson(res: ServerResponse, value: unknown, headers: Record<string, s
 }
 
 export async function testConnectorEnvelope() {
+  const ungroundedImpact = buildImpactAnalysis({
+    requirement: "Please test login, tasks and /login thoroughly.",
+    diff: "",
+    bugTicket: "",
+    sourceContexts: [],
+    sources: []
+  });
+  assert.equal(ungroundedImpact.affectedPages.length, 0, "keywords must not fabricate fixed product pages");
+  assert.equal(ungroundedImpact.affectedApis.length, 0, "keywords must not fabricate fixed product APIs");
+  assert.equal(ungroundedImpact.recommendedScenarios.length, 0, "registry keywords may not become production business facts without a code edge");
+
   const connectorInput = {
     fallbackDiff: "diff --git a/app-under-test/src/main.tsx b/app-under-test/src/main.tsx\n+ login auth change",
     requirementPath: "data/fixtures/task-filter-requirement.md",

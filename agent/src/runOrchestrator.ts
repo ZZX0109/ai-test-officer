@@ -1,18 +1,17 @@
 import { Queue, Worker, type Job } from "bullmq";
 import { createHash } from "node:crypto";
-import { resolveFinalStatus, type JudgeRecommendation, type MachineGate } from "@ai-test-officer/contracts";
 import { acceptsExecutionResult, appendSystemRunEvent, runEventStore, type RunProjection } from "./runEventStore.js";
 import { runVisualGrayTest } from "./testRunner.js";
 import type { RunRequest } from "./types.js";
 import { persistExecutionResult } from "./executionPersistence.js";
 import { acquireExecutionLease } from "./executionLease.js";
-import { agentOrchestrationMode, getAgentGraphProjection, resumeAgentGraph, startAgentGraphForRun } from "./agentGraphService.js";
+import { getAgentGraphProjection, resumeAgentGraph, startAgentGraphForRun } from "./agentGraphService.js";
 import { readCoverageItems, updateCoverageDisposition } from "./coverageStore.js";
-import { getScenario } from "./scenarios.js";
+import { getScenario, hasScenario } from "./scenarios.js";
 import { buildScenarioGrayPlan } from "./plan.js";
 import { compileTrustedScenarioPlan } from "./compiledPlanContract.js";
 import { runStructuredCoveragePath } from "./structuredCoverageRunner.js";
-import { finalizeProofBundle, type MachineGateDraft } from "./proof/proofBundleService.js";
+import { pathExecutionResultSchema } from "@ai-test-officer/contracts";
 
 const queueName = process.env.RUN_QUEUE_NAME ?? "ai-test-officer-runs";
 const activeControllers = new Map<string, AbortController>();
@@ -80,50 +79,11 @@ function redisConnection() {
   };
 }
 
-function machineGateFromResult(result: Awaited<ReturnType<typeof runVisualGrayTest>>): MachineGate {
-  if (result.machineGate) return result.machineGate;
-  const status = result.gateStatus ?? "needs-human-review";
-  const draft: MachineGateDraft = {
-    status,
-    reasons: result.artifactIntegrity?.items.filter((item) => !["present", "self_reference"].includes(item.status)).map((item) => `${item.id}:${item.status}`) ?? [],
-    reasonDetails: (result.artifactIntegrity?.items ?? [])
-      .filter((item) => !["present", "self_reference"].includes(item.status) && item.evidenceId)
-      .map((item) => ({
-        code: item.status,
-        summary: `${item.id}:${item.status}`,
-        evidenceRefs: [item.evidenceId!]
-      })),
-    assertionFailures: result.assertions.filter((item) => !item.passed).map((item) => item.name)
-  };
-  return finalizeProofBundle({
-    draft,
-    runId: result.id,
-    evidence: result.evidence,
-    artifactsV2: result.artifactsV2,
-    artifactIntegrity: result.artifactIntegrity,
-    machineGate: draft,
-    judgeReport: result.judgeReport
-  }).machineGate;
-}
-
-function recommendationFromResult(result: Awaited<ReturnType<typeof runVisualGrayTest>>): JudgeRecommendation {
-  if (result.judgeRecommendation) return result.judgeRecommendation;
-  const judge = result.judgeReport.releaseJudge;
-  return {
-    status: judge.verdict === "needs_review" ? "needs-human-review" : judge.verdict,
-    summary: judge.summary,
-    evidenceRefs: Array.from(new Set(judge.findings.flatMap((finding) => finding.evidenceRefs)))
-  };
-}
-
 export function buildQueuedRunRequest(projection: RunProjection, signal: AbortSignal): RunRequest {
   const input = projection.input as Record<string, unknown>;
   // In active mode the worker is a deterministic executor. Selective LLM
   // judging belongs to the durable graph node so a worker retry cannot create
   // duplicate model calls or independently change the run conclusion.
-  const graphOwnsJudge = agentOrchestrationMode(
-    typeof projection.input.projectId === "string" ? projection.input.projectId : undefined
-  ) === "active";
   return {
     runId: projection.id,
     appUrl: typeof input.appUrl === "string" ? input.appUrl : undefined,
@@ -135,9 +95,9 @@ export function buildQueuedRunRequest(projection: RunProjection, signal: AbortSi
     plan: projection.plan,
     compiledPlan: projection.compiledPlan,
     credentialId: typeof input.modelProfileId === "string" ? input.modelProfileId : undefined,
-    judgeMode: graphOwnsJudge
-      ? "deterministic"
-      : input.judgeMode === "llm-assisted" || input.judgeMode === "adaptive" ? input.judgeMode : "deterministic",
+    // Selective judging is a Graph node. Worker retries must never produce a
+    // second model call or independently alter a formal conclusion.
+    judgeMode: "deterministic",
     llmBudget: input.llmBudget as RunRequest["llmBudget"],
     priorLlmTokens: projection.plannerCalls?.reduce((sum, call) => sum + (call.usage.totalTokens ?? 0), 0) ?? projection.plannerCall?.usage.totalTokens ?? 0,
     experimentId: typeof input.experimentId === "string" ? input.experimentId : undefined,
@@ -176,7 +136,10 @@ async function beginEvidenceCollection(
 
 async function dispatchParentCoverageRun(projection: RunProjection) {
   const items = await readCoverageItems(projection.id);
-  const executable = items.filter((item) => item.disposition === "pending" && item.scenarioId);
+  const executable = items.filter((item) =>
+    item.disposition === "pending"
+    && (Boolean(item.structuredPlan) || (Boolean(item.scenarioId) && hasScenario(item.scenarioId!)))
+  );
   if (!executable.length) {
     const childRunIds = items.map((item) => item.childRunId).filter((id): id is string => Boolean(id));
     // A parent without path children has no execution evidence to aggregate.
@@ -246,9 +209,7 @@ async function dispatchParentCoverageRun(projection: RunProjection) {
     }
     if (ready.state === "awaiting-plan-approval") ready = await appendSystemRunEvent(childRunId, "plan_approved");
     if (ready.state === "awaiting-permission") ready = await appendSystemRunEvent(childRunId, "permission_granted");
-    if (agentOrchestrationMode(
-      typeof ready.input.projectId === "string" ? ready.input.projectId : undefined
-    ) === "active" && !terminalRunStates.has(ready.state)) {
+    if (!terminalRunStates.has(ready.state)) {
       // Establish the child checkpoint before its worker result can arrive.
       // Otherwise the worker would resume a graph thread that does not exist
       // and the child would remain stuck in collecting forever.
@@ -257,7 +218,7 @@ async function dispatchParentCoverageRun(projection: RunProjection) {
     await updateCoverageDisposition({
       runId: projection.id,
       coverageItemId: item.id,
-      disposition: "pending",
+      disposition: "executing",
       reason: "path_run_queued",
       childRunId
     });
@@ -285,7 +246,11 @@ async function aggregateParentCoverageRun(runId: string, expectedGeneration?: nu
     await updateCoverageDisposition({
       runId,
       coverageItemId: item.id,
-      disposition: child.state === "blocked" || child.state === "cancelled" ? "blocked" : "executed",
+      disposition: child.state === "blocked" || child.state === "cancelled"
+        ? "blocked"
+        : child.gateStatus === "fail" || child.state === "failed"
+          ? "failed"
+          : "executed",
       reason: child.gateStatus ?? child.state,
       childRunId: child.id
     });
@@ -341,14 +306,31 @@ async function scheduleParentAggregation(runId: string, executionGeneration?: nu
       }
       const current = await runEventStore.get(runId);
       if (current?.state === "running") {
+        const errorCode = error instanceof Error ? error.message : "parent_aggregation_failed";
+        const attemptId = current.activeExecutionAttemptId;
+        const generation = current.executionGeneration ?? executionGeneration;
+        if (!attemptId || generation === undefined) {
+          // No durable Worker ownership means there is no execution result we
+          // are allowed to publish. Leave the parent running for its Graph
+          // watchdog instead of manufacturing a Run-level conclusion here.
+          return;
+        }
         if (!await beginEvidenceCollection(runId, {
-          finalStatus: "blocked",
-          error: error instanceof Error ? error.message : "parent_aggregation_failed"
-        })) return;
+          error: errorCode,
+          pathStatus: "blocked"
+        }, attemptId)) return;
         void resumeGraphAndQueueIfNeeded(runId, {
           execution: {
-            finalStatus: "blocked",
-            error: error instanceof Error ? error.message : "parent_aggregation_failed"
+            pathResult: pathExecutionResultSchema.parse({
+              runId,
+              attemptId,
+              executionGeneration: generation,
+              status: "blocked",
+              executionSucceeded: false,
+              error: errorCode
+            }),
+            workerAttemptId: attemptId,
+            executionGeneration: generation
           }
         }).catch(() => undefined);
       }
@@ -362,9 +344,6 @@ export async function executeQueuedRun(runId: string, options?: { expectedVersio
   if (options?.expectedVersion !== undefined && initialProjection?.version !== options.expectedVersion) {
     return initialProjection;
   }
-  const graphOwnsFinalization = agentOrchestrationMode(
-    typeof initialProjection?.input.projectId === "string" ? initialProjection.input.projectId : undefined
-  ) === "active";
   const lease = await acquireExecutionLease(runId);
   if (!lease) return runEventStore.get(runId);
   const heartbeat = setInterval(() => void lease.heartbeat().then((active) => { if (!active) activeControllers.get(runId)?.abort(); }).catch(() => activeControllers.get(runId)?.abort()), Math.max(1_000, Number(process.env.EXECUTION_LEASE_TTL_MS ?? 30_000) / 3));
@@ -380,7 +359,7 @@ export async function executeQueuedRun(runId: string, options?: { expectedVersio
   // the same Graph thread once in that case so the worker's evidence event can
   // resume the authoritative execution node instead of leaving the run in
   // collecting forever.
-  if (graphOwnsFinalization && !(await getAgentGraphProjection(runId))) {
+  if (!(await getAgentGraphProjection(runId))) {
     await startAgentGraphForRun(projection);
   }
   if (projection.state === "queued") await appendSystemRunEvent(runId, "run_preparing");
@@ -431,107 +410,81 @@ export async function executeQueuedRun(runId: string, options?: { expectedVersio
           signal: controller.signal
         });
         if (!await beginEvidenceCollection(runId, { resultRunId: result.id }, lease.attemptId)) return runEventStore.get(runId);
-        if (graphOwnsFinalization) {
-          void resumeGraphAndQueueIfNeeded(runId, {
-            execution: {
+        void resumeGraphAndQueueIfNeeded(runId, {
+          execution: {
+            pathResult: pathExecutionResultSchema.parse({
+              runId,
+              attemptId: lease.attemptId,
+              executionGeneration: options?.expectedVersion ?? initialProjection?.version ?? 0,
+              status: result.outcomeSummary?.executionSucceeded === true ? "executed" : "failed",
               resultRunId: result.id,
-              executionSucceeded: result.outcomeSummary?.executionSucceeded === true,
-              workerAttemptId: lease.attemptId,
-              executionGeneration: options?.expectedVersion ?? initialProjection?.version
-            }
-          }).catch(() => undefined);
-          return runEventStore.get(runId);
-        }
-        const machineGate = machineGateFromResult(result);
-        const judgeRecommendation = recommendationFromResult(result);
-        await appendSystemRunEvent(runId, "run_judging", {
-          resultRunId: result.id,
-          machineGate,
-          judgeRecommendation
-        });
-        const finalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
-        const payload = {
-          resultRunId: result.id,
-          machineGate,
-          judgeRecommendation,
-          finalStatus,
-          outcomeSummary: result.outcomeSummary
-        };
-        return finalStatus === "pass"
-          ? appendSystemRunEvent(runId, "run_completed", payload)
-          : finalStatus === "fail"
-            ? appendSystemRunEvent(runId, "run_failed", payload)
-            : finalStatus === "blocked"
-              ? appendSystemRunEvent(runId, "run_blocked", payload)
-              : appendSystemRunEvent(runId, "human_review_requested", payload);
+              executionSucceeded: result.outcomeSummary?.executionSucceeded === true
+            }),
+            resultRunId: result.id,
+            workerAttemptId: lease.attemptId,
+            executionGeneration: options?.expectedVersion ?? initialProjection?.version
+          }
+        }).catch(() => undefined);
+        return runEventStore.get(runId);
       }
     }
     const queuedRequest = buildQueuedRunRequest(projection, controller.signal);
     const requestedScenarioId = typeof projection.input.scenarioId === "string" ? projection.input.scenarioId : undefined;
     if (requestedScenarioId && queuedRequest.scenarioId !== requestedScenarioId) {
-      if (graphOwnsFinalization) {
-        if (!await beginEvidenceCollection(runId, {
-          error: "scenario_handoff_missing",
-          requestedScenarioId,
-          projectedScenarioId: projection.selectedScenarioId
-        }, lease.attemptId)) return runEventStore.get(runId);
-        void resumeGraphAndQueueIfNeeded(runId, { execution: {
-          finalStatus: "blocked",
-          error: "scenario_handoff_missing",
-          workerAttemptId: lease.attemptId,
-          executionGeneration: options?.expectedVersion ?? initialProjection?.version
-        } });
-        return runEventStore.get(runId);
-      }
-      const terminal = await appendSystemRunEvent(runId, "run_blocked", {
-        finalStatus: "blocked",
+      if (!await beginEvidenceCollection(runId, {
         error: "scenario_handoff_missing",
         requestedScenarioId,
         projectedScenarioId: projection.selectedScenarioId
-      });
-      return terminal;
+      }, lease.attemptId)) return runEventStore.get(runId);
+      void resumeGraphAndQueueIfNeeded(runId, { execution: {
+        pathResult: pathExecutionResultSchema.parse({
+          runId,
+          attemptId: lease.attemptId,
+          executionGeneration: options?.expectedVersion ?? initialProjection?.version ?? 0,
+          status: "blocked",
+          executionSucceeded: false,
+          error: "scenario_handoff_missing"
+        }),
+        workerAttemptId: lease.attemptId,
+        executionGeneration: options?.expectedVersion ?? initialProjection?.version
+      } });
+      return runEventStore.get(runId);
     }
     if (!queuedRequest.scenarioId) {
-      if (graphOwnsFinalization) {
-        if (!await beginEvidenceCollection(runId, { error: "scenario_handoff_missing" }, lease.attemptId)) return runEventStore.get(runId);
-        void resumeGraphAndQueueIfNeeded(runId, { execution: {
-          finalStatus: "blocked",
-          error: "scenario_handoff_missing",
-          workerAttemptId: lease.attemptId,
-          executionGeneration: options?.expectedVersion ?? initialProjection?.version
-        } });
-        return runEventStore.get(runId);
-      }
-      const terminal = await appendSystemRunEvent(runId, "run_blocked", { finalStatus: "blocked", error: "scenario_handoff_missing" });
-      return terminal;
+      if (!await beginEvidenceCollection(runId, { error: "scenario_handoff_missing" }, lease.attemptId)) return runEventStore.get(runId);
+      void resumeGraphAndQueueIfNeeded(runId, { execution: {
+        pathResult: pathExecutionResultSchema.parse({
+          runId,
+          attemptId: lease.attemptId,
+          executionGeneration: options?.expectedVersion ?? initialProjection?.version ?? 0,
+          status: "blocked",
+          executionSucceeded: false,
+          error: "scenario_handoff_missing"
+        }),
+        workerAttemptId: lease.attemptId,
+        executionGeneration: options?.expectedVersion ?? initialProjection?.version
+      } });
+      return runEventStore.get(runId);
     }
     const result = await runVisualGrayTest(queuedRequest);
     await persistExecutionResult(runId, result);
     if (!await beginEvidenceCollection(runId, { resultRunId: result.id }, lease.attemptId)) return runEventStore.get(runId);
-    if (graphOwnsFinalization) {
-      void resumeGraphAndQueueIfNeeded(runId, {
-        execution: {
+    void resumeGraphAndQueueIfNeeded(runId, {
+      execution: {
+        pathResult: pathExecutionResultSchema.parse({
+          runId,
+          attemptId: lease.attemptId,
+          executionGeneration: options?.expectedVersion ?? initialProjection?.version ?? 0,
+          status: "executed",
           resultRunId: result.id,
-          executionSucceeded: true,
-          workerAttemptId: lease.attemptId,
-          executionGeneration: options?.expectedVersion ?? initialProjection?.version
-        }
-      }).catch(() => undefined);
-      return runEventStore.get(runId);
-    }
-    const machineGate = machineGateFromResult(result);
-    const judgeRecommendation = recommendationFromResult(result);
-    await appendSystemRunEvent(runId, "run_judging", { resultRunId: result.id, machineGate, judgeRecommendation });
-    const finalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
-    const payload = { resultRunId: result.id, machineGate, judgeRecommendation, finalStatus, outcomeSummary: result.outcomeSummary };
-    const terminal = finalStatus === "pass"
-      ? await appendSystemRunEvent(runId, "run_completed", payload)
-      : finalStatus === "fail"
-        ? await appendSystemRunEvent(runId, "run_failed", payload)
-        : finalStatus === "blocked"
-          ? await appendSystemRunEvent(runId, "run_blocked", payload)
-          : await appendSystemRunEvent(runId, "human_review_requested", payload);
-    return terminal;
+          executionSucceeded: true
+        }),
+        resultRunId: result.id,
+        workerAttemptId: lease.attemptId,
+        executionGeneration: options?.expectedVersion ?? initialProjection?.version
+      }
+    }).catch(() => undefined);
+    return runEventStore.get(runId);
   } catch (error) {
     const current = await runEventStore.get(runId);
     if (current?.state === "paused" || current?.state === "cancelled") return current;
@@ -541,26 +494,25 @@ export async function executeQueuedRun(runId: string, options?: { expectedVersio
     // formal result so Graph can report an actionable object-store issue rather
     // than opening a target-project repair session.
     const blocked = /runtime_unavailable|permission|environment|command_not_found|health|port|dependency|artifact[_-]?object|object[ _-]?store|minio|\bs3\b|econnrefused|fetch failed/i.test(message);
-    const finalStatus = blocked ? "blocked" : "fail";
-    if (graphOwnsFinalization) {
-      const latest = await runEventStore.get(runId);
-      const accepted = latest?.state === "running"
-        ? await beginEvidenceCollection(runId, { error: message, finalStatus }, lease.attemptId)
-        : false;
-      if (!accepted) return runEventStore.get(runId);
-      void resumeGraphAndQueueIfNeeded(runId, { execution: {
-        finalStatus,
-        error: message,
-        workerAttemptId: lease.attemptId,
-        executionGeneration: options?.expectedVersion ?? initialProjection?.version
-      } });
-      return runEventStore.get(runId);
-    }
-    const terminal = await appendSystemRunEvent(runId, blocked ? "run_blocked" : "run_failed", {
-      finalStatus: blocked ? "blocked" : "fail",
-      error: message
-    });
-    return terminal;
+    const pathStatus = blocked ? "blocked" : "failed";
+    const latest = await runEventStore.get(runId);
+    const accepted = latest?.state === "running"
+      ? await beginEvidenceCollection(runId, { error: message, pathStatus }, lease.attemptId)
+      : false;
+    if (!accepted) return runEventStore.get(runId);
+    void resumeGraphAndQueueIfNeeded(runId, { execution: {
+      pathResult: pathExecutionResultSchema.parse({
+        runId,
+        attemptId: lease.attemptId,
+        executionGeneration: options?.expectedVersion ?? initialProjection?.version ?? 0,
+        status: pathStatus,
+        executionSucceeded: false,
+        error: message
+      }),
+      workerAttemptId: lease.attemptId,
+      executionGeneration: options?.expectedVersion ?? initialProjection?.version
+    } });
+    return runEventStore.get(runId);
   } finally {
     activeControllers.delete(runId);
     clearInterval(heartbeat);

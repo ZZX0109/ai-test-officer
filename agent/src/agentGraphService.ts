@@ -13,7 +13,8 @@ import {
   type RepairDecisionAnswer,
   type RecoveryActionResult,
   type RecoveryDecision,
-  recoveryActionResultSchema
+  recoveryActionResultSchema,
+  pathExecutionResultSchema
 } from "@ai-test-officer/contracts";
 import { randomUUID } from "node:crypto";
 import {
@@ -33,8 +34,11 @@ import {
   createCoverageItems,
   createDynamicBrowserCoverageItems,
   createManifestCoverageItems,
+  isCoverageExercised,
+  isCoverageTerminal,
   readCoverageItems,
-  saveCoverageItems
+  saveCoverageItems,
+  updateCoverageDisposition
 } from "./coverageStore.js";
 import { buildProofGraph, readProofArtifacts, writeProofArtifacts } from "./proofGraph.js";
 import { persistParentAggregateEvidence } from "./parentRunEvidence.js";
@@ -169,8 +173,10 @@ async function finalizeBrowserExecutionProof(input: {
   const coverage = input.coverageScope === "browser"
     ? allCoverage.filter((item) => item.surface === "page")
     : allCoverage;
-  const coverageComplete = coverage.length > 0 && coverage.every((item) => item.disposition !== "pending");
+  const coverageComplete = coverage.length > 0 && coverage.every(isCoverageTerminal);
   const blockedCoverage = coverage.filter((item) => item.disposition === "blocked");
+  const failedCoverage = coverage.filter((item) => item.disposition === "failed");
+  const excludedCoverage = coverage.filter((item) => item.disposition === "excluded");
   const executedResults = results.filter((item) => item.status === "completed");
   const failedOracles = executedResults.flatMap((item) => item.oracleResults.filter((oracle) => !oracle.passed));
   // A stale binding which is followed by a successful re-observation is an
@@ -180,8 +186,7 @@ async function finalizeBrowserExecutionProof(input: {
     item.status !== "completed" && item.errorCode !== "browser_control_binding_stale"
   );
   const executionSucceeded = executedResults.length > 0 && nonRetryableFailures.length === 0;
-  const requirementCovered = coverageComplete && blockedCoverage.length === 0
-    && coverage.every((item) => item.disposition === "executed");
+  const requirementCovered = coverageComplete && coverage.every(isCoverageExercised);
   const artifactKinds = new Set(artifacts.map((artifact) => artifact.kind));
   const requiredKinds = ["screenshot", "dom", "trace", "operation-log"] as const;
   const missingKinds = requiredKinds.filter((kind) => !artifactKinds.has(kind));
@@ -204,9 +209,10 @@ async function finalizeBrowserExecutionProof(input: {
       sha256: artifact.integrity.sha256
     }))
   };
-  const status: MachineGate["status"] = !coverageComplete || blockedCoverage.length > 0 || !executionSucceeded || missingKinds.length > 0
+  const status: MachineGate["status"] = !coverageComplete || !executionSucceeded || missingKinds.length > 0
     ? "blocked"
-    : failedOracles.length > 0 ? "fail" : "pass";
+    : failedOracles.length > 0 || failedCoverage.length > 0 ? "fail"
+      : blockedCoverage.length > 0 || excludedCoverage.length > 0 ? "blocked" : "pass";
   const failedEvidenceRefs = results
     .filter((item) => item.status !== "completed" || item.oracleResults.some((oracle) => !oracle.passed))
     .flatMap((item) => item.evidenceRefs);
@@ -215,7 +221,9 @@ async function finalizeBrowserExecutionProof(input: {
   const prefix = input.reasonPrefix ?? "";
   const reasons = [
     ...(!coverageComplete ? [`${prefix}coverage_disposition_incomplete`] : []),
+    ...failedCoverage.map((item) => `${prefix}coverage_failed:${item.flowId}`),
     ...blockedCoverage.map((item) => `${prefix}coverage_blocked:${item.flowId}`),
+    ...excludedCoverage.map((item) => `${prefix}coverage_excluded:${item.flowId}`),
     ...(!executionSucceeded ? ["browser_action_execution_incomplete"] : []),
     ...missingKinds.map((kind) => `required_artifact_missing:${kind}`),
     ...failedOracles.map((oracle) => `oracle_failed:${oracle.oracleId}`)
@@ -244,6 +252,9 @@ async function finalizeBrowserExecutionProof(input: {
   });
   const outcomeSummary = runOutcomeSummaryV2Schema.parse({
     schemaVersion: "2.0",
+    executionStatus: blockedCoverage.length > 0 || excludedCoverage.length > 0
+      ? "completed-with-gaps"
+      : "completed",
     schedulingCompleted: true,
     executionStarted: results.length > 0,
     executionSucceeded,
@@ -382,14 +393,15 @@ async function machineGateFromResult(bundle: Awaited<ReturnType<typeof readRunBu
   }).machineGate;
 }
 
-function recommendationFromResult(result: Awaited<ReturnType<typeof readRunBundle>>["result"]): JudgeRecommendation | undefined {
-  if (result.judgeRecommendation) return result.judgeRecommendation;
-  const judge = result.judgeReport?.releaseJudge;
-  if (!judge) return undefined;
+function deterministicRecommendation(machineGate: MachineGate): JudgeRecommendation {
   return {
-    status: judge.verdict === "needs_review" ? "needs-human-review" : judge.verdict,
-    summary: judge.summary,
-    evidenceRefs: Array.from(new Set(judge.findings.flatMap((finding) => finding.evidenceRefs)))
+    status: machineGate.status === "pass"
+      ? "pass"
+      : machineGate.status === "fail"
+        ? "fail"
+        : "needs-human-review",
+    summary: "Deterministic recommendation derived from the verified Machine Gate; no LLM Judge was required.",
+    evidenceRefs: Array.from(new Set(machineGate.reasonDetails?.flatMap((detail) => detail.evidenceRefs) ?? []))
   };
 }
 
@@ -403,13 +415,9 @@ let servicePromise: Promise<GraphService> | undefined;
 const inFlightGraphStarts = new Map<string, Promise<unknown>>();
 
 export function agentOrchestrationMode(projectId?: string): "shadow" | "active" {
-  if (process.env.AGENT_ORCHESTRATION_MODE === "shadow") return "shadow";
-  // Active is the production/default path. Set AGENT_ORCHESTRATION_MODE=shadow
-  // only for explicit comparison runs or an emergency rollback.
-  // The former allowlist made a newly uploaded project silently fall back to
-  // the legacy executor. Keep the variable for observability/rollback notes,
-  // but do not let it downgrade normal projects; an explicit `shadow` mode is
-  // the only supported rollback switch.
+  // Product runs always use the authoritative graph. Shadow comparison belongs
+  // to the benchmark harness and must never silently route an uploaded project
+  // through the retired direct-run pipeline.
   void projectId;
   return "active";
 }
@@ -972,7 +980,7 @@ async function buildService() {
       }),
       continuePaths: node("continue-paths", async (state) => {
         const coverage = await readCoverageItems(state.runId).catch(() => []);
-        const pending = coverage.filter((item) => item.disposition === "pending").length;
+        const pending = coverage.filter((item) => !isCoverageTerminal(item)).length;
         const continuationPasses = state.continuationPasses ?? 0;
         return {
           remainingPathCount: pending,
@@ -1188,7 +1196,7 @@ async function buildService() {
             coverageMap: {
               ...(state.coverageMap ?? {}),
               items,
-              dispositionComplete: items.length > 0 && items.every((item) => item.disposition !== "pending")
+              dispositionComplete: items.length > 0 && items.every(isCoverageTerminal)
             }
           };
         }
@@ -1198,7 +1206,7 @@ async function buildService() {
             coverageMap: {
               ...(state.coverageMap ?? {}),
               items: bundle.coverageItems ?? [],
-              dispositionComplete: (bundle.coverageItems ?? []).every((item) => item.disposition !== "pending")
+              dispositionComplete: (bundle.coverageItems ?? []).every(isCoverageTerminal)
             }
           };
         } catch {
@@ -1322,6 +1330,14 @@ async function buildService() {
           ?? coverage.find((item) => item.disposition === "pending" && item.surface === "page")
           ?? coverage.find((item) => item.surface === "page");
         if (!current) throw new Error("browser_agent_coverage_missing");
+        if (!isCoverageTerminal(current) && current.disposition !== "binding") {
+          await updateCoverageDisposition({
+            runId: state.runId,
+            coverageItemId: current.id,
+            disposition: "binding",
+            reason: "binding_runtime_controls"
+          });
+        }
         const attemptId = state.currentAttemptId ?? `attempt_${randomUUID()}`;
         const routes = [
           { id: "project-root", path: url }
@@ -1560,6 +1576,14 @@ async function buildService() {
         const decision = state.browserDecision;
         const action = decision?.actions[0];
         if (!decision || !action) throw new Error("browser_agent_action_missing");
+        if (state.currentCoverageItemId) {
+          await updateCoverageDisposition({
+            runId: state.runId,
+            coverageItemId: state.currentCoverageItemId,
+            disposition: "executing",
+            reason: `browser_action:${action.action}`
+          });
+        }
         const project = state.projectId ? await getProject(state.projectId) : undefined;
         const result = await executeBrowserAgentAction({
           action,
@@ -1635,7 +1659,7 @@ async function buildService() {
             }
           };
         }
-        let terminalDisposition: "executed" | "blocked" | undefined;
+        let terminalDisposition: "executed" | "failed" | "blocked" | undefined;
         let dispositionReason: string | undefined;
         const completedLoginBoundary = result?.status === "completed"
           && result.oracleResults.length > 0
@@ -1678,7 +1702,7 @@ async function buildService() {
           // Coverage means the path and oracle were actually executed. A
           // business assertion failure is an executed path with a fail gate,
           // not an infrastructure coverage gap.
-          terminalDisposition = "executed";
+          terminalDisposition = "failed";
           dispositionReason = result.summary;
         } else if (decision?.status === "blocked") {
           terminalDisposition = "blocked";
@@ -1744,6 +1768,25 @@ async function buildService() {
           return { gate: run?.machineGate ? { machineGate: run.machineGate, outcomeSummary: run.outcomeSummary } : {} };
         }
         if (state.browserAgentRequired && state.execution?.aggregate !== true) {
+          // Preserve the complete inventory during planning, then resolve any
+          // path that never acquired a runtime executor into an explicit gap at
+          // collection time. This allows runnable paths to proceed without
+          // silently treating unbound work as covered.
+          const collectedCoverage = await readCoverageItems(state.runId);
+          const normalizedCoverage = collectedCoverage.map((item) => isCoverageTerminal(item)
+            ? item
+            : {
+                ...item,
+                disposition: "blocked" as const,
+                dispositionReason: item.dispositionReason
+                  ?? (item.surface === "page"
+                    ? "runtime_binding_not_completed"
+                    : "manifest_executor_binding_unavailable"),
+                updatedAt: new Date().toISOString()
+              });
+          if (normalizedCoverage.some((item, index) => item !== collectedCoverage[index])) {
+            await saveCoverageItems(state.runId, normalizedCoverage);
+          }
           const traceArtifact = await finalizeBrowserAgentTrace(state.runId).catch(() => undefined);
           if (traceArtifact) {
             await appendEvidence(state.runId, {
@@ -1798,18 +1841,20 @@ async function buildService() {
           };
         }
         const resultRunId = typeof state.execution?.resultRunId === "string" ? state.execution.resultRunId : state.runId;
-        if (state.execution?.error && !state.execution.resultRunId) {
+        const parsedPathResult = pathExecutionResultSchema.safeParse(state.execution?.pathResult);
+        const pathResult = parsedPathResult.success ? parsedPathResult.data : undefined;
+        if (pathResult?.error && !pathResult.resultRunId) {
           const machineGate = finalizeProofBundle({
             draft: {
-              status: state.execution.finalStatus === "fail" ? "fail" : "blocked",
-              reasons: [String(state.execution.error)],
+              status: pathResult.status === "failed" ? "fail" : "blocked",
+              reasons: [pathResult.error],
               reasonDetails: [],
               assertionFailures: []
             },
             runId: state.runId,
             machineGate: {
-              status: state.execution.finalStatus === "fail" ? "fail" : "blocked",
-              reasons: [String(state.execution.error)],
+              status: pathResult.status === "failed" ? "fail" : "blocked",
+              reasons: [pathResult.error],
               reasonDetails: [],
               assertionFailures: []
             }
@@ -1830,8 +1875,10 @@ async function buildService() {
             ? await persistBrowserPhaseForAggregate(state)
             : undefined;
           const coverage = await readCoverageItems(state.runId);
-          const coverageComplete = coverage.length > 0 && coverage.every((item) => item.disposition !== "pending");
+          const coverageComplete = coverage.length > 0 && coverage.every(isCoverageTerminal);
           const blockedCoverage = coverage.filter((item) => item.disposition === "blocked");
+          const failedCoverage = coverage.filter((item) => item.disposition === "failed");
+          const excludedCoverage = coverage.filter((item) => item.disposition === "excluded");
           const childEvidenceComplete = children.length === childRunIds.length && children.every((child) =>
             child.outcomeSummary?.artifactIntegrityVerified === true
             && child.outcomeSummary?.evidenceGrounded === true
@@ -1842,13 +1889,16 @@ async function buildService() {
             ...children.map((child) => child.gateStatus ?? "needs-human-review"),
             ...(browserPhase ? [browserPhase.finalStatus as MachineGate["status"]] : [])
           ];
-          const status: MachineGate["status"] = !coverageComplete || blockedCoverage.length > 0 || statuses.includes("blocked") ? "blocked"
-            : statuses.includes("fail") ? "fail"
+          const status: MachineGate["status"] = !coverageComplete ? "blocked"
+            : failedCoverage.length > 0 || statuses.includes("fail") ? "fail"
+              : blockedCoverage.length > 0 || excludedCoverage.length > 0 || statuses.includes("blocked") ? "blocked"
               : statuses.includes("needs-human-review") ? "needs-human-review"
                 : evidenceComplete ? "pass" : "needs-human-review";
           const reasons = [
             ...(!coverageComplete ? ["coverage_disposition_incomplete"] : []),
+            ...failedCoverage.map((item) => `coverage_failed:${item.flowId}:${item.dispositionReason ?? "oracle_failed"}`),
             ...blockedCoverage.map((item) => `coverage_blocked:${item.flowId}:${item.dispositionReason ?? "unspecified"}`),
+            ...excludedCoverage.map((item) => `coverage_excluded:${item.flowId}:${item.dispositionReason ?? "not_applicable"}`),
             ...(!evidenceComplete ? ["child_evidence_incomplete"] : []),
             ...children.filter((child) => child.gateStatus !== "pass").map((child) => `child_run:${child.id}:${child.gateStatus ?? child.state}`)
           ];
@@ -1890,7 +1940,7 @@ async function buildService() {
                 ...(browserPhase ? [browserPhase] : [])
               ],
               machineGateDraft: aggregateDraft,
-              gateEligibleFacts: { executionSucceeded, requirementCovered: coverageComplete },
+              gateEligibleFacts: { executionSucceeded, requirementCovered: coverage.every(isCoverageExercised) },
               judgeRecommendation
             });
           } catch (error) {
@@ -2005,7 +2055,11 @@ async function buildService() {
         }
         const bundle = await readRunBundle(resultRunId);
         const machineGate = await machineGateFromResult(bundle);
-        const judgeRecommendation = recommendationFromResult(bundle.result);
+        // Worker/test-runner Judge placeholders are not authoritative. A clear
+        // verified Gate proceeds deterministically; the later selective-judge
+        // node may replace this recommendation only for a real evidence or
+        // attribution conflict.
+        const judgeRecommendation = deterministicRecommendation(machineGate);
         const finalStatus = resolveFinalStatus({ machineGate, judgeRecommendation });
         const current = await runEventStore.get(state.runId);
         if (current?.state === "collecting") {
@@ -2265,6 +2319,15 @@ async function buildService() {
       finalize: node("finalize", async (state) => {
         let run = await runEventStore.get(state.runId);
         if (state.mode === "active" && run && !["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(run.state)) {
+          const coverage = await readCoverageItems(state.runId).catch(() => []);
+          const hasCoverageGaps = coverage.some((item) => item.disposition === "blocked" || item.disposition === "excluded");
+          const hasUnfinishedCoverage = coverage.some((item) => !isCoverageTerminal(item));
+          const pathResult = pathExecutionResultSchema.safeParse(state.execution?.pathResult);
+          const executionStatus = pathResult.success && pathResult.data.status === "blocked" && coverage.length === 0
+            ? "infrastructure-failed" as const
+            : hasCoverageGaps || hasUnfinishedCoverage
+              ? "completed-with-gaps" as const
+              : "completed" as const;
           const discovery = state.coverageMap?.discovery && typeof state.coverageMap.discovery === "object"
             ? state.coverageMap.discovery as Record<string, unknown>
             : undefined;
@@ -2278,15 +2341,19 @@ async function buildService() {
           const judgeRecommendation = state.gate?.judgeRecommendation as JudgeRecommendation | undefined;
           const finalStatus = machineGate
             ? resolveFinalStatus({ machineGate, judgeRecommendation })
-            : state.execution?.finalStatus === "fail" ? "fail"
-              : state.execution?.finalStatus === "blocked" ? "blocked"
+            : pathResult.success && pathResult.data.status === "failed" ? "fail"
+              : pathResult.success && pathResult.data.status === "blocked" ? "blocked"
                 : "needs-human-review";
+          const outcomeSummary = state.gate?.outcomeSummary
+            ? { ...state.gate.outcomeSummary, executionStatus }
+            : undefined;
           const payload = {
             resultRunId: state.execution?.resultRunId,
             machineGate,
             judgeRecommendation,
             finalStatus,
-            outcomeSummary: state.gate?.outcomeSummary,
+            executionStatus,
+            outcomeSummary,
             ...(discovery ? { discovery } : {})
           };
           run = finalStatus === "pass"

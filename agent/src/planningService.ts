@@ -7,7 +7,6 @@ import { analyzeIntake } from "./intakeAnalyzer.js";
 import { createLlmPlanningAdvice } from "./llmPlanningAdvisor.js";
 import { buildPlanningConversation, type PlannedBusinessFlow, type PlanningConversationResult, type PlanningMessage } from "./planningConversation.js";
 import { getPlanningFlowPage, savePlanningInventory } from "./planningInventoryStore.js";
-import { listScenarios } from "./scenarios.js";
 import { probeDiscoveryConnectivity, runSmokeFirstDiscovery } from "./smokeFirstDiscovery.js";
 import { toTargetProjectConfig } from "./projectAdapter.js";
 
@@ -108,16 +107,12 @@ export async function createPlanningConversation(input: {
   const { project, request } = input;
   const requiresPageSmoke = /全面扫描|灰度测试|完整测试|全量测试|full[\s_-]*(scan|coverage)/i.test(request.message);
   let discoveryReadiness = await probeDiscoveryConnectivity({ projectId: project.id, maxAttempts: 2 });
-  const scenarioContracts = listScenarios()
-    .filter((scenario) => !scenario.matcher?.projectIds?.length || scenario.matcher.projectIds.includes(project.id))
-    .map((scenario) => ({ id: scenario.id, keywords: scenario.matcher?.keywords ?? [scenario.id, scenario.title] }));
   const targetRoot = toTargetProjectConfig(project).rootDir;
   const graph = await buildCodeImpactGraph({
     repositoryRoot: targetRoot,
     files: changedFilesFromDiff(request.diff),
     diff: request.diff || undefined,
     includeRepositorySources: true,
-    scenarios: scenarioContracts,
     cacheFile: path.join(input.reportsDir, "planning-cache", `${project.id}.json`)
   });
   const capabilityGraph = await buildBusinessCapabilityGraph({ repositoryRoot: targetRoot, codeGraph: graph, manifest: project.manifest });

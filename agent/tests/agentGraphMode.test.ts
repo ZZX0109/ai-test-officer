@@ -30,7 +30,7 @@ export function testAgentGraphMode() {
     delete process.env.AGENT_GRAPH_ACTIVE_PROJECTS;
     assert.equal(agentOrchestrationMode("unknown-project"), "active");
     process.env.AGENT_ORCHESTRATION_MODE = "shadow";
-    assert.equal(agentOrchestrationMode("andflow"), "shadow");
+    assert.equal(agentOrchestrationMode("andflow"), "active", "product runs cannot be downgraded to the retired direct-run chain");
 
     assert.equal(requiresActiveBrowserDiscovery(runProjection({
       coverageMode: "full",
