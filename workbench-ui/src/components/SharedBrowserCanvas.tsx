@@ -37,6 +37,7 @@ export function SharedBrowserCanvas({
   const viewportCallbackRef = useRef(onViewportChange);
   const activeSessionRef = useRef({ runId, session });
   const lastViewportRef = useRef<{ width: number; height: number } | null>(null);
+  const measuredViewportRef = useRef<{ width: number; height: number } | null>(null);
 
   useEffect(() => {
     viewportCallbackRef.current = onViewportChange;
@@ -50,18 +51,23 @@ export function SharedBrowserCanvas({
     const host = hostRef.current;
     const callback = viewportCallbackRef.current;
     if (!host || !callback || !activeSessionRef.current.runId || !activeSessionRef.current.session) return;
-    const width = Math.round(host.clientWidth);
-    const height = Math.round(host.clientHeight);
+    const measured = measuredViewportRef.current;
+    const width = measured?.width ?? Math.round(host.clientWidth);
+    const height = measured?.height ?? Math.round(host.clientHeight);
     if (width < 320 || height < 240) return;
     const previous = lastViewportRef.current;
-    if (previous && Math.abs(previous.width - width) <= 8 && Math.abs(previous.height - height) <= 8) return;
+    // Playwright resizing can alter the responsive target page by a few pixels,
+    // which used to trigger another ResizeObserver report and create a visible
+    // large/small feedback loop. Only commit a materially different, settled
+    // workbench surface.
+    if (previous && Math.abs(previous.width - width) < 32 && Math.abs(previous.height - height) < 32) return;
     lastViewportRef.current = { width, height };
     void callback({ width, height });
   };
 
   const scheduleViewportReport = () => {
     if (viewportTimerRef.current) window.clearTimeout(viewportTimerRef.current);
-    viewportTimerRef.current = window.setTimeout(reportViewport, 180);
+    viewportTimerRef.current = window.setTimeout(reportViewport, 420);
   };
 
   const flushTypedText = () => {
@@ -105,7 +111,9 @@ export function SharedBrowserCanvas({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const viewportObserver = new ResizeObserver(() => {
+    const viewportObserver = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) measuredViewportRef.current = { width: Math.round(rect.width), height: Math.round(rect.height) };
       drawLatest();
       scheduleViewportReport();
     });
@@ -142,7 +150,7 @@ export function SharedBrowserCanvas({
         try {
           await streamRunBrowserFrames(streamRunId, async (bytes) => {
             const frameBuffer = bytes.slice().buffer as ArrayBuffer;
-            const next = await createImageBitmap(new Blob([frameBuffer], { type: "image/jpeg" }));
+            const next = await createImageBitmap(new Blob([frameBuffer], { type: "image/png" }));
             if (disposed) return next.close();
             bitmapRef.current?.close();
             bitmapRef.current = next;

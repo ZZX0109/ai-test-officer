@@ -127,7 +127,7 @@ export function DiscoveryPanel({ discovery, drafts, onScan, onProbeDraft, onAppr
                 {draft.draftReviewStatus === "approved"
                   ? "已验证可执行"
                   : draft.selectorProbeStatus === "passed"
-                    ? "页面绑定已通过"
+                    ? "页面确认已完成"
                     : draft.selectorProbeStatus === "failed"
                       ? "等待修复"
                       : "等待页面探测"}

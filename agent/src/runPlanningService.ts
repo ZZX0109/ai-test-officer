@@ -88,7 +88,7 @@ function dynamicBrowserPlan(input: {
       risks: [{
         id: "dynamic-browser-binding",
         level: "high",
-        title: "未知项目需要运行时页面绑定与机器 Oracle",
+        title: "未知项目需要在实际页面确认操作和验证条件",
         evidence: input.requirement ?? "用户要求执行交互式浏览器测试",
         pathIds: effectivePathIds,
         coverageDisposition: "required"
@@ -96,17 +96,17 @@ function dynamicBrowserPlan(input: {
       levels: [{
         id: "core_path",
         title: "运行时业务路径",
-        description: "由页面观测、受限 LLM 动作和确定性 Oracle 逐步执行。",
+        description: "通过页面观测、受限 AI 操作和明确的验证条件逐步执行。",
         paths: effectivePathIds.map((id, index) => ({
           id,
           title: inventory.find((item) => item.id === id)?.title
             ?? input.impactAnalysis.affectedPages[index]?.target
             ?? `动态业务路径 ${index + 1}`,
           riskReason: inventory.find((item) => item.id === id)
-            ? `该业务路径代表 ${inventory.find((item) => item.id === id)?.sourceCount ?? 1} 个静态代码候选；必须在真实页面中形成动作和机器 Oracle。`
+            ? `该业务路径代表 ${inventory.find((item) => item.id === id)?.sourceCount ?? 1} 个静态代码候选；必须在实际页面中确认操作步骤和可机器检查的预期结果。`
             : "没有可直接复用的固定 Scenario，需在真实页面中绑定控件。",
           expectedFrom: "llm_inferred" as const,
-          steps: ["观测页面", "选择受限动作", "执行并采集前后证据", "执行机器 Oracle"],
+          steps: ["观测页面", "选择受限动作", "执行并采集前后证据", "检查预期结果"],
           retry: 2
         }))
       }]

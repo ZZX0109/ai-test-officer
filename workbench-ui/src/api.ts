@@ -107,7 +107,7 @@ export function sendRunBrowserInput(runId: string, input: { kind: "click" | "typ
 
 /**
  * Opens the authoritative Playwright frame stream. Frames are length-prefixed
- * JPEG payloads drawn directly onto a canvas by the Workbench; this is not the
+ * lossless PNG payloads drawn directly onto a canvas by the Workbench; this is not the
  * evidence screenshot endpoint and does not poll or mount image URLs.
  */
 export async function streamRunBrowserFrames(

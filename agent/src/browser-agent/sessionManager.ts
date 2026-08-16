@@ -112,13 +112,10 @@ async function startBrowserScreencast(managed: ManagedSession) {
       void cdp.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => undefined);
     });
     await cdp.send("Page.startScreencast", {
-      format: "jpeg",
-      // The Workbench is commonly rendered on a Retina display. Chromium's
-      // old 1600x1000/quality-90 stream made small labels visibly fuzzy after
-      // the canvas was scaled. Keep the transport as JPEG (the stream
-      // protocol is intentionally tiny), but preserve the compositor at a
-      // desktop resolution and avoid an additional lossy quality step.
-      quality: 100,
+      // Text-heavy application UIs visibly degrade when Chromium's JPEG frame
+      // is scaled into the Workbench canvas. PNG preserves the compositor
+      // pixels, while the length-prefixed stream protocol remains unchanged.
+      format: "png",
       // The context renders at deviceScaleFactor=2. Do not cap the compositor
       // back to CSS-pixel dimensions or Chromium will downsample before the
       // lossless canvas scaling stage in Workbench.

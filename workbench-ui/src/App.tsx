@@ -1,6 +1,5 @@
 import React, { useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
-import { initializeOidc, oidcConfigured } from "./auth";
-import { OidcSessionPanel } from "./components/OidcSessionPanel";
+import { initializeOidc } from "./auth";
 import {
   Activity,
   ArrowLeft,
@@ -11,8 +10,6 @@ import {
   KeyRound,
   Link2,
   ListChecks,
-  PanelLeft,
-  PanelRight,
   Pencil,
   Play,
   RefreshCw,
@@ -277,6 +274,12 @@ function boundedAssistantText(value: unknown, limit: number) {
   return compact.length > limit ? `${compact.slice(0, Math.max(0, limit - 1))}…` : compact;
 }
 
+function userFacingPlanningText(value: string) {
+  return value
+    .replace(/\boracle\b/gi, "验证条件")
+    .replace(/页面绑定/g, "页面确认");
+}
+
 function userFacingAssistantError(error: unknown) {
   const detail = error instanceof Error ? error.message : "模型调用失败";
   if (/Validation failed|fieldErrors|provider_http_400/i.test(detail)) {
@@ -311,7 +314,6 @@ const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | und
 
 export function App() {
   const [workspaceState, dispatchWorkspace] = useReducer(workspaceReducer, initialWorkspaceState);
-  const [oidcAuthenticated, setOidcAuthenticated] = useState(false);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [plan, setPlan] = useState<GrayPlan | null>(null);
   const [result, setResult] = useState<RunResult | null>(null);
@@ -452,9 +454,10 @@ export function App() {
   const [revealProjectLoginSettings, setRevealProjectLoginSettings] = useState(false);
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
-  /** The planning sidebar is information-dense; let the operator collapse it
-   * to free the center stage while a run is in progress. */
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [topbarUtilityOpen, setTopbarUtilityOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(332);
+  const workspaceRef = useRef<HTMLElement>(null);
+  const sidebarResizeRef = useRef<{ startX: number; startWidth: number; width: number } | null>(null);
   const [planningSummaryCollapsed, setPlanningSummaryCollapsed] = useState(false);
   /** Evidence id to scroll-to + highlight when the workbench asks to locate one. */
   const [focusEvidenceId, setFocusEvidenceId] = useState<string | null>(null);
@@ -509,8 +512,6 @@ export function App() {
     isAcceptingRequirement
   });
   const activeExecutablePlan = commitCheck?.executablePlan ?? requirementAcceptance?.executablePlan;
-  const selectedScenario = scenarios.find((scenario) => scenario.id === scenarioId);
-  const selectedCandidate = analysis?.scenarioCandidates.find((candidate) => candidate.mappedScenarioId === scenarioId);
   const selectedProjectName = projectDraft?.name ?? projects.find((project) => project.id === selectedProjectId)?.name ?? "未选择项目";
   const selectedProjectExecutionMode = projectDraft?.allowExternalProjectPath
     ? "oci"
@@ -560,7 +561,6 @@ export function App() {
       : projectConnection?.ok || projectRuntime?.status === "running"
   ));
   const evidenceCount = result?.evidence?.length ?? 0;
-  const sourceContextCount = analysis?.sourceContexts?.length ?? 0;
   const planStepCount = activeExecutablePlan?.steps.length
     ?? planningResult?.plan.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0)
     ?? plan?.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0)
@@ -637,9 +637,9 @@ export function App() {
     >
       <header>
         <strong>{flow.title}</strong>
-        <span>{flow.status === "executable" ? "可执行" : flow.status === "auto-bindable" ? "待页面绑定" : flow.status === "needs-input" ? "待补条件" : "覆盖缺口"}</span>
+        <span>{flow.status === "executable" ? "可执行" : flow.status === "auto-bindable" ? "等待页面确认" : flow.status === "needs-input" ? "待补条件" : "覆盖缺口"}</span>
       </header>
-      <p>{flow.reason}</p>
+      <p>{userFacingPlanningText(flow.reason)}</p>
       {flow.pathVersion === "2.0" && flow.sourceLocations?.length ? (
         <LazyDetails
           className="planning-flow-evidence"
@@ -874,8 +874,8 @@ export function App() {
     const repaired = await continueTestPlanning(
       [
         "请根据刚才保存的真实页面路径校验诊断重新规划。",
-        "只保留能够绑定实际页面入口、真实控件、确定性 oracle 和完整证据要求的路径；无法验证的候选请标记为覆盖缺口，不要作为可执行测试。",
-        "需要逐条说明修复了哪个入口、控件或 oracle；未发生变化时必须明确说没有修复。",
+        "只保留能够确认实际页面入口、真实控件、确定性验证条件和完整证据要求的路径；无法验证的候选请标记为覆盖缺口，不要作为可执行测试。",
+        "需要逐条说明修复了哪个入口、控件或验证条件；未发生变化时必须明确说没有修复。",
         `本轮失败链路：\n${failureSummary}`
       ].join("\n"),
       "llm-guided",
@@ -905,12 +905,12 @@ export function App() {
         ...item,
         content: [
           modelTrace,
-          `重新规划结果：${repaired.coverage.executable} 条可直接执行，${repaired.coverage.autoBindable} 条等待真实页面绑定，${repaired.coverage.gaps} 条保留为覆盖缺口。`,
+          `重新规划结果：${repaired.coverage.executable} 条可直接执行，${repaired.coverage.autoBindable} 条等待实际页面确认，${repaired.coverage.gaps} 条保留为覆盖缺口。`,
           prioritizedTitles.length ? `模型优先检查：${prioritizedTitles.slice(0, 5).join("、")}。` : "",
           changedBindings.length
             ? `实际调整：${changedBindings.slice(0, 5).join("；")}${changedBindings.length > 5 ? `；另有 ${changedBindings.length - 5} 项` : ""}。`
             : "实际调整：没有路径状态或场景绑定发生变化。",
-          "尚未修改被测项目代码；确认计划后系统会再次执行真实页面绑定。"
+          "尚未修改被测项目代码；确认计划后系统会在实际页面确认操作步骤和预期结果。"
         ].filter(Boolean).join("\n")
       } : item));
     } else {
@@ -1571,7 +1571,6 @@ export function App() {
   useEffect(() => {
     initializeOidc()
       .then(async (session) => {
-        setOidcAuthenticated(session.authenticated);
         if (session.configured && !session.authenticated) return;
         setProjectListNotice("正在连接 AI 测试服务…");
         await waitForAgentReady();
@@ -1581,6 +1580,38 @@ export function App() {
         setProjectListNotice("AI 测试服务暂时不可用，正在自动重连。");
         setMessage(error instanceof Error ? error.message : "AI 测试服务暂时不可用。");
       });
+  }, []);
+
+  useEffect(() => {
+    const stored = Number(window.localStorage.getItem("ato:planning-sidebar-width"));
+    if (Number.isFinite(stored) && stored >= 280 && stored <= 520) setSidebarWidth(stored);
+  }, []);
+
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      const resize = sidebarResizeRef.current;
+      if (!resize) return;
+      const width = Math.max(280, Math.min(520, resize.startWidth + event.clientX - resize.startX));
+      resize.width = width;
+      workspaceRef.current?.style.setProperty("--planning-sidebar-width", `${width}px`);
+    };
+    const stop = () => {
+      const resize = sidebarResizeRef.current;
+      if (!resize) return;
+      sidebarResizeRef.current = null;
+      setSidebarWidth(resize.width);
+      window.localStorage.setItem("ato:planning-sidebar-width", String(Math.round(resize.width)));
+      document.body.classList.remove("is-resizing-planning-sidebar");
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.classList.remove("is-resizing-planning-sidebar");
+    };
   }, []);
 
   useEffect(() => {
@@ -1900,13 +1931,6 @@ export function App() {
     void restore();
     return () => { disposed = true; };
   }, [selectedProjectId, activeRunId]);
-
-  // Stall decisions live in the left planning sidebar now. Never let a pending
-  // interrupt stay hidden behind a collapsed sidebar — expand it the moment the
-  // graph pauses and needs the operator.
-  useEffect(() => {
-    if (isUserActionableInterrupt(agentProjection?.pendingInterrupt)) setSidebarCollapsed(false);
-  }, [agentProjection?.pendingInterrupt?.status, agentProjection?.pendingInterrupt?.id]);
 
   // Once execution has been confirmed the business-path inventory is no
   // longer the operator's primary task. Collapse the complete card (not only
@@ -3170,7 +3194,7 @@ export function App() {
     }
     if (action === "continue-safe-paths") {
       const replanned = await continueTestPlanning(
-        "继续执行其余能够绑定真实入口、操作、oracle 和证据的安全路径；保留当前失败链路及其证据并单独标记待诊断，不要让它阻止其他独立路径。",
+        "继续执行其余能够确认真实入口、操作、验证条件和证据的安全路径；保留当前失败链路及其证据并单独标记待诊断，不要让它阻止其他独立路径。",
         "llm-guided",
         { internalInstruction: true }
       );
@@ -3952,7 +3976,7 @@ export function App() {
         setPlanningMessages((current) => [...current, {
           id: `dynamic_browser_handoff_${Date.now()}`,
           role: "assistant",
-          content: `项目服务已连通。${coverageInventory.length} 条归并业务路径已写入 Coverage 账本，其中 ${runnableCoverageCount} 条进入运行时绑定与执行，${explicitBlockedCoverageCount} 条保留为待补条件或覆盖缺口，不会冒充已测试。AI 会观察真实页面、选择受限动作、执行机器 Oracle，并仅在需要账号或高风险操作时询问你。`,
+          content: `项目服务已连通。${coverageInventory.length} 条归并业务路径已写入测试清单，其中 ${runnableCoverageCount} 条将进入实际页面确认与执行，${explicitBlockedCoverageCount} 条保留为待补条件或覆盖缺口，不会冒充已测试。AI 会观察真实页面、选择受限动作、检查预期结果，并仅在需要账号或高风险操作时询问你。`,
           createdAt: new Date().toISOString()
         }]);
         setPlanningAutomation({
@@ -4069,7 +4093,7 @@ export function App() {
       setPlanningMessages((current) => [...current, {
         id: `discovery_summary_${Date.now()}`,
         role: "assistant",
-        content: `真实页面扫描完成：从 ${response.discovery.suggestions.length} 条可验证候选中选出 ${selectedDrafts.length} 条低风险路径自动执行。代码扫描识别的组件数量不等于已通过的测试数量；有副作用或缺少业务 oracle 的功能会保留待确认，不会伪装成已覆盖。`,
+        content: `真实页面扫描完成：从 ${response.discovery.suggestions.length} 条可验证候选中选出 ${selectedDrafts.length} 条低风险路径自动执行。代码扫描识别的组件数量不等于已通过的测试数量；有副作用或缺少明确验证条件的功能会保留待确认，不会伪装成已覆盖。`,
         createdAt: new Date().toISOString()
       }]);
       const selectionMode = response.discovery.selectionProvenance?.mode === "llm-assisted"
@@ -4081,7 +4105,7 @@ export function App() {
             : "规则已找到唯一高置信度路径";
       setPlanningAutomation({
         phase: "binding",
-        detail: `${selectionMode}；正在验证元素、动作、oracle 和证据要求。`,
+        detail: `${selectionMode}；正在确认页面元素、操作、预期结果和证据要求。`,
         scenarioId: selectedDrafts[0]?.scenarioId
       });
       const approvedScenarioIds: string[] = [...compiledScenarioIds];
@@ -4091,7 +4115,7 @@ export function App() {
         activeScenarioId = draft.scenarioId;
         setPlanningAutomation({
           phase: "binding",
-          detail: `正在验证第 ${index + 1}/${selectedDrafts.length} 条路径的元素、动作、oracle 和证据要求。`,
+          detail: `正在确认第 ${index + 1}/${selectedDrafts.length} 条路径的页面元素、操作、预期结果和证据要求。`,
           scenarioId: draft.scenarioId
         });
         const probed = await probeScenarioDraft(draft.scenarioId, defaultCredential?.id);
@@ -4142,13 +4166,13 @@ export function App() {
         setPlanningMessages((current) => [...current, {
           id: `binding_repair_${Date.now()}`,
           role: "assistant",
-          content: `页面绑定已自动修复并重新验证：${bindingRepairs.join("；")}。所有修复都限制在已观察到的按钮、标题、testId 和网络请求内，没有修改被测项目代码。`,
+          content: `页面操作已自动重新确认并验证：${bindingRepairs.join("；")}。所有调整都限制在已观察到的按钮、标题、testId 和网络请求内，没有修改被测项目代码。`,
           createdAt: new Date().toISOString()
         }]);
       }
       if (!approvedScenarioIds.length) {
         await analyzeAutomationFailures(bindingFailures, 0);
-        const detail = `${bindingFailures.length} 条候选路径未通过页面绑定，已完成 LLM/规则归因；没有可安全执行的路径被伪装成通过。`;
+        const detail = `${bindingFailures.length} 条候选路径未能在实际页面确认操作和预期结果，已完成 LLM/规则归因；没有可安全执行的路径被伪装成通过。`;
         setPlanningAutomation({ phase: "blocked", detail });
         setMessage(detail);
         return;
@@ -5318,8 +5342,7 @@ export function App() {
   async function syncSharedBrowserViewport(viewport: { width: number; height: number }) {
     if (!activeRunId || !browserSession || ["closed", "failed"].includes(browserSession.status)) return;
     try {
-      const response = await resizeRunBrowserViewport(activeRunId, viewport);
-      setBrowserSession(response.session);
+      await resizeRunBrowserViewport(activeRunId, viewport);
     } catch (error) {
       // Resizing is a display enhancement. A short race while the worker is
       // creating/closing its page must not turn into a user-facing test error.
@@ -5390,32 +5413,43 @@ export function App() {
   return (
     <main className="app-shell minimal-shell">
       <header className="topbar minimal-topbar">
-        <div>
+        <div className="topbar-brand">
           <p className="eyebrow">AI Test Officer</p>
           <h1>测试官工作台</h1>
         </div>
+        <div className="topbar-run-summary" aria-label="当前测试任务">
+          <span>AI 测试任务</span>
+          <strong>{selectedProjectName}</strong>
+          <small>{planStepCount ? `${planStepCount} 步` : "等待生成计划"}</small>
+        </div>
+        <div className="topbar-run-actions">
+          <button className="primary" disabled={!canStartRun} onClick={runPlan} type="button">
+            {isRunning ? <Activity size={15} /> : <Play size={15} />}
+            {isRunning ? "执行中" : "开始测试"}
+          </button>
+          {activeRunId ? (
+            <>
+              {activeRun?.state === "awaiting-plan-approval" ? <button onClick={() => void approveActivePlan()} type="button">审批计划</button> : null}
+              {activeRun?.state === "awaiting-permission" ? <button disabled={!permissionProfile.browserControl} onClick={() => void grantActivePermissions()} type="button">确认权限并执行</button> : null}
+              <button disabled={!activeRun || !["queued", "preparing", "running", "collecting", "judging"].includes(activeRun.state)} onClick={() => void controlActiveRun("pause")} type="button">暂停</button>
+              {activeRun?.state === "paused" ? <button onClick={() => void controlActiveRun("resume")} type="button">恢复</button> : null}
+              <button disabled={!activeRun || ["completed", "failed", "blocked", "cancelled"].includes(activeRun.state)} onClick={() => void controlActiveRun("cancel")} type="button">取消</button>
+            </>
+          ) : null}
+        </div>
         <div className="minimal-topbar-actions">
-          <OidcSessionPanel configured={oidcConfigured()} authenticated={oidcAuthenticated} />
-          <button className="ghost-button" onClick={() => refresh()} type="button">
-            <RefreshCw size={15} />
-            刷新
-          </button>
-          <button
-            className={`ghost-button ${leftDrawerOpen ? "active" : ""}`}
-            onClick={() => { setLeftDrawerOpen((v) => !v); setRightDrawerOpen(false); }}
-            type="button"
-          >
-            <PanelLeft size={15} />
-            详细配置
-          </button>
-          <button
-            className={`ghost-button ${rightDrawerOpen ? "active" : ""}`}
-            onClick={() => { setRightDrawerOpen((v) => !v); setLeftDrawerOpen(false); }}
-            type="button"
-          >
-            证据详情
-            <PanelRight size={15} />
-          </button>
+          <div className="topbar-utility-menu">
+            <button className={`ghost-button ${leftDrawerOpen || rightDrawerOpen ? "active" : ""}`} onClick={() => setTopbarUtilityOpen((open) => !open)} type="button" aria-expanded={topbarUtilityOpen}>
+              <FileSearch size={15} />
+              配置与证据
+            </button>
+            {topbarUtilityOpen ? (
+              <div className="topbar-utility-popover">
+                <button type="button" onClick={() => { setLeftDrawerOpen(true); setRightDrawerOpen(false); setTopbarUtilityOpen(false); }}>项目与运行配置</button>
+                <button type="button" onClick={() => { setRightDrawerOpen(true); setLeftDrawerOpen(false); setTopbarUtilityOpen(false); }}>证据与运行记录</button>
+              </div>
+            ) : null}
+          </div>
           <button
             className="status-pill"
             type="button"
@@ -5536,7 +5570,11 @@ export function App() {
         </div>
       ) : null}
 
-      <section className={`workspace minimal-workspace ${projectPreviewReady ? "assistant-focus" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+      <section
+        ref={workspaceRef}
+        className={`workspace minimal-workspace ${projectPreviewReady ? "assistant-focus" : ""}`}
+        style={{ "--planning-sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}
+      >
         <div
           className={`drawer-overlay ${leftDrawerOpen || rightDrawerOpen ? "open" : ""}`}
           onClick={closeDrawers}
@@ -5550,26 +5588,7 @@ export function App() {
           {renderEvidenceDrawer()}
         </aside>
 
-        <aside className={`simple-sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
-          <button
-            className="sidebar-configure-button"
-            onClick={() => {
-              setLeftDrawerOpen(true);
-              setRightDrawerOpen(false);
-            }}
-            type="button"
-          >
-            点击配置
-          </button>
-          <button
-            className="sidebar-collapse-button"
-            onClick={() => setSidebarCollapsed((v) => !v)}
-            type="button"
-            aria-expanded={!sidebarCollapsed}
-            title={sidebarCollapsed ? "展开计划栏" : "收起计划栏"}
-          >
-            {sidebarCollapsed ? "»" : "« 收起计划栏"}
-          </button>
+        <aside className="simple-sidebar">
           <section className="sidebar-planning-assistant" aria-label="AI 测试助手规划">
               <header>
                 <div>
@@ -5861,6 +5880,18 @@ export function App() {
           </div>
         </aside>
 
+        <div
+          className="sidebar-resize-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="拖动调整计划栏宽度"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            sidebarResizeRef.current = { startX: event.clientX, startWidth: sidebarWidth, width: sidebarWidth };
+            document.body.classList.add("is-resizing-planning-sidebar");
+          }}
+        />
+
         <section
           // A project switch replaces the centre workspace instead of reusing
           // an old scroll container. This lets the browser initialise the new
@@ -5869,44 +5900,6 @@ export function App() {
           key={`workspace:${selectedProjectId || "none"}`}
           className="main-panel simple-main"
         >
-          <div className="mission-stage">
-            <div>
-              <p className="eyebrow">AI 测试任务</p>
-              <h2>{selectedCandidate?.title ?? selectedScenario?.title ?? scenarioId ?? planningResult?.plan.sessionName ?? "等待生成测试内容"}</h2>
-              <p className="mission-summary" aria-label="本次测试摘要">
-                测试对象：{selectedProjectName}　·　测试依据：{sourceContextCount || analysis?.sources.length || 0} 个来源　·　执行计划：{planStepCount || "待生成"}{planStepCount ? " 步" : ""}{planningDraftReady ? "　·　测试计划草案已生成，请检查业务流程后确认。" : ""}
-              </p>
-            </div>
-            <div className="run-command-actions">
-              <button
-                className="primary"
-                disabled={!canStartRun}
-                onClick={runPlan}
-                title={!hasSelectedProject ? "请先选择或识别项目" : !requirementText.trim() ? "请先填写需求" : undefined}
-                type="button"
-              >
-                {isRunning ? <Activity size={16} /> : <Play size={16} />}
-                {isRunning ? "执行中" : "开始测试"}
-              </button>
-              {activeRunId && (
-                <>
-                  <button disabled={activeRun?.state !== "awaiting-plan-approval"} onClick={() => void approveActivePlan()} type="button">审批计划</button>
-                  <button disabled={activeRun?.state !== "awaiting-permission" || !permissionProfile.browserControl} onClick={() => void grantActivePermissions()} type="button">确认权限并执行</button>
-                  <button disabled={!activeRun || !["queued", "preparing", "running", "collecting", "judging"].includes(activeRun.state)} onClick={() => void controlActiveRun("pause")} type="button">暂停</button>
-                  <button disabled={!activeRun || activeRun.state !== "paused"} onClick={() => void controlActiveRun("resume")} type="button">恢复</button>
-                  <button disabled={!activeRun || ["completed", "failed", "blocked", "cancelled"].includes(activeRun.state)} onClick={() => void controlActiveRun("cancel")} type="button">取消</button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {(isRunning || planningAutomationBusy) ? (
-            <div className="mission-status">
-              <span className={isRunning ? "status-dot running" : "status-dot"} />
-              {message || (isRunning ? "Agent 正在执行计划并收集证据" : "正在准备测试环境")}
-            </div>
-          ) : null}
-
           {false && projectPreviewReady && (!planningConfirmed || planningBusy || planningAutomation.phase === "blocked" || planningAutomation.phase === "needs-permission") ? (
             <section className="assistant-planning-stage" aria-label="AI 测试助手规划">
               <header>
@@ -5931,7 +5924,7 @@ export function App() {
                   <div className="planning-coverage">
                     <article><strong>{planningResult!.coverage.discovered}</strong><span>识别流程</span></article>
                     <article><strong>{planningResult!.coverage.executable}</strong><span>可直接执行</span></article>
-                    <article><strong>{planningResult!.coverage.autoBindable ?? 0}</strong><span>待真实页面绑定</span></article>
+                    <article><strong>{planningResult!.coverage.autoBindable ?? 0}</strong><span>等待页面确认</span></article>
                     <article><strong>{planningResult!.coverage.gaps}</strong><span>需补条件</span></article>
                   </div>
                   <div className="model-budget-summary">
@@ -5956,17 +5949,6 @@ export function App() {
                 <button className="primary" type="submit" disabled={planningBusy || !planningInput.trim()}><Send size={15} />{planningBusy ? "规划中" : "发送"}</button>
               </form>
             </section>
-          ) : null}
-
-          {/* A paused run is answered in the left planning sidebar (the stall
-              interaction point). The center keeps only a slim pointer so the
-              live browser view is never occluded by a blocking panel. */}
-          {isUserActionableInterrupt(agentProjection?.pendingInterrupt) ? (
-            <div className="interrupt-pointer-banner" role="status">
-              <Activity size={14} />
-              <span>{agentProjection!.pendingInterrupt!.kind === "credential" ? "等待你授权使用测试账号" : "测试已暂停，需要你的操作"}</span>
-              <em>请在左侧「AI 测试助手」中处理</em>
-            </div>
           ) : null}
 
           <section className="live-view simple-live-view" aria-label="项目工作区">
@@ -6067,13 +6049,23 @@ export function App() {
             ) : (
               <div className="live-view-placeholder">
                 <div className="live-view-grid" />
-                <div className="live-view-scanner" />
-                <div className="live-view-dots">
-                  <span />
-                  <span />
-                  <span />
-                </div>
-                <p>{hasSelectedProject ? "启动并检查项目后，这里会显示测试页面" : "选择项目后，这里会显示测试页面"}</p>
+                {hasSelectedProject ? (
+                  <>
+                    <div className="live-view-scanner" />
+                    <div className="live-view-dots">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                    <p>启动并检查项目后，这里会显示测试页面</p>
+                  </>
+                ) : (
+                  <div className="live-view-project-setup" aria-label="配置测试项目">
+                    <strong>先配置要测试的项目</strong>
+                    <p>选择本地项目后，系统会在沙盒中识别、启动并显示测试页面。</p>
+                    <button className="primary" type="button" onClick={() => { setLeftDrawerOpen(true); setRightDrawerOpen(false); }}>点击配置</button>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -6231,7 +6223,7 @@ export function App() {
                         <span>{gap.status}</span>
                       </header>
                       <p>{gap.requirementSummary}</p>
-                      <p>Oracle: {gap.suggestedOracle}</p>
+                      <p>验证条件：{gap.suggestedOracle}</p>
                       <code>{gap.requiredCapabilities.join(", ")}</code>
                       {draft && (
                         <div className="draft-box">

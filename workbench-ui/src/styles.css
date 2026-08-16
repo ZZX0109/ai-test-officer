@@ -3265,43 +3265,6 @@ select:focus {
   display: none;
 }
 
-/* Collapsed planning sidebar: shrink the first grid column to a narrow handle
-   and hide the dense content so the center stage gets the space back. */
-.minimal-workspace.sidebar-collapsed,
-.minimal-workspace.assistant-focus.sidebar-collapsed {
-  grid-template-columns: 46px minmax(0, 1fr);
-}
-.minimal-workspace.sidebar-collapsed .simple-sidebar {
-  padding-inline: 4px;
-}
-.minimal-workspace.sidebar-collapsed .simple-sidebar .sidebar-configure-button,
-.minimal-workspace.sidebar-collapsed .simple-sidebar .sidebar-planning-assistant,
-.minimal-workspace.sidebar-collapsed .simple-sidebar .sidebar-footer {
-  display: none;
-}
-.minimal-workspace.sidebar-collapsed .sidebar-collapse-button {
-  writing-mode: vertical-rl;
-  letter-spacing: 2px;
-}
-
-.sidebar-collapse-button {
-  flex: 0 0 auto;
-  width: 100%;
-  min-height: 28px;
-  padding: 4px 6px;
-  border: 1px dashed var(--border, #cddff0);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary, #6a7c93);
-  font-size: 11px;
-  cursor: pointer;
-}
-.sidebar-collapse-button:hover {
-  border-style: solid;
-  color: var(--blue);
-  border-color: rgba(37, 99, 235, 0.4);
-}
-
 /* Business features vs technical coverage: lead with what the operator can
    confirm, tuck code-structure coverage behind a collapsed disclosure. */
 .sidebar-flow-section-label {
@@ -3375,24 +3338,6 @@ select:focus {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
-}
-
-.sidebar-configure-button {
-  flex: 0 0 auto;
-  width: 100%;
-  min-height: 38px;
-  border-color: rgba(37, 99, 235, 0.28);
-  border-radius: 10px;
-  background: #ffffff;
-  color: var(--blue);
-  font-size: 13px;
-  font-weight: 650;
-  box-shadow: 0 5px 16px rgba(37, 99, 235, 0.08);
-}
-
-.sidebar-configure-button:hover {
-  border-color: rgba(37, 99, 235, 0.55);
-  background: #f7faff;
 }
 
 .context-nav-item {
@@ -3570,7 +3515,10 @@ select:focus {
 }
 
 .sidebar-planning-messages article {
+  position: relative;
   display: grid;
+  flex: 0 0 auto;
+  min-width: 0;
   gap: 7px;
   padding: 8px 2px;
   border: 0;
@@ -3645,7 +3593,10 @@ select:focus {
    action changes so streaming status updates do not make the conversation
    jump or visually flash. */
 .assistant-conversation-message.is-progress {
-  min-height: 96px;
+  min-height: 0;
+  margin-bottom: 4px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
 }
 
 .assistant-typing {
@@ -5126,8 +5077,8 @@ select:focus {
 }
 
 .live-view-toolbar {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   width: 100%;
   min-height: 42px;
@@ -5155,13 +5106,19 @@ select:focus {
 .live-view-window-dots span:last-child { background: #62c554; }
 
 .live-view-mode {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-primary);
   font-size: 12px;
   font-weight: 650;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .live-view-toolbar code {
+  max-width: min(310px, 24vw);
+  margin-left: auto;
+  flex: 0 1 auto;
   overflow: hidden;
   padding: 5px 10px;
   border: 1px solid rgba(15, 23, 42, 0.08);
@@ -5269,7 +5226,7 @@ select:focus {
 }
 
 .shared-browser-controls {
-  margin-left: auto;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -7272,3 +7229,238 @@ textarea,
 .planning-flow-evidence p { margin: 7px 0 0; line-height: 1.55; }
 .planning-flow-evidence ul { margin: 7px 0 0; padding-left: 18px; max-height: 176px; overflow: auto; }
 .planning-flow-evidence li { margin: 3px 0; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; }
+
+/* Unified mission header and resizable planning workspace. This final block is
+   intentionally authoritative over the legacy responsive refresh rules above. */
+.minimal-topbar {
+  display: grid;
+  grid-template-columns: auto minmax(150px, 1fr) auto auto;
+  align-items: center;
+  gap: 18px;
+  min-height: 72px;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 16px;
+  background: #18352d;
+  color: #f4f8f4;
+  box-shadow: 0 10px 30px rgba(24, 53, 45, 0.16);
+  backdrop-filter: none;
+}
+
+.minimal-topbar h1 {
+  color: #fff;
+  font-family: Georgia, "Songti SC", serif;
+  font-size: 20px;
+}
+
+.minimal-topbar .eyebrow { color: #a8c8b5; }
+.topbar-brand { min-width: 150px; }
+
+.topbar-run-summary {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #d5e5da;
+  font-size: 11px;
+}
+
+.topbar-run-summary span { color: #9dc9aa; font-weight: 700; }
+.topbar-run-summary strong { overflow: hidden; color: #fff; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-run-summary small { color: #a8c8b5; white-space: nowrap; }
+
+.topbar-run-actions,
+.minimal-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.topbar-run-actions button,
+.minimal-topbar-actions .ghost-button,
+.minimal-topbar-actions .status-pill {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid rgba(225, 240, 229, 0.2);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #edf5ef;
+  box-shadow: none;
+  font-size: 11px;
+}
+
+.topbar-run-actions .primary {
+  border-color: #e3f0e4;
+  background: #e3f0e4;
+  color: #18352d;
+}
+
+.topbar-run-actions button:hover:not(:disabled),
+.minimal-topbar-actions button:hover:not(:disabled),
+.minimal-topbar-actions .ghost-button.active {
+  border-color: rgba(255, 255, 255, 0.48);
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.topbar-run-actions .primary:hover:not(:disabled) { background: #fff; color: #18352d; }
+.topbar-run-actions button:disabled { opacity: 0.46; }
+
+.topbar-utility-menu { position: relative; }
+.topbar-utility-popover {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  width: 180px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.18);
+}
+
+.topbar-utility-popover button {
+  justify-content: flex-start;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+}
+.topbar-utility-popover button:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.minimal-workspace,
+.minimal-workspace.assistant-focus {
+  --fixed-browser-stage-height: clamp(560px, 70dvh, 760px);
+  grid-template-columns: var(--planning-sidebar-width, 332px) 8px minmax(640px, 1fr);
+  gap: 0;
+  height: calc(100dvh - 88px);
+}
+
+.simple-sidebar {
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+  align-self: stretch;
+  padding-top: 0;
+  padding-right: 6px;
+  overflow: hidden;
+}
+
+.simple-sidebar .sidebar-planning-assistant {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+}
+
+/* The conversation and the browser are one visual work row. History remains
+   available from the top-bar evidence drawer and must not shorten the chat. */
+.simple-sidebar .sidebar-footer {
+  display: none;
+}
+
+.simple-sidebar .sidebar-planning-messages {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.simple-sidebar .sidebar-planning-composer {
+  grid-template-rows: minmax(0, 1fr) 38px;
+  height: 120px;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+}
+
+.simple-sidebar .sidebar-planning-composer textarea {
+  min-height: 0;
+  height: 100%;
+  resize: none;
+}
+
+.simple-live-view {
+  height: var(--fixed-browser-stage-height);
+  min-height: var(--fixed-browser-stage-height);
+  max-height: var(--fixed-browser-stage-height);
+  flex: 0 0 var(--fixed-browser-stage-height);
+}
+
+.simple-live-view .live-view-content {
+  height: auto;
+  min-height: 0;
+}
+
+.simple-main { margin-left: 0; }
+
+.sidebar-resize-handle {
+  position: relative;
+  z-index: 3;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resize-handle::after {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 3px;
+  width: 2px;
+  border-radius: 999px;
+  background: transparent;
+  content: "";
+  transition: background 120ms ease;
+}
+
+.sidebar-resize-handle:hover::after,
+.is-resizing-planning-sidebar .sidebar-resize-handle::after { background: rgba(37, 99, 235, 0.42); }
+.is-resizing-planning-sidebar { cursor: col-resize; user-select: none; }
+
+.live-view-project-setup {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 9px;
+  max-width: 520px;
+  padding: 22px 28px;
+  text-align: center;
+}
+.live-view-project-setup strong { color: var(--text-highlight); font-size: 20px; }
+.live-view-project-setup p { margin: 0; color: var(--text-secondary); font-family: inherit; font-size: 12px; letter-spacing: normal; }
+.live-view-project-setup button { margin-top: 7px; }
+
+/* The old mission card is gone; keeping this hidden prevents stale markup from
+   reappearing through cached hot updates while the consolidated header loads. */
+.mission-stage { display: none; }
+
+@media (max-width: 1180px) {
+  .minimal-topbar { grid-template-columns: auto minmax(110px, 1fr) auto auto; gap: 10px; }
+  .topbar-run-summary span { display: none; }
+  .topbar-run-summary { grid-template-columns: auto auto; }
+  .minimal-workspace,
+  .minimal-workspace.assistant-focus { grid-template-columns: var(--planning-sidebar-width, 299px) 8px minmax(520px, 1fr); }
+}
+
+@media (max-width: 980px) {
+  .minimal-topbar { grid-template-columns: 1fr auto; min-height: auto; }
+  .topbar-run-summary { grid-column: 1 / -1; grid-row: 2; }
+  .topbar-run-actions { grid-column: 1; grid-row: 3; }
+  .minimal-topbar-actions { grid-column: 2; grid-row: 3; }
+  .minimal-workspace,
+  .minimal-workspace.assistant-focus {
+    --fixed-browser-stage-height: clamp(500px, 68dvh, 680px);
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+  .sidebar-resize-handle { display: none; }
+}

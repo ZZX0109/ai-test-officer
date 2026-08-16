@@ -28,22 +28,23 @@ try {
   if (!candidates.length) throw new Error("workbench_e2e_requires_project");
 
   await projectPicker.selectOption(candidates[0].value);
-  await page.getByText(`测试对象：${candidates[0].label}`, { exact: false }).waitFor();
+  const activeProjectSummary = page.locator(".topbar-run-summary strong");
+  await activeProjectSummary.filter({ hasText: candidates[0].label }).waitFor();
   if (await projectPicker.inputValue() !== candidates[0].value) {
     throw new Error("workbench_e2e_first_project_not_selected");
   }
   const activeCandidate = candidates[0];
   if (candidates[1]) {
     await projectPicker.selectOption(candidates[1].value);
-    await page.getByText(`测试对象：${candidates[1].label}`, { exact: false }).waitFor();
+    await activeProjectSummary.filter({ hasText: candidates[1].label }).waitFor();
     if (await projectPicker.inputValue() !== candidates[1].value) {
       throw new Error("workbench_e2e_second_project_not_selected");
     }
-    if (await page.getByText(`测试对象：${candidates[0].label}`, { exact: false }).count()) {
+    if ((await activeProjectSummary.textContent())?.includes(candidates[0].label)) {
       throw new Error("workbench_e2e_stale_project_state");
     }
     await projectPicker.selectOption(activeCandidate.value);
-    await page.getByText(`测试对象：${activeCandidate.label}`, { exact: false }).waitFor();
+    await activeProjectSummary.filter({ hasText: activeCandidate.label }).waitFor();
   }
 
   // The central surface is intentionally a workspace switch, not an external

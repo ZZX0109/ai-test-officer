@@ -100,9 +100,10 @@ export function AssistantConversationMessage({
   const presentation = assistantPresentation(message.content);
   const assistant = message.role === "assistant";
   const progress = message.id.startsWith("progress:");
+  const streaming = message.id.includes("pending") || Boolean(message.streaming);
 
   return (
-    <article className={`${message.role} assistant-conversation-message${message.id.includes("pending") || message.streaming ? " pending" : ""}${progress ? " is-progress" : ""}`}>
+    <article className={`${message.role} assistant-conversation-message${streaming ? " pending" : ""}${progress ? " is-progress" : ""}`}>
       <header className="assistant-message-header">
         <span className="assistant-message-avatar" aria-hidden="true">
           {assistant ? <Bot size={14} /> : <UserRound size={14} />}
@@ -115,12 +116,12 @@ export function AssistantConversationMessage({
           <p key={index}>{paragraph}</p>
         ))}
       </div>
-      {message.id.includes("pending") || message.streaming ? (
+      {streaming ? (
         <span className="assistant-typing" aria-label="AI 正在思考并执行">
           <b>{message.streaming ? "正在思考" : "正在回复"}</b><i /><i /><i />
         </span>
       ) : null}
-      {assistant && message.llmTrace ? (
+      {assistant && !streaming && message.llmTrace ? (
         <details className="assistant-call-details">
           <summary>
             <Clock3 size={12} />
@@ -141,15 +142,15 @@ export function AssistantConversationMessage({
           </div>
         </details>
       ) : null}
-      {assistant && presentation.technical ? (
+      {assistant && !streaming && presentation.technical ? (
         <details className="assistant-technical-details">
           <summary>查看技术详情</summary>
           <pre>{presentation.technical}</pre>
         </details>
       ) : null}
-      {assistant ? <AssistantReasoningSummary message={message} /> : null}
-      {assistant ? <KnowledgeBasis message={message} /> : null}
-      {assistant && message.repairPlan ? (
+      {assistant && !streaming ? <AssistantReasoningSummary message={message} /> : null}
+      {assistant && !streaming ? <KnowledgeBasis message={message} /> : null}
+      {assistant && !streaming && message.repairPlan ? (
         <RepairPlanPanel
           data={message.repairPlan}
           onAction={onRepairPlanAction}

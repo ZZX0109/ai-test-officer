@@ -231,8 +231,8 @@ export function compileBusinessPaths(input: {
       sourceNodeIds: nodes.map((node) => node.id),
       sourceLocations: nodes.flatMap((node) => node.source ? [node.source] : []),
       reason: hasAction
-        ? `由 ${nodes.length} 个代码节点组成，入口、交互、接口和后续处理关系均保留可追溯来源；运行时会验证实际动作和 oracle。`
-        : `已从代码中识别入口，但尚未形成安全的动作与 oracle 绑定。`
+        ? `由 ${nodes.length} 个代码节点组成，入口、交互、接口和后续处理关系均保留可追溯来源；运行时会验证实际操作和预期结果。`
+        : "已从代码中识别出该功能，等待在实际页面中确认操作步骤和预期结果。"
     };
     paths.push(path);
     nodes.forEach((node) => represented.add(node.id));

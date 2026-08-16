@@ -1312,7 +1312,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       screenshot: retryScreenshot ?? firstScreenshot,
       details: corePassed
         ? `${core.title} 通过。`
-        : `${core.title} 失败：至少一个 scenario oracle 未满足。`
+        : `${core.title} 失败：至少一个验证条件未满足。`
     });
     await appendLoopEvent(id, {
       loopType: "gray_execution_loop",
@@ -1321,7 +1321,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
       title: "Core Path 断言完成",
       action: `verify_${core.pathId}`,
       observation: corePassed
-        ? "scenario oracle 全部通过"
+        ? "所有验证条件均已通过"
         : coreAssertions.map((assertion) => `${assertion.name}=${assertion.passed}`).join("；"),
       decision: corePassed ? "继续回归路径" : "进入失败恢复循环",
       decisionReason: corePassed ? "核心路径通过" : "retry_budget=1",
@@ -1620,7 +1620,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
           status: passed ? "passed" : "failed",
           action: step.action.action,
           screenshot: stepScreenshot,
-          details: passed ? "受控 Action DSL 步骤执行完成。" : "步骤绑定的确定性 oracle 未通过。"
+          details: passed ? "受控测试步骤执行完成。" : "该步骤的验证条件未通过。"
         });
         await appendLoopEvent(id, {
           loopType: "gray_execution_loop",
@@ -2258,7 +2258,7 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     action: "generate_report",
     observation: runFailed ? "核心路径存在失败断言或执行错误" : "未发现阻塞断言",
     decision: runFailed ? "建议 hold_for_review" : "建议 continue",
-    decisionReason: executionError ? executionError.code : failed ? `${scenario.corePath.title} 存在 oracle 失败` : "所有断言通过",
+    decisionReason: executionError ? executionError.code : failed ? `${scenario.corePath.title} 存在未通过的验证条件` : "所有断言通过",
     evidenceRefs: latestEvidence.map((item) => item.id).slice(-8)
   });
   const loopEvents = await readLoopEvents(id);
