@@ -703,6 +703,21 @@ export function getPlanningFlowPage(payload: {
   }>(`/api/planning/${encodeURIComponent(payload.planningId)}/flows?${query.toString()}`);
 }
 
+export function getPlanningFunctionPage(payload: {
+  planningId: string;
+  projectId: string;
+  cursor?: string;
+  limit?: number;
+}) {
+  const query = new URLSearchParams({ projectId: payload.projectId });
+  if (payload.cursor) query.set("cursor", payload.cursor);
+  if (payload.limit) query.set("limit", String(payload.limit));
+  return request<{
+    functions: PlanningConversationResult["businessFunctions"];
+    page: NonNullable<PlanningConversationResult["businessFunctionPage"]>;
+  }>(`/api/planning/${encodeURIComponent(payload.planningId)}/functions?${query.toString()}`);
+}
+
 export function chatWithTestAssistant(payload: {
   projectId: string;
   message: string;

@@ -5,6 +5,7 @@ import type { GrayPlan, IntakeAnalysis, ProjectConfig } from "./types.js";
 import { getScenario, hasScenario } from "./scenarios.js";
 import type { LlmPlanningAdvice } from "./llmPlanningAdvisor.js";
 import type { DiscoveryConnectivityResult } from "./smokeFirstDiscovery.js";
+import type { BusinessFunction, ProjectOverview } from "./businessFunctionCompiler.js";
 
 export type PlanningPhase = "clarifying" | "draft-ready";
 export type BusinessFlowStatus = "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
@@ -50,6 +51,19 @@ export interface PlanningConversationResult {
   reply: string;
   clarificationQuestions: string[];
   businessFlows: PlannedBusinessFlow[];
+  /** User-facing capability summary. businessFlows remains the internal execution inventory. */
+  businessFunctions?: BusinessFunction[];
+  projectOverview?: ProjectOverview;
+  businessFunctionCount?: number;
+  technicalPathCount?: number;
+  businessFunctionSnapshotHash?: string;
+  businessFunctionConfidence?: BusinessFunction["confidence"];
+  businessFunctionPage?: {
+    cursor?: string;
+    nextCursor?: string;
+    total: number;
+    limit: number;
+  };
   /** Initial page only. The complete immutable inventory is persisted by the
    * planning route and fetched through the cursor endpoint. */
   businessFlowPage?: {

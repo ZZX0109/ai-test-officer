@@ -7443,6 +7443,64 @@ textarea,
    reappearing through cached hot updates while the consolidated header loads. */
 .mission-stage { display: none; }
 
+.business-function-list {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+}
+.project-overview {
+  display: grid;
+  gap: 5px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border-left: 3px solid #2563eb;
+  border-radius: 0 10px 10px 0;
+  background: #f8fbff;
+}
+.project-overview strong { color: var(--text-primary); font-size: 13px; }
+.project-overview p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.business-function-list__summary {
+  display: grid;
+  gap: 3px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #eef3ff;
+  color: var(--text-secondary);
+}
+.business-function-list__summary strong { color: var(--text-primary); font-size: 15px; }
+.business-function-list__summary span { font-size: 12px; }
+.business-function-load-more {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle, #d6deef);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: var(--accent, #2563eb);
+  cursor: pointer;
+}
+.business-function-load-more:disabled { opacity: .6; cursor: wait; }
+.business-function-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid #dbe4f5;
+  border-radius: 12px;
+  background: #fff;
+}
+.business-function-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.business-function-card header strong { color: var(--text-primary); font-size: 14px; }
+.business-function-card header p { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.business-function-status { flex: 0 0 auto; color: #2563eb; font-size: 11px; white-space: nowrap; }
+.business-function-card--blocked .business-function-status { color: #b45309; }
+.business-function-card--unknown .business-function-status { color: #64748b; }
+.business-function-meta { display: flex; flex-wrap: wrap; gap: 8px; color: #64748b; font-size: 11px; }
+.business-function-details-toggle { justify-self: start; padding: 0; border: 0; background: none; color: #2563eb; font-size: 11px; cursor: pointer; }
+.business-function-details { padding: 8px 10px; border-radius: 8px; background: #f8fafc; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
+.business-function-details p { margin: 0 0 6px; }
+.business-function-details ul { margin: 0; padding-left: 16px; }
+.business-function-empty { margin: 12px 0; padding: 14px; border-radius: 12px; background: #f8fafc; color: var(--text-secondary); font-size: 12px; }
+
 @media (max-width: 1180px) {
   .minimal-topbar { grid-template-columns: auto minmax(110px, 1fr) auto auto; gap: 10px; }
   .topbar-run-summary span { display: none; }

@@ -6,9 +6,12 @@ import { buildBusinessCapabilityGraph, readBusinessSourceSlices } from "./busine
 import { analyzeIntake } from "./intakeAnalyzer.js";
 import { createLlmPlanningAdvice } from "./llmPlanningAdvisor.js";
 import { buildPlanningConversation, type PlannedBusinessFlow, type PlanningConversationResult, type PlanningMessage } from "./planningConversation.js";
-import { getPlanningFlowPage, savePlanningInventory } from "./planningInventoryStore.js";
+import { getPlanningFlowPage, getPlanningFunctionPage, savePlanningInventory } from "./planningInventoryStore.js";
 import { probeDiscoveryConnectivity, runSmokeFirstDiscovery } from "./smokeFirstDiscovery.js";
 import { toTargetProjectConfig } from "./projectAdapter.js";
+import { compileBusinessFunctions } from "./businessFunctionCompiler.js";
+import type { BusinessFunctionCompilation } from "./businessFunctionCompiler.js";
+import type { BusinessPath } from "./businessPathCompiler.js";
 
 export interface PlanningConversationRequest {
   message: string;
@@ -97,6 +100,47 @@ function injectLoginGateFlow(
   planning.reply = `页面 Discovery 确认项目有登录入口，已把“登录并进入应用”固定为第一条业务路径；${hasCredential ? "已保存的测试账号会在执行前请求你确认后使用。" : "确认计划时会先请你配置仅用于沙盒的测试账号。"}\n\n${planning.reply}`;
 }
 
+/**
+ * Keep the assistant contract at the business level.  The compiler and graph
+ * retain source files, routes and internal path ids for execution, but those
+ * implementation details are not a useful planning conversation for a user.
+ */
+function buildUserFacingPlanningReply(input: {
+  goal: string;
+  planning: PlanningConversationResult;
+  compilation: BusinessFunctionCompilation;
+}) {
+  const { planning, compilation } = input;
+  const comprehensive = /全面扫描|灰度测试|完整测试|全量测试|full[\s_-]*(scan|coverage)/i.test(input.goal);
+  const functions = compilation.functions;
+  const names = functions.slice(0, 12).map((feature) => feature.name);
+  const remaining = Math.max(0, functions.length - names.length);
+  const functionSummary = names.length
+    ? `${names.join("、")}${remaining ? `等 ${functions.length} 个功能` : ""}`
+    : "暂未确认具体业务功能";
+  const needs = functions.filter((feature) => feature.status !== "ready");
+  const loginRequired = planning.businessFlows.some((flow) => flow.id === "flow_login_gate")
+    || functions.some((feature) => feature.name === "登录与身份认证");
+  const requirement = comprehensive
+    ? `我会按完整功能清单安排验证：${functionSummary}。`
+    : `我会围绕你描述的目标定位并验证相关功能：${functionSummary}。`;
+  const prerequisites = loginRequired
+    ? "需要测试账号才能验证登录后的功能；账号只在沙盒会话中使用。"
+    : needs.length
+      ? `其中 ${needs.length} 个功能还需要在真实页面中确认条件，系统会在执行前补充绑定。`
+      : "当前没有需要你额外补充的前置条件。";
+  const next = planning.clarificationQuestions.length
+    ? `下一步：请先确认${planning.clarificationQuestions[0]}，然后我会继续安排测试。`
+    : "下一步：你确认清单后，我会在可见的测试页面中执行并汇报结果。";
+  return [
+    `项目用途：${compilation.overview.purpose}`,
+    `已识别的业务功能：${requirement}`,
+    `本次测试范围：${comprehensive ? "全面扫描全部已识别功能" : "仅测试你描述的目标相关功能"}。`,
+    `前置条件：${prerequisites}`,
+    next
+  ].join("\n");
+}
+
 /** Planning orchestration is kept outside HTTP routing so it can be reused by
  * a Graph node, API route, and worker without reintroducing server.ts logic. */
 export async function createPlanningConversation(input: {
@@ -159,7 +203,51 @@ export async function createPlanningConversation(input: {
     }
   }
   const completeFlows = planning.businessFlows;
-  await savePlanningInventory({ id: planning.id, projectId: project.id, snapshotHash: planning.businessGraph?.projectSnapshotHash, flows: completeFlows, createdAt: new Date().toISOString() });
+  const internalPaths: BusinessPath[] = completeFlows.map((flow) => ({
+    id: flow.id,
+    title: flow.title,
+    summary: flow.summary ?? flow.target,
+    status: flow.status === "executable" ? "auto-bindable" : flow.status,
+    confidence: flow.confidence,
+    risk: flow.risk ?? "medium",
+    surfaces: flow.surfaces ?? (flow.kind === "page" ? ["page"] : flow.kind === "api" ? ["api"] : flow.kind === "data" ? ["data"] : ["background-task"]),
+    roles: flow.roles ?? [],
+    preconditions: flow.requiredInformation,
+    actionCandidates: flow.actionCandidates ?? [],
+    oracleCandidates: flow.oracleCandidates ?? [],
+    requiredEvidenceKinds: flow.requiredEvidenceKinds ?? [],
+    sourceNodeIds: flow.sourceNodeIds ?? [],
+    sourceLocations: flow.sourceLocations ?? [],
+    reason: flow.reason
+  }));
+  const businessCompilation = compileBusinessFunctions({
+    paths: internalPaths,
+    sourceCandidateCount: planning.coverage.sourceCandidates,
+    snapshotHash: planning.businessGraph?.projectSnapshotHash,
+    projectName: project.name,
+    projectDescription: undefined
+  });
+  planning.businessFunctions = businessCompilation.functions;
+  planning.projectOverview = businessCompilation.overview;
+  planning.businessFunctionCount = businessCompilation.overview.businessFunctionCount;
+  planning.technicalPathCount = businessCompilation.overview.technicalPathCount;
+  planning.businessFunctionSnapshotHash = businessCompilation.overview.snapshotHash;
+  planning.businessFunctionConfidence = businessCompilation.overview.confidence;
+  planning.reply = buildUserFacingPlanningReply({
+    goal: request.message,
+    planning,
+    compilation: businessCompilation
+  });
+  planning.businessFunctionPage = {
+    total: businessCompilation.functions.length,
+    limit: businessCompilation.functions.length
+  };
+  await savePlanningInventory({ id: planning.id, projectId: project.id, snapshotHash: planning.businessGraph?.projectSnapshotHash, flows: completeFlows, functions: businessCompilation.functions, createdAt: new Date().toISOString() });
+  const firstFunctionPage = await getPlanningFunctionPage({ inventoryId: planning.id, projectId: project.id, limit: 24 });
+  if (firstFunctionPage) {
+    planning.businessFunctions = firstFunctionPage.functions;
+    planning.businessFunctionPage = firstFunctionPage.page;
+  }
   const firstPage = await getPlanningFlowPage({ inventoryId: planning.id, projectId: project.id, limit: 24 });
   if (firstPage) {
     const visibleIds = new Set(firstPage.flows.map((flow) => flow.id));

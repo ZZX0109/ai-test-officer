@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Pool } from "pg";
 import type { PlannedBusinessFlow } from "./planningConversation.js";
+import type { BusinessFunction } from "./businessFunctionCompiler.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const memory = new Map<string, PlanningInventory>();
@@ -12,11 +13,17 @@ export interface PlanningFlowPage {
   page: { cursor?: string; nextCursor?: string; total: number; limit: number };
 }
 
+export interface PlanningFunctionPage {
+  functions: BusinessFunction[];
+  page: { cursor?: string; nextCursor?: string; total: number; limit: number };
+}
+
 interface PlanningInventory {
   id: string;
   projectId: string;
   snapshotHash?: string;
   flows: PlannedBusinessFlow[];
+  functions?: BusinessFunction[];
   createdAt: string;
 }
 
@@ -40,7 +47,7 @@ function decodeCursor(cursor?: string) {
 }
 
 export async function savePlanningInventory(input: PlanningInventory) {
-  const value = { ...input, flows: [...input.flows] };
+  const value = { ...input, flows: [...input.flows], functions: [...(input.functions ?? [])] };
   memory.set(value.id, value);
   const db = database();
   if (db) {
@@ -86,6 +93,24 @@ export async function getPlanningFlowPage(input: { inventoryId: string; projectI
       cursor: input.cursor,
       nextCursor: nextIndex < inventory.flows.length ? encodeCursor(nextIndex) : undefined,
       total: inventory.flows.length,
+      limit
+    }
+  };
+}
+
+export async function getPlanningFunctionPage(input: { inventoryId: string; projectId: string; cursor?: string; limit?: number }): Promise<PlanningFunctionPage | undefined> {
+  const inventory = await loadPlanningInventory(input.inventoryId);
+  if (!inventory || inventory.projectId !== input.projectId || !inventory.functions) return undefined;
+  const limit = Math.max(1, Math.min(input.limit ?? 24, 100));
+  const start = Math.min(decodeCursor(input.cursor), inventory.functions.length);
+  const functions = inventory.functions.slice(start, start + limit);
+  const nextIndex = start + functions.length;
+  return {
+    functions,
+    page: {
+      cursor: input.cursor,
+      nextCursor: nextIndex < inventory.functions.length ? encodeCursor(nextIndex) : undefined,
+      total: inventory.functions.length,
       limit
     }
   };

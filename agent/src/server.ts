@@ -181,7 +181,7 @@ import { createRunRequestSchema } from "@ai-test-officer/contracts";
 import { buildCodeImpactGraph, changedFilesFromDiff } from "./codeImpactGraph.js";
 import { buildBusinessCapabilityGraph } from "./businessCapabilityGraph.js";
 import { createMissionPreview } from "./missionPreview.js";
-import { getPlanningFlowPage } from "./planningInventoryStore.js";
+import { getPlanningFlowPage, getPlanningFunctionPage } from "./planningInventoryStore.js";
 import { createPlanningConversation } from "./planningService.js";
 import { enqueueRun, executeQueuedRun, interruptRun } from "./runOrchestrator.js";
 import { buildBenchmarkCatalog, trustedBenchmarkRuntimeMetrics } from "./benchmarkSummary.js";
@@ -3231,6 +3231,27 @@ app.get("/api/planning/:planningId/flows", async (req, res, next) => {
     }).parse(req.query);
     await assertProjectAccess(req, query.projectId, "run_tests");
     const page = await getPlanningFlowPage({
+      inventoryId: req.params.planningId,
+      projectId: query.projectId,
+      cursor: query.cursor,
+      limit: query.limit
+    });
+    if (!page) return void res.status(404).json({ error: "planning_inventory_not_found" });
+    res.json(page);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/planning/:planningId/functions", async (req, res, next) => {
+  try {
+    const query = z.object({
+      projectId: z.string().min(1),
+      cursor: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional()
+    }).parse(req.query);
+    await assertProjectAccess(req, query.projectId, "run_tests");
+    const page = await getPlanningFunctionPage({
       inventoryId: req.params.planningId,
       projectId: query.projectId,
       cursor: query.cursor,

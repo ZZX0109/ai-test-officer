@@ -43,8 +43,8 @@ import { RunAssistantPanel } from "./components/RunAssistantPanel";
 import { KnowledgeBasis } from "./components/KnowledgeBasis";
 import { AssistantConversationMessage } from "./components/AssistantConversationMessage";
 import { SharedBrowserCanvas } from "./components/SharedBrowserCanvas";
-import { BusinessFlowList } from "./components/BusinessFlowList";
-import { LazyDetails, ProgressiveDetailsList } from "./components/ProgressiveDetailsList";
+import { BusinessFunctionList } from "./components/BusinessFunctionList";
+import { ProgressiveDetailsList } from "./components/ProgressiveDetailsList";
 import { SecurityPanel } from "./components/SecurityPanel";
 import { SourceStatusPanel } from "./components/SourceStatusPanel";
 import { StoragePanel } from "./components/StoragePanel";
@@ -80,6 +80,7 @@ import {
   chatWithTestAssistant,
   continuePlanningConversation,
   getPlanningFlowPage,
+  getPlanningFunctionPage,
   controlRun,
   approveScenarioDraft,
   createCredential,
@@ -208,7 +209,6 @@ import type {
   ScenarioSummary,
   SecuritySummary,
   BenchmarkSummary,
-  PlannedBusinessFlow,
   StorageArchive,
   StorageStatus
 } from "./types";
@@ -375,6 +375,7 @@ export function App() {
   const [planningInput, setPlanningInput] = useState("");
   const [planningResult, setPlanningResult] = useState<PlanningConversationResult | null>(null);
   const [planningFlowPageLoading, setPlanningFlowPageLoading] = useState(false);
+  const [planningFunctionPageLoading, setPlanningFunctionPageLoading] = useState(false);
   const [excludedPlanningFlowIds, setExcludedPlanningFlowIds] = useState<Set<string>>(() => new Set());
   const [planningBusy, setPlanningBusy] = useState(false);
   const [assistantChatBusy, setAssistantChatBusy] = useState(false);
@@ -620,41 +621,7 @@ export function App() {
     if (!item.reasoningSummary || !liveAssistantPhases.has(item.reasoningSummary.phase)) return true;
     return item.id === latestLiveAssistantId;
   });
-  // Split the scan inventory into what an operator would call "business
-  // features" (real pages) versus technical coverage (API groups, data
-  // entities, background tasks). The flat list used to mix them, so the plan
-  // read as hundreds of code structures instead of "登录 / 创建订单 / 导出".
-  const businessPageFlows = (planningResult?.businessFlows ?? []).filter((flow) => flow.surfaces?.includes("page"));
-  const technicalCoverageFlows = (planningResult?.businessFlows ?? []).filter((flow) => !flow.surfaces?.includes("page"));
   const planningDraftReady = Boolean(discoveryAllowsPlanning && planningResult && !planningConfirmed && !planningBusy);
-  const renderPlanningFlowItem = (flow: PlannedBusinessFlow) => (
-    <article
-      className={`planning-flow ${flow.status}`}
-      key={flow.id}
-      onMouseEnter={() => scheduleFlowDelete(flow.id)}
-      onMouseLeave={() => hideFlowDelete(flow.id)}
-    >
-      <header>
-        <strong>{flow.title}</strong>
-        <span>{flow.status === "executable" ? "可执行" : flow.status === "auto-bindable" ? "等待页面确认" : flow.status === "needs-input" ? "待补条件" : "覆盖缺口"}</span>
-      </header>
-      <p>{userFacingPlanningText(flow.reason)}</p>
-      {flow.pathVersion === "2.0" && flow.sourceLocations?.length ? (
-        <LazyDetails
-          className="planning-flow-evidence"
-          summary={<>代码依据{flow.sourceCount ? ` · ${flow.sourceCount} 项` : ""}</>}
-        >
-          {flow.summary ? <p>{flow.summary}</p> : null}
-          <ul>{flow.sourceLocations.slice(0, 8).map((source) => <li key={`${source.file}:${source.line ?? 0}`}>{source.file}{source.line ? `:${source.line}` : ""}</li>)}</ul>
-        </LazyDetails>
-      ) : null}
-      {flowDeleteReadyId === flow.id ? (
-        <button className="planning-flow-delete" type="button" onClick={() => excludePlanningFlow(flow.id)}>
-          <Trash2 size={13} /> 删除
-        </button>
-      ) : null}
-    </article>
-  );
   const nextSuggestion = result?.failureAttributions?.[0]?.suggestedFix ??
     result?.failureAttributions?.[0]?.topSuspects?.[0]?.suggestedFix ??
     (patrolTrend?.riskIncreased ? "风险趋势升高，建议打开历史运行对比失败证据。" : "先确认项目连接、输入来源和浏览器授权，然后运行一次测试。");
@@ -3985,11 +3952,16 @@ export function App() {
           preconditions: flow.requiredInformation
         }));
         const runnableCoverageCount = coverageInventory.filter((item) => item.status === "executable" || item.status === "auto-bindable").length;
-        const explicitBlockedCoverageCount = coverageInventory.length - runnableCoverageCount;
+        const businessFunctionCount = activePlanning.businessFunctionCount ?? activePlanning.businessFunctions?.length ?? 0;
+        const businessFunctionStatus = activePlanning.projectOverview?.statusCounts;
+        const runnableFunctionCount = businessFunctionStatus?.ready ?? runnableCoverageCount;
+        const pendingFunctionCount = businessFunctionStatus
+          ? businessFunctionStatus["needs-confirmation"] + businessFunctionStatus.blocked + businessFunctionStatus.unknown
+          : Math.max(0, businessFunctionCount - runnableFunctionCount);
         setPlanningMessages((current) => [...current, {
           id: `dynamic_browser_handoff_${Date.now()}`,
           role: "assistant",
-          content: `项目服务已连通。${coverageInventory.length} 条归并业务路径已写入测试清单，其中 ${runnableCoverageCount} 条将进入实际页面确认与执行，${explicitBlockedCoverageCount} 条保留为待补条件或覆盖缺口，不会冒充已测试。AI 会观察真实页面、选择受限动作、检查预期结果，并仅在需要账号或高风险操作时询问你。`,
+          content: `项目服务已连通。已识别 ${businessFunctionCount} 个业务功能，其中 ${runnableFunctionCount} 个可以开始验证，${pendingFunctionCount} 个会在执行时补充条件。AI 会在可见页面中操作并检查结果；只有遇到账号或高风险操作才会询问你。`,
           createdAt: new Date().toISOString()
         }]);
         setPlanningAutomation({
@@ -4106,7 +4078,7 @@ export function App() {
       setPlanningMessages((current) => [...current, {
         id: `discovery_summary_${Date.now()}`,
         role: "assistant",
-        content: `真实页面扫描完成：从 ${response.discovery.suggestions.length} 条可验证候选中选出 ${selectedDrafts.length} 条低风险路径自动执行。代码扫描识别的组件数量不等于已通过的测试数量；有副作用或缺少明确验证条件的功能会保留待确认，不会伪装成已覆盖。`,
+        content: `真实页面扫描完成：已确认 ${selectedDrafts.length} 个低风险业务功能可以开始验证。尚未确认的功能会保留在清单中，不会被误报为已测试。`,
         createdAt: new Date().toISOString()
       }]);
       const selectionMode = response.discovery.selectionProvenance?.mode === "llm-assisted"
@@ -4274,6 +4246,33 @@ export function App() {
       return current;
     } finally {
       setPlanningFlowPageLoading(false);
+    }
+  }
+
+  async function fetchPlanningFunctions(candidate: PlanningConversationResult, fetchAll = false) {
+    const projectId = selectedProjectId || projectDraft?.id;
+    if (!projectId || !candidate.businessFunctionPage?.nextCursor) return candidate;
+    setPlanningFunctionPageLoading(true);
+    try {
+      let current = candidate;
+      do {
+        const response = await getPlanningFunctionPage({
+          planningId: current.id,
+          projectId,
+          cursor: current.businessFunctionPage?.nextCursor,
+          limit: fetchAll ? 100 : 24
+        });
+        const known = new Set((current.businessFunctions ?? []).map((feature) => feature.id));
+        current = {
+          ...current,
+          businessFunctions: [...(current.businessFunctions ?? []), ...(response.functions ?? []).filter((feature) => !known.has(feature.id))],
+          businessFunctionPage: response.page
+        };
+      } while (fetchAll && current.businessFunctionPage?.nextCursor);
+      setPlanningResult((existing) => existing?.id === current.id ? current : existing);
+      return current;
+    } finally {
+      setPlanningFunctionPageLoading(false);
     }
   }
 
@@ -4928,24 +4927,26 @@ export function App() {
 
             {planningResult && (
               <section className="planning-draft">
-                <div className="planning-coverage">
-                  <article><strong>{planningResult.coverage.discovered}</strong><span>识别流程</span></article>
-                  <article><strong>{planningResult.coverage.executable + (planningResult.coverage.autoBindable ?? 0)}</strong><span>确认后可执行</span></article>
-                  <article><strong>{planningResult.coverage.autoBindable ?? 0}</strong><span>其中自动绑定</span></article>
-                  <article><strong>{planningResult.coverage.gaps}</strong><span>覆盖缺口</span></article>
+                {planningResult.projectOverview ? (
+                  <section className="project-overview" aria-label="项目用途">
+                    <strong>项目用途</strong>
+                    <p>{planningResult.projectOverview.purpose}</p>
+                  </section>
+                ) : null}
+                <div className="planning-coverage business-function-overview">
+                  <article><strong>{planningResult.businessFunctionCount ?? planningResult.businessFunctions?.length ?? 0}</strong><span>识别到的业务功能</span></article>
+                  <article><strong>{planningResult.projectOverview?.statusCounts?.ready ?? planningResult.businessFunctions?.filter((feature) => feature.status === "ready").length ?? 0}</strong><span>可直接规划</span></article>
+                  <article><strong>{planningResult.projectOverview?.statusCounts?.["needs-confirmation"] ?? planningResult.businessFunctions?.filter((feature) => feature.status === "needs-confirmation").length ?? 0}</strong><span>需要补充条件</span></article>
+                  <article><strong>{((planningResult.projectOverview?.statusCounts?.blocked ?? 0) + (planningResult.projectOverview?.statusCounts?.unknown ?? 0)) || (planningResult.businessFunctions?.filter((feature) => feature.status === "blocked" || feature.status === "unknown").length ?? 0)}</strong><span>待确认</span></article>
                 </div>
                 {planningResult.businessGraph ? (
-                  <p className="planning-coverage-note">
-                    业务路径图 v{planningResult.businessGraph.version}：已安全索引 {planningResult.businessGraph.sourceFileCount} 个源码文件；每条流程可展开查看代码、接口与运行时绑定依据。
-                    {planningResult.businessGraph.diagnostics.length ? ` ${planningResult.businessGraph.diagnostics.join("；")}` : ""}
-                  </p>
+                  <details className="planning-technical-basis">
+                    <summary>查看处理依据</summary>
+                    <p>Agent 已建立业务功能与内部测试路径的映射。运行时会在沙盒中重新绑定页面、接口和验证条件。</p>
+                    <small>业务图版本 {planningResult.businessGraph.version} · 快照 {planningResult.businessFunctionSnapshotHash?.slice(0, 12) ?? planningResult.businessGraph.projectSnapshotHash.slice(0, 12)}</small>
+                    {planningResult.businessGraph.diagnostics.length ? <p>{planningResult.businessGraph.diagnostics.join("；")}</p> : null}
+                  </details>
                 ) : null}
-                {(planningResult.coverage.autoBindable ?? 0) > 0 && (
-                  <p className="planning-coverage-note">
-                    “可自动绑定”不是失败：这些流程来自代码扫描。确认后，系统会在沙盒页面中验证真实入口、控件和结果；
-                    规则无法唯一判断时才调用 LLM，最终仍无法形成动作与断言的项目才会转为覆盖缺口。
-                  </p>
-                )}
                 {planningResult.llmPlanning?.status === "passed" && (
                   <section className="llm-planning-advice" aria-label="AI 测试规划建议">
                     <strong>AI 规划建议</strong>
@@ -4967,17 +4968,20 @@ export function App() {
                     ))}
                   </div>
                 )}
-                <BusinessFlowList
-                  flows={planningResult.businessFlows}
-                  total={planningResult.businessFlowPage?.total}
-                  hasMore={Boolean(planningResult.businessFlowPage?.nextCursor)}
-                  loading={planningFlowPageLoading}
-                  deletingId={flowDeleteReadyId}
-                  onLoadMore={async () => { await fetchPlanningFlows(planningResult); }}
-                  onDelete={excludePlanningFlow}
-                  onHoverStart={scheduleFlowDelete}
-                  onHoverEnd={hideFlowDelete}
-                />
+                {planningResult.businessFunctions?.length ? (
+                  <BusinessFunctionList
+                    functions={planningResult.businessFunctions}
+                    total={planningResult.businessFunctionCount}
+                    nextCursor={planningResult.businessFunctionPage?.nextCursor}
+                    loading={planningFunctionPageLoading}
+                    onLoadMore={() => void fetchPlanningFunctions(planningResult)}
+                  />
+                ) : (
+                  <section className="business-function-empty">
+                    <strong>业务功能正在整理</strong>
+                    <p>当前历史计划没有保存业务功能摘要；重新扫描后，Agent 会按功能展示，技术路径仅在处理依据中保留。</p>
+                  </section>
+                )}
                 <button
                   className="confirm-planning-button"
                   type="button"
@@ -5688,42 +5692,20 @@ export function App() {
                         <div className="assistant-command-preview assistant-plan-command">
                           {planningResult && discoveryAllowsPlanning ? (
                             <>
-                              <strong>本次准备测试 {planningResult.businessFlows.length} 条业务路径</strong>
-                              {(planningResult.coverage.sourceCandidates ?? planningResult.coverage.discovered) > planningResult.businessFlows.length
-                                ? <small>已从 {planningResult.coverage.sourceCandidates} 个代码候选归并，原始候选仍可审计。</small>
-                                : null}
+                              <strong>本次准备测试 {planningResult.businessFunctionCount ?? planningResult.businessFunctions?.length ?? 0} 个业务功能</strong>
                               <div className="assistant-plan-summary">
-                                <span>{planningResult.coverage.executable + (planningResult.coverage.autoBindable ?? 0)} 条确认后自动执行</span>
-                                <span>其中 {planningResult.coverage.autoBindable ?? 0} 条由 AI 绑定真实页面</span>
-                                {(planningResult.coverage.needsInput + planningResult.coverage.gaps) > 0
-                                  ? <span>{planningResult.coverage.needsInput + planningResult.coverage.gaps} 条需补充或阻塞</span>
+                                <span>Agent 会在内部编排页面、接口和数据测试路径</span>
+                                {(planningResult.businessFunctions?.filter((feature) => feature.status !== "ready").length ?? 0) > 0
+                                  ? <span>{planningResult.businessFunctions?.filter((feature) => feature.status !== "ready").length} 个功能需补充条件</span>
                                   : null}
                               </div>
-                              <ProgressiveDetailsList
-                                className="assistant-plan-list"
-                                listTag="ol"
-                                items={planningResult.businessFlows}
-                                itemKey={(flow) => flow.id}
-                                initialCount={16}
-                                batchSize={16}
-                                totalCount={planningResult.businessFlowPage?.total}
-                                hasMore={Boolean(planningResult.businessFlowPage?.nextCursor)}
-                                loadingMore={planningFlowPageLoading}
-                                onLoadMore={async () => { await fetchPlanningFlows(planningResult); }}
-                                summary="查看要测试的具体内容"
-                                renderItem={(flow) => (
-                                    <li key={flow.id}>
-                                      <span>{flow.title}</span>
-                                      <small>{flow.status === "executable"
-                                        ? "直接执行"
-                                        : flow.status === "auto-bindable"
-                                          ? "自动识别页面后执行"
-                                          : flow.status === "needs-input"
-                                            ? "需要补充条件"
-                                            : "当前阻塞"}</small>
-                                    </li>
-                                )}
-                              />
+                              {planningResult.businessFunctions?.length ? <BusinessFunctionList
+                                functions={planningResult.businessFunctions}
+                                total={planningResult.businessFunctionCount}
+                                nextCursor={planningResult.businessFunctionPage?.nextCursor}
+                                loading={planningFunctionPageLoading}
+                                onLoadMore={() => void fetchPlanningFunctions(planningResult)}
+                              /> : null}
                               <button
                                 className="assistant-suggested-action"
                                 type="button"
@@ -5814,36 +5796,22 @@ export function App() {
                     onClick={() => setPlanningSummaryCollapsed((current) => !current)}
                   >
                     <span>
-                      <strong>{planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径</strong>
-                      <small>{planningResult.coverage.executable + (planningResult.coverage.autoBindable ?? 0)} 条可自动执行</small>
+                      <strong>{planningResult.businessFunctionCount ?? planningResult.businessFunctions?.length ?? 0} 个业务功能</strong>
+                      <small>Agent 会在内部维护测试路径</small>
                     </span>
                     <span>{planningSummaryCollapsed ? "展开" : "收起"}</span>
                   </button>
                   {!planningSummaryCollapsed ? (
                     <>
-                      <span className="sidebar-flow-section-label">业务功能（{businessPageFlows.length} 项，确认后执行）</span>
-                      <ProgressiveDetailsList
-                        className="sidebar-flow-list"
-                        items={businessPageFlows}
-                        itemKey={(flow) => flow.id}
-                        initialCount={20}
-                        batchSize={20}
-                        defaultOpen={false}
-                        totalCount={businessPageFlows.length}
-                        hasMore={Boolean(planningResult.businessFlowPage?.nextCursor)}
-                        loadingMore={planningFlowPageLoading}
-                        onLoadMore={async () => { await fetchPlanningFlows(planningResult); }}
-                        summary={<>查看本次 {planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length} 条业务路径{(planningResult.coverage.sourceCandidates ?? 0) > (planningResult.businessFlowPage?.total ?? planningResult.businessFlows.length) ? `（来自 ${planningResult.coverage.sourceCandidates} 个代码候选）` : ""}</>}
-                        renderItem={renderPlanningFlowItem}
-                      />
-                      {technicalCoverageFlows.length ? (
-                        <details className="sidebar-technical-coverage">
-                          <summary>技术覆盖项（{technicalCoverageFlows.length} 项：接口组 / 数据实体 / 后台任务，非业务功能）</summary>
-                          <div className="sidebar-technical-list">
-                            {technicalCoverageFlows.map((flow) => renderPlanningFlowItem(flow))}
-                          </div>
-                        </details>
-                      ) : null}
+                      {planningResult.businessFunctions?.length ? (
+                        <BusinessFunctionList
+                          functions={planningResult.businessFunctions}
+                          total={planningResult.businessFunctionCount}
+                          nextCursor={planningResult.businessFunctionPage?.nextCursor}
+                          loading={planningFunctionPageLoading}
+                          onLoadMore={() => void fetchPlanningFunctions(planningResult)}
+                        />
+                      ) : <p className="business-function-empty">业务功能摘要尚未生成，请重新扫描。</p>}
                       <button
                         className="primary execute-plan-button"
                         type="button"

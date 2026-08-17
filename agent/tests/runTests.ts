@@ -75,11 +75,13 @@ import { testDurableSustainabilityRestart } from "./durableSustainabilityRestart
 import { testBrowserAgentLoop } from "./browserAgentLoop.test.js";
 import { testBusinessCapabilityGraph } from "./businessCapabilityGraph.test.js";
 import { testPlanningInventoryStore } from "./planningInventoryStore.test.js";
+import { testBusinessFunctionCompiler } from "./businessFunctionCompiler.test.js";
 
 async function main() {
   await testBrowserAgentLoop();
   await testBusinessCapabilityGraph();
   await testPlanningInventoryStore();
+  testBusinessFunctionCompiler();
   testAssistantFallback();
   testProofBundleValidator();
   testEvidenceArtifactLinker();

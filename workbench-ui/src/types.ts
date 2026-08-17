@@ -462,6 +462,18 @@ export interface PlanningConversationResult {
   reply: string;
   clarificationQuestions: string[];
   businessFlows: PlannedBusinessFlow[];
+  businessFunctions?: BusinessFunction[];
+  projectOverview?: ProjectOverview;
+  businessFunctionCount?: number;
+  technicalPathCount?: number;
+  businessFunctionSnapshotHash?: string;
+  businessFunctionConfidence?: BusinessFunction["confidence"];
+  businessFunctionPage?: {
+    cursor?: string;
+    nextCursor?: string;
+    total: number;
+    limit: number;
+  };
   businessFlowPage?: {
     cursor?: string;
     nextCursor?: string;
@@ -497,6 +509,39 @@ export interface PlanningConversationResult {
     durationMs?: number;
     errorCode?: string;
   };
+}
+
+export interface BusinessFunction {
+  id: string;
+  name: string;
+  purpose: string;
+  roles: string[];
+  risk: "low" | "medium" | "high";
+  status: "ready" | "needs-confirmation" | "blocked" | "unknown";
+  confidence: "high" | "medium" | "low";
+  pathIds: string[];
+  sourceLocations: Array<{ file: string; line?: number; parser: string; sourceHash: string }>;
+  evidenceRefs: string[];
+  technicalPathCount: number;
+  branchCount: number;
+  summary: string;
+}
+
+export interface ProjectOverview {
+  purpose: string;
+  confidence: "high" | "medium" | "low";
+  evidenceRefs: string[];
+  businessFunctionCount: number;
+  technicalPathCount: number;
+  sourceCandidateCount: number;
+  unknownCount: number;
+  statusCounts?: {
+    ready: number;
+    "needs-confirmation": number;
+    blocked: number;
+    unknown: number;
+  };
+  snapshotHash?: string;
 }
 
 export interface HarnessGap {
