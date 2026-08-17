@@ -417,14 +417,30 @@ export function buildPlanningConversation(input: {
   analysis: IntakeAnalysis;
   discoveryReadiness?: DiscoveryConnectivityResult;
 }): PlanningConversationResult {
-  const fullText = [...input.history.map((item) => item.content), input.message].join("\n");
-  const comprehensive = /全面|全量|所有业务|所有功能|完整灰度|full|comprehensive/i.test(fullText);
+  // Only user messages are requirements. Assistant copy often contains the
+  // words “全面扫描” as an instruction hint; including it here made every
+  // later targeted request inherit the previous full-inventory scope.
+  const userHistory = input.history
+    .filter((item) => item.role === "user")
+    .map((item) => item.content);
+  const historyText = userHistory.join("\n");
+  const currentMessage = input.message.trim();
+  const comprehensivePattern = /全面|全量|所有业务|所有功能|完整灰度|full|comprehensive/i;
+  const targetedPattern = /测试|验证|检查|工作流|业务流程|功能|登录|权限|订单|报告|导出|刷新/i;
+  const currentIsComprehensive = comprehensivePattern.test(currentMessage);
+  const currentIsTargeted = targetedPattern.test(currentMessage) && !currentIsComprehensive;
+  const comprehensive = currentIsComprehensive
+    || (!currentIsTargeted && comprehensivePattern.test(historyText));
+  const fullText = [historyText, currentMessage].filter(Boolean).join("\n");
+  // A concrete current request is the active scope. Earlier user requests are
+  // retained as context only when the current message is a continuation.
+  const goalText = currentIsTargeted ? currentMessage : [historyText, currentMessage].filter(Boolean).join("\n");
   const flows = buildFlows({
     project: input.project,
     graph: input.graph,
     capabilityGraph: input.capabilityGraph,
     analysis: input.analysis,
-    goal: fullText,
+    goal: goalText,
     comprehensive,
     discoveryReadiness: input.discoveryReadiness
   });
@@ -477,7 +493,9 @@ export function buildPlanningConversation(input: {
       ? `${comprehensive ? "代码全面扫描" : "代码定向分析"}已完成：${sourceCandidates} 个代码候选已归并为 ${flows.length} 条业务路径并显示在计划中。运行时页面预检尚未完成，因此这些路径会在确认执行后先恢复登录或页面状态，再绑定真实控件、动作和 oracle；它们没有被算作已测试或已通过。`
     : phase === "clarifying"
       ? `我扫描了 ${input.project.name}，将 ${sourceCandidates} 个代码候选归并为 ${flows.length} 条业务路径，其中 ${executable} 条已有可执行场景、${autoBindable} 条可由内置浏览器自动绑定、${gaps} 条仍需补充。开始制定最终计划前还需要确认 ${clarificationQuestions.length} 个问题。`
-    : `测试计划已生成：${sourceCandidates} 个代码候选已归并为 ${flows.length} 条业务路径，${executable} 条可以直接执行，${autoBindable} 条会在确认后交给 LangGraph 页面观测与受控动作循环；只有经过真实页面探测仍无法形成动作与断言的路径才会转为覆盖缺口。当前已有 ${gaps} 条明确缺口。${clarificationQuestions.length ? "仍有可选信息可以补充，但不影响确认计划。" : ""}`;
+    : comprehensive
+      ? `测试计划已生成：${sourceCandidates} 个代码候选已归并为 ${flows.length} 条业务路径，${executable} 条可以直接执行，${autoBindable} 条会在确认后交给 LangGraph 页面观测与受控动作循环；只有经过真实页面探测仍无法形成动作与断言的路径才会转为覆盖缺口。当前已有 ${gaps} 条明确缺口。${clarificationQuestions.length ? "仍有可选信息可以补充，但不影响确认计划。" : ""}`
+      : `已根据你的测试目标从代码中定位 ${flows.length} 条相关业务路径：${executable} 条可以直接执行，${autoBindable} 条会在确认后交给 LangGraph 页面观测与受控动作循环，${gaps} 条需要补充条件。你可以先查看这组定向计划，再决定是否开始测试。`;
   return {
     id: `planning_${Date.now()}`,
     phase,

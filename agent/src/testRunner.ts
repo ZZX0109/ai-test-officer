@@ -289,8 +289,9 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
   const attemptClock = new AttemptClock();
   const artifactsV2: ArtifactV2[] = [];
   let activeAttempt = 1;
+  const initialAttemptId = input.attemptId ?? `${id}_attempt_1`;
   const attempts: NonNullable<VisualRunResult["attempts"]> = [{
-    id: `${id}_attempt_1`,
+    id: initialAttemptId,
     runId: id,
     scenarioId: scenario.id,
     attempt: 1,
@@ -298,7 +299,12 @@ async function runVisualGrayTestUnlocked(input: RunRequest): Promise<VisualRunRe
     status: "running",
     artifactIds: []
   }];
-  const attemptIdentity = () => ({ runId: id, scenarioId: scenario.id, attemptId: `${id}_attempt_${activeAttempt}`, attempt: activeAttempt });
+  const attemptIdentity = () => ({
+    runId: id,
+    scenarioId: scenario.id,
+    attemptId: activeAttempt === 1 ? initialAttemptId : `${id}_attempt_${activeAttempt}`,
+    attempt: activeAttempt
+  });
   const appendEvidence = (runId: string, evidence: Omit<EvidenceItem, "id" | "runId" | "timestamp">) => {
     const stamp = attemptClock.next();
     return appendEvidenceToStore(runId, {

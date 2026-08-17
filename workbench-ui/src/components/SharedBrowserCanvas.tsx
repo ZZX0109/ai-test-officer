@@ -30,11 +30,17 @@ export function SharedBrowserCanvas({
   const drawRef = useRef<DrawState | null>(null);
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "ended" | "failed">("idle");
   const [hasFrame, setHasFrame] = useState(false);
+  // Once a managed Playwright session exists it is the only test surface. The
+  // preview iframe is intentionally limited to the pre-run state; rendering
+  // it behind a live stream caused context/scale swaps and made the page look
+  // like it had reloaded when execution started.
+  const showPreviewFallback = Boolean(fallbackUrl && (!runId || !session));
   const sessionStatusRef = useRef(session?.status);
   const typedTextRef = useRef("");
   const typeTimerRef = useRef<number | undefined>(undefined);
   const viewportTimerRef = useRef<number | undefined>(undefined);
   const viewportCallbackRef = useRef(onViewportChange);
+  const loadIssueCallbackRef = useRef(onLoadIssue);
   const activeSessionRef = useRef({ runId, session });
   const lastViewportRef = useRef<{ width: number; height: number } | null>(null);
   const measuredViewportRef = useRef<{ width: number; height: number } | null>(null);
@@ -42,6 +48,10 @@ export function SharedBrowserCanvas({
   useEffect(() => {
     viewportCallbackRef.current = onViewportChange;
   }, [onViewportChange]);
+
+  useEffect(() => {
+    loadIssueCallbackRef.current = onLoadIssue;
+  }, [onLoadIssue]);
 
   useEffect(() => {
     activeSessionRef.current = { runId, session };
@@ -90,8 +100,14 @@ export function SharedBrowserCanvas({
     const cssWidth = Math.max(1, host.clientWidth);
     const cssHeight = Math.max(1, host.clientHeight);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(cssWidth * dpr);
-    canvas.height = Math.round(cssHeight * dpr);
+    const pixelWidth = Math.round(cssWidth * dpr);
+    const pixelHeight = Math.round(cssHeight * dpr);
+    // Assigning canvas.width/height clears the bitmap. Doing that for every
+    // compositor frame caused a visible white flash even when the CSS surface
+    // had not changed. Resize the backing store only when the surface or DPR
+    // actually changes, then repaint the latest frame in place.
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) return;
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -136,7 +152,7 @@ export function SharedBrowserCanvas({
       bitmapRef.current?.close();
       bitmapRef.current = null;
       drawRef.current = null;
-      onLoadIssue?.(null);
+      loadIssueCallbackRef.current?.(null);
       return;
     }
     const streamRunId = runId;
@@ -144,7 +160,7 @@ export function SharedBrowserCanvas({
     let disposed = false;
     setStreamState("connecting");
     setHasFrame(false);
-    onLoadIssue?.(null);
+    loadIssueCallbackRef.current?.(null);
     const connect = async () => {
       while (!disposed && !controller.signal.aborted) {
         try {
@@ -156,7 +172,7 @@ export function SharedBrowserCanvas({
             bitmapRef.current = next;
             setHasFrame(true);
             setStreamState("live");
-            onLoadIssue?.(null);
+            loadIssueCallbackRef.current?.(null);
             drawLatest();
           }, controller.signal);
           if (!disposed && !["closed", "failed"].includes(sessionStatusRef.current ?? "")) {
@@ -169,11 +185,11 @@ export function SharedBrowserCanvas({
           if (disposed || controller.signal.aborted) break;
           if (["closed", "failed"].includes(sessionStatusRef.current ?? "")) {
             setStreamState("ended");
-            onLoadIssue?.(null);
+            loadIssueCallbackRef.current?.(null);
             break;
           }
           setStreamState("failed");
-          onLoadIssue?.(error instanceof Error ? error.message : "共享浏览器连接中断");
+          loadIssueCallbackRef.current?.(error instanceof Error ? error.message : "共享浏览器连接中断");
           await new Promise((resolve) => window.setTimeout(resolve, 800));
         }
       }
@@ -191,11 +207,11 @@ export function SharedBrowserCanvas({
   // compositor frame. It is the final visible state of the real Playwright
   // session and remains useful after the stream ends. A new Run/session still
   // performs a full cleanup through these stable identity dependencies.
-  }, [runId, session?.sessionId, onLoadIssue]);
+  }, [runId, session?.sessionId]);
 
   return (
     <div ref={hostRef} className={`shared-browser-canvas-host is-${streamState}`}>
-      {fallbackUrl ? (
+      {showPreviewFallback ? (
         <iframe
           key={`${fallbackUrl}:${refreshRevision}`}
           className={`shared-browser-canvas-fallback ${hasFrame ? "is-covered" : ""}`}
@@ -235,8 +251,8 @@ export function SharedBrowserCanvas({
           }
         }}
       />
-      {streamState === "connecting" && !fallbackUrl ? <span className="shared-browser-stream-status">正在连接实时浏览器…</span> : null}
-      {streamState === "failed" && !fallbackUrl ? <span className="shared-browser-stream-status is-error">实时连接中断，正在恢复…</span> : null}
+      {streamState === "connecting" && !showPreviewFallback ? <span className="shared-browser-stream-status">正在连接实时浏览器…</span> : null}
+      {streamState === "failed" && !showPreviewFallback ? <span className="shared-browser-stream-status is-error">实时连接中断，正在恢复…</span> : null}
     </div>
   );
 }

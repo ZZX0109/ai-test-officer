@@ -86,6 +86,7 @@ export function buildQueuedRunRequest(projection: RunProjection, signal: AbortSi
   // duplicate model calls or independently change the run conclusion.
   return {
     runId: projection.id,
+    attemptId: projection.activeExecutionAttemptId,
     appUrl: typeof input.appUrl === "string" ? input.appUrl : undefined,
     projectId: typeof input.projectId === "string" ? input.projectId : undefined,
     executionProfile: input.executionProfile === "benchmark" ? "benchmark" : "interactive",
@@ -404,6 +405,7 @@ export async function executeQueuedRun(runId: string, options?: { expectedVersio
         if (!projectId) throw new Error("structured_coverage_project_missing");
         const result = await runStructuredCoveragePath({
           runId,
+          attemptId: lease.attemptId,
           projectId,
           coverageItem: item,
           requirement: typeof projection.input.requirement === "string" ? projection.input.requirement : undefined,
@@ -466,7 +468,7 @@ export async function executeQueuedRun(runId: string, options?: { expectedVersio
       } });
       return runEventStore.get(runId);
     }
-    const result = await runVisualGrayTest(queuedRequest);
+    const result = await runVisualGrayTest({ ...queuedRequest, attemptId: lease.attemptId });
     await persistExecutionResult(runId, result);
     if (!await beginEvidenceCollection(runId, { resultRunId: result.id }, lease.attemptId)) return runEventStore.get(runId);
     void resumeGraphAndQueueIfNeeded(runId, {

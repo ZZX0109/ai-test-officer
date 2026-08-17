@@ -560,6 +560,8 @@ export interface RunRequest {
   /** Stable control-plane run id. Queue executions reuse it so live evidence,
    * SSE state and the final report share one identity. */
   runId?: string;
+  /** Durable execution attempt identity. Retries must never reuse proof scope. */
+  attemptId?: string;
   appUrl?: string;
   projectId?: string;
   logicalProjectId?: string;

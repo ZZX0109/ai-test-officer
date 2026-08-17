@@ -115,7 +115,6 @@ import {
   getRunBrowserSession,
   acquireRunBrowserControl,
   releaseRunBrowserControl,
-  resizeRunBrowserViewport,
   sendRunBrowserInput,
   resumeRepairDecision,
   listRunRepairs,
@@ -3113,6 +3112,13 @@ export function App() {
     }[action];
   }
 
+  function latestPlanningGoal() {
+    return [...planningMessages]
+      .reverse()
+      .find((item) => item.role === "user" && item.content.trim())
+      ?.content.trim() || "全面扫描";
+  }
+
   async function executeAssistantSuggestedAction(actionOverride?: Exclude<AssistantSuggestedAction, "none">) {
     const action = actionOverride ?? assistantSuggestedAction?.action;
     if (!action) return;
@@ -3127,8 +3133,15 @@ export function App() {
     }
     if (action === "start-run") {
       if (!planningResult) {
-        setMessage("测试清单尚未生成，正在先扫描项目。");
-        await continueTestPlanning("全面扫描", "llm-guided");
+        // Keep the user's original goal when the assistant has only produced
+        // the confirmation action. Previously this hard-coded 全面扫描, so a
+        // request such as “登录并建立一个最小的工作流” silently changed
+        // scope when the user clicked “生成测试清单”.
+        const goal = latestPlanningGoal();
+        setMessage(goal === "全面扫描" || goal === "灰度测试"
+          ? "测试清单尚未生成，正在按全面扫描生成。"
+          : `测试清单尚未生成，正在按“${goal}”定位并生成。`);
+        await continueTestPlanning(goal, "llm-guided");
         return;
       }
       setMessage("已收到确认，正在准备沙盒和测试路径。");
@@ -5340,16 +5353,14 @@ export function App() {
   }
 
   async function syncSharedBrowserViewport(viewport: { width: number; height: number }) {
-    if (!activeRunId || !browserSession || ["closed", "failed"].includes(browserSession.status)) return;
-    try {
-      await resizeRunBrowserViewport(activeRunId, viewport);
-    } catch (error) {
-      // Resizing is a display enhancement. A short race while the worker is
-      // creating/closing its page must not turn into a user-facing test error.
-      if (error instanceof Error && !/browser_session_not_active|409/.test(error.message)) {
-        setScreenshotIssue(error.message);
-      }
-    }
+    // Keep the Playwright session at its stable desktop viewport. Resizing it
+    // to the transient CSS size of the Workbench caused a feedback loop:
+    // sidebar/toolbar reflow changed the page viewport, which changed the
+    // page layout and stream dimensions again, producing the visible
+    // large/small flicker and soft text. The canvas already scales the fixed
+    // compositor frame to the available surface without changing the tested
+    // page itself.
+    void viewport;
   }
 
   async function clickSharedBrowser(input: { x: number; y: number; imageWidth: number; imageHeight: number }) {
@@ -5730,9 +5741,9 @@ export function App() {
                                 className="assistant-suggested-action"
                                 type="button"
                                 disabled={assistantChatBusy || planningBusy}
-                                onClick={() => void continueTestPlanning("全面扫描", "llm-guided")}
+                                onClick={() => void continueTestPlanning(latestPlanningGoal(), "llm-guided")}
                               >
-                                生成测试清单
+                                按当前目标生成清单
                               </button>
                             </>
                           )}

@@ -7,6 +7,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { projectManifestSchema } from "@ai-test-officer/contracts";
 import { executeStructuredAction } from "../src/structuredActionExecutors.js";
+import { runStructuredReActLoop } from "../src/react/structuredLoop.js";
 import { createDynamicBrowserCoverageItems, createManifestCoverageItems } from "../src/coverageStore.js";
 import type { ProjectConfig } from "../src/types.js";
 
@@ -174,6 +175,18 @@ export async function testStructuredActionExecutors() {
     });
     assert.equal(job.passed, true);
     assert.equal(job.payload.state, "completed");
+    const loop = await runStructuredReActLoop({
+      steps: [
+        { id: "step-api", action: { action: "api-request", operationId: "listTasks", oracleId: "api-ok" } },
+        { id: "step-job", action: { action: "wait-job", backgroundTaskId: "analysis-job", oracleId: "job-completes", timeoutMs: 2_000 } }
+      ],
+      manifest,
+      project,
+      target: { frontendUrl: baseUrl, backendUrl: baseUrl }
+    });
+    assert.equal(loop.completed, true);
+    assert.equal(loop.passed, true);
+    assert.deepEqual(loop.turns.map((turn) => turn.stepId), ["step-api", "step-job"]);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(directory, { recursive: true, force: true });

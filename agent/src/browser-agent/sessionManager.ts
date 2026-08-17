@@ -199,7 +199,10 @@ function bindTelemetry(managed: ManagedSession) {
   });
 }
 
-async function waitForObservableDocument(runtime: PlaywrightRuntimeSession) {
+/** Wait until the framework has painted an observable page.  Navigation
+ * readiness alone is not enough for SPA login redirects: the HTML shell can
+ * be committed while React is still mounting the authenticated screen. */
+export async function waitForObservableDocument(runtime: PlaywrightRuntimeSession) {
   // `domcontentloaded` only proves that the HTML shell exists. React/Vue/Next
   // applications commonly mount their first useful controls afterwards. If
   // the first Agent observation is taken in that gap, the LLM sees an empty
@@ -542,7 +545,7 @@ export async function reloadManagedBrowserSession(runId: string) {
     managed.pageErrors.length = 0;
     managed.failedRequests.length = 0;
     await managed.runtime.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-    await managed.runtime.page.waitForLoadState("networkidle", { timeout: 3_000 }).catch(() => undefined);
+    await waitForObservableDocument(managed.runtime);
     managed.state = browserSessionSchema.parse({
       ...managed.state,
       status: "ready",

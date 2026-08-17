@@ -36,6 +36,43 @@ export interface LlmCallContext {
 const LANGCHAIN_ADAPTER_VERSION = "agent-orchestration-0.1.0";
 const PROVIDER_ADAPTER_VERSION = "responses-2.1.0";
 
+/**
+ * A single process can own several Graph runs at once.  Without a provider
+ * gate those runs dispatch their ReAct decisions concurrently and a local
+ * SophNet gateway responds with 429 even though each individual run is within
+ * budget.  This is transport coordination, not a semantic fallback: calls
+ * remain the same calls and their result/decision is unchanged.
+ */
+type ProviderGate = {
+  tail: Promise<void>;
+  nextAllowedAt: number;
+};
+const providerGates = new Map<string, ProviderGate>();
+
+function providerGateKey(input: ExecuteLlmCallInput) {
+  return `${input.credential.provider}:${input.credential.baseUrl}:${input.credential.model}`;
+}
+
+async function acquireProviderSlot(input: ExecuteLlmCallInput): Promise<{ waitedMs: number; release: () => void }> {
+  const current = providerGates.get(providerGateKey(input)) ?? {
+    tail: Promise.resolve(),
+    nextAllowedAt: 0
+  };
+  let release!: () => void;
+  const turn = new Promise<void>((resolve) => { release = resolve; });
+  const predecessor = current.tail;
+  current.tail = predecessor.then(() => turn);
+  providerGates.set(providerGateKey(input), current);
+  const queuedAt = Date.now();
+  await predecessor;
+  const minimumIntervalMs = Math.max(0, Number(process.env.LLM_PROVIDER_MIN_INTERVAL_MS ?? 120));
+  const delayMs = Math.max(0, current.nextAllowedAt - Date.now());
+  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  const waitedMs = Date.now() - queuedAt;
+  current.nextAllowedAt = Date.now() + minimumIntervalMs;
+  return { waitedMs, release };
+}
+
 interface ProviderResponseData {
   id?: string;
   model?: string;
@@ -428,12 +465,15 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
       : input.transportPreference === "stream"
         ? ["stream"]
         : ["stream", "stream", "non-stream"]
-    : ["stream"];
+      : ["stream"];
   const maxAttempts = modes.length;
   let lastError: unknown;
+  let providerQueueMs = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const remainingMs = (input.totalTimeoutMs ?? (input.timeoutMs ?? 30_000) * maxAttempts + 2_000) - (Date.now() - started);
     if (remainingMs <= 0) { lastError = new Error("provider_total_timeout"); break; }
+    const providerSlot = await acquireProviderSlot(input);
+    providerQueueMs += providerSlot.waitedMs;
     try {
       const mode = modes[attempt - 1];
       const result = await executeTransportAttempt(input, Math.min(input.timeoutMs ?? Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 30_000), remainingMs), mode);
@@ -478,7 +518,7 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
         completedAt,
         durationMs,
         timing: {
-          queueMs: 0,
+          queueMs: providerQueueMs,
           firstTokenMs: result.telemetry.firstTokenAt ? Math.max(0, Date.parse(result.telemetry.firstTokenAt) - Date.parse(startedAt)) : undefined,
           generationMs: durationMs,
           totalMs: durationMs
@@ -540,6 +580,8 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
         });
       }
       await new Promise((resolve) => setTimeout(resolve, baseDelay + Math.floor(Math.random() * Math.max(25, baseDelay * 0.2))));
+    } finally {
+      providerSlot.release();
     }
   }
   const errorCode = lastError instanceof Error ? lastError.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
@@ -576,7 +618,7 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
     startedAt,
     completedAt,
     durationMs,
-    timing: { queueMs: 0, generationMs: durationMs, totalMs: durationMs },
+    timing: { queueMs: providerQueueMs, generationMs: durationMs, totalMs: durationMs },
     status: "failed",
     transportMode: streamFailedBeforeFallback ? "non-stream-fallback" : usedFallback ? "non-stream" : "stream",
     fallbackReason: streamFailedBeforeFallback ? "stream_incomplete" : undefined,

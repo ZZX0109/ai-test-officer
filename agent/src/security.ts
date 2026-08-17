@@ -112,11 +112,18 @@ export function basicRateLimit(req: Request, res: Response, next: NextFunction) 
   // browser run cannot blank the embedded test canvas with a 429.  API writes
   // and normal reads retain the conservative default budget.
   const artifactRead = req.method === "GET" && req.path.startsWith("/artifacts/");
+  const runRead = req.method === "GET" && (
+    req.path.startsWith("/v1/runs/") ||
+    req.path.startsWith("/api/runs/") ||
+    req.path.startsWith("/api/projects/")
+  );
   const max = Number(artifactRead
     ? (process.env.ARTIFACT_RATE_LIMIT_MAX ?? 1_200)
-    : (process.env.RATE_LIMIT_MAX ?? 240));
+    : runRead
+      ? (process.env.RUN_READ_RATE_LIMIT_MAX ?? 1_200)
+      : (process.env.RATE_LIMIT_MAX ?? 240));
   const client = req.ip || req.socket.remoteAddress || "unknown";
-  const key = `${artifactRead ? "artifact" : "api"}:${client}`;
+  const key = `${artifactRead ? "artifact" : runRead ? "run-read" : "api"}:${client}`;
   const now = Date.now();
   const bucket = rateBuckets.get(key);
   if (!bucket || bucket.resetAt <= now) {
@@ -126,6 +133,7 @@ export function basicRateLimit(req: Request, res: Response, next: NextFunction) 
   }
   bucket.count += 1;
   if (bucket.count > max) {
+    res.setHeader("Retry-After", "2");
     res.status(429).json({ error: "Rate limit exceeded" });
     return;
   }

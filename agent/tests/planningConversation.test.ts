@@ -110,6 +110,24 @@ export function testPlanningConversation() {
   assert.equal(second.phase, "draft-ready");
   assert.equal(second.plan.levels[0]?.paths.length, 3);
 
+  const assistantHintHistory: PlanningMessage[] = [
+    {
+      id: "assistant_hint",
+      role: "assistant",
+      content: "输入“全面扫描”或“灰度测试”可直接列出完整测试清单。",
+      createdAt: "2026-07-24T00:00:02.000Z"
+    }
+  ];
+  const targetedAfterHint = buildPlanningConversation({
+    project,
+    message: "建立一个最简单的工作流进行测试",
+    history: assistantHintHistory,
+    graph,
+    analysis
+  });
+  assert.equal(targetedAfterHint.coverage.scope, "targeted", "assistant hint text must not turn a targeted request into a full scan");
+  assert.match(targetedAfterHint.reply, /根据你的测试目标从代码中定位/);
+
   const waitingForSmoke = buildPlanningConversation({
     project,
     message: requirement,

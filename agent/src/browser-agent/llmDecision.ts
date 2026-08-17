@@ -142,7 +142,27 @@ export function parseBrowserDecisionProviderOutput(text: string, observation: Br
   }
   const invalidEvidence = parsed.evidenceRefs.find((id) => !observation.evidenceRefs.includes(id));
   if (invalidEvidence) throw new Error(`browser_llm_invalid_evidence_ref:${invalidEvidence}`);
-  return { ...parsed, oracles: parsedOracles };
+  // Browser decisions are already grounded by the current observation,
+  // control IDs and deterministic Oracle checks. The generic knowledge
+  // contract is intentionally not allowed to invent claim IDs here: doing so
+  // used to reject an otherwise valid action after one semantic-repair pass
+  // with knowledge_boundary_validation_failed, leaving the run parked after
+  // a successful login. Keep the boundary record explicit and empty for this
+  // narrow action protocol; runtime evidence remains the source of truth.
+  return {
+    ...parsed,
+    oracles: parsedOracles,
+    knowledge: knowledgeBoundaryOutputSchema.parse({
+      schemaVersion: "2.0",
+      factsUsed: [],
+      inferences: [],
+      assumptions: [],
+      unknowns: [],
+      toolRequests: [],
+      blockingQuestions: [],
+      proposedActions: []
+    })
+  };
 }
 
 export function compactBrowserObservationForDecision(observation: BrowserObservation) {

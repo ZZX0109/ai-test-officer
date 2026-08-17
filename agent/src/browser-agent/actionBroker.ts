@@ -17,6 +17,7 @@ import {
   dynamicBrowserScenarioId,
   getManagedBrowserSession,
   observeManagedBrowserSession,
+  waitForObservableDocument,
   updateManagedBrowserSession
 } from "./sessionManager.js";
 import {
@@ -30,6 +31,10 @@ const credentialPattern = /credential|password|secret|login|username|token|å‡­æ
 
 function controlDescription(control: BrowserControl) {
   return [control.role, control.accessibleName, control.label, control.testId].filter(Boolean).join(" ");
+}
+
+function attemptKey(attemptId: string) {
+  return attemptId.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
 export function browserActionPolicy(action: BrowserAgentAction, control?: BrowserControl) {
@@ -84,7 +89,7 @@ async function screenshotEvidence(runId: string, attemptId: string, stepId: stri
   const managed = getManagedBrowserSession(runId);
   if (!managed) throw new Error("browser_session_not_active");
   const directory = path.join(getReportsDir(), "runs", runId, "browser-agent", "screenshots");
-  const finalPath = path.join(directory, `${stepId}-${phase}.png`);
+  const finalPath = path.join(directory, `${attemptKey(attemptId)}-${stepId}-${phase}.png`);
   const temporary = `${finalPath}.${process.pid}.partial`;
   await mkdir(directory, { recursive: true });
   await managed.runtime.page.screenshot({ path: temporary, type: "png", animations: "disabled", timeout: 5_000 });
@@ -92,7 +97,7 @@ async function screenshotEvidence(runId: string, attemptId: string, stepId: stri
   const artifact = await commitBrowserAgentArtifact({
     runId,
     filePath: finalPath,
-    id: `${runId}_${stepId}_${phase}_screenshot`,
+    id: `${runId}_${attemptKey(attemptId)}_${stepId}_${phase}_screenshot`,
     stepId,
     kind: "screenshot",
     mediaType: "image/png"
@@ -112,13 +117,13 @@ async function screenshotEvidence(runId: string, attemptId: string, stepId: stri
 
 async function observationEvidence(observation: BrowserObservation, stepId: string, phase: "before" | "after") {
   const directory = path.join(getReportsDir(), "runs", observation.runId, "browser-agent", "dom");
-  const filePath = path.join(directory, `${stepId}-${phase}.json`);
+  const filePath = path.join(directory, `${attemptKey(observation.attemptId)}-${stepId}-${phase}.json`);
   await mkdir(directory, { recursive: true });
   await writeFile(filePath, JSON.stringify(observation, null, 2));
   const artifact = await commitBrowserAgentArtifact({
     runId: observation.runId,
     filePath,
-    id: `${observation.runId}_${stepId}_${phase}_dom`,
+    id: `${observation.runId}_${attemptKey(observation.attemptId)}_${stepId}_${phase}_dom`,
     stepId,
     kind: "dom",
     mediaType: "application/json"
@@ -294,9 +299,11 @@ async function waitForExpectedPageChange(
   if (waits.length) await Promise.allSettled(waits);
   await page.waitForLoadState("domcontentloaded", { timeout: Math.min(timeout, 3_000) }).catch(() => undefined);
   await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 3_000) }).catch(() => undefined);
-  // Give React one paint after the awaited state change so DOM and screenshot
-  // are sampled from the same rendered state.
-  await page.waitForTimeout(150);
+  // A navigation can resolve before the SPA has mounted its authenticated
+  // screen. Reuse the same observable-document gate as initial session
+  // creation so the post-login observation and live frame describe the same
+  // page generation instead of briefly showing an empty shell.
+  await waitForObservableDocument(managed.runtime);
 }
 
 export async function executeBrowserAgentAction(input: {
@@ -349,13 +356,13 @@ export async function executeBrowserAgentAction(input: {
     const afterScreenshot = await screenshotEvidence(action.runId, action.attemptId, action.actionId, "after").catch(() => undefined);
     const oracleResults = input.oracles.filter((oracle) => action.oracleIds.includes(oracle.id)).map((oracle) => evaluateOracle(oracle, fresh, after));
     const operationDirectory = path.join(getReportsDir(), "runs", action.runId, "browser-agent", "operations");
-    const operationPath = path.join(operationDirectory, `${action.actionId}.json`);
+    const operationPath = path.join(operationDirectory, `${attemptKey(action.attemptId)}-${action.actionId}.json`);
     await mkdir(operationDirectory, { recursive: true });
     await writeFile(operationPath, JSON.stringify({ action, beforeObservationId: fresh.observationId, afterObservationId: after.observationId, oracleResults }, null, 2));
     const operationArtifact = await commitBrowserAgentArtifact({
       runId: action.runId,
       filePath: operationPath,
-      id: `${action.runId}_${action.actionId}_operation`,
+      id: `${action.runId}_${attemptKey(action.attemptId)}_${action.actionId}_operation`,
       stepId: action.actionId,
       kind: "operation-log",
       mediaType: "application/json"

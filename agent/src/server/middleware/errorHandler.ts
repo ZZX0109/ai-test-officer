@@ -46,6 +46,13 @@ export function errorHandler(
     res.status(403).json({ error: "project_scope_forbidden" });
     return;
   }
+  // The Workbench may finish a run while a queued viewport refresh is still
+  // in flight. That is an expected lifecycle race, not an application crash;
+  // return a retryable conflict instead of logging it as an unhandled error.
+  if (error instanceof Error && error.message === "browser_session_not_active") {
+    res.status(409).json({ error: "browser_session_not_active" });
+    return;
+  }
   if (error instanceof Error && (
     error.message === "repair_host_apply_disabled"
     || error.message === "repair_high_risk_confirmation_required"
