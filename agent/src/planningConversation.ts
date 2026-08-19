@@ -162,6 +162,19 @@ function humanize(value: string) {
     .trim() || value;
 }
 
+// User-facing title for an API-route flow. Raw labels like "GET /api/orders"
+// or "/api/reports" are bare routes; strip the HTTP method and the /api/
+// prefix so the flow reads as a function ("orders 接口流程") rather than a
+// route table entry. Controller-style labels ("usersController.list") are
+// still humanized via camelCase/separator splitting.
+function apiFlowTitle(label: string): string {
+  const path = label
+    .replace(/^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+/i, "")
+    .replace(/^\/+api\/+(v?\d+\/)?/i, "")
+    .replace(/^\/+/, "");
+  return `${humanize(path)} 接口流程`;
+}
+
 function uniqueNodes(nodes: CodeGraphNode[], kind: CodeGraphNode["kind"]) {
   const seen = new Set<string>();
   return nodes.filter((node) => {
@@ -338,7 +351,7 @@ function buildFlows(input: {
         ? `${/(^|\/)App$/i.test(node.label) ? "应用主界面" : humanize(node.label)} 页面流程`
         : kind === "component"
           ? `${humanize(node.label)} 功能`
-          : `${node.label} 接口流程`,
+          : apiFlowTitle(node.label),
       kind,
       target: groupTarget,
       status: supportsBrowserDiscovery ? "auto-bindable" : "coverage-gap",

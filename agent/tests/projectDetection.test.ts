@@ -247,3 +247,40 @@ export async function testProjectDetectionWizard() {
     await Promise.all(fixtures.map((fixture) => rm(fixture, { recursive: true, force: true })));
   }
 }
+
+export async function testExternalServiceDependencyDetection() {
+  const fixtures: string[] = [];
+  try {
+    // Node project referencing PostgreSQL + Redis, plus a .env declaring
+    // DATABASE_URL. All three signals must surface at the upload step.
+    const nodeWithDb = await makeFixture("ai-test-officer-extdb-node-", {
+      "package.json": JSON.stringify({ dependencies: { pg: "^8.0.0", ioredis: "^5.0.0" } }),
+      ".env": "DATABASE_URL=postgres://localhost/app\nREDIS_URL=redis://localhost\n"
+    });
+    fixtures.push(nodeWithDb);
+    const nodeResult = await detectProject(nodeWithDb);
+    assert.ok(nodeResult.externalServiceDependencies?.some((dep) => dep.startsWith("PostgreSQL")), "pg dep must surface PostgreSQL");
+    assert.ok(nodeResult.externalServiceDependencies?.some((dep) => dep.startsWith("Redis")), "ioredis dep must surface Redis");
+    assert.ok(nodeResult.externalServiceDependencies?.some((dep) => dep.includes(".env 声明")), "DATABASE_URL in .env must surface the env signal");
+
+    // Python project whose requirements.txt pulls in psycopg2. The sandbox
+    // does not provision PostgreSQL, so it must be listed before starting.
+    const pythonWithDb = await makeFixture("ai-test-officer-extdb-py-", {
+      "requirements.txt": "fastapi\npsycopg2-binary==2.9\nuvicorn\n"
+    });
+    fixtures.push(pythonWithDb);
+    const pyResult = await detectProject(pythonWithDb);
+    assert.ok(pyResult.externalServiceDependencies?.some((dep) => dep.startsWith("PostgreSQL")), "psycopg2 in requirements.txt must surface PostgreSQL");
+
+    // A plain Vite project has no external service deps; the list must be
+    // empty so the upload step does not false-alarm a clean project.
+    const cleanVite = await makeFixture("ai-test-officer-extdb-clean-", {
+      "package.json": JSON.stringify({ scripts: { dev: "vite" }, dependencies: { vite: "^5.0.0" } })
+    });
+    fixtures.push(cleanVite);
+    const cleanResult = await detectProject(cleanVite);
+    assert.equal(cleanResult.externalServiceDependencies?.length ?? 0, 0, "a project with no external service deps must not surface any");
+  } finally {
+    await Promise.all(fixtures.map((fixture) => rm(fixture, { recursive: true, force: true })));
+  }
+}

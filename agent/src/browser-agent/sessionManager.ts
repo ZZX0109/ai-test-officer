@@ -682,3 +682,14 @@ export async function closeBrowserAgentSession(runId: string) {
 export async function closeAllBrowserAgentSessions() {
   await Promise.allSettled([...sessions.keys()].map((runId) => closeBrowserAgentSession(runId)));
 }
+
+// Terminate every live browser context bound to a project. Called when the
+// project runtime itself is stopped: the project process is gone, so any
+// Playwright session still pointing at it is residue and must be closed
+// (otherwise it leaks until its lease expires against a dead origin).
+export async function closeBrowserSessionsForProject(projectId: string) {
+  const runIds = [...sessions.entries()]
+    .filter(([, managed]) => managed.state.projectId === projectId)
+    .map(([runId]) => runId);
+  await Promise.allSettled(runIds.map((runId) => closeBrowserAgentSession(runId)));
+}

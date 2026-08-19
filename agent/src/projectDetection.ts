@@ -359,7 +359,7 @@ function firstScript(scripts: Record<string, string>, names: string[]) {
 
 function configuredFrontendPort(scripts: Record<string, string>, configText: string, fallback: number) {
   const scriptText = Object.values(scripts).join("\n");
-  const scriptMatch = /(?:--port|-p)\s*[= ]\s*(\d{2,5})\b/.exec(scriptText);
+  const scriptMatch = /(?:--port|--listen|-l|-p)\s*[= ]\s*(\d{2,5})\b/.exec(scriptText);
   if (scriptMatch) return Number(scriptMatch[1]);
   const viteConfigMatch = /\bserver\s*:\s*\{[\s\S]{0,2500}?\bport\s*:\s*(\d{2,5})\b/m.exec(configText);
   if (viteConfigMatch) return Number(viteConfigMatch[1]);
@@ -520,7 +520,7 @@ async function detectWorkspaceBackend(
     )).join("\n");
     const scriptText = Object.values(workspaceScripts).join("\n");
     const port = Number(
-      /(?:--port|-p)\s*[= ]\s*(\d{2,5})\b/.exec(scriptText)?.[1]
+      /(?:--port|--listen|-l|-p)\s*[= ]\s*(\d{2,5})\b/.exec(scriptText)?.[1]
       ?? /^\s*PORT\s*=\s*(\d{2,5})\s*$/m.exec(envText)?.[1]
       ?? 3000
     );
@@ -620,6 +620,33 @@ function sandboxImage(stack: ProjectDetectionResult["detectedStack"], nodeEngine
     })();
 }
 
+// Stack-aware first-start grace. Heavy frameworks can exceed the default
+// 5-minute prepare budget on a cold start (JVM + Hibernate + Flyway/Liquibase
+// for Spring, Django/Rails migrations). A slow-but-healthy boot must not be
+// misjudged as "not ready" just because it crossed the generic deadline.
+function prepareBudgetForStack(stack: ProjectDetectionResult["detectedStack"]): number {
+  const has = (token: string) => stack.some((item) => item === token);
+  if (has("spring") || has("java")) return 600_000;
+  if (has("django") || has("rails")) return 450_000;
+  return 300_000;
+}
+
+// Apply a manifest-declared health path to the probe URL. The manifest's
+// healthCheck.path used to be declared but never consumed, so a project that
+// serves health on /actuator/health or /healthz could only be probed at "/",
+// which 404s during boot and is misjudged as "not ready". "/" (the default)
+// is a no-op so existing behavior is unchanged unless a path is declared.
+function withHealthPath(baseUrl: string | undefined, path?: string): string | undefined {
+  if (!baseUrl || !path || path === "/") return baseUrl;
+  try {
+    const url = new URL(baseUrl);
+    url.pathname = path.startsWith("/") ? path : `/${path}`;
+    return url.toString();
+  } catch {
+    return baseUrl;
+  }
+}
+
 function sandboxManifest(input: {
   projectId: string;
   stack: ProjectDetectionResult["detectedStack"];
@@ -631,6 +658,11 @@ function sandboxManifest(input: {
   test?: CommandSpec;
   frontendPort: number;
   backendPort?: number;
+  /** Detected backend health path (e.g. "/api/health" for FastAPI). Applied to
+   * manifest.healthCheck.path so the runtime probes the right endpoint and
+   * withHealthPath keeps manifest path + healthCheckUrl consistent. Omitted for
+   * frontend-only projects, where "/" is correct. */
+  healthCheckPath?: string;
 }): ProjectManifest {
   return {
     schemaVersion: "1.0",
@@ -643,7 +675,7 @@ function sandboxManifest(input: {
       { name: "frontend", env: "FRONTEND_PORT", purpose: "frontend" },
       ...(input.backendPort ? [{ name: "backend", env: "BACKEND_PORT", purpose: "backend" as const }] : [])
     ],
-    healthCheck: { path: "/", timeoutMs: 30_000 },
+    healthCheck: { path: input.healthCheckPath ?? "/", timeoutMs: 30_000 },
     environmentAllowlist: ["NODE_ENV", "FRONTEND_PORT", "BACKEND_PORT"],
     network: { mode: "allow-target", allowedHosts: ["127.0.0.1", "localhost"] },
     fixtures: [],
@@ -654,7 +686,7 @@ function sandboxManifest(input: {
     execution: { mode: "oci", image: input.image ?? sandboxImage(input.stack, input.nodeEngine), engine: "docker" },
     budget: {
       runTimeoutMs: 1_200_000,
-      prepareTimeoutMs: 300_000,
+      prepareTimeoutMs: prepareBudgetForStack(input.stack),
       scenarioTimeoutMs: 300_000,
       stepTimeoutMs: 45_000,
       maxSteps: 50,
@@ -736,6 +768,70 @@ function detectUploadedOpenApi(files: Array<{ relativePath: string; content?: st
     }
   }
   return Array.from(new Map(collected.map((operation) => [operation.operationId, operation])).values());
+}
+
+// External service dependency detection at the upload step. A project that
+// references a database / cache / queue / search / cloud-store the sandbox
+// does not provision must surface that BEFORE the user starts the sandbox
+// (step 1 / upload), instead of starting and crashing or silently degrading
+// (e.g. running without the DB). Signals come from package.json deps,
+// requirements.txt, and .env / .env.example variable names.
+const DATABASE_CLIENT_PACKAGES: Record<string, string> = {
+  pg: "PostgreSQL", "pg-pool": "PostgreSQL", postgres: "PostgreSQL", "pg-promise": "PostgreSQL",
+  mysql: "MySQL", mysql2: "MySQL", mariadb: "MariaDB",
+  mongodb: "MongoDB", mongoose: "MongoDB",
+  "@prisma/client": "Prisma（外部数据库）", prisma: "Prisma（外部数据库）",
+  "@redis/client": "Redis", redis: "Redis", ioredis: "Redis"
+};
+const SERVICE_CLIENT_PACKAGES: Record<string, string> = {
+  amqplib: "RabbitMQ（AMQP）", kafkajs: "Kafka",
+  "@elastic/elasticsearch": "Elasticsearch",
+  "@aws-sdk/client-s3": "AWS S3", "aws-sdk": "AWS",
+  "@google-cloud/firestore": "Google Firestore", "firebase-admin": "Firebase",
+  "@supabase/supabase-js": "Supabase"
+};
+const DATABASE_PYTHON_PACKAGES: Record<string, string> = {
+  psycopg2: "PostgreSQL", psycopg: "PostgreSQL", asyncpg: "PostgreSQL",
+  "mysql-connector": "MySQL", pymysql: "MySQL",
+  pymongo: "MongoDB", mongoengine: "MongoDB",
+  redis: "Redis", sqlalchemy: "SQLAlchemy（外部数据库）",
+  elasticsearch: "Elasticsearch", pika: "RabbitMQ（AMQP）",
+  "confluent-kafka": "Kafka", boto3: "AWS"
+};
+const EXTERNAL_SERVICE_ENV = /\b(DATABASE_URL|POSTGRES_URL|MYSQL_URL|MONGO(?:DB)?_URI|REDIS_URL|REDIS_HOST|AMQP_URL|RABBITMQ_URL|KAFKA_URL|ELASTICSEARCH_URL|S3_BUCKET|S3_ENDPOINT|STORAGE_ENDPOINT)\b/;
+
+export async function detectExternalServiceDependencies(input: {
+  deps: Record<string, unknown>;
+  files: string[];
+  projectPath: string;
+}): Promise<string[]> {
+  const services = new Set<string>();
+  for (const [pkg, service] of Object.entries(DATABASE_CLIENT_PACKAGES)) {
+    if (input.deps[pkg]) services.add(service);
+  }
+  for (const [pkg, service] of Object.entries(SERVICE_CLIENT_PACKAGES)) {
+    if (input.deps[pkg]) services.add(service);
+  }
+  // Python projects: scan requirements.txt for DB / queue / cloud clients.
+  if (input.files.includes("requirements.txt")) {
+    const requirements = await readFile(path.join(input.projectPath, "requirements.txt"), "utf8").catch(() => "");
+    for (const [pkg, service] of Object.entries(DATABASE_PYTHON_PACKAGES)) {
+      if (new RegExp(`^\\s*${pkg.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\b`, "im").test(requirements)) {
+        services.add(service);
+      }
+    }
+  }
+  // .env / .env.example variable names signal the project EXPECTS an external
+  // service even when the client package is abstracted away (e.g. Prisma).
+  for (const envFile of [".env", ".env.example", ".env.local"]) {
+    if (!input.files.includes(envFile)) continue;
+    const envText = await readFile(path.join(input.projectPath, envFile), "utf8").catch(() => "");
+    if (EXTERNAL_SERVICE_ENV.test(envText)) {
+      services.add("外部服务（.env 声明了 DATABASE_URL / REDIS_URL / AMQP_URL 等）");
+      break;
+    }
+  }
+  return [...services].map((service) => `${service} — 沙盒未提供该外部依赖，启动会失败或需降级运行；请在确认前配置或知悉。`);
 }
 
 export async function detectProject(projectPathInput: string): Promise<ProjectDetectionResult> {
@@ -898,7 +994,8 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
     start: processSpecs[0]?.commandSpec ?? commandSpec(devCommand),
     test: testCommandSpec,
     frontendPort,
-    backendPort
+    backendPort,
+    healthCheckPath: backendPort ? backendHealthPath : undefined
   });
   const suggestedConfig: ProjectConfig = {
     id: projectId,
@@ -912,7 +1009,7 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
     testCommand,
     testCommandSpec,
     processes: processSpecs,
-    healthCheckUrl: backendUrl ?? frontendUrl,
+    healthCheckUrl: withHealthPath(backendUrl ?? frontendUrl, detectedManifest.healthCheck?.path),
     frontendUrl,
     backendUrl,
     login: loginCapability.detected ? {
@@ -951,12 +1048,16 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
     backendPort ? `http://127.0.0.1:${backendPort}/health` : undefined,
     frontendUrl
   ].filter((value): value is string => Boolean(value));
+  const externalServiceDependencies = projectExists
+    ? await detectExternalServiceDependencies({ deps, files, projectPath })
+    : [];
   const warnings = [
     projectExists ? undefined : "项目路径不存在。",
     !pkg && !ecosystemLaunch ? "没有识别到受支持的项目入口或依赖清单。" : undefined,
     apiCredentialCapability.detected
       ? `检测到项目需要 API 凭据：${apiCredentialCapability.requirements.map((item) => item.envName).join(", ")}。启动前需要明确选择凭据。`
-      : undefined
+      : undefined,
+    ...externalServiceDependencies
   ].filter((item): item is string => Boolean(item));
   const plainLanguageFixes = [
     projectExists ? "项目路径可以访问。" : "请确认项目文件夹路径是否正确，或者在 Finder 中复制完整路径。",
@@ -976,6 +1077,7 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
     packageManagers,
     loginCapability,
     apiCredentialCapability,
+    externalServiceDependencies,
     suggestedConfig,
     ports,
     healthCandidates,
@@ -1077,6 +1179,33 @@ export async function detectProjectManifest(input: {
   const startCommandSpec = commandSpec(devCommand);
   const testCommand = scripts.test ? packageScriptCommand(nodePackageManager, "test") : undefined;
   const testCommandSpec = commandSpec(testCommand, 600_000);
+  // Hoisted so the manifest's declared health path can shape healthCheckUrl
+  // below, instead of the path being dead metadata that never reaches the probe.
+  const detectedManifest = (() => {
+    const manifest = sandboxManifest({
+      projectId,
+      stack: detectedStack,
+      nodeEngine: nodeEngineFromPackage(pkg),
+      install: installCommandSpec,
+      start: startCommandSpec,
+      test: testCommandSpec,
+      frontendPort,
+      backendPort,
+      healthCheckPath: backendPort ? "/api/health" : undefined
+    });
+    return {
+      ...manifest,
+      apiOperations: detectedApiOperations,
+      environmentAllowlist: Array.from(new Set([
+        ...manifest.environmentAllowlist,
+        ...apiCredentialCapability.requirements.flatMap((item) => [
+          item.envName,
+          item.baseUrlEnv,
+          item.modelEnv
+        ].filter((value): value is string => Boolean(value)))
+      ]))
+    };
+  })();
   const suggestedConfig: ProjectConfig = {
     id: projectId,
     name: normalizedRoot.replace(/[-_]+/g, " "),
@@ -1088,37 +1217,14 @@ export async function detectProjectManifest(input: {
     startCommandSpec,
     testCommand,
     testCommandSpec,
-    healthCheckUrl: backendUrl ?? frontendUrl,
+    healthCheckUrl: withHealthPath(backendUrl ?? frontendUrl, detectedManifest.healthCheck?.path),
     frontendUrl,
     backendUrl,
     login: { method: "none" },
     apiCredentialRequirements: apiCredentialCapability.requirements,
     apiCredentialBindings: [],
     env: {},
-    manifest: (() => {
-      const manifest = sandboxManifest({
-        projectId,
-        stack: detectedStack,
-        nodeEngine: nodeEngineFromPackage(pkg),
-        install: installCommandSpec,
-        start: startCommandSpec,
-        test: testCommandSpec,
-        frontendPort,
-        backendPort
-      });
-      return {
-        ...manifest,
-        apiOperations: detectedApiOperations,
-        environmentAllowlist: Array.from(new Set([
-          ...manifest.environmentAllowlist,
-          ...apiCredentialCapability.requirements.flatMap((item) => [
-            item.envName,
-            item.baseUrlEnv,
-            item.modelEnv
-          ].filter((value): value is string => Boolean(value)))
-        ]))
-      };
-    })(),
+    manifest: detectedManifest,
     timeoutMs: 30_000,
     createdAt: now,
     updatedAt: now

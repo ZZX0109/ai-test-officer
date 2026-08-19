@@ -103,6 +103,7 @@ export type ProjectRuntimeFailureReason =
   | "early_exit"
   | "permission_denied"
   | "container_runtime_unavailable"
+  | "container_image_unavailable"
   | "budget_exceeded"
   | "cancelled"
   | "unknown";
@@ -215,6 +216,10 @@ export interface ProjectDetectionResult {
   healthCandidates: string[];
   warnings: string[];
   plainLanguageFixes: string[];
+  /** External DB / cache / queue / search / cloud-store the project references
+   * but the sandbox does not provision. Surfaced at the upload step so the user
+   * knows before starting, instead of crashing or silently degrading. */
+  externalServiceDependencies?: string[];
 }
 
 export interface ProjectDiagnosis {
@@ -235,7 +240,7 @@ export interface ProjectDiagnosis {
 export interface ProjectRuntimeStatus {
   projectId: string;
   status: "idle" | "installing" | "starting" | "running" | "stopped" | "failed";
-  phase?: "idle" | "installing_dependencies" | "starting_processes" | "waiting_for_health" | "ready" | "stopping" | "failed";
+  phase?: "idle" | "installing_dependencies" | "pulling_sandbox_image" | "starting_processes" | "waiting_for_health" | "ready" | "stopping" | "failed";
   phaseStartedAt?: string;
   deadlineAt?: string;
   elapsedMs?: number;

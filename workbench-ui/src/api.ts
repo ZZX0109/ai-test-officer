@@ -1435,6 +1435,13 @@ export function getStorageStatus() {
   return request<{ storage: StorageStatus }>("/api/storage/status");
 }
 
+// First-run readiness gate: Docker/Podman availability is checked BEFORE the
+// Workbench attempts to start a project, so a missing runtime surfaces as a
+// clear prerequisite prompt instead of failing mid-startup.
+export function getReadiness(engine: "docker" | "podman" = "docker") {
+  return request<{ docker: { available: boolean; engine: "docker" | "podman" } }>(`/api/readiness?engine=${engine}`);
+}
+
 export function getSecuritySummary() {
   return request<{ security: SecuritySummary }>("/api/security/summary");
 }

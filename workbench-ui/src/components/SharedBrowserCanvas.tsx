@@ -251,8 +251,15 @@ export function SharedBrowserCanvas({
           }
         }}
       />
-      {streamState === "connecting" && !showPreviewFallback ? <span className="shared-browser-stream-status">正在连接实时浏览器…</span> : null}
-      {streamState === "failed" && !showPreviewFallback ? <span className="shared-browser-stream-status is-error">实时连接中断，正在恢复…</span> : null}
+      {!hasFrame && !showPreviewFallback && streamState !== "ended" ? (
+        streamState === "failed" ? (
+          <span className="shared-browser-stream-status is-error">实时连接中断，正在恢复…</span>
+        ) : (
+          <span className="shared-browser-stream-status is-loading">
+            {streamState === "live" ? "正在加载首帧…" : streamState === "connecting" ? "正在连接实时浏览器…" : "准备连接实时浏览器…"}
+          </span>
+        )
+      ) : null}
     </div>
   );
 }

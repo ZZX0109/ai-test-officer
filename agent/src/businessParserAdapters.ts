@@ -353,7 +353,94 @@ export async function parsePythonSourcesBatch(files: ParserSourceFile[]): Promis
   return result;
 }
 
+// Bare static sites (a single index.html with inline scripts / forms / nav)
+// have no .tsx/.py source for the capability graph to scan, so the planner
+// found zero business flows and asked the operator to hand-describe every
+// page. This adapter extracts interactive controls (buttons, inputs, forms,
+// links + <title>) directly from HTML so static-site features surface as
+// candidate business paths at the planning step, the same way JSX controls
+// do for React projects.
+function htmlLineOf(source: string, position: number) {
+  return source.slice(0, Math.max(0, position)).split("\n").length;
+}
+
+function htmlBasename(relative: string) {
+  const base = relative.split("/").pop() ?? relative;
+  return base.replace(/\.[^.]+$/, "").replace(/[._-]+/g, " ").trim() || "静态页面";
+}
+
+function stripTags(value: string) {
+  return value.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+
+function parseHtmlFile(file: ParserSourceFile): ParsedBusinessFile {
+  const facts: ParsedBusinessFact[] = [];
+  const source = file.source;
+  const titleMatch = /<title[^>]*>\s*([^<]+?)\s*<\/title>/i.exec(source);
+  const pageLabel = titleMatch?.[1]?.trim() || htmlBasename(file.relative);
+  facts.push({
+    key: `html:page:${file.relative}`,
+    kind: "page",
+    label: pageLabel,
+    line: 1,
+    confidence: "medium",
+    metadata: { framework: "static-html", entry: "spa" }
+  });
+  for (const match of source.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/gi)) {
+    const text = stripTags(match[1] ?? "");
+    if (!text) continue;
+    facts.push({
+      key: `html:button:${match.index ?? 0}`,
+      kind: "ui-action",
+      label: text,
+      line: htmlLineOf(source, match.index ?? 0),
+      confidence: "medium",
+      metadata: { control: "button", framework: "static-html" }
+    });
+  }
+  for (const match of source.matchAll(/<input\b[^>]*>/gi)) {
+    const tag = match[0];
+    const placeholder = /placeholder\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1];
+    const name = /name\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1];
+    const label = placeholder || name;
+    if (!label) continue;
+    facts.push({
+      key: `html:input:${match.index ?? 0}`,
+      kind: "ui-component",
+      label,
+      line: htmlLineOf(source, match.index ?? 0),
+      confidence: "low",
+      metadata: { control: "input", framework: "static-html" }
+    });
+  }
+  for (const match of source.matchAll(/<form\b[^>]*>/gi)) {
+    facts.push({
+      key: `html:form:${match.index ?? 0}`,
+      kind: "ui-action",
+      label: "表单提交",
+      line: htmlLineOf(source, match.index ?? 0),
+      confidence: "medium",
+      metadata: { control: "form", framework: "static-html" }
+    });
+  }
+  for (const match of source.matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+    const href = match[1];
+    const text = stripTags(match[2] ?? "");
+    if (!text || /^(?:mailto:|tel:|javascript:)/i.test(href)) continue;
+    facts.push({
+      key: `html:link:${match.index ?? 0}`,
+      kind: "page",
+      label: text,
+      line: htmlLineOf(source, match.index ?? 0),
+      confidence: "low",
+      metadata: { route: href, framework: "static-html" }
+    });
+  }
+  return { adapter: "html-markup", facts, relations: [], diagnostics: [] };
+}
+
 export async function parseBusinessSource(file: ParserSourceFile): Promise<ParsedBusinessFile> {
+  if (/\.html?$/i.test(file.relative)) return parseHtmlFile(file);
   if (/\.py$/i.test(file.relative)) return parseFastApi(file);
   if (/\.vue$/i.test(file.relative)) return parseTypeScriptFile(file, "vue");
   if (/(?:^|\/)(?:app|pages)\//i.test(file.relative)) return parseTypeScriptFile(file, "next");

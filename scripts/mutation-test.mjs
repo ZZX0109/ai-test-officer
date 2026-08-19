@@ -44,6 +44,14 @@ const cases = [
     replace: "viewer: [\"read_project\", \"read_artifacts\", \"read_reports\", \"read_evidence\", \"run_tests\"]",
     test: "projectAuthorization.test.ts",
     exported: "testProjectAuthorizationMatrix"
+  },
+  {
+    id: "shell-argv-operator-not-rejected",
+    file: "agent/src/shellArgv.ts",
+    find: "SHELL_OPERATORS.test(ch)",
+    replace: "false",
+    test: "shellArgv.test.ts",
+    exported: "testShellArgvSafety"
   }
 ];
 

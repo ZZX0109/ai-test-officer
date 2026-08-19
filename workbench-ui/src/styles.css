@@ -970,6 +970,33 @@ button:disabled {
   min-height: 38px;
 }
 
+/* Workflow-guide step 4 highlight: draw the eye to the "describe test goal"
+   composer once the project is running and the browser is loaded. */
+.planning-composer.is-flow-focus {
+  position: relative;
+  padding: 8px;
+  border-radius: 8px;
+  box-shadow: 0 0 0 2px #2563eb, 0 0 0 4px rgba(37, 99, 235, 0.18);
+  animation: planning-composer-flow-pulse 1.6s ease-in-out infinite;
+}
+.planning-composer.is-flow-focus::before {
+  content: "← 在此描述测试目标";
+  position: absolute;
+  top: -10px;
+  left: 8px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+@keyframes planning-composer-flow-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px #2563eb, 0 0 0 4px rgba(37, 99, 235, 0.18); }
+  50% { box-shadow: 0 0 0 2px #2563eb, 0 0 0 7px rgba(37, 99, 235, 0.08); }
+}
+
 .api-settings-backdrop {
   position: fixed;
   inset: 0;
@@ -2200,10 +2227,35 @@ select:focus {
   font-size: 12px;
 }
 
-.workflow-guide span + span::before {
+.workflow-guide__steps {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin: 0;
+  padding: 0;
+}
+.workflow-guide__steps li {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--surface-muted, #f0f1f5);
+  color: var(--text-muted, #6b7280);
+}
+.workflow-guide__steps li.is-current {
+  background: #e8f0fe;
+  color: #2563eb;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px #93c5fd;
+}
+.workflow-guide__steps li.is-done {
+  background: #e6f4ea;
+  color: #1e7e34;
+}
+.workflow-guide__steps li + li::before {
   content: "→";
-  margin-right: 10px;
-  color: var(--text-disabled);
+  margin-right: 4px;
+  color: var(--text-disabled, #c0c4cc);
 }
 
 .optional-context {
@@ -2775,8 +2827,7 @@ select:focus {
   padding: 3px 7px;
 }
 
-.wizard-box .wizard-result {
-  margin-top: 10px;
+.wizard-box .wizard-result {  margin-top: 10px;
 }
 
 .wizard-result > header > div,
@@ -5311,6 +5362,18 @@ select:focus {
 }
 
 .shared-browser-stream-status.is-error { background: rgba(153, 27, 27, 0.86); }
+.shared-browser-stream-status.is-loading { background: rgba(15, 23, 42, 0.82); display: inline-flex; align-items: center; gap: 6px; }
+.shared-browser-stream-status.is-loading::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: shared-browser-stream-spin 0.7s linear infinite;
+  display: inline-block;
+}
+@keyframes shared-browser-stream-spin { to { transform: rotate(360deg); } }
 
 .workbench-crash-state {
   min-height: 100vh;
@@ -7522,3 +7585,310 @@ textarea,
   }
   .sidebar-resize-handle { display: none; }
 }
+
+/* ===== 运行视图切换（对话 / 轨迹） ===== */
+.run-view-toggle {
+  display: inline-flex;
+  gap: 2px;
+  margin: 0 0 12px;
+  padding: 2px;
+  border: 1px solid var(--border, #d8dee9);
+  border-radius: 8px;
+  background: var(--surface-muted, #f4f5f9);
+}
+.run-view-toggle__btn {
+  border: 0;
+  background: transparent;
+  color: var(--muted, #6b7280);
+  padding: 4px 14px;
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.run-view-toggle__btn.is-active {
+  background: var(--surface, #fff);
+  color: var(--text, #1f2937);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* ===== 可追溯轨迹面板 ===== */
+.trajectory { display: flex; flex-direction: column; gap: 12px; }
+.trajectory__summary { display: flex; flex-wrap: wrap; gap: 8px; }
+.trajectory__chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: 999px; font-size: 12px;
+  background: var(--surface-muted, #f4f5f9); color: var(--muted, #6b7280);
+}
+.trajectory__chip--passed { background: #e6f4ea; color: #1e7e34; }
+.trajectory__chip--failed { background: #fdecea; color: #c0392b; }
+
+.trajectory__timeline { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--border, #d8dee9); }
+.trajectory__node { position: relative; padding: 8px 0 8px 16px; }
+.trajectory__node::before {
+  content: ""; position: absolute; left: -7px; top: 14px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--muted, #9ca3af);
+}
+.trajectory__node--passed::before { background: #1e7e34; }
+.trajectory__node--failed::before { background: #c0392b; }
+.trajectory__node--warning::before { background: #b7791f; }
+.trajectory__node--running::before { background: #2563eb; }
+
+.trajectory__node-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: transparent; border: 0; padding: 2px 0; cursor: pointer; font-size: 13px;
+}
+.trajectory__node-head:disabled { cursor: default; }
+.trajectory__phase { font-weight: 600; padding: 1px 8px; border-radius: 6px; font-size: 12px; background: var(--surface-muted, #f0f1f5); }
+.trajectory__phase--passed { background: #e6f4ea; color: #1e7e34; }
+.trajectory__phase--failed { background: #fdecea; color: #c0392b; }
+.trajectory__phase--warning { background: #fef5e7; color: #b7791f; }
+.trajectory__phase--running { background: #e8f0fe; color: #2563eb; }
+.trajectory__node-title { flex: 1; color: var(--text, #1f2937); }
+.trajectory__node-time { font-size: 11px; }
+.trajectory__node-body { padding: 4px 0 6px; font-size: 13px; }
+.trajectory__node-body p { margin: 2px 0; }
+.trajectory__node-detail { margin: 6px 0 2px; border-top: 1px dashed var(--border, #d8dee9); padding-top: 6px; }
+.trajectory__node-detail details { margin: 4px 0; }
+.trajectory__node-detail summary { cursor: pointer; font-size: 12px; color: var(--muted, #6b7280); display: inline-flex; align-items: center; gap: 5px; }
+.trajectory__sublist { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+
+.trajectory-call { border: 1px solid var(--border, #e5e7eb); border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+.trajectory-call__head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.trajectory-call__purpose { font-weight: 600; }
+.trajectory-call__model { color: var(--muted, #6b7280); font-family: ui-monospace, monospace; }
+.trajectory-call__status { padding: 0 6px; border-radius: 4px; font-size: 11px; }
+.trajectory-call__status--passed { background: #e6f4ea; color: #1e7e34; }
+.trajectory-call__status--failed { background: #fdecea; color: #c0392b; }
+.trajectory-call__status--warning { background: #fef5e7; color: #b7791f; }
+.trajectory-call__meta { color: var(--muted, #6b7280); font-size: 11px; }
+.trajectory-call__reason { margin: 4px 0 0; color: var(--muted, #6b7280); }
+
+.trajectory-browser { font-size: 12px; }
+.trajectory-browser__head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.trajectory-browser__status { padding: 0 6px; border-radius: 4px; font-size: 11px; background: var(--surface-muted, #f0f1f5); }
+.trajectory-browser__actions { list-style: none; margin: 4px 0 0; padding: 0 0 0 16px; }
+.trajectory-browser__actions li { margin: 2px 0; }
+.trajectory-browser__result { font-size: 11px; }
+.trajectory-browser__oracle { color: var(--muted, #6b7280); font-size: 11px; }
+
+.trajectory-obs { font-size: 12px; }
+.trajectory-obs__head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.trajectory-obs__url { font-family: ui-monospace, monospace; max-width: 60ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trajectory-obs__problems { color: #c0392b; display: inline-flex; align-items: center; gap: 3px; }
+
+.trajectory-conclusion { font-size: 12px; border-left: 3px solid var(--border, #d8dee9); padding-left: 8px; }
+.trajectory-conclusion--passed { border-left-color: #1e7e34; }
+.trajectory-conclusion--failed { border-left-color: #c0392b; }
+.trajectory-conclusion--warning { border-left-color: #b7791f; }
+.trajectory-conclusion__head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.trajectory-conclusion__claim { font-weight: 600; }
+.trajectory-conclusion__status { padding: 0 6px; border-radius: 4px; font-size: 11px; background: var(--surface-muted, #f0f1f5); }
+.trajectory-conclusion__status--passed { background: #e6f4ea; color: #1e7e34; }
+.trajectory-conclusion__status--failed { background: #fdecea; color: #c0392b; }
+.trajectory-conclusion__status--warning { background: #fef5e7; color: #b7791f; }
+
+.trajectory-evidence-refs { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.trajectory-evidence-refs li { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted, #6b7280); }
+.trajectory-evidence-refs code { font-family: ui-monospace, monospace; }
+
+.trajectory__assistant { margin-top: 8px; }
+.trajectory__assistant summary { cursor: pointer; font-size: 12px; color: var(--muted, #6b7280); display: inline-flex; align-items: center; gap: 5px; }
+
+/* === 逐条测试进度 (FeatureTestProgress) === */
+.feature-test-progress {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 8px;
+  background: var(--bg-secondary, #f8fafc);
+  font-size: 12px;
+}
+.feature-test-progress > strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text-primary, #111827);
+  font-size: 13px;
+}
+.feature-test-progress__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.verdict-chip {
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #eef0f4;
+  color: #6b7280;
+}
+.verdict-chip.verdict-pass { background: #e6f4ea; color: #1e7e34; }
+.verdict-chip.verdict-repaired { background: #e6f4ea; color: #1e7e34; border: 1px dashed #1e7e34; }
+.verdict-chip.verdict-fail { background: #fde8e8; color: #b42318; }
+.verdict-chip.verdict-blocked { background: #fff4d6; color: #946700; }
+.verdict-chip.verdict-running { background: #e8f0fe; color: #2563eb; }
+.verdict-chip.verdict-pending { background: #eef0f4; color: #6b7280; }
+.feature-test-progress__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.feature-test-progress__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #eef0f4;
+}
+.feature-test-progress__title { flex: 1; color: var(--text-primary, #111827); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feature-test-progress__verdict { font-size: 11px; font-weight: 600; }
+.verdict-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #d1d5db; }
+.feature-test-progress__item.verdict-pass .verdict-dot { background: #16a34a; }
+.feature-test-progress__item.verdict-pass .feature-test-progress__verdict { color: #1e7e34; }
+.feature-test-progress__item.verdict-repaired .verdict-dot { background: #16a34a; }
+.feature-test-progress__item.verdict-repaired .feature-test-progress__verdict { color: #1e7e34; }
+.feature-test-progress__item.verdict-fail .verdict-dot { background: #dc2626; }
+.feature-test-progress__item.verdict-fail .feature-test-progress__verdict { color: #b42318; }
+.feature-test-progress__item.verdict-blocked .verdict-dot { background: #d97706; }
+.feature-test-progress__item.verdict-blocked .feature-test-progress__verdict { color: #946700; }
+.feature-test-progress__item.verdict-running .verdict-dot { background: #2563eb; animation: feature-test-progress-pulse 1.2s ease-in-out infinite; }
+.feature-test-progress__item.verdict-running .feature-test-progress__verdict { color: #2563eb; }
+.feature-test-progress__item.verdict-pending .verdict-dot { background: #d1d5db; }
+.feature-test-progress__item.verdict-pending .feature-test-progress__verdict { color: #6b7280; }
+@keyframes feature-test-progress-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* === FeatureTestProgress 修复入口按钮 === */
+.feature-test-progress__repair {
+  margin-left: 6px;
+  padding: 2px 8px;
+  border: 1px solid #f0a0a0;
+  border-radius: 6px;
+  background: #fde8e8;
+  color: #b42318;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.feature-test-progress__repair:hover { background: #fbd0d0; }
+.feature-test-progress__repair:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* === RepairWorkspace 丢弃按钮 === */
+.repair-discard-button {
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle, #d1d5db);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+  cursor: pointer;
+}
+.repair-discard-button:hover:not(:disabled) { background: #f3f4f6; color: #374151; }
+.repair-discard-button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* === 按功能组织的测试报告 (FeatureTestReport) === */
+.feature-test-report {
+  margin: 8px 0;
+  padding: 12px;
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 8px;
+  background: #fff;
+  font-size: 12px;
+}
+.feature-test-report > .muted { color: var(--text-muted, #6b7280); }
+.feature-test-report__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #eef0f4;
+}
+.feature-test-report__header > strong { font-size: 13px; color: var(--text-primary, #111827); }
+.feature-test-report__summary { color: var(--text-muted, #6b7280); font-size: 11px; }
+.feature-test-report__trajectory {
+  margin-left: auto;
+  padding: 3px 10px;
+  border: 1px solid var(--border-subtle, #d1d5db);
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #2563eb;
+  font-size: 11px;
+  cursor: pointer;
+}
+.feature-test-report__trajectory:hover { background: #eef2ff; }
+.feature-test-report__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.feature-test-report__table th {
+  text-align: left;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--text-muted, #6b7280);
+  border-bottom: 1px solid #eef0f4;
+}
+.feature-test-report__table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+.feature-test-report__title { color: var(--text-primary, #111827); max-width: 40ch; }
+.feature-test-report__verdict { display: flex; align-items: center; gap: 6px; font-weight: 600; white-space: nowrap; }
+.feature-test-report__evidence ul { margin: 0; padding-left: 16px; }
+.feature-test-report__evidence li { font-size: 11px; color: var(--text-muted, #6b7280); word-break: break-all; }
+.feature-test-report .muted { color: var(--text-muted, #6b7280); }
+.feature-test-report__table tr.verdict-pass .verdict-dot { background: #16a34a; }
+.feature-test-report__table tr.verdict-pass .feature-test-report__verdict { color: #1e7e34; }
+.feature-test-report__table tr.verdict-fail .verdict-dot { background: #dc2626; }
+.feature-test-report__table tr.verdict-fail .feature-test-report__verdict { color: #b42318; }
+.feature-test-report__table tr.verdict-blocked .verdict-dot { background: #d97706; }
+.feature-test-report__table tr.verdict-blocked .feature-test-report__verdict { color: #946700; }
+.feature-test-report__table tr.verdict-untested .verdict-dot { background: #d1d5db; }
+.feature-test-report__table tr.verdict-untested .feature-test-report__verdict { color: #6b7280; }
+
+/* Pre-confirm editable feature list (PlanningFlowEditor). The confirmed plan
+   is a real approval gate: the user can prune, rename, or add a flow before
+   confirming, instead of rubber-stamping the scan output. */
+.planning-flow-editor { margin-top: 12px; }
+.planning-flow-editor > strong { display: block; margin-bottom: 4px; }
+.planning-flow-editor .field-hint { margin: 0 0 8px; }
+.planning-flow-empty { margin: 0 0 8px; color: #6b7280; font-size: 13px; }
+.planning-flow-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.planning-flow-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
+.planning-flow-title { min-width: 0; padding: 4px 6px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 14px; }
+.planning-flow-title:disabled { color: inherit; background: transparent; border-color: transparent; }
+.planning-flow-exclude { border: 1px solid #f3c2c2; background: #fff5f5; color: #b91c1c; border-radius: 4px; padding: 3px 8px; font-size: 12px; cursor: pointer; }
+.planning-flow-exclude:disabled { opacity: 0.5; cursor: not-allowed; }
+.planning-flow-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.planning-flow-add input { padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 14px; }
+.flow-status-chip { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.flow-status-chip.is-executable { background: #dcfce7; color: #166534; }
+.flow-status-chip.is-auto-bindable { background: #e0e7ff; color: #3730a3; }
+.flow-status-chip.is-needs-input { background: #fef3c7; color: #92400e; }
+.flow-status-chip.is-coverage-gap { background: #fee2e2; color: #991b1b; }
+
+/* First-run readiness gate: surfaces missing prerequisites (Docker / LLM
+   credential / project) before the user attempts to start the sandbox. */
+.readiness-gate { margin-top: 8px; padding: 8px 10px; border: 1px solid #f3c2c2; background: #fff5f5; border-radius: 6px; }
+.readiness-gate strong { display: block; margin-bottom: 4px; color: #b91c1c; }
+.readiness-gate ul { margin: 0; padding-left: 18px; }
+.readiness-gate li { color: #92400e; }
+.readiness-gate__pending { margin: 6px 0 0; color: #6b7280; font-size: 12px; }
+
+/* Upload-step external dependency alert: the project references a DB / cache /
+   queue / search / cloud service the sandbox does not provision. Surfaced
+   prominently so the user does not start and crash or silently degrade. */
+.wizard-external-deps { margin-top: 8px; padding: 8px 10px; border: 1px solid #f3c2c2; background: #fff5f5; border-radius: 6px; }
+.wizard-external-deps strong { display: block; margin-bottom: 4px; color: #b91c1c; }
+.wizard-external-deps p { margin: 0 0 4px; color: #92400e; font-size: 13px; }
+.wizard-external-deps ul { margin: 0; padding-left: 18px; }
+.wizard-external-deps li { color: #92400e; }

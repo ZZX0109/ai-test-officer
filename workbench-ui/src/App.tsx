@@ -31,6 +31,10 @@ import {
 } from "./components/DiscoveryPanel";
 import { discoveryOrchestrationCopy } from "./discoveryOrchestrationCopy";
 import { EvidencePanel } from "./components/EvidencePanel";
+import { TrajectoryPanel } from "./components/TrajectoryPanel";
+import { FeatureTestProgress } from "./components/FeatureTestProgress";
+import { PlanningFlowEditor } from "./components/PlanningFlowEditor";
+import { FeatureTestReport } from "./components/FeatureTestReport";
 import { InterruptDecisionPanel } from "./components/InterruptDecisionPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { ImpactPanel } from "./components/ImpactPanel";
@@ -109,6 +113,7 @@ import {
   getAiStartRecovery,
   getSecuritySummary,
   getStorageStatus,
+  getReadiness,
   getRunBundle,
   getRunEvidence,
   getRunProjection,
@@ -202,6 +207,7 @@ import type {
   RepairDecisionValue,
   RepairPlanData,
   RepairSession,
+  PlannedBusinessFlow,
   RunBundle,
   RunProjection,
   RunHistoryEntry,
@@ -313,6 +319,7 @@ const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | und
 
 export function App() {
   const [workspaceState, dispatchWorkspace] = useReducer(workspaceReducer, initialWorkspaceState);
+  const [runViewMode, setRunViewMode] = useState<"dialogue" | "trajectory" | "report">("dialogue");
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [plan, setPlan] = useState<GrayPlan | null>(null);
   const [result, setResult] = useState<RunResult | null>(null);
@@ -372,6 +379,7 @@ export function App() {
   }]);
   const planningMessagesViewportRef = useRef<HTMLDivElement | null>(null);
   const planningMessagesPinnedRef = useRef(true);
+  const requirementComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const [planningInput, setPlanningInput] = useState("");
   const [planningResult, setPlanningResult] = useState<PlanningConversationResult | null>(null);
   const [planningFlowPageLoading, setPlanningFlowPageLoading] = useState(false);
@@ -426,6 +434,17 @@ export function App() {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<RunProjection | null>(null);
   const [repairSession, setRepairSession] = useState<RepairSession | null>(null);
+  // ScenarioIds whose failed conclusion has been overturned by a passed repair
+  // retest. Survives closing the repair workspace (component state, not tied to
+  // the current repair session) so the feature list stays green after repair.
+  const [repairVerifiedScenarioIds, setRepairVerifiedScenarioIds] = useState<Set<string>>(new Set());
+  const [dockerReadiness, setDockerReadiness] = useState<{ available: boolean; engine: "docker" | "podman" } | null>(null);
+  // Repair verdicts are tied to a specific run's scenarioIds; clear them when
+  // the active run changes so a stale "repaired" flag from a previous run
+  // cannot turn a new run's feature green.
+  useEffect(() => {
+    setRepairVerifiedScenarioIds(new Set());
+  }, [activeRun?.id]);
   const [repairWorkspaceOpen, setRepairWorkspaceOpen] = useState(false);
   // The centre surface has two explicit modes. Preview never grants source
   // write access; code mode is always a sandbox workspace and only becomes
@@ -638,6 +657,45 @@ export function App() {
   // run the user was viewing.
   const runIsBlocked = latestDecision === "blocked"
     || (planningAutomation.phase === "blocked" && latestDecision !== "pass");
+  // Lifted workflow-guide step so the planning composer (and other left-bar
+  // entries) can react to "you are on step 4: describe the test goal" instead
+  // of the step indicator living only inside the drawer.
+  const isExecutingRun = Boolean(activeRun?.state)
+    && !["draft", "awaiting-plan-approval", "awaiting-permission", "completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(activeRun?.state ?? "");
+  const currentFlowStep =
+    (result?.finalStatus === "pass" || result?.finalStatus === "fail" || activeRun?.state === "completed") && !isExecutingRun ? 8
+      : repairSession || repairWorkspaceOpen ? 7
+      : isExecutingRun ? 6
+        : planningResult?.businessFlows?.length || activeRun?.state === "awaiting-plan-approval" || runIsBlocked ? 5
+          : activeRun?.state === "draft" || activeRun?.state === "awaiting-permission" ? 4
+            : projectRuntime?.status === "running" ? 3
+              : projectRuntime?.status === "starting" || projectRuntime?.status === "installing" || selectedProjectId ? 2
+                : 1;
+  // Workflow-guide step 4 ("describe the test goal"): focus the left-bar
+  // requirement composer so the user lands on the input instead of hunting
+  // for it once the project is running and the browser is loaded.
+  useEffect(() => {
+    if (currentFlowStep === 4) requirementComposerRef.current?.focus();
+  }, [currentFlowStep]);
+  // First-run readiness gate: proactively check the container engine so a
+  // missing Docker/Podman surfaces as a prerequisite prompt before the user
+  // tries to start the sandbox (step 2), not as a mid-startup failure.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const data = await getReadiness().catch(() => null);
+      if (!cancelled && data) setDockerReadiness(data.docker);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedProjectId]);
+  // The three prerequisites for entering step 2 (sandbox run). Any missing
+  // one is surfaced as a clear prompt instead of letting the user start and
+  // fail halfway. Docker-pending (null) is not yet a blocker.
+  const readinessBlockers: string[] = [];
+  if (!hasSelectedProject) readinessBlockers.push("上传或选择一个项目");
+  if (!credentials.length) readinessBlockers.push("配置模型凭据（OpenAI-compatible key，用于功能识别与规划）");
+  if (dockerReadiness && !dockerReadiness.available) readinessBlockers.push(`启动 ${dockerReadiness.engine}（容器运行时不可用）`);
+  const readinessReady = readinessBlockers.length === 0;
   const loginServiceUnavailable = runIsBlocked &&
     /resolveLogin[\s\S]{0,180}(retry|timeout|timed out|network|refused|502|503|unavailable)|maximum retry count[\s\S]{0,80}resolveLogin/i.test(runDiagnosticText);
   const authBlockDetected = runIsBlocked && !loginServiceUnavailable &&
@@ -892,8 +950,9 @@ export function App() {
     }
   }
 
-  async function openCodeRepairWorkspace() {
-    if (!activeRunId) {
+  async function openCodeRepairWorkspace(targetRunId?: string) {
+    const repairRunId = targetRunId ?? activeRunId;
+    if (!repairRunId) {
       setCentreSurface("code");
       if (!selectedProjectId || repairBusy) {
         setMessage(selectedProjectId ? "代码沙盒正在准备，请稍候。" : "请先选择项目，再打开代码沙盒。");
@@ -963,7 +1022,7 @@ export function App() {
       createdAt: new Date().toISOString()
     }]);
     try {
-      const response = await createRunRepair(activeRunId, {
+      const response = await createRunRepair(repairRunId, {
         autoAnalyze: true,
         credentialId: defaultCredential?.id,
         summary: "根据当前运行的机器门禁、失败断言和证据定位最小修复。"
@@ -971,7 +1030,7 @@ export function App() {
       setRepairSession(response.repair);
       setRepairWorkspaceOpen(true);
       setMessage(response.repair.summary);
-      const calls = await getRunLlmCalls(activeRunId).catch(() => null);
+      const calls = await getRunLlmCalls(repairRunId).catch(() => null);
       const repairCall = [...(calls?.calls ?? [])].reverse().find((call) => call.purpose === "repairing");
       const changedFiles = response.repair.files.map((file) => `${file.path}（${file.additions}+/${file.deletions}-，${file.risk}）`);
       setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
@@ -1044,6 +1103,15 @@ export function App() {
     if (!repairSession) throw new Error("repair_session_not_selected");
     const response = await validateRepair(repairSession.id, allowNetworkInstall);
     setRepairSession(response.repair);
+    // A passed repair retest overturns the failed conclusion for the repaired
+    // feature. Map the repair session's run (the failed child run) back to its
+    // scenarioId via the run's conclusions, so the feature list can turn green.
+    if (response.repair.validation?.status === "passed") {
+      const scenarioId = result?.conclusions?.find((conclusion) => conclusion.runId === response.repair.runId)?.scenarioId;
+      if (scenarioId) {
+        setRepairVerifiedScenarioIds((current) => new Set([...current, scenarioId]));
+      }
+    }
     return response.repair;
   }
 
@@ -1274,6 +1342,40 @@ export function App() {
     if (removed.scenarioId && removed.scenarioId === scenarioId) setScenarioId("");
     setFlowDeleteReadyId(null);
     setMessage(`已从本次测试计划排除“${removed.title}”。不会修改项目代码。`);
+  }
+
+  function editPlanningFlowTitle(flowId: string, title: string) {
+    setPlanningResult((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        businessFlows: current.businessFlows.map((flow) => flow.id === flowId ? { ...flow, title } : flow)
+      };
+    });
+  }
+
+  function addPlanningFlow(title: string) {
+    setPlanningResult((current) => {
+      if (!current) return current;
+      const flow: PlannedBusinessFlow = {
+        id: `manual_${Math.random().toString(36).slice(2, 10)}`,
+        title,
+        kind: "scenario",
+        target: "",
+        status: "needs-input",
+        confidence: "low",
+        reason: "用户手动添加的功能，待确认页面/控件/预期结果。",
+        requiredInformation: []
+      };
+      const businessFlows = [...current.businessFlows, flow];
+      const needsInput = businessFlows.filter((item) => item.status === "needs-input").length;
+      return {
+        ...current,
+        businessFlows,
+        coverage: { ...current.coverage, discovered: businessFlows.length, needsInput }
+      };
+    });
+    setMessage(`已添加自定义功能“${title}”。`);
   }
 
   function openCredentialSettings() {
@@ -2572,6 +2674,20 @@ export function App() {
       setAppUrl(saved.project.frontendUrl);
 
       setProjectLaunchPhase("正在检查已有沙盒；仅在未运行时启动项目…");
+      // First-run readiness gate: refuse to enter step 2 unless Docker is
+      // available and an LLM credential is configured. Surface the missing
+      // prerequisites instead of starting and failing halfway (Docker) or
+      // succeeding the sandbox only to stall at feature identification (LLM).
+      const freshDocker = await getReadiness().catch(() => null);
+      if (freshDocker) setDockerReadiness(freshDocker.docker);
+      const startBlockers: string[] = [];
+      if (!credentials.length) startBlockers.push("配置模型凭据（OpenAI-compatible key）");
+      if (freshDocker && !freshDocker.docker.available) startBlockers.push(`启动 ${freshDocker.docker.engine}（容器运行时不可用）`);
+      if (startBlockers.length) {
+        setProjectLaunchPhase("");
+        setMessage(`未进入沙盒运行，请先${startBlockers.join("、")}。`);
+        return;
+      }
       const accepted = await startProjectAsync(saved.project.id);
       if (!isCurrentDiagnosis()) return;
       setProjectRuntime(accepted.runtime);
@@ -4866,10 +4982,39 @@ export function App() {
         <div className="drawer-body">
           <section className="workflow-guide" aria-label="测试流程">
             <strong>按这个顺序完成测试</strong>
-            <span>1. 接入项目</span>
-            <span>2. 对话规划</span>
-            <span>3. 确认计划</span>
-            <span>4. 审批计划并执行</span>
+            {(() => {
+              const flowStep = currentFlowStep;
+              const steps = [
+                "1. 上传项目",
+                "2. 沙盒运行",
+                "3. 内置浏览器",
+                "4. 描述测试目标",
+                "5. 识别功能列表",
+                "6. 逐条测试",
+                "7. 修复失败（可选）",
+                "8. 测试报告"
+              ];
+              return (
+                <>
+                  <ol className="workflow-guide__steps">
+                    {steps.map((label, idx) => {
+                      const n = idx + 1;
+                      const stateCls = n === flowStep ? "is-current" : n < flowStep ? "is-done" : "";
+                      return <li key={label} className={stateCls}>{label}</li>;
+                    })}
+                  </ol>
+                  {currentFlowStep <= 2 && !readinessReady ? (
+                    <div className="readiness-gate" role="alert">
+                      <strong>进入第 2 步前需先就绪：</strong>
+                      <ul>
+                        {readinessBlockers.map((item) => <li key={item}>{item}</li>)}
+                      </ul>
+                      {dockerReadiness === null ? <p className="readiness-gate__pending">正在检查容器运行时…</p> : null}
+                    </div>
+                  ) : null}
+                </>
+              );
+            })()}
           </section>
 
           <ProjectWizardPanel
@@ -4939,6 +5084,24 @@ export function App() {
                   <article><strong>{planningResult.projectOverview?.statusCounts?.["needs-confirmation"] ?? planningResult.businessFunctions?.filter((feature) => feature.status === "needs-confirmation").length ?? 0}</strong><span>需要补充条件</span></article>
                   <article><strong>{((planningResult.projectOverview?.statusCounts?.blocked ?? 0) + (planningResult.projectOverview?.statusCounts?.unknown ?? 0)) || (planningResult.businessFunctions?.filter((feature) => feature.status === "blocked" || feature.status === "unknown").length ?? 0)}</strong><span>待确认</span></article>
                 </div>
+                {planningResult.businessFlows?.length && !planningConfirmed ? (
+                  <PlanningFlowEditor
+                    flows={planningResult.businessFlows}
+                    disabled={planningAutomationBusy}
+                    onExclude={(flowId) => excludePlanningFlow(flowId)}
+                    onEditTitle={(flowId, title) => editPlanningFlowTitle(flowId, title)}
+                    onAdd={(title) => addPlanningFlow(title)}
+                  />
+                ) : null}
+                {(activeRun || result) && planningResult?.businessFlows?.some((flow) => flow.scenarioId) ? (
+                  <FeatureTestProgress
+                    flows={planningResult.businessFlows}
+                    conclusions={result?.conclusions ?? []}
+                    runActive={Boolean(activeRun?.state) && !["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(activeRun?.state ?? "")}
+                    repairVerifiedScenarioIds={repairVerifiedScenarioIds}
+                    onRepair={(runId) => void openCodeRepairWorkspace(runId)}
+                  />
+                ) : null}
                 {planningResult.businessGraph ? (
                   <details className="planning-technical-basis">
                     <summary>查看处理依据</summary>
@@ -5066,8 +5229,9 @@ export function App() {
               </section>
             )}
 
-            <form className="planning-composer" onSubmit={(event) => { event.preventDefault(); void continueTestPlanning(); }}>
+            <form className={`planning-composer${currentFlowStep === 4 ? " is-flow-focus" : ""}`} onSubmit={(event) => { event.preventDefault(); void continueTestPlanning(); }}>
               <textarea
+                ref={requirementComposerRef}
                 aria-label="描述测试目标"
                 value={planningInput}
                 onChange={(event) => setPlanningInput(event.target.value)}
@@ -5923,7 +6087,7 @@ export function App() {
                   </button>
                 </div>
               ) : null}
-              <form className="planning-composer" onSubmit={(event) => { event.preventDefault(); void continueTestPlanning(); }}>
+              <form className={`planning-composer${currentFlowStep === 4 ? " is-flow-focus" : ""}`} onSubmit={(event) => { event.preventDefault(); void continueTestPlanning(); }}>
                 <textarea aria-label="描述测试目标" value={planningInput} onChange={(event) => setPlanningInput(event.target.value)} rows={3} placeholder="例如：全面灰度测试；重点检查登录、权限、数据刷新和报告生成。" />
                 <button className="primary" type="submit" disabled={planningBusy || !planningInput.trim()}><Send size={15} />{planningBusy ? "规划中" : "发送"}</button>
               </form>
@@ -6091,7 +6255,40 @@ export function App() {
                 {agentProjection.recoveryResult?.userMessage ? <span>{agentProjection.recoveryResult.userMessage}</span> : null}
               </div>
             ) : null}
-            <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
+            <div className="run-view-toggle" role="tablist" aria-label="运行视图模式">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={runViewMode === "dialogue"}
+                className={`run-view-toggle__btn${runViewMode === "dialogue" ? " is-active" : ""}`}
+                onClick={() => setRunViewMode("dialogue")}
+              >对话</button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={runViewMode === "trajectory"}
+                className={`run-view-toggle__btn${runViewMode === "trajectory" ? " is-active" : ""}`}
+                onClick={() => setRunViewMode("trajectory")}
+              >轨迹</button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={runViewMode === "report"}
+                className={`run-view-toggle__btn${runViewMode === "report" ? " is-active" : ""}`}
+                onClick={() => setRunViewMode("report")}
+              >报告</button>
+            </div>
+            {runViewMode === "dialogue" ? (
+              <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
+            ) : runViewMode === "trajectory" ? (
+              <TrajectoryPanel runId={activeRunId} loopEvents={displayedLoopEvents ?? []} />
+            ) : (
+              <FeatureTestReport
+                flows={planningResult?.businessFlows ?? []}
+                conclusions={result?.conclusions ?? []}
+                onViewTrajectory={() => setRunViewMode("trajectory")}
+              />
+            )}
           </section>
 
           <details className="advanced-section">

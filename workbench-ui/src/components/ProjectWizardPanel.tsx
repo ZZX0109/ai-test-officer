@@ -360,6 +360,15 @@ export function ProjectWizardPanel({
           {detection.warnings.map((warning) => (
             <p key={warning}>注意：{warning}</p>
           ))}
+          {detection.externalServiceDependencies?.length ? (
+            <div className="wizard-external-deps" role="alert">
+              <strong>外部依赖（沙盒未提供）</strong>
+              <p>该项目引用了沙盒不提供的外部数据库 / 缓存 / 队列 / 搜索 / 云服务。直接启动会失败或降级运行，请先配置或知悉：</p>
+              <ul>
+                {detection.externalServiceDependencies.map((dep) => <li key={dep}>{dep}</li>)}
+              </ul>
+            </div>
+          ) : null}
           {detection.exists ? (
             <details className="wizard-details">
               <summary><Info size={14} /> 查看系统识别到的技术信息</summary>

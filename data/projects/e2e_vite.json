@@ -1,0 +1,138 @@
+{
+  "id": "e2e_vite",
+  "name": "e2e vite",
+  "projectPath": "/tmp/e2e-vite",
+  "allowExternalProjectPath": true,
+  "installCommand": "npm install",
+  "installCommandSpec": {
+    "executable": "npm",
+    "args": [
+      "install"
+    ],
+    "timeoutMs": 300000
+  },
+  "startCommand": "",
+  "processes": [
+    {
+      "name": "web",
+      "command": "npm run dev -- --host 0.0.0.0 --port 5173 --strictPort",
+      "healthCheckUrl": "http://127.0.0.1:5173",
+      "required": true,
+      "commandSpec": {
+        "executable": "npm",
+        "args": [
+          "run",
+          "dev",
+          "--",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "5173",
+          "--strictPort"
+        ],
+        "timeoutMs": 300000
+      }
+    }
+  ],
+  "healthCheckUrl": "http://127.0.0.1:5173",
+  "frontendUrl": "http://127.0.0.1:5173",
+  "login": {
+    "method": "none"
+  },
+  "apiCredentialRequirements": [],
+  "apiCredentialBindings": [],
+  "env": {},
+  "timeoutMs": 30000,
+  "manifest": {
+    "schemaVersion": "1.0",
+    "projectId": "e2e_vite",
+    "workspaceRoot": ".",
+    "commands": {
+      "install": {
+        "executable": "npm",
+        "args": [
+          "install"
+        ],
+        "timeoutMs": 300000
+      },
+      "start": {
+        "executable": "npm",
+        "args": [
+          "run",
+          "dev",
+          "--",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "5173",
+          "--strictPort"
+        ],
+        "timeoutMs": 300000
+      }
+    },
+    "commandAllowlist": [
+      "npm",
+      "npx",
+      "node",
+      "pnpm",
+      "yarn",
+      "python",
+      "python3",
+      "pip",
+      "uv",
+      "uvicorn"
+    ],
+    "ports": [
+      {
+        "name": "frontend",
+        "env": "FRONTEND_PORT",
+        "purpose": "frontend"
+      }
+    ],
+    "healthCheck": {
+      "path": "/",
+      "timeoutMs": 30000
+    },
+    "environmentAllowlist": [
+      "NODE_ENV",
+      "FRONTEND_PORT",
+      "BACKEND_PORT"
+    ],
+    "network": {
+      "mode": "allow-target",
+      "allowedHosts": [
+        "127.0.0.1",
+        "localhost"
+      ]
+    },
+    "fixtures": [],
+    "apiOperations": [],
+    "dataSources": [],
+    "backgroundTasks": [],
+    "capabilities": {
+      "browser": true,
+      "desktop": false,
+      "allowedBundleIds": []
+    },
+    "execution": {
+      "mode": "oci",
+      "image": "node:22-bookworm-slim",
+      "engine": "docker"
+    },
+    "budget": {
+      "runTimeoutMs": 1200000,
+      "prepareTimeoutMs": 300000,
+      "scenarioTimeoutMs": 300000,
+      "stepTimeoutMs": 45000,
+      "maxSteps": 50,
+      "maxAttempts": 2,
+      "maxScreenshots": 100,
+      "maxVideoBytes": 524288000,
+      "maxLogBytes": 52428800,
+      "maxArtifactBytes": 1073741824,
+      "maxConcurrency": 2
+    }
+  },
+  "createdAt": "2026-08-18T15:24:00.867Z",
+  "updatedAt": "2026-08-18T15:59:24.244Z"
+}

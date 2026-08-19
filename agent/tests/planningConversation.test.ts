@@ -59,6 +59,13 @@ export function testPlanningConversation() {
   assert.equal(first.phase, "draft-ready");
   assert.match(first.clarificationQuestions[0] ?? "", /测试账号|未登录/);
   assert.ok(first.businessFlows.every((flow) => flow.status === "auto-bindable"));
+  // API flows must read as user-facing functions, not bare routes: no HTTP
+  // method, no leading slash or /api/ path segment in the title.
+  const apiFlow = first.businessFlows.find((flow) => flow.kind === "api");
+  assert.ok(apiFlow, "expected at least one api flow");
+  assert.match(apiFlow!.title, /接口流程$/);
+  assert.doesNotMatch(apiFlow!.title, /^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b/i, "api flow title must not expose the raw HTTP method");
+  assert.doesNotMatch(apiFlow!.title, /\/api\//, "api flow title must not expose the raw /api/ route prefix");
   assert.match(first.plan.levels[0]?.paths[0]?.steps.join("\n") ?? "", /自动发现并绑定/);
 
   const semanticInventory = buildPlanningConversation({

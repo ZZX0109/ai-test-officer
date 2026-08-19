@@ -2,7 +2,7 @@
 
 > 一个以真实执行和可追溯证据为核心的 AI 测试工作台：选择项目、描述需求、确认计划，让系统在隔离沙盒中启动项目、执行浏览器路径、采集证据并给出可信裁决。
 
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Playwright](https://img.shields.io/badge/Playwright-browser%20evidence-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
 [![Docker](https://img.shields.io/badge/Sandbox-Docker%20%2F%20Podman-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
@@ -399,7 +399,7 @@ SSE 会实时推送 `llm.call.*`、`artifact.committed`、`proof.*` 和
 LangGraph 管理 `intake → discover → coverage → plan → compile → approval → sandbox → execute → gate → triage → repair → finalize` 的执行游标、人工中断和恢复；LangChain 负责结构化模型输出、工具 schema、预算和脱敏。两者不会替换 Playwright、BullMQ、Artifact v2 或确定性 Gate。
 
 - `thread_id` 固定为 `runId`，生产 checkpoint 保存在 PostgreSQL 的独立 `langgraph` schema。
-- PostgreSQL Run Event 仍是业务状态唯一事实源；checkpoint 无权直接写 `finalStatus`。
+- 生产环境以 PostgreSQL Run Event 作为业务状态事实源；开发环境（未设 `DATABASE_URL`）回退到本地 SQLite，其余证据/覆盖/凭据 Store 当前为 JSON 文件 + 内存缓存，统一到同一后端的改造进行中（见存储章节）。checkpoint 无权直接写 `finalStatus`。
 - `POST /v1/runs` 只负责认证、幂等创建、写入事件并启动 Graph，不在路由内同步跑完整 Planner。
 - allowlist 项目可使用 `active` Graph 作为正式调度权威；默认仍为 `shadow`，直至 100 次对照验收完成。
 - Graph `execute` 节点通过 BullMQ 投递 path child run，worker 结果以持久化事件恢复同一 thread。
@@ -501,7 +501,7 @@ ai-test-officer/
 
 ### 环境要求
 
-- Node.js 20+
+- Node.js 22.5+（Agent 状态存储使用 `node:sqlite`，22.5 起免实验性 flag；推荐 24，见 `.nvmrc`）
 - npm 10+
 - Docker Desktop 或 Podman（外部项目沙盒必需）
 - Playwright Chromium

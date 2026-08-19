@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=22"
+    "node": ">=22.5.0"
   },
   "workspaces": [
     "packages/contracts",
@@ -56,9 +56,10 @@
     "reports:retention:archive-local": "node scripts/reports-retention.mjs --apply --archive --prune-local-stores",
     "lint": "eslint \"agent/src/**/*.ts\" \"packages/*/src/**/*.ts\" \"workbench-ui/src/**/*.{ts,tsx}\" \"app-under-test/src/**/*.{ts,tsx}\"",
     "quality:contracts": "node scripts/quality-contract.mjs",
+    "size-guard": "node scripts/file-size-guard.mjs",
     "test:workbench-e2e": "node scripts/workbench-e2e.mjs",
     "test:mutation": "node scripts/mutation-test.mjs",
-    "quality": "npm run lint && npm run quality:contracts && npm run typecheck && npm test && npm run test:mutation",
+    "quality": "npm run lint && npm run size-guard && npm run quality:contracts && npm run typecheck && npm test && npm run test:mutation",
     "clean": "rm -rf agent/dist app-under-test/dist workbench-ui/dist"
   },
   "devDependencies": {

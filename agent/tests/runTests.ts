@@ -19,8 +19,23 @@ import { testArtifactIntegrity } from "./artifactIntegrity.test.js";
 import { testJudgeSchema } from "./judgeSchema.test.js";
 import { testLocalConfigInit } from "./localConfigInit.test.js";
 import { testPlanStepSchema } from "./planStepSchema.test.js";
-import { testProjectDetectionWizard } from "./projectDetection.test.js";
+import { testProjectDetectionWizard, testExternalServiceDependencyDetection } from "./projectDetection.test.js";
 import { testProjectAdapter } from "./projectAdapter.test.js";
+import {
+  testPrivateDependencyBlockerDetectsNpmPrivateRegistryWithoutToken,
+  testPrivateDependencyBlockerPassesNpmPrivateRegistryWithToken,
+  testPrivateDependencyBlockerIgnoresPublicNpmRegistry,
+  testPrivateDependencyBlockerDetectsPipPrivateIndex,
+  testPrivateDependencyBlockerDetectsPipGitSshDependency,
+  testPrivateDependencyBlockerPassesPublicPipRequirements,
+  testPrivateDependencyBlockerPassesWhenNoDepConfig,
+  testPrivateDependencyBlockerDetectsGoPrivateGitReplace,
+  testPrivateDependencyBlockerDetectsCargoPrivateGitDep,
+  testPrivateDependencyBlockerDetectsMavenPrivateRepo,
+  testPrivateDependencyBlockerDetectsBundlerPrivateGit,
+  testPrivateDependencyBlockerDetectsComposerPrivateRepo,
+  testPrivateDependencyBlockerPassesPublicMavenCentral
+} from "./dependencyReadiness.test.js";
 import { testProjectLoginStore } from "./projectLoginStore.test.js";
 import { testReportRendererRedaction } from "./reportRenderer.test.js";
 import { testReportsRetention } from "./reportsRetention.test.js";
@@ -76,6 +91,7 @@ import { testBrowserAgentLoop } from "./browserAgentLoop.test.js";
 import { testBusinessCapabilityGraph } from "./businessCapabilityGraph.test.js";
 import { testPlanningInventoryStore } from "./planningInventoryStore.test.js";
 import { testBusinessFunctionCompiler } from "./businessFunctionCompiler.test.js";
+import { testShellArgvSafety } from "./shellArgv.test.js";
 
 async function main() {
   await testBrowserAgentLoop();
@@ -90,6 +106,7 @@ async function main() {
   testProofBundleIntegrity();
   await testConnectorEnvelope();
   await testProjectDetectionWizard();
+  await testExternalServiceDependencyDetection();
   await testProjectFolderBrowser();
   await testRepairWorkspace();
   await testProofGraph();
@@ -115,6 +132,19 @@ async function main() {
   await testCiCliErrorReports();
   await testCiShellExitContract();
   await testProjectAdapter();
+  await testPrivateDependencyBlockerDetectsNpmPrivateRegistryWithoutToken();
+  await testPrivateDependencyBlockerPassesNpmPrivateRegistryWithToken();
+  await testPrivateDependencyBlockerIgnoresPublicNpmRegistry();
+  await testPrivateDependencyBlockerDetectsPipPrivateIndex();
+  await testPrivateDependencyBlockerDetectsPipGitSshDependency();
+  await testPrivateDependencyBlockerPassesPublicPipRequirements();
+  await testPrivateDependencyBlockerPassesWhenNoDepConfig();
+  await testPrivateDependencyBlockerDetectsGoPrivateGitReplace();
+  await testPrivateDependencyBlockerDetectsCargoPrivateGitDep();
+  await testPrivateDependencyBlockerDetectsMavenPrivateRepo();
+  await testPrivateDependencyBlockerDetectsBundlerPrivateGit();
+  await testPrivateDependencyBlockerDetectsComposerPrivateRepo();
+  await testPrivateDependencyBlockerPassesPublicMavenCentral();
   await testProjectLoginStore();
   await testExternalProjectSmoke();
   await testInvestmentAgentWorkflowExternalSmoke();
@@ -156,6 +186,7 @@ async function main() {
   await testLocalConfigInit();
   await testServiceHealthContract();
   await testRunBundleArchive();
+  testShellArgvSafety();
   await import("../src/selfTest.js");
 }
 

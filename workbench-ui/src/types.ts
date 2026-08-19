@@ -976,6 +976,10 @@ export interface ProjectDetectionResult {
   healthCandidates: string[];
   warnings: string[];
   plainLanguageFixes: string[];
+  /** External DB / cache / queue / search / cloud-store the project references
+   * but the sandbox does not provision. Surfaced at the upload step so the user
+   * knows before starting, instead of crashing or silently degrading. */
+  externalServiceDependencies?: string[];
 }
 
 export interface ProjectDiagnosis {

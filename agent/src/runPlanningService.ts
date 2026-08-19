@@ -356,6 +356,28 @@ export async function planRunFromDurableInput(runId: string): Promise<RunProject
       }
     } catch (error) {
       const reason = error instanceof Error ? error.message : "llm_planner_failed";
+      // A missing LLM credential is a first-run configuration blocker, not a
+      // transient planner failure. Surfacing it here (instead of silently
+      // falling back to a deterministic scenario plan) lets the Workbench gate
+      // step 5 on "configure a model credential" rather than producing a
+      // degraded feature list that misrepresents the project's real surface.
+      // Transient LLM failures (network/schema) below still fall back to a
+      // deterministic scenario when one is available.
+      if (reason === "llm_not_configured") {
+        return appendPlanningEvent(runId, "run_blocked", "llm-credential-missing", {
+          finalStatus: "blocked",
+          error: "llm_credential_missing",
+          message: "未配置模型凭据：第 5 步（LLM 识别功能列表）需要 OpenAI-compatible API Key。请先在凭据管理中配置一个默认凭据，再重新发起规划。",
+          provenance: planProvenanceSchema.parse({
+            source: "llm",
+            promptVersion,
+            modelProfileId: input.modelProfileId,
+            compilationStatus: "rejected",
+            fallbackReason: "llm_not_configured"
+          }),
+          impactAnalysis
+        });
+      }
       const callResult = llmCallSchema.safeParse(
         typeof error === "object" && error !== null && "llmCall" in error ? error.llmCall : undefined
       );

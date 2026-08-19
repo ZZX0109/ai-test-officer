@@ -142,7 +142,8 @@ import {
   stopProject,
   testProjectConnection,
   resolveProjectTarget,
-  toTargetProjectConfig
+  toTargetProjectConfig,
+  containerEngineIsReady
 } from "./projectAdapter.js";
 import { detectProject, detectProjectManifest, diagnoseProject } from "./projectDetection.js";
 import { createRuntimeRecoveryAdvice } from "./runtimeStartupAdvisor.js";
@@ -221,6 +222,8 @@ import {
 } from "./browser-agent/store.js";
 import {
   acquireBrowserControl,
+  closeBrowserAgentSession,
+  closeBrowserSessionsForProject,
   executeUserBrowserInput,
   releaseBrowserControl,
   resizeManagedBrowserViewport,
@@ -1325,6 +1328,14 @@ for (const [action, eventType] of Object.entries(controlEvents)) {
       }
       if (!run) throw new Error("run_control_retry_exhausted");
       const replayed = isIdempotentReplay(run);
+      // Cancel/stop must terminate the shared browser context too, not only
+      // append the run_cancelled event. An interrupted Graph does not always
+      // reach its browser-cleanup node, so without this the Playwright session
+      // leaks until its lease expires. closeBrowserAgentSession is idempotent
+      // (no session -> read-only no-op), so this is safe on any run state.
+      if (!replayed && eventType === "run_cancelled") {
+        await closeBrowserAgentSession(run.id).catch(() => undefined);
+      }
       if (!replayed && eventType === "decision_overridden" && run.resultRunId) {
         await appendHumanOverrideConclusion({
           resultRunId: run.resultRunId,
@@ -3159,6 +3170,10 @@ app.post("/api/projects/:id/ai-start-recovery", async (req, res, next) => {
 
 app.post("/api/projects/:id/stop", async (req, res, next) => {
   try {
+    // Stopping the project runtime must also tear down any live browser
+    // contexts bound to it; otherwise Playwright sessions linger against a dead
+    // origin until their lease expires.
+    await closeBrowserSessionsForProject(req.params.id).catch(() => undefined);
     res.json({ runtime: await stopProject(req.params.id) });
   } catch (error) {
     next(error);
@@ -4140,6 +4155,20 @@ app.get("/api/run-history", async (req, res, next) => {
 app.get("/api/storage/status", async (_req, res, next) => {
   try {
     res.json({ storage: await storageStatus() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// First-run readiness gate: the Workbench checks Docker/Podman availability
+// BEFORE attempting to start a project (step 2), so a missing runtime surfaces
+// as a clear prerequisite prompt instead of failing mid-startup. The engine
+// defaults to docker; podman is honoured when a project declares it.
+app.get("/api/readiness", async (req, res, next) => {
+  try {
+    const engine = req.query.engine === "podman" ? "podman" : "docker" as const;
+    const available = await containerEngineIsReady(engine);
+    res.json({ docker: { available, engine } });
   } catch (error) {
     next(error);
   }

@@ -420,6 +420,18 @@ export function RepairWorkspace({
           >
             应用到原项目
           </button>
+          <button
+            type="button"
+            className="repair-discard-button"
+            disabled={Boolean(busy)}
+            onClick={() => {
+              if (!window.confirm("丢弃本次修复？沙盒副本与补丁将不应用到原项目，原项目保持不变。")) return;
+              onClose();
+            }}
+            title="不应用任何改动，关闭修复工作区"
+          >
+            丢弃修复
+          </button>
         </div> : <span>保存按钮只更新当前沙盒副本。</span>}
       </footer>
     </section>

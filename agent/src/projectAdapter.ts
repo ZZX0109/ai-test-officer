@@ -19,6 +19,9 @@ import { commandSpecSchema, projectManifestSchema, type CommandSpec } from "@ai-
 import { buildOciInvocation, classifyRuntimeFailure } from "@ai-test-officer/execution-worker";
 import { getProjectLoginSecret } from "./projectLoginStore.js";
 import { decrypt, getCredential } from "./credentialStore.js";
+import { parseLegacyCommandString } from "./shellArgv.js";
+import { ensureContainerImageReady } from "./sandboxImageReadiness.js";
+import { ensureDependenciesInstallable } from "./dependencyReadiness.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const projectDir = path.join(rootDir, "data", "projects");
@@ -993,7 +996,7 @@ async function inspectManagedContainerFailure(running: RunningProject | undefine
   return undefined;
 }
 
-async function containerEngineIsReady(engine: "docker" | "podman") {
+export async function containerEngineIsReady(engine: "docker" | "podman") {
   const result = await captureProcessOutput(engine, ["info"], 5_000, 64 * 1024);
   return result.exitCode === 0;
 }
@@ -1294,13 +1297,19 @@ function spawnManagedProcess(input: {
       return spawned;
     })()
     : typeof input.command === "string"
-    ? spawn(input.command, {
-      cwd: input.cwd,
-      shell: true,
-      detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: commandEnv(input.project)
-    })
+    ? (() => {
+      const parsed = parseLegacyCommandString(input.command);
+      if (input.project.manifest && !input.project.manifest.commandAllowlist.includes(parsed.executable)) {
+        throw new Error(`command_not_allowed:${parsed.executable}`);
+      }
+      return spawn(parsed.executable, parsed.args, {
+        cwd: input.cwd,
+        shell: false,
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...commandEnv(input.project), ...parsed.env }
+      });
+    })()
     : (() => {
       const command = commandSpecSchema.parse(input.command);
       if (input.project.manifest && !input.project.manifest.commandAllowlist.includes(command.executable)) {
@@ -1594,6 +1603,19 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
   }
   const containerRuntimeFailure = await ensureContainerEngineReady(project);
   if (containerRuntimeFailure) return containerRuntimeFailure;
+  const containerImageFailure = await ensureContainerImageReady(project, {
+    captureProcessOutput,
+    runningProjects,
+    runtimeTiming,
+    now,
+    redactText
+  });
+  if (containerImageFailure) return containerImageFailure;
+  // Pre-flight private-dependency detection: a project needing a private
+  // registry / SSH key / private index must fail fast here with a clear
+  // blocker, not install halfway inside the sandbox and exit generically.
+  const privateDependencyFailure = await ensureDependenciesInstallable(project, cwd, now);
+  if (privateDependencyFailure) return privateDependencyFailure;
   const recoveredSandbox = await inspectRunningSandbox(project);
   if (recoveredSandbox) {
     runningProjects.set(id, recoveredSandbox.running);

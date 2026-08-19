@@ -1,0 +1,141 @@
+{
+  "id": "e2e_fastapi",
+  "name": "e2e fastapi",
+  "projectPath": "/tmp/e2e-fastapi",
+  "allowExternalProjectPath": true,
+  "installCommand": "pip install -r requirements.txt",
+  "installCommandSpec": {
+    "executable": "pip",
+    "args": [
+      "install",
+      "-r",
+      "requirements.txt"
+    ],
+    "timeoutMs": 300000
+  },
+  "startCommand": "",
+  "processes": [
+    {
+      "name": "api",
+      "command": "python -m uvicorn main:app --host 0.0.0.0 --port 8000",
+      "healthCheckUrl": "http://127.0.0.1:8000",
+      "required": true,
+      "commandSpec": {
+        "executable": "python",
+        "args": [
+          "-m",
+          "uvicorn",
+          "main:app",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000"
+        ],
+        "timeoutMs": 300000
+      }
+    }
+  ],
+  "healthCheckUrl": "http://127.0.0.1:8000/api/health",
+  "frontendUrl": "http://127.0.0.1:8000",
+  "backendUrl": "http://127.0.0.1:8000/api/health",
+  "login": {
+    "method": "none"
+  },
+  "apiCredentialRequirements": [],
+  "apiCredentialBindings": [],
+  "env": {},
+  "timeoutMs": 30000,
+  "manifest": {
+    "schemaVersion": "1.0",
+    "projectId": "e2e_fastapi",
+    "workspaceRoot": ".",
+    "commands": {
+      "install": {
+        "executable": "pip",
+        "args": [
+          "install",
+          "-r",
+          "requirements.txt"
+        ],
+        "timeoutMs": 300000
+      },
+      "start": {
+        "executable": "python",
+        "args": [
+          "-m",
+          "uvicorn",
+          "main:app",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000"
+        ],
+        "timeoutMs": 300000
+      }
+    },
+    "commandAllowlist": [
+      "python",
+      "python3",
+      "pip",
+      "uv",
+      "uvicorn"
+    ],
+    "ports": [
+      {
+        "name": "frontend",
+        "env": "FRONTEND_PORT",
+        "purpose": "frontend"
+      },
+      {
+        "name": "backend",
+        "env": "BACKEND_PORT",
+        "purpose": "backend"
+      }
+    ],
+    "healthCheck": {
+      "path": "/api/health",
+      "timeoutMs": 30000
+    },
+    "environmentAllowlist": [
+      "NODE_ENV",
+      "FRONTEND_PORT",
+      "BACKEND_PORT"
+    ],
+    "network": {
+      "mode": "allow-target",
+      "allowedHosts": [
+        "127.0.0.1",
+        "localhost"
+      ]
+    },
+    "fixtures": [],
+    "apiOperations": [],
+    "dataSources": [],
+    "backgroundTasks": [],
+    "capabilities": {
+      "browser": true,
+      "desktop": false,
+      "allowedBundleIds": []
+    },
+    "execution": {
+      "mode": "oci",
+      "image": "python:3.12-slim-bookworm",
+      "engine": "docker"
+    },
+    "budget": {
+      "runTimeoutMs": 1200000,
+      "prepareTimeoutMs": 300000,
+      "scenarioTimeoutMs": 300000,
+      "stepTimeoutMs": 45000,
+      "maxSteps": 50,
+      "maxAttempts": 2,
+      "maxScreenshots": 100,
+      "maxVideoBytes": 524288000,
+      "maxLogBytes": 52428800,
+      "maxArtifactBytes": 1073741824,
+      "maxConcurrency": 2
+    }
+  },
+  "createdAt": "2026-08-18T15:22:09.207Z",
+  "updatedAt": "2026-08-18T16:12:25.109Z"
+}
