@@ -1,36 +1,41 @@
 {
   "id": "investment_agent_workflow_external",
   "name": "Investment Agent Workflow External Project",
-  "projectPath": "../investment-research-system",
+  "projectPath": "/tmp/external-projects/investment-research-system",
   "allowExternalProjectPath": true,
-  "installCommand": "",
+  "installCommand": "npm ci",
   "startCommand": "",
   "processes": [
     {
-      "name": "investment-agent-api",
-      "command": "npm run dev:api",
-      "commandSpec": { "executable": "npm", "args": ["run", "dev:api"] },
-      "healthCheckUrl": "http://127.0.0.1:8000/api/health",
-      "required": true
-    },
-    {
-      "name": "investment-agent-web",
-      "command": "npm run dev -- --port 5173",
-      "commandSpec": { "executable": "npm", "args": ["run", "dev", "--", "--port", "5173"] },
-      "healthCheckUrl": "http://127.0.0.1:5173",
-      "required": true
+      "name": "app",
+      "command": "python -m uvicorn investment_research.main:app --host 0.0.0.0 --port 8000",
+      "healthCheckUrl": "http://127.0.0.1:8000/health",
+      "required": true,
+      "commandSpec": {
+        "executable": "python",
+        "args": [
+          "-m",
+          "uvicorn",
+          "investment_research.main:app",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000"
+        ],
+        "timeoutMs": 300000
+      }
     }
   ],
-  "healthCheckUrl": "http://127.0.0.1:8000/api/health",
+  "healthCheckUrl": "http://127.0.0.1:8000/health",
   "frontendUrl": "http://127.0.0.1:5173",
   "backendUrl": "http://127.0.0.1:8000/api/health",
   "login": {
-    "method": "form",
-    "usernameEnv": "INVESTMENT_AGENT_WORKFLOW_SMOKE_EMAIL",
-    "passwordEnv": "INVESTMENT_AGENT_WORKFLOW_SMOKE_PASSWORD",
-    "loginUrl": "http://127.0.0.1:5173"
+    "method": "none"
   },
-  "env": {},
+  "env": {
+    "NODE_ENV": "development",
+    "PYTHONPATH": "/workspace/src"
+  },
   "cleanupCommand": "",
   "timeoutMs": 35000,
   "externalSmokeProfile": {
@@ -70,5 +75,128 @@
     ]
   },
   "createdAt": "2026-07-08T00:00:00.000Z",
-  "updatedAt": "2026-07-08T00:00:00.000Z"
+  "updatedAt": "2026-08-24T22:10:22.692Z",
+  "manifest": {
+    "schemaVersion": "1.0",
+    "projectId": "investment_agent_workflow_external",
+    "workspaceRoot": ".",
+    "commands": {
+      "install": {
+        "executable": "npm",
+        "args": [
+          "ci"
+        ],
+        "timeoutMs": 300000
+      },
+      "start": {
+        "executable": "python",
+        "args": [
+          "-m",
+          "uvicorn",
+          "backend.app:app",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000"
+        ],
+        "timeoutMs": 300000
+      },
+      "test": {
+        "executable": "npm",
+        "args": [
+          "run",
+          "test"
+        ],
+        "timeoutMs": 600000
+      }
+    },
+    "commandAllowlist": [
+      "npm",
+      "npx",
+      "node",
+      "pnpm",
+      "yarn",
+      "python",
+      "python3",
+      "pip",
+      "uv",
+      "uvicorn"
+    ],
+    "ports": [
+      {
+        "name": "frontend",
+        "env": "FRONTEND_PORT",
+        "purpose": "frontend"
+      },
+      {
+        "name": "backend",
+        "env": "BACKEND_PORT",
+        "purpose": "backend"
+      }
+    ],
+    "healthCheck": {
+      "path": "/api/health",
+      "timeoutMs": 30000
+    },
+    "environmentAllowlist": [
+      "NODE_ENV",
+      "FRONTEND_PORT",
+      "BACKEND_PORT",
+      "INVESTMENT_RESEARCH_WEB_SEARCH_API_KEY",
+      "INVESTMENT_RESEARCH_WEB_SEARCH_BASE_URL",
+      "INVESTMENT_RESEARCH_WEB_SEARCH_MODEL",
+      "PYTHONPATH",
+      "APP_PORT",
+      "HEALTH_PORT"
+    ],
+    "network": {
+      "mode": "deny",
+      "allowedHosts": [],
+      "enforcement": "none"
+    },
+    "fixtures": [],
+    "apiOperations": [],
+    "dataSources": [],
+    "backgroundTasks": [],
+    "capabilities": {
+      "browser": true,
+      "desktop": false,
+      "allowedBundleIds": []
+    },
+    "execution": {
+      "mode": "oci",
+      "image": "investment-deps:latest",
+      "engine": "docker",
+      "preinstalledDependencies": true
+    },
+    "budget": {
+      "runTimeoutMs": 1200000,
+      "prepareTimeoutMs": 300000,
+      "scenarioTimeoutMs": 300000,
+      "stepTimeoutMs": 45000,
+      "maxSteps": 50,
+      "maxAttempts": 2,
+      "maxScreenshots": 100,
+      "maxVideoBytes": 524288000,
+      "maxLogBytes": 52428800,
+      "maxArtifactBytes": 1073741824,
+      "maxConcurrency": 2
+    }
+  },
+  "installCommandSpec": {
+    "executable": "npm",
+    "args": [
+      "ci"
+    ],
+    "timeoutMs": 300000
+  },
+  "testCommand": "npm run test",
+  "testCommandSpec": {
+    "executable": "npm",
+    "args": [
+      "run",
+      "test"
+    ],
+    "timeoutMs": 600000
+  }
 }
