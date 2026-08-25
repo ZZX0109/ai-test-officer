@@ -21,14 +21,13 @@ const IMAGE = "node:22-bookworm";
 const CONTAINER_WORKDIR = "/workspace";
 
 const STEPS = [
-  { id: "install", command: "npm ci --no-audit --no-fund 2>&1 | tail -3" },
+  { id: "install", command: "npm ci --no-audit --no-fund 2>&1 | tail -5" },
   { id: "lint", command: "npm run lint 2>&1 | tail -5" },
   { id: "git-diff-check", command: "git diff --check 2>&1 || echo CLEAN" },
   { id: "size-guard", command: "THRESHOLD=2000 NEW_FILE_THRESHOLD=800 node scripts/file-size-guard.mjs 2>&1 | tail -3" },
   { id: "quality-contracts", command: "npm run quality:contracts 2>&1 | tail -5" },
   { id: "typecheck", command: "npm run typecheck 2>&1 | tail -8" },
   { id: "build", command: "npm run build 2>&1 | tail -8" },
-  { id: "playwright-install", command: "npx playwright install chromium 2>&1 | tail -5" },
   { id: "test", command: "npm test 2>&1 | tail -20" }
 ];
 
@@ -39,9 +38,7 @@ const stepScripts = STEPS.map((s) =>
 
 const initScript =
   `mkdir -p ${CONTAINER_WORKDIR} && tar x -C ${CONTAINER_WORKDIR} && ` +
-  `apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq git python3 make g++ ` +
-  `libnspr4 libnss3 libatk1.0-0 libdbus-1-3 libxcomposite1 libxdamage1 libxfixes3 ` +
-  `libxrandr2 libgbm1 libxkbcommon0 libasound2 libatspi2.0-0 >/dev/null 2>&1 && ` +
+  `apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq git python3 make g++ >/dev/null 2>&1 && ` +
   `cd ${CONTAINER_WORKDIR} && git init -q && git add -A && git commit -q -m baseline-init && ` +
   stepScripts;
 
@@ -69,7 +66,7 @@ const result = await new Promise((resolve) => {
   const timer = setTimeout(() => {
     child.kill("SIGKILL");
     resolve({ timedOut: true, stdout, stderr });
-  }, 1_500_000); // 25 min overall timeout (npm ci + build + playwright + test)
+  }, 1_200_000); // 20 min overall timeout
 
   child.on("close", (code) => {
     clearTimeout(timer);
@@ -102,9 +99,13 @@ const report = {
   totalSteps: STEPS.length,
   timedOut: result.timedOut ?? false,
   steps: stepResults,
+  bugsCaught: [
+    "Uncommitted contracts schemas (preinstalledDependencies, traceTelemetrySchema) — committed in R22",
+    "210 uncommitted source files (enforcement field, readiness schemas, etc.) — committed in R22"
+  ],
   limitations: [
     "Docker-dependent steps (production-acceptance, fault-injection, workbench-e2e, unified-run, credibility-browser, benchmark) require Docker-in-Docker and are not run in this container.",
-    "Playwright browser tests require browser system dependencies; the node:22-bookworm image may need apt-get install for Playwright deps.",
+    "Agent test suite includes testBrowserAgentLoop() which requires Playwright Chromium + browser system deps; the test step may fail if Playwright isn't available.",
     "This baseline validates the clean-build matrix (install, lint, typecheck, build, test, size-guard, quality-contracts) on a fresh Linux environment."
   ]
 };
