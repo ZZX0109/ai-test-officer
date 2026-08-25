@@ -28,7 +28,7 @@ const STEPS = [
   { id: "quality-contracts", command: "npm run quality:contracts 2>&1 | tail -5" },
   { id: "typecheck", command: "npm run typecheck 2>&1 | tail -8" },
   { id: "build", command: "npm run build 2>&1 | tail -8" },
-  { id: "playwright-install", command: "npx playwright install --with-deps chromium 2>&1 | tail -5" },
+  { id: "playwright-install", command: "npx playwright install chromium 2>&1 | tail -5" },
   { id: "test", command: "npm test 2>&1 | tail -20" }
 ];
 
