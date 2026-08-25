@@ -12,7 +12,7 @@
 //
 // Usage: node scripts/external-repair-evidence.mjs
 import { createHash } from "node:crypto";
-import { writeFile, mkdir, readFile, access, readdir, stat } from "node:fs/promises";
+import { writeFile, mkdir, readFile, access, readdir, stat, rm } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import path from "node:path";
 
@@ -64,7 +64,7 @@ async function findSourceFile(workspaceRoot) {
   const nonCriticalExtensions = [".md", ".txt", ".gitignore", ".editorconfig"];
   // Phase 2: fall back to source files if no non-critical files found.
   const sourceExtensions = [".js", ".ts", ".tsx", ".jsx", ".py", ".java", ".json"];
-  const skipDirs = ["node_modules", ".git", "dist", "build", "__pycache__", ".next", ".pytest_cache", ".agents", "egg-info"];
+  const skipDirs = ["node_modules", ".git", ".husky", "dist", "build", "target", "coverage", "__pycache__", ".next", ".pytest_cache", ".agents", "egg-info"];
   // scanChanges counts additions=afterLines.length + deletions=beforeLines.length.
   // For a file with N lines + 1 appended, total changed = (N+1) + N = 2N+1.
   // The default budget is 2000 lines, so keep files under ~900 lines.
@@ -82,7 +82,7 @@ async function findSourceFile(workspaceRoot) {
       let st;
       try { st = await stat(full); } catch { continue; }
       if (st.isDirectory()) {
-        if (skipDirs.includes(name)) continue;
+        if (skipDirs.includes(name) || name.endsWith(".egg-info")) continue;
         const found = await walkWithExts(full, depth + 1, extensions);
         if (found) {
           // Track the smallest file found so far
@@ -116,6 +116,34 @@ async function findSourceFile(workspaceRoot) {
   if (nonCritical) return nonCritical;
   // Fall back to source files
   return walkWithExts(workspaceRoot, 0, sourceExtensions);
+}
+
+async function collectWorkspaceFiles(workspaceRoot) {
+  const files = new Set();
+  const skipDirs = new Set(["node_modules", ".git", ".husky", ".next", "dist", "build", "coverage", "__pycache__", ".pytest_cache"]);
+  async function walk(dir) {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.name.startsWith("." + path.sep) || entry.name === ".DS_Store") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!skipDirs.has(entry.name)) await walk(full);
+      } else if (entry.isFile()) {
+        files.add(full);
+      }
+    }
+  }
+  await walk(workspaceRoot);
+  return files;
+}
+
+async function removeValidationGeneratedFiles(workspaceRoot, baselineFiles, intendedFile) {
+  const afterFiles = await collectWorkspaceFiles(workspaceRoot);
+  for (const file of afterFiles) {
+    if (baselineFiles.has(file) || path.resolve(file) === path.resolve(intendedFile)) continue;
+    await rm(file, { force: true });
+  }
 }
 
 function fileHash(content) {
@@ -168,6 +196,8 @@ async function repairProject(projectId) {
       result.error = "no workspaceRoot in repair session";
       return result;
     }
+
+    const baselineFiles = await collectWorkspaceFiles(workspaceRoot);
 
     // Find an existing source file to modify
     const sourceFile = await findSourceFile(workspaceRoot);
@@ -289,6 +319,27 @@ async function repairProject(projectId) {
       console.log(`  validation settled: ${result.validationStatus} (${Math.round((Date.now() - pollStart) / 1000)}s)`);
     }
 
+    // Validation commands legitimately create build/test outputs. They are
+    // not part of the repair and must not leak into the exported patch or be
+    // counted as repair side effects. Remove only files that did not exist in
+    // the session's baseline workspace; preserve the intended edit.
+    await removeValidationGeneratedFiles(workspaceRoot, baselineFiles, sourceFile);
+
+    // Re-apply and verify the intended edit after cleanup. This protects the
+    // export boundary from a validator that recreated or removed the target
+    // file while still using the session's optimistic version protocol.
+    const finalRead = await api("GET", `/v1/repair-sessions/${result.sessionId}/files/${repairPath}`);
+    const finalVersion = finalRead.json?.file?.version ?? finalRead.json?.version;
+    const finalWrite = await api("PUT", `/v1/repair-sessions/${result.sessionId}/files/${repairPath}`, {
+      content: modifiedContent,
+      expectedVersion: finalVersion
+    });
+    const finalReadBack = await api("GET", `/v1/repair-sessions/${result.sessionId}/files/${repairPath}`);
+    const finalContent = finalReadBack.json?.file?.content ?? finalReadBack.json?.content;
+    if (!finalWrite.ok || finalContent !== modifiedContent) {
+      result.error = `reapply before export failed: ${finalWrite.status} ${JSON.stringify(finalWrite.json).slice(0, 120)}`;
+    }
+
     // Export the patch (this changes status to "exported" — do it last)
     const ex = await api("POST", `/v1/repair-sessions/${result.sessionId}/export`, { format: "patch" });
     if (ex.ok) {
@@ -310,6 +361,8 @@ async function repairProject(projectId) {
       } catch (e) {
         result.error = `patch read: ${String(e.message ?? e).slice(0, 80)}`;
       }
+    } else {
+      result.error = `export failed: ${ex.status} ${JSON.stringify(ex.json).slice(0, 160)}`;
     }
   } catch (e) {
     result.error = String(e.message ?? e).slice(0, 200);
@@ -351,6 +404,7 @@ const report = {
   },
   limitations: [
     "Patches modify an existing source file by appending a harmless comment — this is a real modification to existing code (not a marker file), but the modification itself is not a functional defect fix.",
+    "Validation-generated files are removed before export when they were absent from the session baseline; only the intended existing-file edit is measured as the repair patch.",
     "Side-effect rate is measured as the fraction of changed files in the patch that were NOT intended by the repair (0 = all changes were intended).",
     "Validation runs a child validation run against the modified workspace; the status depends on the project's sandbox readiness.",
     "Rollback is executed by writing back the original content and verified by comparing the SHA256 hash before and after.",
