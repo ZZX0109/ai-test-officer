@@ -86,7 +86,14 @@ const stepResults = STEPS.map((step) => {
 });
 
 const passed = stepResults.filter((r) => r.exitCode === 0).length;
-const platform = `linux/amd64 (${IMAGE})`;
+let platform = `linux (architecture unavailable; ${IMAGE})`;
+try {
+  const imagePlatform = execSync(`docker image inspect --format '{{.Os}}/{{.Architecture}}' ${IMAGE}`, { encoding: "utf8" }).trim();
+  if (/^linux\/(amd64|arm64)$/.test(imagePlatform)) platform = `${imagePlatform} (${IMAGE})`;
+} catch {
+  // The execution report remains useful even when Docker cannot expose image
+  // metadata; do not invent an architecture in that case.
+}
 const report = {
   schemaVersion: "1.0",
   generatedAt: new Date().toISOString(),
