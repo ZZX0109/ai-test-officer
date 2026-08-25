@@ -65,27 +65,60 @@ async function waitForHealth(timeoutMs = 300_000) {
   return false;
 }
 
+async function waitForKeycloak(timeoutMs = 240_000) {
+  // Keycloak imports the realm + starts accepting token requests asynchronously.
+  // The agent-api health can pass before Keycloak is fully ready.
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await fetch(`${oidcBase}/realms/ai-test-officer/protocol/openid-connect/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "password",
+          client_id: "ai-test-officer-local",
+          username: "acceptance-runner",
+          password: "acceptance-runner-change-me"
+        })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.access_token) return json.access_token;
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 4_000));
+  }
+  return null;
+}
+
 const oidcBase = "http://127.0.0.1:18080";
 let accessToken = null;
 
 async function obtainAccessToken() {
-  // Same password-grant flow as production-acceptance.mjs
-  const res = await fetch(`${oidcBase}/realms/ai-test-officer/protocol/openid-connect/token`, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "password",
-      client_id: "ai-test-officer-local",
-      username: "acceptance-runner",
-      password: "acceptance-runner-change-me"
-    })
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`oidc_token_failed: ${res.status} ${text.slice(0, 200)}`);
+  // Try direct first; if it fails, waitForKeycloak polls the token endpoint.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${oidcBase}/realms/ai-test-officer/protocol/openid-connect/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "password",
+          client_id: "ai-test-officer-local",
+          username: "acceptance-runner",
+          password: "acceptance-runner-change-me"
+        })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        return json.access_token;
+      }
+    } catch (e) {
+      if (attempt === 0) console.log(`  token attempt ${attempt + 1} failed: ${e.message}, waiting for Keycloak…`);
+    }
+    await new Promise((r) => setTimeout(r, 5_000));
   }
-  const json = await res.json();
-  return json.access_token;
+  // Final fallback: poll the token endpoint until Keycloak is ready
+  return await waitForKeycloak();
 }
 
 async function authHeaders() {
@@ -118,7 +151,7 @@ async function createRun(idx) {
     });
     const json = await res.json();
     const elapsed = performance.now() - start;
-    return { ok: res.ok, status: res.status, elapsed, runId: json.run?.id ?? json.id ?? null, error: json.error };
+    return { ok: res.ok, status: res.status, elapsed, runId: json.run?.id ?? json.id ?? null, error: json.error ?? `status_${res.status}`, rawError: JSON.stringify(json).slice(0, 150) };
   } catch (e) {
     return { ok: false, status: 0, elapsed: performance.now() - start, runId: null, error: String(e.message).slice(0, 120) };
   }
@@ -142,9 +175,11 @@ const healthy = await waitForHealth();
 console.log(`health: ${healthy}`);
 
 if (healthy) {
-  console.log("obtaining OIDC access token…");
-  try { accessToken = await obtainAccessToken(); console.log(`token: ${accessToken.slice(0, 20)}…`); }
-  catch (e) { console.log(`token error: ${e.message}`); }
+  console.log("obtaining OIDC access token (waiting for Keycloak realm import)…");
+  try {
+    accessToken = await obtainAccessToken();
+    console.log(`token: ${accessToken ? accessToken.slice(0, 20) + "…" : "FAILED (null)"}`);
+  } catch (e) { console.log(`token error: ${e.message}`); }
 }
 
 const sloBefore = await fetchSlo();
