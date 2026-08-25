@@ -13,6 +13,7 @@
 
 import { execFileSync, execSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { S3Client, PutObjectCommand, GetObjectCommand, CreateBucketCommand, HeadBucketCommand } from "@aws-sdk/client-s3";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -133,6 +134,48 @@ async function loadTestMinio(level) {
   return { latencies, wallMs };
 }
 
+// REAL MinIO S3 PUT/GET test: creates a bucket, then concurrently PUTs and GETs
+// objects via the S3 API (not just the health endpoint). This addresses the
+// gap "MinIO load is health-endpoint HTTP (not S3 PUT/GET object ops)."
+let s3Client = null;
+let s3Bucket = null;
+async function ensureS3Bucket() {
+  if (s3Client) return;
+  s3Client = new S3Client({
+    endpoint: `http://127.0.0.1:${MN_PORT}`,
+    region: "us-east-1",
+    credentials: { accessKeyId: MN_ROOT_USER, secretAccessKey: MN_ROOT_PASSWORD },
+    forcePathStyle: true
+  });
+  s3Bucket = `ato-capacity-test-${Date.now().toString(36)}`;
+  try {
+    await s3Client.send(new CreateBucketCommand({ Bucket: s3Bucket }));
+  } catch (e) {
+    // Bucket may already exist; check if it's accessible
+    try { await s3Client.send(new HeadBucketCommand({ Bucket: s3Bucket })); }
+    catch { throw new Error(`s3_bucket_create_failed: ${e.message}`); }
+  }
+}
+
+async function loadTestMinioS3(level) {
+  await ensureS3Bucket();
+  const latencies = [];
+  const start = Date.now();
+  const payload = Buffer.alloc(1024, "capacity-test"); // 1KB object
+  await Promise.all(Array.from({ length: level }, async (_, i) => {
+    const key = `obj-${Date.now().toString(36)}-${i}`;
+    const t0 = performance.now();
+    try {
+      await s3Client.send(new PutObjectCommand({ Bucket: s3Bucket, Key: key, Body: payload }));
+      const getRes = await s3Client.send(new GetObjectCommand({ Bucket: s3Bucket, Key: key }));
+      await getRes.Body.transformToString();
+      latencies.push(Math.round(performance.now() - t0));
+    } catch {}
+  }));
+  const wallMs = Date.now() - start;
+  return { latencies, wallMs };
+}
+
 function dockerStats() {
   const out = execSync(`docker stats --no-stream --format "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}" ${PG_C} ${RD_CONTAINER} ${MN_C}`, { stdio: "pipe", timeout: 15000 }).toString();
   const stats = {};
@@ -161,7 +204,8 @@ async function main() {
   const services = [
     { name: "postgres", fn: loadTestPostgres },
     { name: "redis", fn: loadTestRedis },
-    { name: "minio", fn: loadTestMinio }
+    { name: "minio-health", fn: loadTestMinio },
+    { name: "minio-s3", fn: loadTestMinioS3 }
   ];
   const results = {};
   for (const svc of services) {
@@ -189,12 +233,12 @@ async function main() {
     schemaVersion: "1.0",
     generatedAt,
     scenario: "capacity-data-services",
-    description: "REAL Postgres + Redis + MinIO load at 10/50/200 concurrent, with P50/P95/P99 latency + Docker CPU/memory. Complements the control-plane spec-generation test.",
-    services: { postgres: "postgres:16-alpine", redis: "redis:7.4-alpine", minio: "minio/minio:RELEASE.2025-04-22T22-12-26Z" },
+    description: "REAL Postgres + Redis + MinIO load at 10/50/200 concurrent, with P50/P95/P99 latency + Docker CPU/memory. MinIO now includes real S3 PUT/GET object operations (not just health endpoint). Complements the control-plane spec-generation test.",
+    services: { postgres: "postgres:16-alpine", redis: "redis:7.4-alpine", "minio-health": "health endpoint", "minio-s3": "S3 PUT+GET 1KB objects" },
     levels: LEVELS,
     results,
     dockerStats: stats,
-    gaps: ["Worker load not exercised (data-services layer only).", "Browser concurrency, SSE, BrowserContext metrics not exercised (require agent-api + browser runtime).", "MinIO load is health-endpoint HTTP (not S3 PUT/GET object ops)."]
+    gaps: ["Worker load not exercised (data-services layer only).", "Browser concurrency, SSE, BrowserContext metrics not exercised (require agent-api + browser runtime)."]
   };
   writeFileSync(path.join(reportDir, "latest.json"), JSON.stringify(report, null, 2));
   const md = [

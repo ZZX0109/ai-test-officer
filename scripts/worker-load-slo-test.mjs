@@ -69,6 +69,58 @@ function percentile(sorted, p) {
   return Math.round(sorted[Math.max(0, idx)]);
 }
 
+// Measure run COMPLETION latency: for a sample of created runs, approve plans
+// (if needed) + poll until terminal state. This addresses the gap "measures
+// run CREATION latency, not full execution completion."
+async function measureCompletionLatency(runIds, { sampleSize = 10, timeoutMs = 180_000 } = {}) {
+  const sample = runIds.filter(Boolean).slice(0, sampleSize);
+  if (!sample.length) return { measured: 0, latencies: [], note: "no runs to sample" };
+  const completionTimes = [];
+  for (const runId of sample) {
+    const createStart = performance.now();
+    try {
+      // Poll until terminal state, approving plans if needed
+      const deadline = Date.now() + timeoutMs;
+      let settled = false;
+      while (Date.now() < deadline) {
+        const res = await fetch(`${BASE}/v1/runs/${runId}`, { headers: { "x-agent-token": TOKEN } });
+        const d = await res.json();
+        const run = d.run ?? d;
+        const state = run.state;
+        if (state === "awaiting-plan-approval") {
+          // Approve plan so execution can proceed
+          await fetch(`${BASE}/v1/runs/${runId}/plan-approval`, {
+            method: "POST",
+            headers: { "x-agent-token": TOKEN, "Content-Type": "application/json" },
+            body: JSON.stringify({ expectedVersion: run.version, actor: "worker-load-test", idempotencyKey: `${runId}:plan` })
+          });
+          continue;
+        }
+        if (/^(completed|failed|aborted|cancelled|blocked|awaiting-human-review)$/.test(state)) {
+          completionTimes.push(Math.round(performance.now() - createStart));
+          settled = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      if (!settled) completionTimes.push(null); // timeout
+    } catch {
+      completionTimes.push(null);
+    }
+  }
+  const valid = completionTimes.filter((t) => t !== null).sort((a, b) => a - b);
+  return {
+    measured: valid.length,
+    sampled: sample.length,
+    latencies: valid,
+    p50: percentile(valid, 50),
+    p95: percentile(valid, 95),
+    p99: percentile(valid, 99),
+    max: valid.length ? valid[valid.length - 1] : 0,
+    timeouts: completionTimes.filter((t) => t === null).length
+  };
+}
+
 const args = parseArgs();
 const lane = { planner: "deterministic", judge: "deterministic" };
 const model = null; // deterministic lane doesn't need a model
@@ -108,6 +160,12 @@ const wallMs = performance.now() - wallStart;
 
 const sloAfter = await fetchSlo();
 
+// Measure completion latency for a sample of created runs
+console.log("measuring completion latency (sample of 10 runs)...");
+const runIds = results.filter(r => r.ok && r.runId).map(r => r.runId);
+const completion = await measureCompletionLatency(runIds, { sampleSize: 10, timeoutMs: 120_000 });
+console.log(`  completion: measured=${completion.measured}/${completion.sampled} p50=${completion.p50}ms p95=${completion.p95}ms timeouts=${completion.timeouts}`);
+
 const latencies = results.map(r => r.elapsed).sort((a, b) => a - b);
 const okResults = results.filter(r => r.ok);
 const errResults = results.filter(r => !r.ok);
@@ -131,6 +189,15 @@ const report = {
       max: latencies.length ? Math.round(latencies[latencies.length - 1]) : 0,
       min: latencies.length ? Math.round(latencies[0]) : 0
     },
+    completionLatencyMs: {
+      measured: completion.measured,
+      sampled: completion.sampled,
+      p50: completion.p50,
+      p95: completion.p95,
+      p99: completion.p99,
+      max: completion.max,
+      timeouts: completion.timeouts
+    },
     errorBreakdown: errResults.reduce((acc, r) => {
       const key = r.error ?? `status_${r.status}`;
       acc[key] = (acc[key] ?? 0) + 1;
@@ -148,7 +215,7 @@ if (okResults.length === 0) report.gaps.push("no_successful_runs — sandbox may
 if (report.results.errorRate > 0.1) report.gaps.push(`high_error_rate (${(report.results.errorRate * 100).toFixed(1)}%)`);
 
 report.limitations = [
-  "Load test measures run CREATION latency (POST /v1/runs), not full execution completion (runs settle asynchronously).",
+  "Creation latency measures POST /v1/runs response time; completion latency measures time from creation to terminal state (sample of 10 runs, plans auto-approved).",
   "Dev agent uses SQLite (databaseConfigured=false); production SLO numbers require the Postgres-backed production compose.",
   "SLO metrics from /api/operations/slo are point-in-time snapshots before/after the load burst.",
   "Browser concurrency, SSE, and BrowserContext metrics are not measured by this script (those require the Workbench UI + Playwright runtime)."
