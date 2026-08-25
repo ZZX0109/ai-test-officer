@@ -10,6 +10,7 @@ ENV CYPRESS_INSTALL_BINARY=0
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git cmake python3 make g++ libopenblas-dev pkg-config libvips-dev \
   && rm -rf /var/lib/apt/lists/* \
+  && npm install --global --force pnpm@9.15.9 \
   && pnpm --version | grep -Fx '9.15.9'
 
 RUN apt-get update \
