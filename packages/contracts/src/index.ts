@@ -10,6 +10,50 @@ import {
 export const gateStatusSchema = z.enum(["pass", "fail", "blocked", "needs-human-review"]);
 export type GateStatus = z.infer<typeof gateStatusSchema>;
 
+export const readinessStatusSchema = z.enum(["ready", "repairable", "blocked"]);
+export type ReadinessStatus = z.infer<typeof readinessStatusSchema>;
+
+export const readinessSeveritySchema = z.enum(["info", "warning", "error"]);
+export type ReadinessSeverity = z.infer<typeof readinessSeveritySchema>;
+
+export const readinessCheckSchema = z.object({
+  id: z.string().min(1),
+  status: readinessStatusSchema,
+  severity: readinessSeveritySchema,
+  message: z.string().min(1),
+  evidence: z.array(z.string().min(1)).default([]),
+  remediation: z.string().min(1).optional(),
+  requiredBy: z.array(z.string().min(1)).default([]),
+  updatedAt: z.string().datetime()
+});
+export type ReadinessCheck = z.infer<typeof readinessCheckSchema>;
+
+export const readinessReportSchema = z.object({
+  projectId: z.string().min(1),
+  status: readinessStatusSchema,
+  checks: z.array(readinessCheckSchema),
+  generatedAt: z.string().datetime(),
+  bootstrapId: z.string().min(1).optional()
+});
+export type ReadinessReport = z.infer<typeof readinessReportSchema>;
+
+export const reviewCaseSchema = z.object({
+  id: z.string().min(1),
+  category: z.enum(["environment", "credentials", "network", "runtime", "coverage", "proof", "repair", "permission", "unknown"]),
+  severity: z.enum(["low", "medium", "high", "critical"]),
+  title: z.string().min(1),
+  explanation: z.string().min(1),
+  whatWasTried: z.array(z.string().min(1)).default([]),
+  evidenceRefs: z.array(z.string().min(1)).default([]),
+  requiredDecision: z.string().min(1),
+  nextAction: z.string().min(1),
+  cta: z.string().min(1),
+  canRetry: z.boolean().default(false),
+  canResume: z.boolean().default(false),
+  createdAt: z.string().datetime()
+});
+export type ReviewCase = z.infer<typeof reviewCaseSchema>;
+
 export function normalizeLegacyGateStatus(value: string): GateStatus {
   if (["pass", "continue", "passed"].includes(value)) return "pass";
   if (["fail", "failed", "stop_and_fix"].includes(value)) return "fail";
@@ -96,6 +140,11 @@ export const artifactV2Schema = z.object({
   origin: artifactOriginSchema,
   storageUri: z.string().min(1),
   replicaUris: z.array(z.string().min(1)).default([]),
+  // A configured object store is authoritative for production Artifact v2
+  // replicas.  The field stays optional for pre-object-store and local-only
+  // bundles, while a reconciler can explicitly mark a once-committed replica
+  // as missing so it is never used to support a pass again.
+  objectStoreState: z.enum(["committed", "missing", "uncommitted"]).optional(),
   sequence: z.number().int().nonnegative(),
   monotonicOffsetMs: z.number().nonnegative(),
   integrity: artifactIntegrityV2Schema,
@@ -211,6 +260,8 @@ export const projectManifestSchema = z.object({
   workspaceRoot: z.string().min(1),
   commands: z.object({
     install: commandSpecSchema.optional(),
+    migrate: commandSpecSchema.optional(),
+    seed: commandSpecSchema.optional(),
     start: commandSpecSchema.optional(),
     targetedTest: commandSpecSchema.optional(),
     relatedTest: commandSpecSchema.optional(),
@@ -221,7 +272,12 @@ export const projectManifestSchema = z.object({
   ports: z.array(z.object({ name: z.string().min(1), env: z.string().regex(/^[A-Z_][A-Z0-9_]*$/), purpose: z.enum(["frontend", "backend", "health", "auxiliary"]) })).default([]),
   healthCheck: z.object({ path: z.string().startsWith("/"), timeoutMs: z.number().int().positive().default(20_000) }).optional(),
   environmentAllowlist: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/)).default([]),
-  network: z.object({ mode: z.enum(["deny", "allow-target", "allowlist"]).default("allow-target"), allowedHosts: z.array(z.string()).default([]) }).default({}),
+  network: z.object({
+    mode: z.enum(["deny", "allow-target", "allowlist"]).default("allow-target"),
+    allowedHosts: z.array(z.string().min(1)).max(128).default([]),
+    /** Non-deny execution must name an externally enforced egress-only network. */
+    enforcement: z.enum(["none", "external-egress-proxy"]).default("none")
+  }).default({}),
   fixtures: z.array(z.object({ id: z.string().min(1), path: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/), destructive: z.boolean().default(false) })).default([]),
   apiOperations: z.array(z.object({
     operationId: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
@@ -230,7 +286,15 @@ export const projectManifestSchema = z.object({
     baseUrlRef: z.enum(["frontend", "backend"]).default("backend"),
     allowedStatusCodes: z.array(z.number().int().min(100).max(599)).min(1).default([200]),
     fixtureRef: z.string().min(1).optional(),
-    destructive: z.boolean().default(false)
+    destructive: z.boolean().default(false),
+    // Mutable operations are executable only when the target explicitly
+    // participates in the stable action-key protocol.  Requiring an echoed
+    // response key lets the executor fail closed instead of assuming that an
+    // arbitrary POST endpoint implemented idempotency.
+    idempotency: z.object({
+      requestHeader: z.string().regex(/^[A-Za-z0-9-]+$/),
+      responseHeader: z.string().regex(/^[A-Za-z0-9-]+$/)
+    }).optional()
   })).default([]),
   dataSources: z.array(z.object({
     id: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
@@ -259,7 +323,20 @@ export const projectManifestSchema = z.object({
     timeoutMs: z.number().int().min(1_000).max(300_000).default(60_000)
   })).default([]),
   capabilities: z.object({ browser: z.boolean().default(true), desktop: z.boolean().default(false), allowedBundleIds: z.array(z.string()).default([]) }).default({}),
-  execution: z.object({ mode: z.enum(["oci", "trusted-local"]).default("oci"), image: z.string().min(1).optional(), engine: z.enum(["docker", "podman"]).default("docker") }).default({}),
+  execution: z.object({
+    mode: z.enum(["oci", "trusted-local"]).default("oci"),
+    image: z.string().min(1).optional(),
+    engine: z.literal("docker").default("docker"),
+    /**
+     * The source project already carries installed dependencies (e.g. host
+     * `node_modules` / `.venv` pre-populated to avoid a sandbox cold install
+     * that would need registry egress the deny/isolated network policy blocks).
+     * When true the execution worker copies dependency directories into the
+     * writable workspace (instead of excluding them) and skips the prepare
+     * (install) command, so the project starts without any network access.
+     */
+    preinstalledDependencies: z.boolean().optional()
+  }).default({}),
   budget: resourceBudgetSchema.default({})
 }).superRefine((manifest, context) => {
   if (manifest.execution.mode === "oci" && !manifest.execution.image) context.addIssue({ code: z.ZodIssueCode.custom, path: ["execution", "image"], message: "OCI execution requires an immutable image." });
@@ -280,8 +357,12 @@ const transitions: Record<RunState, Partial<Record<RunEventType, RunState>>> = {
   // lets a user approve a resume after a service restart without pretending a
   // browser attempt is still alive.
   queued: { run_preparing: "preparing", run_paused: "paused", run_cancelled: "cancelled", run_blocked: "blocked" },
-  preparing: { run_started: "running", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
-  running: { run_paused: "paused", evidence_collecting: "collecting", run_judging: "judging", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
+  preparing: { run_started: "running", run_retrying: "queued", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
+  // A dead Worker can leave a Lease behind after it has announced
+  // `run_started`. Lease recovery appends run_retrying, clears the generation
+  // fence and creates a fresh versioned Outbox delivery; it never fabricates a
+  // terminal result from an interrupted action.
+  running: { run_paused: "paused", run_retrying: "queued", evidence_collecting: "collecting", run_judging: "judging", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
   paused: { run_resumed: "running", run_cancelled: "cancelled", run_blocked: "blocked" },
   collecting: { run_judging: "judging", run_failed: "failed", run_blocked: "blocked", run_cancelled: "cancelled" },
   judging: { run_retrying: "queued", human_review_requested: "awaiting-human-review", run_completed: "completed", run_failed: "failed", run_blocked: "blocked" },
@@ -463,6 +544,15 @@ export const llmCallSchema = z.object({
   promptVersion: z.string().min(1).optional(),
   promptSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   inputSummarySha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  // Truncated (~2 KB) previews of the request prompt, the model response, and
+  // any provider-returned reasoning/thinking text. The full messages are not
+  // persisted (they can carry large knowledge-boundary source excerpts), but
+  // these previews let a human audit "what the model was asked / answered /
+  // reasoned" directly in the trajectory — the same visibility DSH's agent
+  // turn view provides, scoped to keep the run store bounded.
+  inputPreview: z.string().max(2048).optional(),
+  outputPreview: z.string().max(2048).optional(),
+  reasoningPreview: z.string().max(2048).optional(),
   actionDslVersion: z.string().min(1).optional(),
   outputSchemaVersion: z.string().min(1).optional(),
   graphVersion: z.string().min(1).optional(),
@@ -1150,6 +1240,26 @@ export const coverageItemSchema = z.object({
   actionPathIds: z.array(z.string()).default([]),
   oracleIds: z.array(z.string()).default([]),
   requiredEvidenceKinds: z.array(artifactKindV2Schema).default([]),
+  /** Runtime Binding Compiler output. `pending` means observation/manifest
+   * binding is still required; it is never equivalent to a verified binding. */
+  binding: z.object({
+    compilerVersion: z.string().min(1),
+    status: z.enum(["pending", "bound", "needs-input", "unsupported", "blocked-by-capability", "coverage-gap"]),
+    entryRoute: z.string().optional(),
+    operationId: z.string().optional(),
+    actionPathIds: z.array(z.string()).default([]),
+    oracleIds: z.array(z.string()).default([]),
+    requiredCapabilities: z.array(z.string()).default([]),
+    reason: z.string().optional(),
+    boundAt: z.string().datetime().optional()
+  }).optional(),
+  /** Per-path resource envelope copied into the child run at dispatch time. */
+  budget: z.object({
+    maxBrowserActionCalls: z.number().int().min(1).max(60),
+    maxTotalTokens: z.number().int().positive().max(100_000),
+    totalTimeoutMs: z.number().int().min(1_000).max(300_000),
+    maxAttempts: z.number().int().min(1).max(2)
+  }).optional(),
   /**
    * A manifest-derived, fully bound plan. This is deliberately stored on the
    * coverage item rather than reconstructed from LLM text by the worker.
@@ -1454,6 +1564,9 @@ export const runStreamEventSchema = z.object({
 });
 
 export function artifactGateEligibility(artifact: ArtifactV2) {
+  if (artifact.objectStoreState === "missing" || artifact.objectStoreState === "uncommitted") {
+    return { eligible: false, reason: `object_store_${artifact.objectStoreState}` } as const;
+  }
   if (["simulated", "legacy-unverified", "user-uploaded"].includes(artifact.origin)) {
     return { eligible: false, reason: `origin_${artifact.origin}` } as const;
   }
@@ -1569,7 +1682,8 @@ export type {
 export {
   traceChainSchema,
   traceQuerySchema,
-  traceSpanSchema
+  traceSpanSchema,
+  traceTelemetrySchema
 } from "./trace-chain.js";
 export type {
   TraceActor,
@@ -1579,6 +1693,7 @@ export type {
   TraceSpan,
   TraceSpanKind,
   TraceSpanStatus,
+  TraceTelemetry,
   SpanId
 } from "./trace-chain.js";
 
