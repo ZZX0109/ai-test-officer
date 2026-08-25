@@ -5,8 +5,8 @@ review the AI Test Officer architecture and reliability changes.
 
 Use `npm run package:review` to create the review archive. It verifies that
 the archive contains the current low-sensitivity verification reports
-(Production acceptance, Shadow Graph, baseline, external acceptance audit and
-the explicitly limited control-plane capacity check)
+(Production acceptance, Shadow Graph, clean Linux baseline, external acceptance
+audit, capacity, repair, red-team and SLO reports)
 and contains no dependency/build cache, `.env`, blind labels or AppleDouble files.
 When the target text is outside the repository, set
 `REVIEW_REQUIREMENTS_SOURCE=/absolute/path/to/requirements.txt`; the exact
@@ -21,15 +21,18 @@ source is then included at the archive root for an external reviewer.
 - Architecture, reliability, security, benchmark and data-ownership documents
 - `docs/current-completion-audit.md` and adversarial Proof Bundle tests
 - `reports/capacity-control-plane/latest.json` is included as a clearly labelled control-plane-only scale check; it is not a production capacity claim.
+- Data-service, worker and browser load reports are included with their own scope limits; they do not combine into an end-to-end production capacity claim.
 - `reports/fault-injection/latest.json` and `.md` are included as a mapped 14-boundary isolated-Compose recovery audit; they are not a sustained production SLO or external-project fault report.
-- `reports/security-adversarial/latest.json` is included as a local deterministic Prompt Injection matrix; it is not a malicious-container or production multi-tenant red-team report.
-- `reports/external-acceptance/` includes the five locked-project provenance and native-preflight records. They deliberately remain `preflight-only`/`evidence-incomplete`; they are not sealed blind-evaluation results.
+- `reports/security-adversarial/latest.json` and the three `reports/redteam/` probes are included as isolated security evidence; they are not a sustained production multi-tenant red-team report.
+- `reports/external-acceptance/` includes the five locked-project provenance and lane records. The current fail-closed audit is `NOT READY`: no independent evaluator report is supplied and the recorded non-native lanes are not terminal sealed-evaluation results.
+- `reports/external-repair/latest.json` is included so its blocked/failed validations are reviewable; it is not successful production Repair proof.
+- `reports/production-slo/latest.json` is included with generated stack secrets removed. It records one disposable Compose measurement, not a persistent production deployment.
 
 ## Deliberately excluded
 
 - `node_modules/`
 - `agent/dist/`, `workbench-ui/dist/`, `app-under-test/dist/`
-- local coverage/cache output and reports outside the allowlisted latest
+- local coverage/cache output, evaluator labels/unseal keys and reports outside the allowlisted latest
   verification reports included with this reviewer snapshot
 - `.git/`
 - `.env` and local credential/secret files under `config/`
