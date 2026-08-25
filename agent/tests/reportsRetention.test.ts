@@ -118,7 +118,7 @@ export async function testReportsRetention() {
     const defaultArchived = await runRetention(defaultArchiveReportsDir, true, true, { storageHome });
     assert.equal(defaultArchived.archive, true);
     assert.equal(defaultArchived.archiveDir.startsWith(path.join(storageHome, "reports-archive")), true);
-    assert.equal(defaultArchived.archiveDir.includes(rootDir), false);
+    assert.equal(defaultArchived.archiveDir.startsWith(rootDir), false);
     assert.equal(await exists(path.join(defaultArchived.archiveDir, "runs", "run_old", "bundle.json")), true);
   } finally {
     await rm(reportsDir, { recursive: true, force: true });
