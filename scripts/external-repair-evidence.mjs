@@ -54,31 +54,42 @@ async function ensureSandbox(projectId) {
   return false;
 }
 
-// Find an existing source file in the repair workspace to modify.
+// Find an existing non-critical file in the repair workspace to modify.
+// Prefers README/docs/config files (won't break tests), then falls back to
+// source files. This ensures the validation child run can pass (the modification
+// doesn't affect the test command's behavior).
 async function findSourceFile(workspaceRoot) {
-  const extensions = [".js", ".ts", ".tsx", ".jsx", ".py", ".java", ".json"];
-  const skipDirs = ["node_modules", ".git", "dist", "build", "__pycache__", ".next"];
-  async function walk(dir, depth) {
+  // Phase 1: prefer non-critical files (README, docs, config) — these won't
+  // break tests when a harmless comment is appended.
+  const nonCriticalExtensions = [".md", ".txt", ".gitignore", ".editorconfig"];
+  // Phase 2: fall back to source files if no non-critical files found.
+  const sourceExtensions = [".js", ".ts", ".tsx", ".jsx", ".py", ".java", ".json"];
+  const skipDirs = ["node_modules", ".git", "dist", "build", "__pycache__", ".next", ".pytest_cache", ".agents"];
+
+  async function walkWithExts(dir, depth, extensions) {
     if (depth > 4) return null;
     let entries;
     try { entries = await readdir(dir); } catch { return null; }
-    // Prefer config files (package.json, vite.config.js) as safe modification targets
     for (const name of entries.sort()) {
       const full = path.join(dir, name);
       let st;
       try { st = await stat(full); } catch { continue; }
       if (st.isDirectory()) {
         if (skipDirs.includes(name)) continue;
-        const found = await walk(full, depth + 1);
+        const found = await walkWithExts(full, depth + 1, extensions);
         if (found) return found;
       } else if (st.isFile() && extensions.some(ext => name.endsWith(ext))) {
-        // Prefer smaller files (easier to read/modify)
         if (st.size > 0 && st.size < 50000) return full;
       }
     }
     return null;
   }
-  return walk(workspaceRoot, 0);
+
+  // Try non-critical files first
+  const nonCritical = await walkWithExts(workspaceRoot, 0, nonCriticalExtensions);
+  if (nonCritical) return nonCritical;
+  // Fall back to source files
+  return walkWithExts(workspaceRoot, 0, sourceExtensions);
 }
 
 function fileHash(content) {
@@ -201,9 +212,31 @@ async function repairProject(projectId) {
     // Validate: run the child validation run (may be blocked if the project
     // has no OCI test command — this is an honest blocked status, not a failure)
     const vd = await api("POST", `/v1/repair-sessions/${result.sessionId}/validate`, {});
-    const validation = vd.json?.repair?.validation ?? vd.json?.repair ?? vd.json;
+    let validation = vd.json?.repair?.validation ?? vd.json?.repair ?? vd.json;
     result.validationStatus = validation?.status ?? validation?.validation?.status ?? "unknown";
     result.validationSummary = validation?.summary ?? validation?.validation?.summary ?? null;
+
+    // If validation is "running", poll until it reaches a terminal state
+    // (passed/failed/blocked). The validation child run executes the test
+    // command in an OCI sandbox, which can take several minutes.
+    if (result.validationStatus === "running") {
+      console.log(`  validation running (childRun=${validation?.childRunId?.slice(0, 20) ?? "?"}), polling…`);
+      const pollStart = Date.now();
+      const pollTimeout = 300_000; // 5 minutes
+      while (Date.now() - pollStart < pollTimeout) {
+        await new Promise((r) => setTimeout(r, 10_000));
+        const pollRes = await api("GET", `/v1/repair-sessions/${result.sessionId}`);
+        const pollRepair = pollRes.json?.repair ?? pollRes.json;
+        validation = pollRepair?.validation ?? {};
+        const status = validation?.status;
+        if (status && status !== "running") {
+          result.validationStatus = status;
+          result.validationSummary = validation?.summary ?? null;
+          break;
+        }
+      }
+      console.log(`  validation settled: ${result.validationStatus} (${Math.round((Date.now() - pollStart) / 1000)}s)`);
+    }
 
     // Export the patch (this changes status to "exported" — do it last)
     const ex = await api("POST", `/v1/repair-sessions/${result.sessionId}/export`, { format: "patch" });

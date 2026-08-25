@@ -904,7 +904,13 @@ export async function validateRepairSession(
     workspaceNamespace: `repair-validation-${id}`
   });
   const installCommand = project.installCommandSpec ?? project.manifest.commands.install;
-  if (installCommand && !dependencyCache?.prepared) {
+  // Projects with preinstalledDependencies have their dependencies baked into
+  // the OCI image (investment-deps, fastapi-deps, etc.). The cache volume is
+  // not needed — the execution worker copies node_modules/.venv from the image
+  // into the writable workspace. Treat this as "cache ready" so validation
+  // proceeds instead of blocking on an undefined cache result.
+  const preinstalled = project.manifest.execution.preinstalledDependencies === true;
+  if (installCommand && !preinstalled && !dependencyCache?.prepared) {
     const timestamp = new Date().toISOString();
     const validation = repairValidationSchema.parse({
       id: `repair_validation_${randomUUID()}`,
