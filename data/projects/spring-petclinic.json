@@ -1,0 +1,26 @@
+{
+  "id": "spring-petclinic",
+  "name": "Spring Petclinic",
+  "projectPath": "/tmp/external-projects/spring-petclinic",
+  "framework": "java-spring",
+  "login": { "method": "none" },
+  "processes": [],
+  "env": {},
+  "manifest": {
+    "schemaVersion": "1.0",
+    "projectId": "spring-petclinic",
+    "framework": "java-spring",
+    "workspaceRoot": ".",
+    "commands": {
+      "test": { "executable": "mvn", "args": ["test", "-q"] }
+    },
+    "commandAllowlist": ["mvn", "java"],
+    "ports": [],
+    "environmentAllowlist": [],
+    "network": { "mode": "deny" },
+    "execution": { "mode": "oci", "image": "maven:3.9-eclipse-temurin-21", "engine": "docker" },
+    "budget": { "prepareTimeoutMs": 600000 }
+  },
+  "testCommand": "mvn test -q",
+  "timeoutMs": 600000
+}
