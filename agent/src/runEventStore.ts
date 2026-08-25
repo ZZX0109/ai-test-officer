@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Pool } from "pg";
+import type { Pool } from "pg";
+import { getDatabasePool } from "./databaseRuntime.js";
+import { pauseAfterCommittedRunEvent } from "./faultInjection.js";
+import { insertOutboxInTransaction } from "./outboxStore.js";
 import { runEventSchema, transitionRunState, type CompiledPlan, type ExecutionStatus, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunKind, type RunOutcomeSummaryV2, type RunState } from "@ai-test-officer/contracts";
 import type { GrayPlan, ImpactAnalysis } from "./types.js";
 
@@ -319,7 +322,11 @@ export class SqliteRunEventStore implements RunEventStore {
 export class PostgresRunEventStore implements RunEventStore {
   private readonly pool: Pool;
   private initialized?: Promise<void>;
-  constructor(connectionString: string) { this.pool = new Pool({ connectionString, max: 10 }); }
+  constructor(connectionString: string) {
+    const pool = getDatabasePool(connectionString);
+    if (!pool) throw new Error("DATABASE_URL is required for PostgreSQL run events");
+    this.pool = pool;
+  }
   private init() {
     return this.initialized ??= this.pool.query(`
       CREATE TABLE IF NOT EXISTS run_projections (
@@ -332,7 +339,32 @@ export class PostgresRunEventStore implements RunEventStore {
         idempotency_key TEXT NOT NULL UNIQUE, event_json JSONB NOT NULL,
         UNIQUE(run_id, version)
       );
+      CREATE TABLE IF NOT EXISTS event_outbox_v1 (
+        id TEXT PRIMARY KEY, topic TEXT NOT NULL, aggregate_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE, payload JSONB NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+        available_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        published_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS event_outbox_v1_pending_idx
+        ON event_outbox_v1 (status, available_at, created_at);
     `).then(() => undefined);
+  }
+
+  private async appendExecutionOutbox(client: import("pg").PoolClient, event: RunEvent, projection: RunProjection) {
+    if (!(event.type === "permission_granted" || event.type === "run_resumed" || event.type === "run_retrying")) return;
+    // Dynamic browser *path children* are Graph-owned. Their parent is still
+    // Worker-owned and must be dispatched through the outbox; only suppress
+    // the child delivery to avoid running a second executor for the same
+    // Playwright thread.
+    if (projection.runKind === "path" && projection.input.dynamicBrowser === true) return;
+    await insertOutboxInTransaction(client, {
+      topic: "run.execute",
+      aggregateId: event.runId,
+      idempotencyKey: `run:${event.runId}:execute:v${projection.version}`,
+      payload: { runId: event.runId, version: projection.version, jobId: `${event.runId}-v${projection.version}` }
+    });
   }
   async create(input: { runId?: string; actor: string; idempotencyKey: string; payload?: Record<string, unknown> }) {
     await this.init();
@@ -354,6 +386,7 @@ export class PostgresRunEventStore implements RunEventStore {
         [runId, String(projection.input.organizationId ?? "local"), projection.input.projectId ?? null, projection.state, projection.version, projection.input, projection.runKind, projection.parentRunId ?? null, projection.coverageItemId ?? null, projection.createdAt, projection.updatedAt]
       );
       await client.query("INSERT INTO run_events_v1 (id, run_id, payload, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING", [event.id, runId, event, event.createdAt]);
+      await this.appendExecutionOutbox(client, event, projection);
       await client.query("COMMIT");
       return projection;
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
@@ -381,6 +414,7 @@ export class PostgresRunEventStore implements RunEventStore {
       await client.query("UPDATE run_projections SET state=$2, version=$3, updated_at=$4, projection_json=$5 WHERE run_id=$1", [input.runId, projection.state, projection.version, projection.updatedAt, projection]);
       await client.query("UPDATE runs_v1 SET state=$2, version=$3, final_status=$4, updated_at=$5 WHERE id=$1", [input.runId, projection.state, projection.version, projection.gateStatus ?? null, projection.updatedAt]);
       await client.query("INSERT INTO run_events_v1 (id, run_id, payload, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING", [event.id, event.runId, event, event.createdAt]);
+      await this.appendExecutionOutbox(client, event, projection);
       await client.query("COMMIT");
       return projection;
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
@@ -401,7 +435,7 @@ export async function appendSystemRunEvent(runId: string, type: RunEventType, pa
     const current = await runEventStore.get(runId);
     if (!current) throw new Error("run_not_found");
     try {
-      return await runEventStore.append({
+      const committed = await runEventStore.append({
         runId,
         type,
         expectedVersion: current.version,
@@ -409,6 +443,11 @@ export async function appendSystemRunEvent(runId: string, type: RunEventType, pa
         idempotencyKey: `${runId}:${type}:${current.version + 1}`,
         payload
       });
+      // The only supported crash breakpoint lives after the Event Store
+      // transaction. It therefore proves recovery from a durable business
+      // fact, never from a speculative in-memory Gate.
+      await pauseAfterCommittedRunEvent({ run: committed, eventType: type });
+      return committed;
     } catch (error) {
       if (!(error instanceof Error) || !error.message.startsWith("run_version_conflict:")) throw error;
     }

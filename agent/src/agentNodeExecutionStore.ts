@@ -1,9 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { Pool } from "pg";
 import type { AgentGraphNode } from "@ai-test-officer/contracts";
+import { getDatabasePool } from "./databaseRuntime.js";
 
 const memory = new Map<string, Record<string, unknown>>();
-let pool: Pool | undefined;
 
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
@@ -36,7 +35,8 @@ export async function executeAgentNodeIdempotently(
     memory.set(key, output);
     return output;
   }
-  pool ??= new Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
+  const pool = getDatabasePool();
+  if (!pool) throw new Error("DATABASE_URL is required for durable agent node execution");
   let id = `node_${randomUUID()}`;
   const inserted = await pool.query(
     "INSERT INTO agent_node_executions_v1 (id,run_id,node,attempt,input_hash,status,started_at) VALUES ($1,$2,$3,$4,$5,'running',now()) ON CONFLICT (run_id,node,attempt,input_hash) DO NOTHING RETURNING id",

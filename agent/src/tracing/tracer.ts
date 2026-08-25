@@ -9,10 +9,12 @@ import {
   type TraceSpan,
   type TraceSpanKind,
   type TraceSpanStatus,
+  type TraceTelemetry,
   type SpanId
 } from "@ai-test-officer/contracts";
 import { createHash, randomUUID } from "node:crypto";
-import { Pool } from "pg";
+import type { Pool } from "pg";
+import { getDatabasePool } from "../databaseRuntime.js";
 
 const id32 = (): string => `${randomUUID()}${randomUUID()}`.replaceAll("-", "").slice(0, 32);
 export const generateTraceId = (): TraceId => `trace_${id32()}` as TraceId;
@@ -22,6 +24,17 @@ export function hashInput(input: unknown): string {
 }
 
 interface TraceStore { chains: Map<TraceId, TraceChain>; spans: Map<SpanId, TraceSpan>; }
+export interface TraceSpanContext {
+  projectId?: string;
+  scenarioId?: string;
+  attemptId?: string;
+  stepId?: string;
+  decision?: TraceSpan["decision"];
+  toolCall?: TraceSpan["toolCall"];
+  evidence?: TraceSpan["evidence"];
+  telemetry?: TraceTelemetry;
+  attributes?: TraceSpan["attributes"];
+}
 const createStore = (): TraceStore => ({ chains: new Map(), spans: new Map() });
 
 const kindFor = (kind: string): TraceSpanKind => {
@@ -40,7 +53,7 @@ export class Tracer {
 
   constructor(store?: TraceStore, connectionString = process.env.DATABASE_URL) {
     this.store = store ?? createStore();
-    this.pool = !store && connectionString ? new Pool({ connectionString, max: 2 }) : undefined;
+    this.pool = !store ? getDatabasePool(connectionString) : undefined;
   }
 
   async startChain(runId: string, projectId?: string, requirement?: string, diff?: string): Promise<TraceId> {
@@ -86,14 +99,15 @@ export class Tracer {
     return this.getChain(traceId);
   }
 
-  async startSpan(runId: string, kind: TraceSpanKind, name: string, actor: TraceActor, input?: unknown, parentSpanId?: SpanId): Promise<SpanId> {
+  async startSpan(runId: string, kind: TraceSpanKind, name: string, actor: TraceActor, input?: unknown, parentSpanId?: SpanId, context?: TraceSpanContext): Promise<SpanId> {
     const traceId = await this.activeTraceId(runId) ?? await this.startChain(runId);
     const now = new Date().toISOString();
     const spanId = generateSpanId();
     const span = traceSpanSchema.parse({
       schemaVersion: "1.0", traceId, spanId, parentSpanId,
       kind: kindFor(kind), name, actor: actorFor(actor), status: "ok",
-      startTimestamp: now, inputHash: hashInput(input), runId, createdAt: now
+      startTimestamp: now, inputHash: hashInput(input), runId, createdAt: now,
+      ...(context ?? {})
     });
     if (this.pool) {
       await this.pool.query(
@@ -123,12 +137,12 @@ export class Tracer {
     return updated;
   }
 
-  traceUserRequest(runId: string, request: unknown): Promise<SpanId> { return this.startSpan(runId, "request", "User Request", "user", request); }
-  traceAgentDecision(runId: string, nodeName: string, input: unknown, parentSpanId?: SpanId): Promise<SpanId> { return this.startSpan(runId, "decision", nodeName, "planner", input, parentSpanId); }
-  traceToolCall(runId: string, toolName: string, params: unknown, parentSpanId?: SpanId): Promise<SpanId> { return this.startSpan(runId, "tool_call", toolName, "system", params, parentSpanId); }
-  traceExecution(runId: string, stepName: string, input: unknown, parentSpanId?: SpanId): Promise<SpanId> { return this.startSpan(runId, "execution", stepName, "executor", input, parentSpanId); }
-  traceEvidence(runId: string, evidenceType: string, input: unknown, parentSpanId?: SpanId): Promise<SpanId> { return this.startSpan(runId, "evidence_collection", evidenceType, "collector", input, parentSpanId); }
-  traceJudgment(runId: string, judgmentType: string, input: unknown, parentSpanId?: SpanId): Promise<SpanId> { return this.startSpan(runId, "judgment", judgmentType, "judge", input, parentSpanId); }
+  traceUserRequest(runId: string, request: unknown, context?: TraceSpanContext): Promise<SpanId> { return this.startSpan(runId, "request", "User Request", "user", request, undefined, context); }
+  traceAgentDecision(runId: string, nodeName: string, input: unknown, parentSpanId?: SpanId, context?: TraceSpanContext): Promise<SpanId> { return this.startSpan(runId, "decision", nodeName, "planner", input, parentSpanId, context); }
+  traceToolCall(runId: string, toolName: string, params: unknown, parentSpanId?: SpanId, context?: TraceSpanContext): Promise<SpanId> { return this.startSpan(runId, "tool_call", toolName, "system", params, parentSpanId, context); }
+  traceExecution(runId: string, stepName: string, input: unknown, parentSpanId?: SpanId, context?: TraceSpanContext): Promise<SpanId> { return this.startSpan(runId, "execution", stepName, "executor", input, parentSpanId, context); }
+  traceEvidence(runId: string, evidenceType: string, input: unknown, parentSpanId?: SpanId, context?: TraceSpanContext): Promise<SpanId> { return this.startSpan(runId, "evidence_collection", evidenceType, "collector", input, parentSpanId, context); }
+  traceJudgment(runId: string, judgmentType: string, input: unknown, parentSpanId?: SpanId, context?: TraceSpanContext): Promise<SpanId> { return this.startSpan(runId, "judgment", judgmentType, "judge", input, parentSpanId, context); }
 
   async getChain(traceId: TraceId): Promise<TraceChain | undefined> {
     if (this.pool) {
@@ -190,7 +204,8 @@ export class Tracer {
     return chain ? { chain, spans: await this.getSpansByChain(traceId) } : undefined;
   }
 
-  async close(): Promise<void> { await this.pool?.end(); }
+  /** The process-wide database runtime owns pool shutdown. */
+  async close(): Promise<void> { return Promise.resolve(); }
 
   private async activeTraceId(runId: string): Promise<TraceId | undefined> {
     const cached = this.active.get(runId);

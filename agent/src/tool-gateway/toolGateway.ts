@@ -183,7 +183,10 @@ export class ToolGateway {
         const memory = getMemoryService();
         const failureType = typeof params.failureType === "string" && ["selector_not_found", "timeout", "assertion_failed", "network_error", "page_crash", "auth_failure", "data_mismatch", "environment_issue", "flaky_test", "other"].includes(params.failureType)
           ? [params.failureType as ExperienceMemoryEntry["failureType"]] : undefined;
-        return memory.queryExperienceEntries({ projectId: typeof params.projectId === "string" ? params.projectId : undefined, ...(failureType ? { failureType } : {}), limit: 50, semanticLimit: 10, semanticThreshold: 0.6, includeUnvalidated: true, offset: 0 });
+        return {
+          retrieval: memory.retrievalDescriptor(),
+          entries: await memory.queryExperienceEntries({ projectId: typeof params.projectId === "string" ? params.projectId : undefined, ...(failureType ? { failureType } : {}), limit: 50, semanticLimit: 10, semanticThreshold: 0.6, includeUnvalidated: true, offset: 0 })
+        };
       }
     });
 
@@ -192,10 +195,13 @@ export class ToolGateway {
       definition: toolMetadata("search_similar_experiences", "search_similar_experiences", { query: "string", projectId: "string?" }),
       handler: async (params) => {
         const memory = getMemoryService();
-        return memory.searchByEmbedding(
-          params.query as string,
-          params.projectId as string | undefined
-        );
+        return {
+          retrieval: memory.retrievalDescriptor(),
+          entries: await memory.searchByEmbedding(
+            params.query as string,
+            params.projectId as string | undefined
+          )
+        };
       }
     });
 

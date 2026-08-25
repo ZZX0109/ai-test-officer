@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
 import { assistantActionForRepairDecision } from "./assistantFallback.js";
 import { readRunBundle } from "./evidenceStore.js";
 import { decideRepair } from "./repairDecision.js";
 import type { FailureAttribution, RepairDecision } from "./types.js";
+import { getDatabasePool } from "./databaseRuntime.js";
 
 /**
  * Run-scoped repair plan resolution.
@@ -71,12 +71,9 @@ const rootDir = path.basename(process.cwd()) === "agent"
   ? path.resolve(process.cwd(), "..")
   : process.cwd();
 const repairPlansRoot = path.join(rootDir, "reports", "repair-plans");
-let postgresPool: Pool | undefined;
 
 function pool() {
-  if (!process.env.DATABASE_URL) return undefined;
-  postgresPool ??= new Pool({ connectionString: process.env.DATABASE_URL });
-  return postgresPool;
+  return getDatabasePool();
 }
 
 function planFile(runId: string) {

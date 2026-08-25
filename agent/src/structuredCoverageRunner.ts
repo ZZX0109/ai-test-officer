@@ -110,7 +110,7 @@ export async function runStructuredCoveragePath(input: {
   if (actions.some((candidate) => candidate.action === "api-request" || candidate.action === "wait-job")) {
     const health = await testProjectConnection(project);
     if (!health.ok) {
-      const runtime = await startProject(project.id);
+      const runtime = await startProject(project.id, { runId: input.runId, attemptId });
       if (runtime.status !== "running") {
         throw new Error(`runtime_unavailable:${runtime.failureReason}:${runtime.message}`);
       }
@@ -126,7 +126,9 @@ export async function runStructuredCoveragePath(input: {
       manifest: project.manifest,
       project,
       target,
-      signal: input.signal
+      signal: input.signal,
+      runId: input.runId,
+      attemptId
     });
     executionError = react.error;
   } catch (error) {

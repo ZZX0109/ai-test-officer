@@ -110,6 +110,8 @@ function EvidenceRefs({ refs }: { refs: string[] | undefined }) {
 function LlmCallRow({ call }: { call: LlmInvocation }) {
   const tone = call.status === "passed" ? "passed" : call.status === "failed" ? "failed" : "warning";
   const tokens = call.usage.totalTokens ?? 0;
+  const [expanded, setExpanded] = useState(false);
+  const hasPreview = Boolean(call.inputPreview || call.outputPreview || call.reasoningPreview);
   return (
     <li className={`trajectory-call trajectory-call--${tone}`}>
       <div className="trajectory-call__head">
@@ -120,9 +122,43 @@ function LlmCallRow({ call }: { call: LlmInvocation }) {
         <span className="trajectory-call__meta">
           {tokens > 0 ? `${tokens} tok` : ""}{call.usage.estimatedCostUsd ? ` · ${formatCost(call.usage.estimatedCostUsd ?? 0)}` : ""}
         </span>
+        {hasPreview ? (
+          <button
+            type="button"
+            className="trajectory-call__expand"
+            aria-expanded={expanded}
+            aria-label={expanded ? "收起模型问答预览" : "展开模型问答预览"}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {expanded ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+            <span className="trajectory-call__expand-label">{expanded ? "收起问答" : "查看问答"}</span>
+          </button>
+        ) : null}
       </div>
       {call.routeReason ? <p className="trajectory-call__reason">{call.routeReason}</p> : null}
       {call.failureClass ? <p className="trajectory-call__reason">{call.failureClass}{call.errorCode ? ` · ${call.errorCode}` : ""}</p> : null}
+      {expanded && hasPreview ? (
+        <div className="trajectory-call__previews">
+          {call.inputPreview ? (
+            <div className="trajectory-call__preview">
+              <span className="trajectory-call__preview-label">模型被问（提示词预览）</span>
+              <pre className="trajectory-call__preview-text">{call.inputPreview}</pre>
+            </div>
+          ) : null}
+          {call.outputPreview ? (
+            <div className="trajectory-call__preview">
+              <span className="trajectory-call__preview-label">模型回答（输出预览）</span>
+              <pre className="trajectory-call__preview-text">{call.outputPreview}</pre>
+            </div>
+          ) : null}
+          {call.reasoningPreview ? (
+            <div className="trajectory-call__preview">
+              <span className="trajectory-call__preview-label">模型推理（reasoning 预览）</span>
+              <pre className="trajectory-call__preview-text">{call.reasoningPreview}</pre>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </li>
   );
 }

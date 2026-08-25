@@ -233,7 +233,7 @@ function startupFailureReply(input: AssistantFailureContext) {
     : portConflicts.length
       ? "可以让系统重新分配沙盒端口后重试；如果冲突进程属于当前项目，无需手动结束它。"
       : diagnostic.failureReason === "container_runtime_unavailable"
-        ? "请允许系统启动 Docker Desktop/Podman；沙盒就绪后会重新尝试，不会降级到宿主机执行。"
+        ? "请允许系统启动 Docker Desktop；沙盒就绪后会重新尝试，不会降级到宿主机执行。"
         : "你可以再次“诊断并运行”；如果仍失败，可继续问我具体失败阶段，系统会依据已保存日志说明，而不是让你猜。";
   return {
     problem,

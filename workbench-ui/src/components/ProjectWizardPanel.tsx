@@ -105,6 +105,7 @@ export function ProjectWizardPanel({
     "order_portal_lite",
     "todo_lite"
   ]);
+  const systemProjects = projects.filter((project) => systemProjectIds.has(project.id));
   const recentProjects = projects.filter((project) => !systemProjectIds.has(project.id));
 
   function nativeEntries(rootName: string, entries: Awaited<ReturnType<typeof listProjectDirectory>>["entries"]): FileTreeNode[] {
@@ -298,6 +299,26 @@ export function ProjectWizardPanel({
         </select>
         {projectListNotice ? <small role="status">{projectListNotice}</small> : null}
       </label>
+      {systemProjects.length ? (
+        <section className="system-project-picker" aria-label="系统示例项目">
+          <strong>系统示例项目</strong>
+          <p>可直接选择内置 Fixture 以验证 Workbench、Benchmark 和回归流程。</p>
+          <div className="system-project-list">
+            {systemProjects.map((project) => (
+              <button
+                key={project.id}
+                type="button"
+                data-project-id={project.id}
+                aria-pressed={selectedProjectId === project.id}
+                onClick={() => onSelectProject(project.id)}
+              >
+                <strong>{project.name}</strong>
+                <span>{project.projectPath}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
       <input
         ref={(node) => {
           folderInputRef.current = node;

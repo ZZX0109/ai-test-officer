@@ -1,24 +1,21 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
 import type {
   LegacyProjectMemberRole,
   ProjectGrant,
   ProjectMemberRole,
   ProjectScope
 } from "./types.js";
+import { getDatabasePool } from "./databaseRuntime.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const grantDir = path.join(rootDir, "reports", "security");
 const grantFile = path.join(grantDir, "project-grants.json");
-let postgresPool: Pool | undefined;
 let localGrantMutation: Promise<void> = Promise.resolve();
 
 function pool() {
-  if (!process.env.DATABASE_URL) return undefined;
-  postgresPool ??= new Pool({ connectionString: process.env.DATABASE_URL });
-  return postgresPool;
+  return getDatabasePool();
 }
 
 type StoredProjectGrant = Omit<ProjectGrant, "role"> & {

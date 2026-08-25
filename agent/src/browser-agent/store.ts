@@ -1,7 +1,6 @@
 import { EventEmitter } from "node:events";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
 import {
   browserActionDecisionSchema,
   browserActionResultSchema,
@@ -15,6 +14,7 @@ import {
   type BrowserSession
 } from "@ai-test-officer/contracts";
 import { getReportsDir } from "../evidenceStore.js";
+import { getDatabasePool } from "../databaseRuntime.js";
 
 export type BrowserAgentLifecycleEvent = {
   runId: string;
@@ -31,10 +31,9 @@ export type BrowserAgentLifecycleEvent = {
 const events = new EventEmitter();
 events.setMaxListeners(200);
 const queues = new Map<string, Promise<unknown>>();
-let pool: Pool | undefined;
 
 function database() {
-  return process.env.DATABASE_URL ? pool ??= new Pool({ connectionString: process.env.DATABASE_URL, max: 3 }) : undefined;
+  return getDatabasePool();
 }
 
 async function persistDatabase(query: string, values: unknown[]) {

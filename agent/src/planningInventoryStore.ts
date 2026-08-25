@@ -1,12 +1,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
 import type { PlannedBusinessFlow } from "./planningConversation.js";
 import type { BusinessFunction } from "./businessFunctionCompiler.js";
+import { getDatabasePool } from "./databaseRuntime.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const memory = new Map<string, PlanningInventory>();
-let pool: Pool | undefined;
 
 export interface PlanningFlowPage {
   flows: PlannedBusinessFlow[];
@@ -32,8 +31,7 @@ function inventoryFile(id: string) {
 }
 
 function database() {
-  if (!process.env.DATABASE_URL) return undefined;
-  return pool ??= new Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
+  return getDatabasePool();
 }
 
 function encodeCursor(index: number) {

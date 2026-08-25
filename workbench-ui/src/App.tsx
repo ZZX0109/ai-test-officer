@@ -5,16 +5,11 @@ import {
   ArrowLeft,
   CalendarClock,
   CheckCircle2,
-  Code2,
   FileSearch,
   KeyRound,
-  Link2,
-  ListChecks,
-  Pencil,
   Play,
   RefreshCw,
   Save,
-  Send,
   Star,
   Square,
   Timer,
@@ -22,36 +17,24 @@ import {
   X,
   XCircle
 } from "lucide-react";
-import { ConnectorPanel } from "./components/ConnectorPanel";
 import { BotDeliveryPanel } from "./components/BotDeliveryPanel";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
-import {
-  DiscoveryOrchestrationNotice,
-  DiscoveryPanel
-} from "./components/DiscoveryPanel";
-import { discoveryOrchestrationCopy } from "./discoveryOrchestrationCopy";
+import { DiscoveryPanel } from "./components/DiscoveryPanel";
 import { EvidencePanel } from "./components/EvidencePanel";
-import { TrajectoryPanel } from "./components/TrajectoryPanel";
-import { FeatureTestProgress } from "./components/FeatureTestProgress";
-import { PlanningFlowEditor } from "./components/PlanningFlowEditor";
-import { FeatureTestReport } from "./components/FeatureTestReport";
-import { InterruptDecisionPanel } from "./components/InterruptDecisionPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
-import { ImpactPanel } from "./components/ImpactPanel";
 import { PatrolPanel } from "./components/PatrolPanel";
 import { ProjectPanel } from "./components/ProjectPanel";
 import { ProjectWizardPanel } from "./components/ProjectWizardPanel";
-import { WorkbenchSectionBoundary } from "./components/WorkbenchSectionBoundary";
-import { RunTimeline } from "./components/RunTimeline";
-import { RunAssistantPanel } from "./components/RunAssistantPanel";
-import { KnowledgeBasis } from "./components/KnowledgeBasis";
-import { AssistantConversationMessage } from "./components/AssistantConversationMessage";
-import { SharedBrowserCanvas } from "./components/SharedBrowserCanvas";
-import { BusinessFunctionList } from "./components/BusinessFunctionList";
+import { LiveWorkspacePanel } from "./components/LiveWorkspacePanel";
 import { ProgressiveDetailsList } from "./components/ProgressiveDetailsList";
-import { SecurityPanel } from "./components/SecurityPanel";
-import { SourceStatusPanel } from "./components/SourceStatusPanel";
+import { ContextSupplementPanel } from "./components/ContextSupplementPanel";
 import { StoragePanel } from "./components/StoragePanel";
+import { AdvancedCapabilitiesSection } from "./components/AdvancedCapabilitiesSection";
+import { AssistantPlanningSidebar } from "./components/AssistantPlanningSidebar";
+import { ApiSettingsDialog } from "./components/ApiSettingsDialog";
+import { PlanningConversationPanel } from "./components/PlanningConversationPanel";
+import { ReadinessPanel } from "./components/ReadinessPanel"; import { CredentialSetupWizard } from "./components/CredentialSetupWizard";
+import { ExecutionTimelinePanel } from "./components/ExecutionTimelinePanel";
 import { AuthenticatedArtifactLink } from "./components/AuthenticatedArtifact";
 import {
   forgetProjectActiveRun,
@@ -61,6 +44,22 @@ import {
   rememberProjectActiveRun
 } from "./activeRunCache";
 import { useWorkbenchState } from "./hooks/useWorkbenchState";
+import { useReadiness } from "./hooks/useReadiness"; import { useReviewCase } from "./hooks/useReviewCase";
+import { useSharedBrowserInteractions } from "./hooks/useSharedBrowserInteractions";
+import { useRepairWorkspaceActions } from "./hooks/useRepairWorkspaceActions";
+import { useProjectSelection } from "./hooks/useProjectSelection";
+import { useAdvancedOperations } from "./hooks/useAdvancedOperations";
+import { usePlanningFlowEdits } from "./hooks/usePlanningFlowEdits";
+import { usePlanningConversationRequest } from "./hooks/usePlanningConversationRequest";
+import { useConfirmedScenarioExecution, type AutomationFailure } from "./hooks/useConfirmedScenarioExecution";
+import { useProjectPreparation } from "./hooks/useProjectPreparation";
+import { useAutomaticPlanning } from "./hooks/useAutomaticPlanning";
+import { useProjectRecovery } from "./hooks/useProjectRecovery";
+import { useProjectRuntimeOperations } from "./hooks/useProjectRuntimeOperations";
+import { useContextRefresh } from "./hooks/useContextRefresh";
+import { useWorkbenchLifecycleEffects } from "./hooks/useWorkbenchLifecycleEffects";
+import { useAutomaticDiagnosticExplanation } from "./hooks/useAutomaticDiagnosticExplanation";
+import { useRunInspectionActions } from "./hooks/useRunInspectionActions";
 import {
   initialWorkspaceState,
   workspaceReducer,
@@ -76,8 +75,6 @@ import {
   upsertAssistantProgress
 } from "./workbenchLogic";
 
-const RepairWorkspace = React.lazy(() => import("./components/MonacoRepairWorkspace")
-  .then((module) => ({ default: module.RepairWorkspace })));
 import {
   analyzeConnectedContext,
   bindProjectApiCredential,
@@ -88,13 +85,8 @@ import {
   controlRun,
   approveScenarioDraft,
   createCredential,
-  createRunRepair,
-  createProjectCodeSession,
-  createHarnessGapDraft,
   createProjectGrant,
   deleteCredential,
-  deletePatrolPlan,
-  deliverRunToBot,
   detectProject,
   detectProjectManifest,
   diagnoseProject,
@@ -102,31 +94,23 @@ import {
   getAuditStoreStatus,
   getBenchmarkSummary,
   getLatestDemoVerification,
-  getRunLlmCalls,
   getRunKnowledge,
   subscribeRunEvents,
   getGrayPlan,
   getRepairFile,
   getPatrolTrend,
   getProjectRuntime,
-  getProjectRecovery,
   getAiStartRecovery,
   getSecuritySummary,
   getStorageStatus,
   getReadiness,
-  getRunBundle,
   getRunEvidence,
   getRunProjection,
   getRunAgent,
   getRunBrowserSession,
-  acquireRunBrowserControl,
-  releaseRunBrowserControl,
-  sendRunBrowserInput,
   resumeRepairDecision,
   listRunRepairs,
   listRepairWorkspaceFiles,
-  applyRepair,
-  exportRepair,
   listHarnessGaps,
   listBotDeliveries,
   listCredentials,
@@ -143,32 +127,21 @@ import {
   rotateCredential,
   runCommitCheck,
   runDiscoveryScan,
-  runPatrol,
-  runPatrolPlanNow,
   runRequirementAcceptance,
-  recoverAndRetryProject,
   resumeRunAgentInterrupt,
-  runStorageRetention,
   createVisualRun,
   approveRunPlan,
   grantRunPermissions,
   waitForRunReport,
   saveProject,
   saveProjectLoginCredential,
-  savePatrolPlan,
   sendRunAgentMessage,
-  startPatrolJob,
   startProjectAsync,
-  stopPatrolJob,
   stopProject,
   testCredential,
   testProjectConnection,
-  installHarnessGapDraft,
-  updateHarnessGap,
   updateCredential,
-  updateRepairFile,
   updateRepairPlanStatus,
-  validateRepair,
   waitForAgentReady
 } from "./api";
 import type {
@@ -207,7 +180,6 @@ import type {
   RepairDecisionValue,
   RepairPlanData,
   RepairSession,
-  PlannedBusinessFlow,
   RunBundle,
   RunProjection,
   RunHistoryEntry,
@@ -219,15 +191,6 @@ import type {
   StorageStatus
 } from "./types";
 import "./styles.css";
-
-interface AutomationFailure {
-  scenarioId: string;
-  title?: string;
-  target?: string;
-  stage: "binding" | "execution";
-  detail: string;
-  requiredInformation?: string[];
-}
 
 function auditStoreClass(auditStore: AuditStoreStatus | null) {
   if (!auditStore) return "warning";
@@ -384,7 +347,6 @@ export function App() {
   const [planningResult, setPlanningResult] = useState<PlanningConversationResult | null>(null);
   const [planningFlowPageLoading, setPlanningFlowPageLoading] = useState(false);
   const [planningFunctionPageLoading, setPlanningFunctionPageLoading] = useState(false);
-  const [excludedPlanningFlowIds, setExcludedPlanningFlowIds] = useState<Set<string>>(() => new Set());
   const [planningBusy, setPlanningBusy] = useState(false);
   const [assistantChatBusy, setAssistantChatBusy] = useState(false);
   const [assistantSuggestedAction, setAssistantSuggestedAction] = useState<{
@@ -413,8 +375,6 @@ export function App() {
   const generationRequestRef = useRef<{ id: string; projectId: string; controller: AbortController } | null>(null);
   const diagnosisOperationRef = useRef<{ id: string; projectId: string } | null>(null);
   const activeRunRestoreEpochRef = useRef(0);
-  const [flowDeleteReadyId, setFlowDeleteReadyId] = useState<string | null>(null);
-  const flowDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [capabilities, setCapabilities] = useState<PlatformCapability[]>([]);
   const [deliveries, setDeliveries] = useState<BotDelivery[]>([]);
@@ -438,7 +398,7 @@ export function App() {
   // retest. Survives closing the repair workspace (component state, not tied to
   // the current repair session) so the feature list stays green after repair.
   const [repairVerifiedScenarioIds, setRepairVerifiedScenarioIds] = useState<Set<string>>(new Set());
-  const [dockerReadiness, setDockerReadiness] = useState<{ available: boolean; engine: "docker" | "podman" } | null>(null);
+  const { report: readinessReport, docker: dockerReadiness, loading: readinessLoading, bootstrapping: bootstrapBusy, refresh: refreshReadiness, bootstrap: runBootstrap } = useReadiness(selectedProjectId, credentials.length);
   // Repair verdicts are tied to a specific run's scenarioIds; clear them when
   // the active run changes so a stale "repaired" flag from a previous run
   // cannot turn a new run's feature green.
@@ -514,6 +474,25 @@ export function App() {
   const [botChannel, setBotChannel] = useState("值班群");
   const [botGithubPrUrl, setBotGithubPrUrl] = useState("");
   const [botIncludeScreenshots, setBotIncludeScreenshots] = useState(true);
+
+  const {
+    toggleBrowserControl,
+    clickSharedBrowser,
+    pressSharedBrowserKey,
+    typeSharedBrowserText,
+    typeIntoSharedBrowser,
+    syncSharedBrowserViewport
+  } = useSharedBrowserInteractions({
+    activeRunId,
+    browserSession,
+    browserManualInput,
+    browserControlBusy,
+    setBrowserSession,
+    setBrowserControlBusy,
+    setBrowserFrameRevision,
+    setBrowserManualInput,
+    setMessage
+  });
 
   const {
     defaultCredential,
@@ -677,24 +656,12 @@ export function App() {
   useEffect(() => {
     if (currentFlowStep === 4) requirementComposerRef.current?.focus();
   }, [currentFlowStep]);
-  // First-run readiness gate: proactively check the container engine so a
-  // missing Docker/Podman surfaces as a prerequisite prompt before the user
-  // tries to start the sandbox (step 2), not as a mid-startup failure.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const data = await getReadiness().catch(() => null);
-      if (!cancelled && data) setDockerReadiness(data.docker);
-    })();
-    return () => { cancelled = true; };
-  }, [selectedProjectId]);
-  // The three prerequisites for entering step 2 (sandbox run). Any missing
-  // one is surfaced as a clear prompt instead of letting the user start and
-  // fail halfway. Docker-pending (null) is not yet a blocker.
-  const readinessBlockers: string[] = [];
+  const readinessBlockers: string[] = readinessReport?.checks
+    .filter((item) => item.status === "blocked")
+    .map((item) => item.message) ?? [];
   if (!hasSelectedProject) readinessBlockers.push("上传或选择一个项目");
-  if (!credentials.length) readinessBlockers.push("配置模型凭据（OpenAI-compatible key，用于功能识别与规划）");
-  if (dockerReadiness && !dockerReadiness.available) readinessBlockers.push(`启动 ${dockerReadiness.engine}（容器运行时不可用）`);
+  if (!readinessReport && !credentials.length) readinessBlockers.push("配置模型凭据（OpenAI-compatible key，用于功能识别与规划）");
+  if (!readinessReport && dockerReadiness && !dockerReadiness.available) readinessBlockers.push(`启动 ${dockerReadiness.engine}（容器运行时不可用）`);
   const readinessReady = readinessBlockers.length === 0;
   const loginServiceUnavailable = runIsBlocked &&
     /resolveLogin[\s\S]{0,180}(retry|timeout|timed out|network|refused|502|503|unavailable)|maximum retry count[\s\S]{0,80}resolveLogin/i.test(runDiagnosticText);
@@ -709,6 +676,7 @@ export function App() {
   const credentialReadyForRetry = authBlockDetected && hasConfiguredProjectLogin;
   const screenshotRateLimited = Boolean(screenshotIssue && /rate limit exceeded|429/i.test(screenshotIssue));
   const reviewRequired = activeRun?.state === "awaiting-human-review" || latestDecision === "needs-human-review";
+  const reviewCase = useReviewCase(activeRunId, reviewRequired);
   const pathBindingRepairable = planningAutomation.phase === "blocked"
     && /真实页面路径|安全校验|页面绑定|没有路径通过|失败链路|入口、控件或预期结果/i.test(planningAutomation.detail);
   const proofInfrastructureFailure = Boolean(result?.machineGate?.reasonDetails?.some((reason) =>
@@ -753,6 +721,269 @@ export function App() {
   const latestPlanningAssistant = [...planningMessages].reverse().find((item) => item.role === "assistant");
   const latestPlanningAssistantMessage = latestPlanningAssistant?.content;
   const visiblePlanningTail = visiblePlanningMessages.at(-1);
+  const {
+    openCodeRepairWorkspace,
+    openProjectCodeWorkspace,
+    saveRepairFile,
+    validateCurrentRepair,
+    exportCurrentRepair,
+    applyCurrentRepair
+  } = useRepairWorkspaceActions({
+    activeRunId,
+    selectedProjectId,
+    repairBusy,
+    startupRepairAvailable,
+    credentialId: defaultCredential?.id,
+    projectRecovery,
+    projectRuntime,
+    repairSession,
+    result,
+    setCentreSurface,
+    setRepairBusy,
+    setRepairWorkspaceOpen,
+    setRepairSession,
+    setMessage,
+    setPlanningMessages,
+    setRepairVerifiedScenarioIds
+  });
+  const { selectProject } = useProjectSelection({
+    projects,
+    scenarioId,
+    activeRunRestoreEpochRef,
+    generationRequestRef,
+    diagnosisOperationRef,
+    onResetPlanning: resetPlanningConversation,
+    onProjectNotFound: (projectId) => dispatchWorkspace({ type: "project-loaded", projectId }),
+    onProjectLoaded: (projectId) => dispatchWorkspace({ type: "project-loaded", projectId }),
+    setSelectedProjectId,
+    setPreviewSessionProjectId,
+    setRunPreviewModalOpen,
+    setProjectDraft,
+    setProjectPathInput,
+    setAppUrl,
+    setProjectDetection,
+    setProjectDetectMessage,
+    setProjectDiagnosis,
+    setProjectConnection,
+    setProjectRuntime,
+    setProjectGrants,
+    setPatrolTrend,
+    setPlan,
+    setResult,
+    setActiveRunId,
+    setActiveRun,
+    setAnalysis
+  });
+  const { refresh, refreshInputContext } = useContextRefresh({
+    credentials,
+    plan,
+    projects,
+    selectedProjectId,
+    scenarioId,
+    projectDraft,
+    deliveries,
+    patrolJobs,
+    harnessGaps,
+    setCredentials,
+    setPlan,
+    setProjects,
+    setProjectListNotice,
+    setScenarios,
+    setCapabilities,
+    setDeliveries,
+    setPatrolJobs,
+    setPatrolPlans,
+    setHarnessGaps,
+    setScenarioDrafts,
+    setDemoVerification,
+    setSecuritySummary,
+    setBenchmarkSummary,
+    setAuditStore,
+    setRunHistory,
+    setStorageStatus,
+    setStorageArchives,
+    setPatrolTrend,
+    setProjectDraft,
+    setProjectGrants,
+    setProjectRuntime,
+    setProjectDetection,
+    setAppUrl,
+    isRefreshingContext,
+    setIsRefreshingContext,
+    setContextRefreshStatus,
+    setMessage
+  });
+  const {
+    runPatrolOnce,
+    startScheduler,
+    stopScheduler,
+    runSavedPatrolPlan,
+    removeSavedPatrolPlan,
+    deliverRun,
+    setGapStatus,
+    draftScenarioFromGap,
+    installScenarioFromGap
+  } = useAdvancedOperations({
+    appUrl,
+    selectedProjectId,
+    projectDraft,
+    scenarioId,
+    credentialId: defaultCredential?.id,
+    requirementText,
+    diffText,
+    plan,
+    permissionProfile,
+    result,
+    botProvider,
+    botChannel,
+    botIncludeScreenshots,
+    botGithubPrUrl,
+    recipients,
+    optionalTrim,
+    requireBrowserAuthorization,
+    refresh,
+    setMessage,
+    setIsPatrolling,
+    setIsScheduling,
+    setResult,
+    setPatrolRun,
+    setDeliveries,
+    setPatrolPlans,
+    setPatrolJobs,
+    setHarnessGaps,
+    setGapDrafts,
+    setScenarioId
+  });
+  const {
+    excludedPlanningFlowIds,
+    resetPlanningFlowEdits,
+    excludePlanningFlow,
+    editPlanningFlowTitle,
+    addPlanningFlow
+  } = usePlanningFlowEdits({
+    planningResult,
+    scenarioId,
+    setPlanningResult,
+    setScenarioId,
+    setMessage
+  });
+  const { continueTestPlanning } = usePlanningConversationRequest({
+    selectedProjectId,
+    projectDraft,
+    planningInput,
+    planningMessages,
+    diffText,
+    bugTicketText,
+    defaultCredential,
+    resetPlanningFlowEdits,
+    setPlanningInput,
+    setPlanningMessages,
+    setPlanningBusy,
+    setPlanningConfirmed,
+    setPlanningResult,
+    setPlanningAutomation,
+    setScenarioId,
+    setDiscovery,
+    setScenarioDrafts,
+    setAnalysis,
+    setRequirementText,
+    setMessage
+  });
+  const { recoverProjectAndRetry } = useProjectRecovery({
+    selectedProjectId,
+    projectDraft,
+    credentialId: defaultCredential?.id,
+    projectRecoveryBusy,
+    getActionLabel: assistantActionLabel,
+    normalizeError: userFacingAutomationError,
+    boundText: boundedAssistantText,
+    setMessage,
+    setPlanningMessages,
+    setProjectRecoveryBusy,
+    setProjectRecovery,
+    setProjectRuntime,
+    setRuntimeRecoveryAdvice,
+    setAssistantSuggestedAction,
+    setPlanningAutomation,
+    setPreviewSessionProjectId
+  });
+  const { executeConfirmedScenarioAutomatically } = useConfirmedScenarioExecution({
+    selectedProjectId,
+    projectDraft,
+    previewUrl,
+    requirementText,
+    diffText,
+    executionMode: selectedProjectExecutionMode,
+    permissionProfile,
+    defaultCredential,
+    beginWorkspaceOperation,
+    dispatchWorkspace,
+    closeDrawers,
+    userFacingError: userFacingAutomationError,
+    setPlanningAutomation,
+    setMessage,
+    setRunPreviewModalOpen,
+    setIsRunning,
+    setBrowserSession,
+    setActiveRunId,
+    setActiveRun,
+    setResult,
+    setAutomationFailures,
+    setPlanningMessages
+  });
+  const { ensureProjectReadyForAutomation } = useProjectPreparation({
+    projectDraft,
+    projectDetection,
+    projectRuntime,
+    setProjectDraft,
+    setSelectedProjectId,
+    setProjectPathInput,
+    setAppUrl,
+    setProjectConnection,
+    setProjectRuntime,
+    setProjectDiagnosis,
+    setPreviewSessionProjectId,
+    setPlanningAutomation
+  });
+  const { continueAutomaticPlanning } = useAutomaticPlanning({
+    permissionProfile,
+    planningResult,
+    requirementText,
+    executionMode: selectedProjectExecutionMode,
+    defaultCredential,
+    discovery,
+    ensureProjectReadyForAutomation,
+    executeConfirmedScenarioAutomatically,
+    analyzeAutomationFailures,
+    userFacingError: userFacingAutomationError,
+    setPlanningAutomation,
+    setMessage,
+    setRunPreviewModalOpen,
+    setAutomationFailures,
+    setPlanningMessages,
+    setDiscovery,
+    setScenarioDrafts,
+    setScenarioId,
+    setScenarios,
+    setRevealProjectLoginSettings
+  });
+  const { openHistoricalRun, runRetentionDryRun } = useRunInspectionActions({
+    refresh,
+    fromBundle: runResultFromBundle,
+    setMessage,
+    setResult,
+    setActiveRunId,
+    setCentreSurface,
+    setActiveRun,
+    setBrowserSession,
+    setBrowserFrameRevision,
+    setLiveRun,
+    setCommitCheck,
+    setRequirementAcceptance,
+    setPatrolRun,
+    setRightDrawerOpen,
+    setLeftDrawerOpen
+  });
 
   useLayoutEffect(() => {
     const viewport = planningMessagesViewportRef.current;
@@ -950,184 +1181,6 @@ export function App() {
     }
   }
 
-  async function openCodeRepairWorkspace(targetRunId?: string) {
-    const repairRunId = targetRunId ?? activeRunId;
-    if (!repairRunId) {
-      setCentreSurface("code");
-      if (!selectedProjectId || repairBusy) {
-        setMessage(selectedProjectId ? "代码沙盒正在准备，请稍候。" : "请先选择项目，再打开代码沙盒。");
-        return;
-      }
-      setRepairBusy(true);
-      const analyzeStartup = startupRepairAvailable;
-      const pendingId = `startup_repair_${Date.now()}`;
-      setMessage(analyzeStartup
-        ? "正在读取启动诊断并让 AI 生成受限的沙盒修复…"
-        : "正在创建项目代码沙盒；原项目保持只读。");
-      if (analyzeStartup) {
-        setPlanningMessages((current) => [...current, {
-          id: pendingId,
-          role: "assistant",
-          content: "遇到的问题：项目经过有限恢复后仍未启动。\n系统正在做什么：正在读取启动日志和允许修改的配置文件，在隔离沙盒中生成最小补丁。\n需要你操作：你已确认本次沙盒分析；原项目不会被修改，联网安装仍会单独询问。",
-          createdAt: new Date().toISOString()
-        }]);
-      }
-      try {
-        const response = await createProjectCodeSession(selectedProjectId, {
-          autoAnalyze: analyzeStartup,
-          credentialId: defaultCredential?.id,
-          summary: analyzeStartup
-            ? "根据已保存的项目启动状态和运行日志，分析最小启动配置修复。"
-            : undefined
-        });
-        setRepairSession(response.repair);
-        setRepairWorkspaceOpen(true);
-        const changedFiles = response.repair.files.map((file) => file.path);
-        setMessage(analyzeStartup ? response.repair.summary : "代码沙盒已准备，可以查看和编辑文件。保存只写入沙盒，不会直接修改原项目。");
-        if (analyzeStartup) {
-          setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
-            ...item,
-            content: [
-              `遇到的问题：${projectRecovery?.events.at(-1)?.message ?? projectRuntime?.message ?? "项目启动失败。"}`,
-              `系统已经做了什么：${response.repair.summary}`,
-              changedFiles.length
-                ? `沙盒变更：${changedFiles.join("、")}。已打开代码 Diff，尚未写回原项目。`
-                : "沙盒变更：模型没有生成满足安全约束的修改，未改动任何文件。",
-              "需要你操作：查看 Diff；如涉及依赖清单，需先授权联网安装，然后执行重新验证。"
-            ].join("\n")
-          } : item));
-        }
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : "创建代码沙盒失败";
-        setMessage(detail);
-        if (analyzeStartup) {
-          setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
-            ...item,
-            content: `遇到的问题：启动修复没有完成。\n系统已经做了什么：已保留原启动诊断，没有修改原项目。技术原因：${detail}\n需要你操作：检查模型配置，或在已打开的代码沙盒中手动调整启动配置。`
-          } : item));
-        }
-      } finally {
-        setRepairBusy(false);
-      }
-      return;
-    }
-    setCentreSurface("code");
-    setRepairBusy(true);
-    setMessage("已获得你的请求，正在创建只读源码快照和可写沙盒副本，并根据失败证据生成最小修复。");
-    const pendingId = `code_repair_pending_${Date.now()}`;
-    setPlanningMessages((current) => [...current, {
-      id: pendingId,
-      role: "assistant",
-        content: "你已授权 AI 在隔离沙盒中分析失败并提出最小补丁。系统会先保留原始证据；原项目保持只读。AI 会说明修改原因、预期效果和复测范围，验证通过前不会应用到原项目。",
-      createdAt: new Date().toISOString()
-    }]);
-    try {
-      const response = await createRunRepair(repairRunId, {
-        autoAnalyze: true,
-        credentialId: defaultCredential?.id,
-        summary: "根据当前运行的机器门禁、失败断言和证据定位最小修复。"
-      });
-      setRepairSession(response.repair);
-      setRepairWorkspaceOpen(true);
-      setMessage(response.repair.summary);
-      const calls = await getRunLlmCalls(repairRunId).catch(() => null);
-      const repairCall = [...(calls?.calls ?? [])].reverse().find((call) => call.purpose === "repairing");
-      const changedFiles = response.repair.files.map((file) => `${file.path}（${file.additions}+/${file.deletions}-，${file.risk}）`);
-      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
-        ...item,
-        content: [
-          response.repair.summary,
-          `失败归因：${response.repair.failureClass}。`,
-          changedFiles.length ? `沙盒变更：${changedFiles.join("；")}。` : "模型没有生成可安全应用的文件变更。",
-          repairCall
-            ? `模型 ${repairCall.model}；调用 ${repairCall.id}；${repairCall.durationMs}ms；${repairCall.usage.totalTokens ?? 0} Token；状态 ${repairCall.status}。`
-            : "本次没有可用的 Repair 模型调用记录。",
-          "修复工作区已打开，可逐行查看 Diff；重新验证通过前不会应用到原项目。你可以继续手动编辑沙盒副本。"
-        ].join("\n")
-      } : item));
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : "创建修复工作区失败";
-      setMessage(detail);
-      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
-        ...item,
-        content: `修复会话创建失败：${detail}。原机器结论和证据保持不变，没有修改项目文件。`
-      } : item));
-    } finally {
-      setRepairBusy(false);
-    }
-  }
-
-  // Code mode is a normal project-viewing surface, not a reward unlocked only
-  // after a failed test.  Opening it creates a filtered, writable sandbox copy
-  // of the selected project's source.  The original folder is never exposed
-  // for writes; repair-specific AI proposals still use openCodeRepairWorkspace
-  // above and retain their run/evidence provenance.
-  async function openProjectCodeWorkspace() {
-    setCentreSurface("code");
-    if (!selectedProjectId) {
-      setMessage("请先上传或选择项目，再查看代码。");
-      return;
-    }
-    if (repairSession?.projectId === selectedProjectId) {
-      setRepairWorkspaceOpen(true);
-      return;
-    }
-    if (repairBusy) return;
-    setRepairBusy(true);
-    setMessage("正在创建受控项目代码副本；原项目保持只读。");
-    try {
-      const response = await createProjectCodeSession(selectedProjectId, "项目代码工作区：用于查看、编辑沙盒副本和准备后续测试修复。");
-      setRepairSession(response.repair);
-      setRepairWorkspaceOpen(true);
-      setMessage("项目代码已载入受控工作区。任何保存只写入沙盒副本，不会直接修改原项目。");
-    } catch (error) {
-      setRepairWorkspaceOpen(false);
-      setCentreSurface("preview");
-      setMessage(error instanceof Error ? `无法打开项目代码：${error.message}` : "无法打开项目代码工作区。");
-    } finally {
-      setRepairBusy(false);
-    }
-  }
-
-  async function saveRepairFile(file: RepairFileContent, content: string) {
-    if (!repairSession) throw new Error("repair_session_not_selected");
-    const response = await updateRepairFile(repairSession.id, file.path, {
-      content,
-      expectedVersion: file.version
-    });
-    setRepairSession(response.repair);
-    return response.repair;
-  }
-
-  async function validateCurrentRepair(allowNetworkInstall = false) {
-    if (!repairSession) throw new Error("repair_session_not_selected");
-    const response = await validateRepair(repairSession.id, allowNetworkInstall);
-    setRepairSession(response.repair);
-    // A passed repair retest overturns the failed conclusion for the repaired
-    // feature. Map the repair session's run (the failed child run) back to its
-    // scenarioId via the run's conclusions, so the feature list can turn green.
-    if (response.repair.validation?.status === "passed") {
-      const scenarioId = result?.conclusions?.find((conclusion) => conclusion.runId === response.repair.runId)?.scenarioId;
-      if (scenarioId) {
-        setRepairVerifiedScenarioIds((current) => new Set([...current, scenarioId]));
-      }
-    }
-    return response.repair;
-  }
-
-  async function exportCurrentRepair(format: "patch" | "zip") {
-    if (!repairSession) throw new Error("repair_session_not_selected");
-    const response = await exportRepair(repairSession.id, format);
-    return { downloadUrl: response.export.downloadUrl };
-  }
-
-  async function applyCurrentRepair(confirmHighRisk: boolean) {
-    if (!repairSession) throw new Error("repair_session_not_selected");
-    const response = await applyRepair(repairSession.id, confirmHighRisk);
-    setRepairSession(response.repair);
-    return response.repair;
-  }
-
   function returnBlockedPreparationToAssistant() {
     setRunPreviewModalOpen(false);
     setPlanningConfirmed(false);
@@ -1225,6 +1278,74 @@ export function App() {
     await continueTestPlanning("测试账号已经配置完成，请重新生成并执行需要登录的测试路径。");
   }
 
+  const {
+    detectCurrentProjectPath,
+    diagnoseAndRunCurrentProject,
+    applyAiRecoveryCandidate,
+    saveCurrentProjectLoginCredential,
+    savePreparationLoginAndContinue,
+    stopCurrentProject,
+    saveInterruptCredential
+  } = useProjectRuntimeOperations({
+    credentials,
+    defaultCredential,
+    selectedProjectExecutionMode,
+    projectDraft,
+    projectDetection,
+    runtimeRecoveryAdvice,
+    planningResult,
+    planningMessages,
+    discovery,
+    permissionProfile,
+    preparationRequiresLogin,
+    preparationLoginUsername,
+    preparationLoginPassword,
+    authBlockDetected,
+    activeRunRestoreEpochRef,
+    diagnosisOperationRef,
+    surfacedProjectDiagnostics,
+    resetPlanningConversation,
+    closeDrawers,
+    boundedAssistantText,
+    recoverProjectAndRetry,
+    retryWithConfiguredLogin,
+    executeConfirmedScenarioAutomatically,
+    continueAutomaticPlanning,
+    setProjectDetectMessage,
+    setMessage,
+    setProjectDetection,
+    setProjectDraft,
+    setSelectedProjectId,
+    setProjectPathInput,
+    setAppUrl,
+    setActiveRunId,
+    setActiveRun,
+    setAgentProjection,
+    setBrowserSession,
+    setLiveRun,
+    setResult,
+    setRepairSession,
+    setInterruptError,
+    setInterruptBusy,
+    setIsRunning,
+    setRunPreviewModalOpen,
+    setScreenshotIssue,
+    setProjectConnection,
+    setProjectDiagnosis,
+    setRuntimeRecoveryAdvice,
+    setProjectLaunchPhase,
+    setProjectRuntime,
+    setPlanningAutomation,
+    setPreviewSessionProjectId,
+    setPlanningMessages,
+    setRevealProjectLoginSettings,
+    setPreparationLoginError,
+    setPreparationLoginUsername,
+    setPreparationLoginPassword,
+    setPreparationLoginSaving,
+    setScenarioId
+  });
+
   async function bindMissingProjectApiCredentials(
     credentialId: string,
     source: "test-system" | "dedicated"
@@ -1274,8 +1395,7 @@ export function App() {
   }
 
   function resetPlanningConversation() {
-    if (flowDeleteTimer.current) clearTimeout(flowDeleteTimer.current);
-    setFlowDeleteReadyId(null);
+    resetPlanningFlowEdits();
     setPlanningMessages([{
       id: `planning_welcome_${Date.now()}`,
       role: "assistant",
@@ -1293,91 +1413,6 @@ export function App() {
     setPlan(null);
   }
 
-  function scheduleFlowDelete(flowId: string) {
-    if (flowDeleteTimer.current) clearTimeout(flowDeleteTimer.current);
-    flowDeleteTimer.current = setTimeout(() => setFlowDeleteReadyId(flowId), 1_000);
-  }
-
-  function hideFlowDelete(flowId: string) {
-    if (flowDeleteTimer.current) clearTimeout(flowDeleteTimer.current);
-    flowDeleteTimer.current = null;
-    setFlowDeleteReadyId((current) => current === flowId ? null : current);
-  }
-
-  function excludePlanningFlow(flowId: string) {
-    const removed = planningResult?.businessFlows.find((flow) => flow.id === flowId);
-    if (!removed) return;
-    setExcludedPlanningFlowIds((current) => new Set([...current, flowId]));
-    setPlanningResult((current) => {
-      if (!current) return current;
-      const businessFlows = current.businessFlows.filter((flow) => flow.id !== flowId);
-      const executable = businessFlows.filter((flow) => flow.status === "executable").length;
-      const autoBindable = businessFlows.filter((flow) => flow.status === "auto-bindable").length;
-      const needsInput = businessFlows.filter((flow) => flow.status === "needs-input").length;
-      const gaps = businessFlows.filter((flow) => flow.status === "coverage-gap").length;
-      return {
-        ...current,
-        businessFlows,
-        coverage: {
-          ...current.coverage,
-          discovered: businessFlows.length,
-          executable,
-          autoBindable,
-          needsInput,
-          gaps,
-          sourceCandidates: businessFlows.reduce((total, flow) => total + (flow.sourceCount ?? 1), 0),
-          confidence: businessFlows.length && gaps === 0 ? "high" : businessFlows.length ? "medium" : "low"
-        },
-        plan: {
-          ...current.plan,
-          risks: current.plan.risks.filter((risk) => !risk.id.endsWith(flowId)),
-          levels: current.plan.levels.map((level) => ({
-            ...level,
-            paths: level.paths.filter((path) => path.id !== flowId)
-          }))
-        },
-        recommendedScenarioId: businessFlows.find((flow) => flow.status === "executable")?.scenarioId
-      };
-    });
-    if (removed.scenarioId && removed.scenarioId === scenarioId) setScenarioId("");
-    setFlowDeleteReadyId(null);
-    setMessage(`已从本次测试计划排除“${removed.title}”。不会修改项目代码。`);
-  }
-
-  function editPlanningFlowTitle(flowId: string, title: string) {
-    setPlanningResult((current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        businessFlows: current.businessFlows.map((flow) => flow.id === flowId ? { ...flow, title } : flow)
-      };
-    });
-  }
-
-  function addPlanningFlow(title: string) {
-    setPlanningResult((current) => {
-      if (!current) return current;
-      const flow: PlannedBusinessFlow = {
-        id: `manual_${Math.random().toString(36).slice(2, 10)}`,
-        title,
-        kind: "scenario",
-        target: "",
-        status: "needs-input",
-        confidence: "low",
-        reason: "用户手动添加的功能，待确认页面/控件/预期结果。",
-        requiredInformation: []
-      };
-      const businessFlows = [...current.businessFlows, flow];
-      const needsInput = businessFlows.filter((item) => item.status === "needs-input").length;
-      return {
-        ...current,
-        businessFlows,
-        coverage: { ...current.coverage, discovered: businessFlows.length, needsInput }
-      };
-    });
-    setMessage(`已添加自定义功能“${title}”。`);
-  }
-
   function openCredentialSettings() {
     setRightDrawerOpen(false);
     setLeftDrawerOpen(false);
@@ -1386,963 +1421,84 @@ export function App() {
     setApiSettingsOpen(true);
   }
 
-  function renderApiSettingsDialog() {
-    if (!apiSettingsOpen) return null;
-    return (
-      <div className="api-settings-backdrop" role="presentation" onMouseDown={() => setApiSettingsOpen(false)}>
-        <section
-          className="api-settings-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="api-settings-title"
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <header>
-            <div>
-              <p className="eyebrow">AI 配置</p>
-              <h2 id="api-settings-title">API Key 与模型</h2>
-              <p>配置一次后，测试计划和问题分析会自动使用默认模型。</p>
-            </div>
-            <button className="icon-button" type="button" aria-label="关闭 API Key 配置" onClick={() => setApiSettingsOpen(false)}>
-              <X size={17} />
-            </button>
-          </header>
-
-          <button
-            className="add-credential-button"
-            type="button"
-            onClick={() => {
-              if (credentialFormOpen) {
-                cancelEdit();
-                return;
-              }
-              cancelEdit();
-              setCredentialFormOpen(true);
-            }}
-          >
-            {credentialFormOpen ? "收起配置" : "添加新的 API Key"}
-          </button>
-
-          {credentialFormOpen && <form className="api-settings-form" onSubmit={submitCredential}>
-            <label>
-              配置名称
-              <input aria-label="名称" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：我的 GPT" />
-            </label>
-            <label>
-              服务商
-              <select aria-label="Provider" value={form.provider} onChange={(event) => setForm({ ...form, provider: event.target.value })}>
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="openai-compatible">兼容 OpenAI 的服务</option>
-                <option value="custom">自定义服务</option>
-              </select>
-            </label>
-            <label>
-              API 地址
-              <input aria-label="Base URL" value={form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" />
-            </label>
-            <label>
-              模型名称
-              <input aria-label="模型" value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="gpt-5.1-codex" />
-            </label>
-            <label>
-              API Key
-              <input aria-label="API Key" type="password" value={form.apiKey} onChange={(event) => setForm({ ...form, apiKey: event.target.value })} placeholder={editingCredentialId ? "留空则保留原来的 Key" : "粘贴 API Key"} />
-              <small>密钥不会显示在报告或测试证据中。</small>
-            </label>
-            <details className="api-settings-advanced">
-              <summary>高级设置</summary>
-              <label>标签<input aria-label="标签" value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} /></label>
-              <label>Owner<input aria-label="Owner" value={form.owner} onChange={(event) => setForm({ ...form, owner: event.target.value })} /></label>
-              <label>Scopes<input aria-label="Scopes" value={form.scopes} onChange={(event) => setForm({ ...form, scopes: event.target.value })} /></label>
-              <label className="checkbox-row"><input checked={form.isDefault} onChange={(event) => setForm({ ...form, isDefault: event.target.checked })} type="checkbox" />设为默认模型</label>
-            </details>
-            <div className="form-actions">
-              <button className="primary" type="submit"><Save size={15} />{editingCredentialId ? "保存修改" : "保存 API Key"}</button>
-              <button type="button" onClick={cancelEdit}>取消</button>
-            </div>
-          </form>}
-
-          <section className="saved-credentials" aria-label="已保存的模型配置">
-            <h3>已保存的配置</h3>
-            {credentials.length ? credentials.map((credential) => (
-              <article key={credential.id}>
-                <div><strong>{credential.name}</strong><span>{credential.provider} · {credential.model}</span><small>{credential.apiKeyMasked}</small></div>
-                <div className="row-actions">
-                  <button type="button" onClick={async () => { const response = await testCredential(credential.id); setMessage(response.message); }}><FileSearch size={15} />测试</button>
-                  <button className="icon-button" type="button" title="编辑" onClick={() => editCredential(credential)}><Pencil size={15} /></button>
-                  <button className="icon-button" disabled={credential.isDefault} type="button" title="设为默认" onClick={async () => { await updateCredential(credential.id, { isDefault: true }); await refresh(); }}><Star size={15} /></button>
-                  <button className="icon-button" type="button" title="删除" onClick={async () => { await deleteCredential(credential.id); await refresh(); }}><Trash2 size={15} /></button>
-                </div>
-              </article>
-            )) : <p>还没有配置 API Key。</p>}
-          </section>
-        </section>
-      </div>
-    );
-  }
-
-  async function refresh(includeSecondaryData = true) {
-    const projectRequest = listProjects()
-      .then((data) => {
-        writeProjectHistoryCache(data.projects);
-        setProjectListNotice(data.projects.length ? "" : "还没有接入过项目，请上传一个新项目。");
-        return data;
-      })
-      .catch(() => {
-        const cachedProjects = readProjectHistoryCache();
-        setProjectListNotice(cachedProjects.length
-          ? "Agent 暂时未连接，当前显示本机保存的最近项目；恢复连接后才能识别和运行。"
-          : "Agent 暂时未连接，历史项目列表目前无法读取。");
-        return { projects: cachedProjects };
-      });
-    const [
-      credentialData,
-      planData,
-      scenarioData,
-      capabilityData,
-      deliveryData,
-      patrolData,
-      patrolPlanData,
-      gapData,
-      draftData,
-      verificationData,
-      projectData,
-      securityData,
-      benchmarkData
-    ] = await Promise.all([
-      listCredentials().catch(() => ({ credentials })),
-      getGrayPlan().catch(() => plan),
-      listScenarios().catch(() => ({ scenarios })),
-      listPlatformCapabilities().catch(() => ({ capabilities })),
-      listBotDeliveries().catch(() => ({ deliveries })),
-      listPatrolJobs().catch(() => ({ jobs: patrolJobs })),
-      listPatrolPlans().catch(() => ({ plans: [] })),
-      listHarnessGaps().catch(() => ({ gaps: harnessGaps })),
-      listScenarioDrafts().catch(() => ({ drafts: [] })),
-      getLatestDemoVerification().catch(() => ({ verification: null })),
-      projectRequest,
-      getSecuritySummary().catch(() => ({ security: null })),
-      getBenchmarkSummary().catch(() => null)
-    ]);
-    setCredentials(credentialData.credentials);
-    setPlan(planData);
-    setScenarios(scenarioData.scenarios);
-    setCapabilities(capabilityData.capabilities);
-    setDeliveries(deliveryData.deliveries);
-    setPatrolJobs(patrolData.jobs);
-    setPatrolPlans(patrolPlanData.plans);
-    setHarnessGaps(gapData.gaps);
-    setScenarioDrafts(draftData.drafts);
-    setDemoVerification(verificationData.verification);
-    setProjects(projectData.projects);
-    setSecuritySummary(securityData.security);
-    setBenchmarkSummary(benchmarkData);
-
-    if (includeSecondaryData) {
-      // These views touch the persistent audit store and can each take a
-      // couple of seconds on a large local database. They are deliberately
-      // excluded from the initial connection path and loaded sequentially on
-      // an explicit refresh, so onboarding and project launch stay responsive.
-      const auditData = await getAuditStoreStatus().catch(() => ({ auditStore: null }));
-      setAuditStore(auditData.auditStore);
-      const historyData = await listRunHistory({ limit: 100 }).catch(() => ({ runs: [] }));
-      setRunHistory(historyData.runs);
-      const storageData = await getStorageStatus().catch(() => ({ storage: null }));
-      setStorageStatus(storageData.storage);
-      const archiveData = await listStorageArchives().catch(() => ({ archives: [] }));
-      setStorageArchives(archiveData.archives);
-      const trendData = await getPatrolTrend({
-        projectId: selectedProjectId || undefined,
-        scenarioId
-      }).catch(() => ({ trend: null }));
-      setPatrolTrend(trendData.trend);
-    }
-    if (selectedProjectId) {
-      const refreshedProject = projectData.projects.find((project) => project.id === selectedProjectId);
-      // Credential bindings are persisted by the Agent. Keep an open
-      // Workbench in sync after a binding is saved, rather than leaving a
-      // stale in-memory draft to report that a key is still missing.
-      if (refreshedProject) {
-        setProjectDraft((current) => {
-          if (!current || current.id !== refreshedProject.id) return current;
-          const currentUpdatedAt = Date.parse(current.updatedAt ?? "");
-          const refreshedUpdatedAt = Date.parse(refreshedProject.updatedAt ?? "");
-          return Number.isFinite(refreshedUpdatedAt) && refreshedUpdatedAt > currentUpdatedAt
-            ? refreshedProject
-            : current;
-        });
-      }
-      const grantData = await listProjectGrants(selectedProjectId).catch(() => ({ grants: [] }));
-      setProjectGrants(grantData.grants);
-      const runtimeData = await getProjectRuntime(selectedProjectId).catch(() => ({ runtime: null }));
-      setProjectRuntime(runtimeData.runtime);
-    }
-  }
-
-  async function refreshInputContext() {
-    if (isRefreshingContext) return;
-    setIsRefreshingContext(true);
-    setContextRefreshStatus("正在重新扫描当前项目…");
-    setMessage("正在刷新项目和测试上下文…");
-    try {
-      const [projectData, scenarioData, historyData, capabilityData] = await Promise.all([
-        listProjects(),
-        listScenarios(),
-        listRunHistory({ limit: 100 }),
-        listPlatformCapabilities()
-      ]);
-      writeProjectHistoryCache(projectData.projects);
-      setProjectListNotice(projectData.projects.length ? "" : "还没有接入过项目，请上传一个新项目。");
-      setProjects(projectData.projects);
-      setScenarios(scenarioData.scenarios);
-      setRunHistory(historyData.runs);
-      setCapabilities(capabilityData.capabilities);
-      const currentPath = projectDraft?.projectPath || projects.find((project) => project.id === selectedProjectId)?.projectPath;
-      if (currentPath) {
-        const response = await detectProject(currentPath);
-        setProjectDetection(response.detection);
-        if (response.detection.exists) {
-          const suggested = response.detection.suggestedConfig;
-          setProjectDraft((current) => current ? {
-            ...current,
-            installCommand: suggested.installCommand,
-            startCommand: suggested.startCommand,
-            processes: suggested.processes,
-            healthCheckUrl: suggested.healthCheckUrl,
-            frontendUrl: suggested.frontendUrl,
-            backendUrl: suggested.backendUrl
-          } : suggested);
-          setAppUrl(suggested.frontendUrl);
-        }
-      }
-      if (selectedProjectId) {
-        const runtimeData = await getProjectRuntime(selectedProjectId);
-        setProjectRuntime(runtimeData.runtime);
-      }
-      setContextRefreshStatus(`刷新完成 · ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`);
-      setMessage("项目与测试上下文已刷新。");
-    } catch (error) {
-      const cachedProjects = readProjectHistoryCache();
-      if (cachedProjects.length) setProjects(cachedProjects);
-      setProjectListNotice(cachedProjects.length
-        ? "Agent 暂时未连接，当前显示本机保存的最近项目；恢复连接后才能刷新。"
-        : "Agent 暂时未连接，历史项目列表目前无法读取。");
-      setContextRefreshStatus(error instanceof Error ? `刷新失败：${error.message}` : "刷新失败");
-      setMessage(error instanceof Error ? `刷新失败：${error.message}` : "刷新失败");
-    } finally {
-      setIsRefreshingContext(false);
-    }
-  }
-
-  useEffect(() => {
-    initializeOidc()
-      .then(async (session) => {
-        if (session.configured && !session.authenticated) return;
-        setProjectListNotice("正在连接 AI 测试服务…");
-        await waitForAgentReady();
-        await refresh(false);
-      })
-      .catch((error) => {
-        setProjectListNotice("AI 测试服务暂时不可用，正在自动重连。");
-        setMessage(error instanceof Error ? error.message : "AI 测试服务暂时不可用。");
-      });
-  }, []);
-
-  useEffect(() => {
-    const stored = Number(window.localStorage.getItem("ato:planning-sidebar-width"));
-    if (Number.isFinite(stored) && stored >= 280 && stored <= 520) setSidebarWidth(stored);
-  }, []);
-
-  useEffect(() => {
-    const move = (event: PointerEvent) => {
-      const resize = sidebarResizeRef.current;
-      if (!resize) return;
-      const width = Math.max(280, Math.min(520, resize.startWidth + event.clientX - resize.startX));
-      resize.width = width;
-      workspaceRef.current?.style.setProperty("--planning-sidebar-width", `${width}px`);
-    };
-    const stop = () => {
-      const resize = sidebarResizeRef.current;
-      if (!resize) return;
-      sidebarResizeRef.current = null;
-      setSidebarWidth(resize.width);
-      window.localStorage.setItem("ato:planning-sidebar-width", String(Math.round(resize.width)));
-      document.body.classList.remove("is-resizing-planning-sidebar");
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", stop);
-    window.addEventListener("pointercancel", stop);
-    return () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", stop);
-      window.removeEventListener("pointercancel", stop);
-      document.body.classList.remove("is-resizing-planning-sidebar");
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!projectListNotice.includes("暂时") && !projectListNotice.includes("正在连接")) return;
-    const interval = window.setInterval(() => {
-      void listProjects()
-        .then((data) => {
-          writeProjectHistoryCache(data.projects);
-          setProjects(data.projects);
-          setProjectListNotice(data.projects.length ? "" : "还没有接入过项目，请上传一个新项目。");
-          setMessage("AI 测试服务已恢复连接。");
-        })
-        .catch(() => undefined);
-    }, 2_000);
-    return () => window.clearInterval(interval);
-  }, [projectListNotice]);
-
-  useEffect(() => {
-    if (!selectedProjectId) return;
-    const savedProject = projects.find((project) => project.id === selectedProjectId);
-    if (!savedProject) return;
-    setProjectDraft((current) => {
-      if (!current || current.id !== savedProject.id) return current;
-      const currentUpdatedAt = Date.parse(current.updatedAt ?? "");
-      const savedUpdatedAt = Date.parse(savedProject.updatedAt ?? "");
-      return Number.isFinite(savedUpdatedAt) && savedUpdatedAt > currentUpdatedAt
-        ? savedProject
-        : current;
-    });
-  }, [projects, selectedProjectId]);
-
-  // OCI projects can legitimately spend a few minutes installing dependencies
-  // in an empty, disposable sandbox. Keep this UI subscribed to the runtime
-  // until it reaches a stable state instead of leaving an old “installing” or
-  // recoverable “failed” card on screen after the initial polling window ends.
-  useEffect(() => {
-    if (!selectedProjectId) return;
-    let disposed = false;
-    const refreshRuntime = async () => {
-      const snapshot = await getProjectRuntime(selectedProjectId).catch(() => null);
-      if (!snapshot || disposed) return;
-      setProjectRuntime(snapshot.runtime);
-      if (
-        snapshot.runtime.status === "running"
-        && (!projectConnection?.ok || projectDiagnosis?.overallStatus !== "passed")
-      ) {
-        const [connection, diagnosis] = await Promise.all([
-          testProjectConnection(selectedProjectId).catch(() => null),
-          diagnoseProject(selectedProjectId).catch(() => null)
-        ]);
-        if (!disposed && connection) setProjectConnection(connection.result);
-        if (!disposed && diagnosis) setProjectDiagnosis(diagnosis.diagnosis);
-      }
-    };
-    void refreshRuntime();
-    const interval = window.setInterval(() => void refreshRuntime(), 2_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
-  }, [selectedProjectId, projectConnection?.ok, projectDiagnosis?.overallStatus]);
-
-  useEffect(() => {
-    if (!activeRunId || hydratedAgentThreads.current.has(activeRunId)) return;
-    hydratedAgentThreads.current.add(activeRunId);
-    void getRunKnowledge(activeRunId)
-      .then((snapshot) => {
-        const decisions = new Map(snapshot.decisions.map((item) => [item.id, item]));
-        const durable = snapshot.messages.map((item): PlanningMessage => {
-          const decision = item.knowledgeDecisionId
-            ? decisions.get(item.knowledgeDecisionId)
-            : undefined;
-          return {
-            id: item.id,
-            role: item.role === "system" ? "assistant" : item.role,
-            content: item.content,
-            createdAt: item.createdAt,
-            reasoningSummary: item.reasoningSummary,
-            suggestedAction: item.suggestedAction as PlanningMessage["suggestedAction"],
-            requiresConfirmation: item.requiresConfirmation,
-            knowledge: decision?.output,
-            llmTrace: item.llmCallId ? {
-              callId: item.llmCallId,
-              contextId: item.knowledgeContextId,
-              decisionId: item.knowledgeDecisionId,
-              validationStatus: decision?.validationStatus
-            } : undefined
-          };
-        });
-        if (!durable.length) return;
-        setPlanningMessages((current) => {
-          const ids = new Set(current.map((item) => item.id));
-          return [...current, ...durable.filter((item) => !ids.has(item.id))]
-            .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-        });
-      })
-      .catch(() => {
-        hydratedAgentThreads.current.delete(activeRunId);
-      });
-  }, [activeRunId]);
-
-  useEffect(() => {
-    if (!activeRunId) return;
-    return subscribeRunEvents(activeRunId, ({ id, type, payload }) => {
-      if (type.startsWith("browser.")) {
-        if (type.startsWith("browser.session.") || type === "browser.control.changed") {
-          const candidate = payload as unknown as BrowserSession;
-          if (candidate?.runId === activeRunId && candidate?.sessionId) setBrowserSession(candidate);
-          else void getRunBrowserSession(activeRunId).then(({ session }) => setBrowserSession(session)).catch(() => undefined);
-        }
-        if (type === "browser.observation.created" || type === "browser.action.completed" || type === "browser.action.failed") {
-          setBrowserFrameRevision((current) => current + 1);
-          void getRunBrowserSession(activeRunId).then(({ session }) => setBrowserSession(session)).catch(() => undefined);
-        }
-        // The Graph projection owns the single live assistant message. Browser
-        // events update the canvas/session only; writing the same message from
-        // both sources made the sidebar alternate several times per second.
-        return;
-      }
-      // Graph lifecycle frames carry the projection itself. `agent.interrupt.*`
-      // is what turns a silently paused run into a visible decision request, so
-      // it must be consumed here rather than polled.
-      if (type.startsWith("agent.")) {
-        const candidate = payload as unknown as AgentGraphProjection;
-        const isProjectionEvent = type.startsWith("agent.node.") || type.startsWith("agent.interrupt");
-        if (isProjectionEvent && candidate?.runId === activeRunId) {
-          setAgentProjection(candidate);
-          if (candidate.pendingInterrupt) setInterruptError(null);
-        } else if (!isProjectionEvent) {
-          // Recovery/observation/tool SSE payloads are records, not graph
-          // projections. Refresh the projection so the status bar and pending
-          // interrupt remain coherent instead of replacing state with a
-          // malformed decision object.
-          void getRunAgent(activeRunId).then(({ agent }) => setAgentProjection(agent)).catch(() => undefined);
-        }
-        return;
-      }
-      if (type !== "state") return;
-      const event = payload as { id?: string; type?: string; createdAt?: string; payload?: Record<string, unknown> };
-      const finished = ["run_completed", "run_failed", "run_blocked", "run_cancelled", "human_review_requested"].includes(event.type ?? "");
-      setLiveRun((current) => {
-        const eventId = event.id ?? id ?? `${activeRunId}:${event.type ?? "state"}`;
-        const events = current?.events ?? [];
-        const nextEvent = {
-          id: `sse:${eventId}`,
-          loopType: "run_state",
-          iteration: Number(id ?? 0),
-          title: event.type ?? "run_state",
-          status: finished ? "completed" : "running",
-          timestamp: event.createdAt ?? new Date().toISOString(),
-          observation: JSON.stringify(event.payload ?? {}),
-          evidenceRefs: []
-        } satisfies RunResult["loopEvents"][number];
-        return {
-          ...current,
-          runId: activeRunId,
-          status: finished ? "finished" : "running",
-          evidenceCount: current?.evidenceCount ?? 0,
-          events: events.some((item) => item.id === nextEvent.id) ? events : [...events, nextEvent].slice(-100),
-          evidence: current?.evidence ?? []
-        };
-      });
-      void getRunProjection(activeRunId).then(({ run }) => setActiveRun(run)).catch(() => undefined);
-    });
-  }, [activeRunId]);
-
-  useEffect(() => {
-    if (!activeRunId) {
-      setBrowserSession(null);
-      return;
-    }
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const refreshSession = async () => {
-      let nextSession: BrowserSession | null = null;
-      try {
-        nextSession = (await getRunBrowserSession(activeRunId)).session;
-        if (disposed) return;
-        // A transient empty response during Graph startup must not erase a
-        // session/frame that is already visible.
-        if (nextSession) {
-          setBrowserSession(nextSession);
-          setBrowserFrameRevision((current) => current + 1);
-        }
-      } catch {
-        // SSE and the next bounded poll can recover. Keep the last frame on
-        // screen instead of falling back to the unrelated passive iframe.
-      }
-      if (disposed) return;
-      const terminal = nextSession && ["closed", "failed"].includes(nextSession.status);
-      if (!terminal) timer = setTimeout(refreshSession, nextSession ? 1_500 : 600);
-    };
-    void refreshSession();
-    return () => {
-      disposed = true;
-      if (timer !== undefined) clearTimeout(timer);
-    };
-  }, [activeRunId]);
-
-  // A terminal Run is authoritative even when React preserved an old
-  // planningAutomation state during HMR, tab restore, or an SSE reconnect.
-  // Hydrate its report for every active Run, not only in the project-restore
-  // branch below. Otherwise a successful retry can keep displaying the prior
-  // “safety validation blocked” assistant card indefinitely.
-  useEffect(() => {
-    if (!activeRunId || hydratedRunReports.current.has(activeRunId)) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const hydrateTerminalReport = async () => {
-      try {
-        const projection = (await getRunProjection(activeRunId)).run;
-        if (disposed) return;
-        setActiveRun(projection);
-        const terminal = ["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(projection.state);
-        if (!terminal) {
-          timer = setTimeout(hydrateTerminalReport, 1_500);
-          return;
-        }
-        if (projection.state === "cancelled") {
-          hydratedRunReports.current.add(activeRunId);
-          return;
-        }
-        const report = await waitForRunReport(activeRunId);
-        if (disposed) return;
-        const finalStatus = report.finalStatus ?? report.gateStatus
-          ?? (report.verdict === "continue" ? "pass" : report.verdict === "stop_and_fix" ? "fail" : "needs-human-review");
-        const succeeded = finalStatus === "pass";
-        hydratedRunReports.current.add(activeRunId);
-        setIsRunning(false);
-        setResult(report);
-        setAutomationFailures([]);
-        setPlanningAutomation({ phase: succeeded ? "ready" : "blocked", detail: report.summary });
-        setMessage(report.summary);
-        setPlanningMessages((current) => {
-          const withoutSupersededDiagnostics = current.filter((item) => (
-            !item.id.startsWith("automation_failure_analysis_")
-            && !item.id.startsWith("run_failure_analysis_")
-            && !item.id.startsWith("preparation_blocked_")
-            && !item.id.startsWith("progress:run:")
-          ));
-          if (withoutSupersededDiagnostics.some((item) => item.id === `run_outcome_${activeRunId}`)) {
-            return withoutSupersededDiagnostics;
-          }
-          return [...withoutSupersededDiagnostics, {
-            id: `run_outcome_${activeRunId}`,
-            role: "assistant",
-            content: succeeded
-              ? `本次测试已经完成。机器结论：通过。${report.summary}`
-              : `本次测试已经结束。机器结论：${finalStatus}。${report.summary}`,
-            createdAt: new Date().toISOString(),
-            reasoningSummary: {
-              phase: "completed",
-              observations: [`Run ${activeRunId} 已进入终态 ${projection.state}`],
-              assessment: report.summary,
-              nextStep: succeeded ? "可以查看本次证据和测试报告。" : "只处理报告中仍未完成的路径。",
-              userAction: "无需处理已被本次终态取代的临时阻塞提示。",
-              confidence: "high"
-            },
-            requiresConfirmation: false
-          }];
-        });
-      } catch {
-        if (!disposed) timer = setTimeout(hydrateTerminalReport, 2_000);
-      }
-    };
-    void hydrateTerminalReport();
-    return () => {
-      disposed = true;
-      if (timer !== undefined) clearTimeout(timer);
-    };
-  }, [activeRunId]);
-
-  // A project switch or a Workbench refresh used to discard the Run id even
-  // though the Playwright session and its last frame were still persisted by
-  // the Agent. Keep one authoritative Run pointer per project and rehydrate it
-  // before mounting a passive iframe.
-  useEffect(() => {
-    if (!selectedProjectId || !activeRunId) return;
-    rememberProjectActiveRun(selectedProjectId, activeRunId);
-  }, [selectedProjectId, activeRunId]);
-
-  useEffect(() => {
-    if (!selectedProjectId || activeRunId) return;
-    const cachedRunId = readProjectActiveRun(selectedProjectId);
-    if (!cachedRunId) return;
-    const restoreEpoch = activeRunRestoreEpochRef.current;
-    let disposed = false;
-    const restore = async () => {
-      // Only an explicitly remembered active Run may be resumed here. Durable
-      // history is terminal audit data and must never be projected into a new
-      // diagnosis/planning session as if the user had just run a test.
-      const candidates = rankProjectRunCandidates(cachedRunId, []);
-      for (const runId of candidates) {
-        try {
-          const projection = await getRunProjection(runId);
-          if (disposed || restoreEpoch !== activeRunRestoreEpochRef.current) return;
-          if (!isRestorableProjectRun(projection.run, selectedProjectId)) {
-            forgetProjectActiveRun(selectedProjectId, runId);
-            continue;
-          }
-          const sessionResponse = await getRunBrowserSession(runId).catch(() => ({ session: undefined }));
-          if (disposed || restoreEpoch !== activeRunRestoreEpochRef.current) return;
-          setActiveRunId(runId);
-          setActiveRun(projection.run);
-          if (sessionResponse.session) {
-            setBrowserSession(sessionResponse.session);
-            setBrowserFrameRevision((current) => current + 1);
-            setCentreSurface("preview");
-          }
-          rememberProjectActiveRun(selectedProjectId, runId);
-          return;
-        } catch {
-          if (runId === cachedRunId) forgetProjectActiveRun(selectedProjectId, runId);
-        }
-      }
-    };
-    void restore();
-    return () => { disposed = true; };
-  }, [selectedProjectId, activeRunId]);
-
-  // Once execution has been confirmed the business-path inventory is no
-  // longer the operator's primary task. Collapse the complete card (not only
-  // its inner list) so it cannot cover the assistant conversation. The header
-  // remains available for an explicit re-open.
-  useEffect(() => {
-    if (planningConfirmed) setPlanningSummaryCollapsed(true);
-  }, [planningConfirmed]);
-
-  /**
-   * Hydrate the graph projection whenever the active run changes.
-   *
-   * SSE only delivers *future* frames. A run that was already interrupted —
-   * because the operator reloaded the page or the service restarted — would
-   * otherwise show no decision request at all and appear permanently stuck.
-   * Polling continues while an interrupt is pending so a decision made in
-   * another tab clears this one too.
-   */
-  useEffect(() => {
-    if (!activeRunId) {
-      setAgentProjection(null);
-      setInterruptError(null);
-      return;
-    }
-    let disposed = false;
-    const hydrate = async () => {
-      try {
-        const { agent } = await getRunAgent(activeRunId);
-        if (!disposed && agent?.runId === activeRunId) setAgentProjection(agent);
-      } catch {
-        // A run started before the graph was enabled has no projection. The
-        // deterministic run view stays authoritative.
-      }
-    };
-    void hydrate();
-    const interval = window.setInterval(() => void hydrate(), 4_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
-  }, [activeRunId]);
-
-  useEffect(() => {
-    if (!activeRunId || !activeRun || ["completed", "failed", "blocked", "cancelled"].includes(activeRun.state)) return;
-    let disposed = false;
-    const refreshEvidence = async () => {
-      try {
-        const response = await getRunEvidence(activeRunId);
-        if (disposed) return;
-        const latestCapturedScreenshot = [...response.evidence]
-          .reverse()
-          .find((item) => item.type === "screenshot" && item.file)?.file;
-        setLiveRun((current) => ({
-          runId: activeRunId,
-          status: "running",
-          latestScreenshot: latestCapturedScreenshot ?? current?.latestScreenshot,
-          latestEvent: response.loopEvents.at(-1) ?? current?.latestEvent,
-          evidenceCount: response.evidence.length,
-          // Browser loop events are the detailed execution source. Preserve
-          // control-plane events only until the first detailed event arrives.
-          events: response.loopEvents.length ? response.loopEvents : (current?.events ?? []),
-          evidence: response.evidence
-        }));
-      } catch {
-        // The evidence store may not exist until the worker has started the
-        // first attempt. SSE remains the source of run state while we wait.
-      }
-    };
-    void refreshEvidence();
-    const interval = window.setInterval(() => void refreshEvidence(), 900);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
-  }, [activeRunId, activeRun?.state]);
-
-  useEffect(() => {
-    const deterministicNoticeRequired = authFeedbackRequired
-      || credentialReadyForRetry
-      || apiCredentialFeedbackRequired
-      || screenshotRateLimited;
-    if (!deterministicNoticeRequired) return;
-    const noticeKey = [
-      activeRunId ?? selectedProjectId ?? projectDraft?.id ?? "pre-run",
-      runAssistantMessage
-    ].join(":");
-    if (surfacedAssistantNotices.current.has(noticeKey)) return;
-    surfacedAssistantNotices.current.add(noticeKey);
-    setPlanningMessages((current) => upsertAssistantProgress(current, {
-      id: "run-notice",
-      role: "assistant",
-      content: runAssistantMessage,
-      createdAt: new Date().toISOString(),
-      reasoningSummary: {
-        phase: authFeedbackRequired || apiCredentialFeedbackRequired ? "waiting-user" : "diagnosing",
-        observations: [
-          authFeedbackRequired
-            ? "测试到达需要登录的页面，但当前运行没有可用的测试账号"
-            : apiCredentialFeedbackRequired
-              ? `被测项目声明需要 ${missingProjectApiCredentials.map((item) => item.envName).join("、")}`
-              : credentialReadyForRetry
-                ? "测试账号已经加密保存"
-                : "现场截图请求触发限流，上一帧证据仍然保留"
-        ],
-        assessment: runAssistantMessage,
-        nextStep: authFeedbackRequired
-          ? "获得测试账号句柄后恢复同一测试线程"
-          : apiCredentialFeedbackRequired
-            ? "获得项目凭据授权后仅向本次沙盒运行注入"
-            : credentialReadyForRetry
-              ? "使用新账号创建可追溯的重试 attempt"
-              : "自动退避并继续采集其他证据",
-        userAction: authFeedbackRequired
-          ? "请点击“配置测试账号”，不要在对话中粘贴密码。"
-          : apiCredentialFeedbackRequired
-            ? "请选择沿用测试模型凭据或单独的项目测试凭据。"
-            : credentialReadyForRetry
-              ? "点击“使用账号重新测试”即可继续。"
-              : "无需操作；持续超过一分钟时再打开证据详情。",
-        confidence: "high"
-      }
-    }, `notice:${activeRunId ?? selectedProjectId ?? "pre-run"}`));
-  }, [
-    activeRunId,
+  useWorkbenchLifecycleEffects({
+    refresh,
+    projectListNotice,
+    projects,
     selectedProjectId,
-    projectDraft?.id,
+    projectConnection,
+    projectDiagnosis,
+    projectDraft,
+    activeRunId,
+    activeRun,
+    planningConfirmed,
+    result,
+    planningResultId: planningResult?.id,
+    planningAutomation,
     authFeedbackRequired,
     credentialReadyForRetry,
     apiCredentialFeedbackRequired,
     screenshotRateLimited,
     runAssistantMessage,
-    missingProjectApiCredentials
-  ]);
+    missingProjectApiCredentials,
+    sidebarResizeRef,
+    workspaceRef,
+    activeRunRestoreEpochRef,
+    hydratedAgentThreads,
+    hydratedRunReports,
+    surfacedAssistantNotices,
+    setProjectListNotice,
+    setMessage,
+    setSidebarWidth,
+    setProjects,
+    setProjectDraft,
+    setProjectRuntime,
+    setProjectConnection,
+    setProjectDiagnosis,
+    setPlanningMessages,
+    setBrowserSession,
+    setBrowserFrameRevision,
+    setAgentProjection,
+    setInterruptError,
+    setLiveRun,
+    setActiveRun,
+    setActiveRunId,
+    setIsRunning,
+    setResult,
+    setAutomationFailures,
+    setPlanningAutomation,
+    setCentreSurface,
+    setPlanningSummaryCollapsed
+  });
 
-  useEffect(() => {
-    const needsExplanation = runIsBlocked || reviewRequired || pathBindingRepairable;
-    const analysisId = activeRunId ?? result?.id ?? planningResult?.id;
-    const projectId = selectedProjectId || projectDraft?.id;
-    if (!needsExplanation || !analysisId || !defaultCredential?.id || !projectId || assistantChatBusy) return;
-    // One durable conclusion gets one automatic explanation. Polling may
-    // enrich summary text/evidence several times after the same terminal
-    // decision; treating each enrichment as a new analysis restarted the
-    // typing row and produced the visible flash reported by operators.
-    const analysisKey = [analysisId, latestDecision, planningAutomation.phase].join(":");
-    if (analyzedBlockedRuns.current.has(analysisKey)) return;
-    analyzedBlockedRuns.current.add(analysisKey);
-    const messageId = `progress:diagnosis:${analysisId}`;
-    setPlanningMessages((current) => upsertAssistantProgress(current, {
-      id: messageId,
-      role: "assistant",
-      content: "正在读取机器结论、失败证据和已有修复记录，整理这次问题与下一步操作…",
-      createdAt: new Date().toISOString(),
-      streaming: true
-    }, `diagnosis:${analysisId}`));
-    setAssistantChatBusy(true);
-    const failurePacket = {
-      finalStatus: result?.finalStatus ?? result?.gateStatus ?? latestDecision ?? "blocked",
-      summary: result?.summary ?? planningAutomation.detail,
-      executionError: result?.executionError,
-      failedAssertions: (result?.assertions ?? [])
-        .filter((item) => !item.passed)
-        .slice(0, 8)
-        .map((item) => ({ name: item.name, expected: item.expected, actual: item.actual, evidenceRefs: item.fact?.evidenceRefs ?? [] })),
-      failureAttributions: (result?.failureAttributions ?? []).slice(0, 4).map((item) => ({
-        title: item.title,
-        reasoning: item.reasoning,
-        suggestedFix: item.suggestedFix
-      })),
-      latestRuntimeLogs: (result?.loopEvents ?? []).slice(-6).map((item) => ({
-        title: item.title,
-        status: item.status,
-        observation: item.observation,
-        evidenceRefs: item.evidenceRefs
-      })),
-      planning: {
-        phase: planningAutomation.phase,
-        detail: planningAutomation.detail,
-        discovered: planningResult?.coverage.discovered,
-        executable: planningResult?.coverage.executable,
-        autoBindable: planningResult?.coverage.autoBindable,
-        gaps: planningResult?.coverage.gaps
-      }
-    };
-    const diagnosisPrompt = "请解释当前运行卡点：发生了什么、系统准备如何处理、我是否需要操作。只依据已保存的运行事实和证据回答。";
-    const useDurableRunThread = Boolean(activeRunId && result && !pathBindingRepairable);
-    void (async () => {
-      if (useDurableRunThread && activeRunId) {
-        const response = await sendRunAgentMessage(activeRunId, {
-          message: diagnosisPrompt,
-          credentialId: defaultCredential.id,
-          origin: "system-diagnosis"
-        });
-        setPlanningMessages((current) => current.map((item) =>
-          item.id === messageId
-            ? {
-              ...item,
-              content: response.assistant.reply,
-              streaming: false,
-              repairPlan: response.assistant.repairPlan,
-              reasoningSummary: response.assistant.reasoningSummary,
-              knowledge: response.assistant.knowledge,
-              suggestedAction: response.assistant.suggestedAction,
-              requiresConfirmation: response.assistant.requiresConfirmation,
-              llmTrace: {
-                callId: response.call.id,
-                model: response.call.model,
-                provider: response.call.provider,
-                durationMs: response.call.durationMs,
-                totalTokens: response.call.usage?.totalTokens,
-                semanticRepairApplied: response.call.semanticRepairApplied,
-                status: response.call.status,
-                fallbackApplied: response.call.fallbackApplied,
-                errorCode: response.call.errorCode,
-                contextId: response.call.knowledgeContextId,
-                decisionId: response.call.knowledgeDecisionId,
-                validationStatus: response.call.knowledgeValidationStatus
-              }
-            }
-            : item
-        ));
-        if (response.assistant.suggestedAction !== "none") {
-          setAssistantSuggestedAction({
-            action: response.assistant.suggestedAction,
-            label: assistantActionLabel(response.assistant.suggestedAction)
-          });
-        }
-        return;
-      }
-      const response = await chatWithTestAssistant({
-        projectId,
-        message: diagnosisPrompt,
-        credentialId: defaultCredential.id,
-        history: planningMessages.slice(-6).map((item) => ({
-          role: item.role,
-          content: boundedAssistantText(item.content, 1_500)
-        })),
-        context: {
-          runState: planningAutomation.phase,
-          finalStatus: result?.finalStatus ?? result?.gateStatus ?? latestDecision,
-          summary: boundedAssistantText(result?.summary ?? planningAutomation.detail, 1_200),
-          evidenceCount: liveRun?.evidenceCount ?? result?.evidence.length ?? 0,
-          currentStep: boundedAssistantText(result?.executionError?.stepId ?? planningAutomation.phase, 300),
-          latestLog: boundedAssistantText(result?.executionError?.message ?? planningAutomation.detail, 700),
-          pageObservation: discovery?.observation,
-          failedAssertions: failurePacket.failedAssertions.map((item) => ({
-            name: boundedAssistantText(item.name, 240),
-            expected: boundedAssistantText(item.expected, 500),
-            actual: boundedAssistantText(item.actual, 500)
-          })),
-          planning: planningResult ? {
-            discovered: planningResult.coverage.discovered,
-            executable: planningResult.coverage.executable,
-            autoBindable: planningResult.coverage.autoBindable,
-            confirmed: planningConfirmed,
-            failures: automationFailures.map((failure) => ({
-              title: failure.title,
-              target: failure.target ?? failure.scenarioId,
-              stage: failure.stage,
-              detail: boundedAssistantText(failure.detail, 1_000),
-              requiredInformation: failure.requiredInformation?.slice(0, 8) ?? []
-            })),
-            blockingQuestions: planningResult.clarificationQuestions.slice(0, 8)
-          } : undefined
-        }
-      });
-      setPlanningMessages((current) => current.map((item) =>
-        item.id === messageId
-          ? {
-            ...item,
-            content: response.assistant.reply,
-            streaming: false,
-            repairPlan: response.assistant.repairPlan,
-            reasoningSummary: response.assistant.reasoningSummary,
-            knowledge: response.assistant.knowledge,
-            suggestedAction: response.assistant.suggestedAction,
-            requiresConfirmation: response.assistant.requiresConfirmation,
-            llmTrace: {
-              callId: response.call.id,
-              model: response.call.model,
-              provider: response.call.provider,
-              durationMs: response.call.durationMs,
-              totalTokens: response.call.usage.totalTokens,
-              semanticRepairApplied: response.call.semanticRepairApplied,
-              status: response.call.status,
-              fallbackApplied: response.call.fallbackApplied,
-              errorCode: response.call.errorCode,
-              contextId: response.call.knowledgeContextId,
-              decisionId: response.call.knowledgeDecisionId,
-              validationStatus: response.call.knowledgeValidationStatus
-            }
-          }
-          : item
-      ));
-      if (response.assistant.suggestedAction !== "none") {
-        setAssistantSuggestedAction({
-          action: response.assistant.suggestedAction,
-          label: assistantActionLabel(response.assistant.suggestedAction)
-        });
-      }
-    })().catch((error) => {
-      // A transient Agent/model outage must not permanently suppress the
-      // automatic explanation for this same blocked state. The next stable
-      // render may retry after the service becomes ready.
-      analyzedBlockedRuns.current.delete(analysisKey);
-      const reason = error instanceof Error ? error.message : "模型调用失败";
-      setPlanningMessages((current) => current.map((item) =>
-        item.id === messageId
-          ? {
-            ...item,
-            content: userFacingAssistantError(error),
-            streaming: false,
-            reasoningSummary: {
-              phase: "waiting-user",
-              observations: [
-                concreteRunFailureMessage || "失败事实和证据已经保存",
-                "模型解释请求未成功，技术原因已记录"
-              ],
-              assessment: "模型服务未返回有效解释；系统仍以确定性断言、证据完整性和机器门禁作为当前事实。",
-              nextStep: "其他独立路径继续执行；失败链路保持待诊断状态，不会被自动放行。",
-              userAction: /401|403|credential|api key/i.test(reason)
-                ? "请检查当前模型凭据后，在对话框中要求重新分析。"
-                : "你可以直接追问、打开证据或稍后重试 AI 分析。",
-              confidence: "high"
-            }
-          }
-          : item
-      ));
-    }).finally(() => {
-      setAssistantChatBusy(false);
-    });
-  }, [
+  useAutomaticDiagnosticExplanation({
     activeRunId,
-    result?.id,
+    result,
     runIsBlocked,
     reviewRequired,
     pathBindingRepairable,
-    defaultCredential?.id,
+    defaultCredential,
     selectedProjectId,
-    projectDraft?.id,
-    planningAutomation.phase,
-    planningAutomation.detail,
+    projectDraft,
+    planningAutomation,
     latestDecision,
-    assistantChatBusy
-  ]);
+    assistantChatBusy,
+    planningMessages,
+    planningResult,
+    planningConfirmed,
+    automationFailures,
+    discovery,
+    liveRun,
+    concreteRunFailureMessage,
+    analyzedBlockedRuns,
+    boundedAssistantText,
+    userFacingAssistantError,
+    actionLabel: assistantActionLabel,
+    setPlanningMessages,
+    setAssistantChatBusy,
+    setAssistantSuggestedAction
+  });
+
 
   async function submitCredential(event: React.FormEvent) {
     event.preventDefault();
@@ -2450,725 +1606,6 @@ export function App() {
       fallbackDiff: strictInput ? undefined : diffText,
       strictInput
     };
-  }
-
-  function selectProject(projectId: string) {
-    activeRunRestoreEpochRef.current += 1;
-    generationRequestRef.current?.controller.abort();
-    generationRequestRef.current = null;
-    // Invalidate an in-flight startup/diagnosis operation. Its network work
-    // may finish, but it must never write the previous project's state into
-    // the newly selected project.
-    diagnosisOperationRef.current = null;
-    // A project picker is configuration-only. Do not let an already-running
-    // runtime auto-mount an iframe and reflow the centre test canvas.
-    setPreviewSessionProjectId("");
-    // The execution preview belongs to the previous project/session. Closing
-    // it here prevents a stale run surface from covering the next project.
-    setRunPreviewModalOpen(false);
-    if (!projectId) {
-      setSelectedProjectId("");
-      setProjectDraft(null);
-      setProjectPathInput("");
-      setAppUrl("");
-      setProjectDetection(null);
-      setProjectDetectMessage("");
-      setProjectDiagnosis(null);
-      setProjectConnection(null);
-      setProjectRuntime(null);
-      setProjectGrants([]);
-      resetPlanningConversation();
-      return;
-    }
-    const project = projects.find((item) => item.id === projectId);
-    setSelectedProjectId(projectId);
-    // A project owns its plan, run and report. Clearing these immediately
-    // prevents the previous project's evidence from surviving while the new
-    // project metadata is still loading.
-    setPlan(null);
-    setResult(null);
-    setActiveRunId(null);
-    setActiveRun(null);
-    setAnalysis(null);
-    resetPlanningConversation();
-    if (project) {
-      setProjectDraft(project);
-      setProjectPathInput(project.projectPath);
-      setAppUrl(project.frontendUrl);
-      setProjectConnection(null);
-      setProjectRuntime(null);
-      setProjectDiagnosis(null);
-      setProjectDetection(null);
-      setProjectDetectMessage("");
-      detectProject(project.projectPath)
-        .then((response) => {
-          setProjectDetection(response.detection);
-          const detected = response.detection.suggestedConfig;
-          const isSystemFixture = new Set([
-            "customer_portal_lite",
-            "investment_agent_workflow_external",
-            "local_demo_app",
-            "order_portal_lite",
-            "todo_lite"
-          ]).has(projectId);
-          if (!project.allowExternalProjectPath || isSystemFixture) return;
-          setAppUrl(detected.frontendUrl);
-          setProjectDraft((current) => current?.id === projectId ? {
-            ...current,
-            installCommand: detected.installCommand,
-            installCommandSpec: detected.installCommandSpec,
-            startCommand: detected.startCommand,
-            startCommandSpec: detected.startCommandSpec,
-            processes: detected.processes,
-            // Re-detection must update the whole launch contract.  Keeping an
-            // older health URL here meant a correctly discovered workspace
-            // command could still be checked against a stale Vite port.
-            frontendUrl: detected.frontendUrl,
-            backendUrl: detected.backendUrl,
-            healthCheckUrl: detected.healthCheckUrl,
-            // Re-detection may refine capabilities, but it must not silently
-            // discard credentials or change the execution boundary that the
-            // user explicitly saved for this project.
-            login: current.login ?? detected.login ?? { method: "none" },
-            apiCredentialRequirements: detected.apiCredentialRequirements ?? [],
-            apiCredentialBindings: current.apiCredentialBindings ?? [],
-            manifest: detected.manifest ? {
-              ...detected.manifest,
-              environmentAllowlist: Array.from(new Set([
-                ...detected.manifest.environmentAllowlist,
-                ...(current.manifest?.environmentAllowlist ?? [])
-              ])),
-              execution: current.allowExternalProjectPath
-                ? { ...detected.manifest.execution, mode: "oci" }
-                : current.manifest?.execution ?? detected.manifest.execution
-            } : current.manifest
-          } : current);
-        })
-        .catch(() => setProjectDetection(null))
-        .finally(() => dispatchWorkspace({ type: "project-loaded", projectId }));
-      getProjectRuntime(projectId)
-        .then((response) => setProjectRuntime(response.runtime))
-        .catch(() => setProjectRuntime(null));
-      listProjectGrants(projectId).then((response) => setProjectGrants(response.grants)).catch(() => setProjectGrants([]));
-      getPatrolTrend({ projectId, scenarioId }).then((response) => setPatrolTrend(response.trend)).catch(() => setPatrolTrend(null));
-    } else {
-      dispatchWorkspace({ type: "project-loaded", projectId });
-    }
-  }
-
-  async function detectCurrentProjectPath(selection: {
-    rootName: string;
-    absolutePath?: string;
-    files: Array<{ relativePath: string; content?: string }>;
-  }) {
-    resetPlanningConversation();
-    setProjectDetectMessage("");
-    setMessage("正在识别项目类型、命令和端口。");
-    try {
-      const response = selection.absolutePath
-        ? await detectProject(selection.absolutePath)
-        : await detectProjectManifest({ rootName: selection.rootName, files: selection.files });
-      setProjectDetection(response.detection);
-      if (response.detection.exists) {
-        const suggested = { ...response.detection.suggestedConfig, allowExternalProjectPath: true };
-        setProjectDraft(suggested);
-        setSelectedProjectId(response.detection.executionReady === false ? "" : suggested.id);
-        setProjectPathInput(suggested.projectPath);
-        setAppUrl(suggested.frontendUrl);
-        if (response.detection.executionReady === false) {
-          setProjectDetectMessage("项目类型已识别，但浏览器无法读取本机完整路径。请在下面的 Target Project 中粘贴项目完整路径后保存。");
-          setMessage("项目类型已识别，仍需补充可执行路径。");
-        } else {
-          setProjectDetectMessage("识别成功，已同步到下面的 Target Project。请检查后保存配置。");
-          setMessage("项目识别完成，Target Project 已更新。");
-        }
-      } else {
-        setProjectDetectMessage("没有找到项目：请确认选择的是项目根目录，并检查 Agent 是否正在运行。");
-        setMessage("项目路径不可读，请检查文件夹。");
-      }
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : "项目识别失败";
-      setProjectDetectMessage(`识别失败：${detail}。请先启动 Agent 服务后重试。`);
-      setMessage(detail);
-    }
-  }
-
-  async function diagnoseAndRunCurrentProject(override?: ProjectConfig) {
-    const selectedCandidate = override ?? projectDraft ?? projectDetection?.suggestedConfig;
-    if (!selectedCandidate) {
-      setMessage("请先识别或选择一个项目。");
-      return;
-    }
-    // Diagnosis starts a fresh lifecycle. Never let an unfinished historical
-    // Run, its interrupt, or its browser lease masquerade as work created by
-    // this click. The backend record remains immutable and available in history.
-    activeRunRestoreEpochRef.current += 1;
-    forgetProjectActiveRun(selectedCandidate.id);
-    setActiveRunId(null);
-    setActiveRun(null);
-    setAgentProjection(null);
-    setBrowserSession(null);
-    setLiveRun(null);
-    setResult(null);
-    setRepairSession(null);
-    setInterruptError(null);
-    setInterruptBusy(false);
-    setIsRunning(false);
-    setRunPreviewModalOpen(false);
-    setScreenshotIssue(null);
-    const diagnosisOperationId = crypto.randomUUID();
-    diagnosisOperationRef.current = {
-      id: diagnosisOperationId,
-      projectId: selectedCandidate.id
-    };
-    const isCurrentDiagnosis = () => diagnosisOperationRef.current?.id === diagnosisOperationId;
-    const detectedCandidate = projectDetection?.suggestedConfig;
-    const canApplyDetectedLaunch = Boolean(
-      detectedCandidate
-      && selectedCandidate.allowExternalProjectPath
-      && detectedCandidate.projectPath === selectedCandidate.projectPath
-    );
-    const candidate: ProjectConfig = canApplyDetectedLaunch ? {
-      ...selectedCandidate,
-      installCommand: detectedCandidate!.installCommand,
-      installCommandSpec: detectedCandidate!.installCommandSpec,
-      startCommand: detectedCandidate!.startCommand,
-      startCommandSpec: detectedCandidate!.startCommandSpec,
-      processes: detectedCandidate!.processes,
-      frontendUrl: detectedCandidate!.frontendUrl,
-      backendUrl: detectedCandidate!.backendUrl,
-      healthCheckUrl: detectedCandidate!.healthCheckUrl,
-      manifest: detectedCandidate!.manifest ? {
-        ...detectedCandidate!.manifest,
-        execution: selectedCandidate.allowExternalProjectPath
-          ? { ...detectedCandidate!.manifest.execution, mode: "oci" }
-          : selectedCandidate.manifest?.execution ?? detectedCandidate!.manifest.execution
-      } : selectedCandidate.manifest
-    } : selectedCandidate;
-    setProjectConnection(null);
-    setProjectDiagnosis(null);
-    setRuntimeRecoveryAdvice(null);
-    setProjectLaunchPhase("正在确认项目设置…");
-    setMessage("正在保存设置并检查可复用的项目沙盒。");
-    try {
-      if (projectDetection?.executionReady === false) {
-        setProjectLaunchPhase("正在确认项目文件夹…");
-        const verified = await detectProject(candidate.projectPath);
-        if (!isCurrentDiagnosis()) return;
-        if (!verified.detection.exists) {
-          setMessage("项目路径不可访问，请重新选择项目文件夹。");
-          return;
-        }
-        setProjectDetection(verified.detection);
-      }
-      setProjectLaunchPhase("正在保存运行设置…");
-      const saved = await saveProject({
-        ...candidate,
-        allowExternalProjectPath: candidate.allowExternalProjectPath ?? true
-      });
-      if (!isCurrentDiagnosis()) return;
-      diagnosisOperationRef.current = { id: diagnosisOperationId, projectId: saved.project.id };
-      setProjectDraft(saved.project);
-      setSelectedProjectId(saved.project.id);
-      setProjectPathInput(saved.project.projectPath);
-      setAppUrl(saved.project.frontendUrl);
-
-      setProjectLaunchPhase("正在检查已有沙盒；仅在未运行时启动项目…");
-      // First-run readiness gate: refuse to enter step 2 unless Docker is
-      // available and an LLM credential is configured. Surface the missing
-      // prerequisites instead of starting and failing halfway (Docker) or
-      // succeeding the sandbox only to stall at feature identification (LLM).
-      const freshDocker = await getReadiness().catch(() => null);
-      if (freshDocker) setDockerReadiness(freshDocker.docker);
-      const startBlockers: string[] = [];
-      if (!credentials.length) startBlockers.push("配置模型凭据（OpenAI-compatible key）");
-      if (freshDocker && !freshDocker.docker.available) startBlockers.push(`启动 ${freshDocker.docker.engine}（容器运行时不可用）`);
-      if (startBlockers.length) {
-        setProjectLaunchPhase("");
-        setMessage(`未进入沙盒运行，请先${startBlockers.join("、")}。`);
-        return;
-      }
-      const accepted = await startProjectAsync(saved.project.id);
-      if (!isCurrentDiagnosis()) return;
-      setProjectRuntime(accepted.runtime);
-      setProjectLaunchPhase(accepted.reused && accepted.runtime.status === "running"
-        ? "已复用正在运行的项目沙盒，正在检查页面…"
-        : accepted.reused
-          ? "项目沙盒已在准备中，继续等待运行状态…"
-          : "启动任务已提交，正在等待项目响应…");
-      const sandboxPrepareTimeout = saved.project.manifest?.execution.mode === "oci"
-        ? (saved.project.manifest.budget.prepareTimeoutMs ?? 300_000)
-        : 0;
-      const startupDeadline = Date.now()
-        + sandboxPrepareTimeout
-        + Math.max(saved.project.timeoutMs ?? 30_000, 30_000)
-        + 10_000;
-      let startedRuntime = accepted.runtime;
-      let missedRuntimePolls = 0;
-      while (Date.now() < startupDeadline) {
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
-        if (!isCurrentDiagnosis()) return;
-        const snapshot = await getProjectRuntime(saved.project.id).catch(() => null);
-        if (!isCurrentDiagnosis()) return;
-        if (!snapshot) {
-          missedRuntimePolls += 1;
-          setProjectLaunchPhase(missedRuntimePolls > 1 ? "Agent 暂时断开，正在自动重连…" : "正在同步启动状态…");
-          continue;
-        }
-        missedRuntimePolls = 0;
-        setProjectLaunchPhase(
-          snapshot.runtime.status === "installing"
-            ? "正在安装项目依赖…"
-            : snapshot.runtime.status === "starting"
-              ? "正在等待项目启动…"
-              : "正在确认项目运行状态…"
-        );
-        setProjectRuntime(snapshot.runtime);
-        startedRuntime = snapshot.runtime;
-        if (!["idle", "installing", "starting"].includes(snapshot.runtime.status)) break;
-      }
-      setProjectRuntime(startedRuntime);
-      if (startedRuntime.status !== "running") {
-        setProjectLaunchPhase("正在汇总失败诊断…");
-        const diagnosed = await diagnoseProject(saved.project.id).catch(() => null);
-        if (!isCurrentDiagnosis()) return;
-        if (diagnosed) setProjectDiagnosis(diagnosed.diagnosis);
-        let recoveryAdvice: RuntimeRecoveryAdvice | null = null;
-        if (defaultCredential) {
-          setProjectLaunchPhase("正在使用 AI 分析启动日志…");
-          const recovery = await getAiStartRecovery(saved.project.id, defaultCredential.id).catch(() => null);
-          if (!isCurrentDiagnosis()) return;
-          if (recovery) {
-            recoveryAdvice = recovery.advice;
-            setRuntimeRecoveryAdvice(recovery.advice);
-          }
-        }
-        const failureMessage = startedRuntime.message ?? "项目启动失败，请查看诊断结果。";
-        setPlanningAutomation({ phase: "blocked", detail: failureMessage });
-        setMessage(failureMessage);
-        void surfaceProjectDiagnosticToAssistant({
-          project: saved.project,
-          runtime: startedRuntime,
-          diagnosis: diagnosed?.diagnosis,
-          recoveryAdvice
-        });
-        await recoverProjectAndRetry("runtime");
-        return;
-      }
-
-      const [tested, diagnosed] = await Promise.all([
-        testProjectConnection(saved.project.id),
-        diagnoseProject(saved.project.id)
-      ]);
-      if (!isCurrentDiagnosis()) return;
-      setProjectConnection(tested.result);
-      setProjectDiagnosis(diagnosed.diagnosis);
-      const readyForPlanning = tested.result.ok && diagnosed.diagnosis.overallStatus === "passed";
-      if (readyForPlanning) {
-        setPreviewSessionProjectId(saved.project.id);
-        closeDrawers();
-      }
-      setMessage(
-        readyForPlanning
-          ? "项目已准备好。请在 AI 测试助手中描述你想验证的内容。"
-          : diagnosed.diagnosis.stages.find((stage) => stage.status === "failed")?.humanMessage
-            ?? tested.result.message
-      );
-      if (!readyForPlanning) {
-        const failureMessage = diagnosed.diagnosis.stages.find((stage) => stage.status === "failed")?.humanMessage
-          ?? tested.result.message;
-        setPlanningAutomation({ phase: "blocked", detail: failureMessage });
-        void surfaceProjectDiagnosticToAssistant({
-          project: saved.project,
-          runtime: startedRuntime,
-          diagnosis: diagnosed.diagnosis,
-          connection: tested.result
-        });
-        await recoverProjectAndRetry(tested.result.ok ? "discovery" : "runtime");
-      }
-    } catch (error) {
-      if (!isCurrentDiagnosis()) return;
-      const detail = error instanceof Error ? error.message : "项目诊断失败";
-      const failedRuntime: ProjectRuntimeStatus = {
-        projectId: selectedCandidate.id,
-        status: "failed",
-        phase: "failed",
-        updatedAt: new Date().toISOString(),
-        failureReason: "unknown",
-        message: detail
-      };
-      setProjectRuntime(failedRuntime);
-      setPlanningAutomation({ phase: "blocked", detail });
-      setMessage(detail);
-      void surfaceProjectDiagnosticToAssistant({
-        project: candidate,
-        runtime: failedRuntime
-      });
-    } finally {
-      if (isCurrentDiagnosis()) {
-        setProjectLaunchPhase("");
-        diagnosisOperationRef.current = null;
-      }
-    }
-  }
-
-  async function surfaceProjectDiagnosticToAssistant(input: {
-    project: ProjectConfig;
-    runtime: ProjectRuntimeStatus;
-    diagnosis?: ProjectDiagnosis;
-    connection?: ProjectHealthCheckResult;
-    recoveryAdvice?: RuntimeRecoveryAdvice | null;
-  }) {
-    const failedStages = (input.diagnosis?.stages ?? [])
-      .filter((stage) => stage.status === "failed" || stage.status === "warning");
-    const diagnosticKey = [
-      input.project.id,
-      input.runtime.updatedAt ?? "runtime-unknown",
-      input.diagnosis?.checkedAt ?? "diagnosis-unknown",
-      input.connection?.checkedAt ?? "connection-unknown",
-      input.runtime.failureReason ?? input.runtime.status,
-      failedStages.map((stage) => `${stage.stage}:${stage.reason}`).join("|")
-    ].join(":");
-    if (surfacedProjectDiagnostics.current.has(diagnosticKey)) return;
-    surfacedProjectDiagnostics.current.add(diagnosticKey);
-
-    const pendingId = `project_diagnostic_${Date.now()}`;
-    setPlanningMessages((current) => [...current, {
-      id: pendingId,
-      role: "assistant",
-      content: "正在读取项目启动阶段、健康检查和脱敏日志，整理失败原因与下一步…",
-      createdAt: new Date().toISOString()
-    }]);
-
-    const firstFailure = failedStages[0];
-    const failureText = boundedAssistantText(
-      firstFailure?.humanMessage
-        || input.runtime.message
-        || input.connection?.message
-        || "项目尚未进入可测试状态",
-      1_200
-    );
-    const missingEnv = failedStages.flatMap((stage) => stage.missingEnv ?? []);
-    const ports = failedStages.flatMap((stage) => stage.portConflicts ?? []).map((item) => item.port);
-    const deterministicReply = [
-      `遇到的问题：${failureText}`,
-      `系统已经做了什么：已保存项目启动阶段、连接检查和脱敏诊断。自动化测试尚未开始，因此不会把环境失败误报为产品缺陷。${input.recoveryAdvice?.summary ? ` AI 启动诊断：${boundedAssistantText(input.recoveryAdvice.summary, 500)}` : ""}`,
-      `需要你做什么：${missingEnv.length
-        ? `请在项目凭据配置中补齐 ${missingEnv.slice(0, 4).join("、")}，不要在对话中粘贴密钥。`
-        : ports.length
-          ? `系统可以重新分配沙盒端口；当前冲突端口为 ${ports.slice(0, 4).join("、")}。`
-          : input.runtime.failureReason === "container_runtime_unavailable"
-            ? "请允许系统启动 Docker Desktop 或 Podman；沙盒就绪后再重试。"
-            : "无需猜测配置；可以继续问我“具体失败在哪一步”，或修正设置后重新诊断。"}`
-    ].join("\n");
-
-    try {
-      const response = await chatWithTestAssistant({
-        projectId: input.project.id,
-        message: "请依据项目当前启动状态和诊断结果，用简单中文说明：发生了什么、系统已经做了什么、用户需要做什么。",
-        credentialId: defaultCredential?.id,
-        history: planningMessages.slice(-6).map((item) => ({
-          role: item.role,
-          content: boundedAssistantText(item.content, 1_200)
-        })),
-        context: {
-          runState: `project-${input.runtime.status}`,
-          finalStatus: "blocked",
-          summary: boundedAssistantText(failureText, 1_200),
-          evidenceCount: 0,
-          currentStep: boundedAssistantText(input.runtime.phase ?? firstFailure?.stage ?? "project-startup", 300),
-          latestLog: boundedAssistantText(input.runtime.message ?? input.connection?.message ?? failureText, 700),
-          pageObservation: discovery?.observation,
-          failedAssertions: []
-        }
-      });
-      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
-        ...item,
-        content: response.assistant.reply,
-        repairPlan: response.assistant.repairPlan,
-        reasoningSummary: response.assistant.reasoningSummary,
-        knowledge: response.assistant.knowledge,
-        suggestedAction: response.assistant.suggestedAction,
-        requiresConfirmation: response.assistant.requiresConfirmation,
-        llmTrace: {
-          callId: response.call.id,
-          model: response.call.model,
-          provider: response.call.provider,
-          durationMs: response.call.durationMs,
-          totalTokens: response.call.usage.totalTokens,
-          semanticRepairApplied: response.call.semanticRepairApplied,
-          status: response.call.status,
-          fallbackApplied: response.call.fallbackApplied,
-          errorCode: response.call.errorCode,
-          contextId: response.call.knowledgeContextId,
-          decisionId: response.call.knowledgeDecisionId,
-          validationStatus: response.call.knowledgeValidationStatus
-        }
-      } : item));
-    } catch (error) {
-      surfacedProjectDiagnostics.current.delete(diagnosticKey);
-      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
-        ...item,
-        content: `模型解读暂时不可用；以下内容来自项目启动器和健康检查的确定性诊断。\n${deterministicReply}`,
-        reasoningSummary: {
-          phase: "waiting-user",
-          observations: [failureText],
-          assessment: "项目启动或连接条件未通过，正式测试尚未开始。",
-          nextStep: "保留诊断并等待项目运行条件恢复后重试。",
-          userAction: deterministicReply.split("需要你做什么：")[1] ?? "修正设置后重新诊断。",
-          confidence: "high"
-        },
-        llmTrace: {
-          callId: `project_diagnostic_fallback_${Date.now()}`,
-          provider: "deterministic",
-          model: "project-startup-diagnostics",
-          status: "failed",
-          fallbackApplied: true,
-          errorCode: error instanceof Error && /truncat/i.test(error.message)
-            ? "assistant_output_truncated"
-            : "assistant_bridge_unavailable"
-        }
-      } : item));
-    }
-  }
-
-  async function applyAiRecoveryCandidate(candidateId: string) {
-    const adviceCandidate = runtimeRecoveryAdvice?.candidates.find((item) => item.id === candidateId);
-    const current = projectDraft ?? projectDetection?.suggestedConfig;
-    if (!adviceCandidate || !current) return;
-    const parts = adviceCandidate.command.trim().split(/\s+/).filter(Boolean);
-    if (!parts.length || !["npm", "pnpm", "yarn", "node", "python", "python3", "uv", "uvicorn"].includes(parts[0])) {
-      setMessage("AI 返回的候选启动方式未通过本地 allowlist 校验。");
-      return;
-    }
-    const commandSpec = { executable: parts[0], args: parts.slice(1), timeoutMs: 300_000 };
-    const targetUrl = adviceCandidate.frontendUrl;
-    const recovered: ProjectConfig = current.processes?.length
-      ? {
-        ...current,
-        frontendUrl: targetUrl ?? current.frontendUrl,
-        healthCheckUrl: targetUrl ?? current.healthCheckUrl,
-        processes: current.processes.map((process, index) => index === 0
-          ? { ...process, command: adviceCandidate.command, commandSpec, healthCheckUrl: targetUrl ?? process.healthCheckUrl }
-          : process)
-      }
-      : { ...current, startCommand: adviceCandidate.command, startCommandSpec: commandSpec, frontendUrl: targetUrl ?? current.frontendUrl, healthCheckUrl: targetUrl ?? current.healthCheckUrl };
-    setProjectDraft(recovered);
-    setRuntimeRecoveryAdvice(null);
-    await diagnoseAndRunCurrentProject(recovered);
-  }
-
-  async function saveCurrentProjectLoginCredential(input: {
-    username: string;
-    password: string;
-    usernameEnv: string;
-    passwordEnv: string;
-  }) {
-    if (!projectDraft) throw new Error("请先识别项目。");
-    const prepared = await saveProject({
-      ...projectDraft,
-      login: {
-        ...projectDraft.login,
-        method: "env",
-        usernameEnv: input.usernameEnv,
-        passwordEnv: input.passwordEnv
-      }
-    });
-    const response = await saveProjectLoginCredential(prepared.project.id, input);
-    setProjectDraft(response.project);
-    setSelectedProjectId(response.project.id);
-    setRevealProjectLoginSettings(false);
-    if (authBlockDetected) {
-      setMessage("测试账号已加密保存，正在使用新账号恢复自动化测试。");
-      window.setTimeout(() => {
-        void retryWithConfiguredLogin(response.project);
-      }, 0);
-    } else {
-      setMessage("测试账号已加密保存，运行时会自动注入沙盒。");
-    }
-    return response.project;
-  }
-
-  async function savePreparationLoginAndContinue() {
-    if (!preparationRequiresLogin) {
-      setPlanningAutomation({ phase: "preparing-project", detail: "正在检查沙盒、项目服务和测试路径。" });
-      return;
-    }
-    if (projectDraft?.login?.credentialId && !preparationLoginUsername.trim() && !preparationLoginPassword) {
-      setPreparationLoginError("");
-      setPlanningAutomation({
-        phase: !permissionProfile.observe || !permissionProfile.browserControl ? "needs-permission" : "preparing-project",
-        detail: !permissionProfile.observe || !permissionProfile.browserControl
-          ? "先允许本次浏览器操作，授权后系统会按顺序准备和执行测试。"
-          : "正在检查沙盒、项目服务和测试路径。"
-      });
-      if (!permissionProfile.observe || !permissionProfile.browserControl) return;
-      const activePlan = planningResult;
-      if (activePlan?.recommendedScenarioId && selectedProjectExecutionMode !== "oci") {
-        setScenarioId(activePlan.recommendedScenarioId);
-        await executeConfirmedScenarioAutomatically(activePlan.recommendedScenarioId);
-      } else {
-        await continueAutomaticPlanning(permissionProfile, projectDraft ?? undefined, activePlan ?? undefined);
-      }
-      return;
-    }
-    if (!projectDraft) {
-      setPreparationLoginError("项目配置尚未保存，请先完成项目接入。");
-      return;
-    }
-    if (!preparationLoginUsername.trim() || !preparationLoginPassword) {
-      setPreparationLoginError("本次计划包含登录步骤，请填写测试账号和测试密码，或先配置已保存的测试账号。");
-      return;
-    }
-    setPreparationLoginSaving(true);
-    setPreparationLoginError("");
-    try {
-      const savedProject = await saveCurrentProjectLoginCredential({
-        username: preparationLoginUsername.trim(),
-        password: preparationLoginPassword,
-        usernameEnv: projectDraft.login?.usernameEnv ?? projectDetection?.loginCapability?.usernameEnv ?? "E2E_USERNAME",
-        passwordEnv: projectDraft.login?.passwordEnv ?? projectDetection?.loginCapability?.passwordEnv ?? "E2E_PASSWORD"
-      });
-      setPreparationLoginPassword("");
-      setPlanningAutomation({
-        phase: !permissionProfile.observe || !permissionProfile.browserControl ? "needs-permission" : "preparing-project",
-        detail: !permissionProfile.observe || !permissionProfile.browserControl
-          ? "测试账号已加密保存。请允许本次浏览器操作后继续。"
-          : "测试账号已加密保存，正在检查沙盒、项目服务和测试路径。"
-      });
-      if (!permissionProfile.observe || !permissionProfile.browserControl) return;
-      const activePlan = planningResult;
-      if (activePlan?.recommendedScenarioId && selectedProjectExecutionMode !== "oci") {
-        setScenarioId(activePlan.recommendedScenarioId);
-        await executeConfirmedScenarioAutomatically(activePlan.recommendedScenarioId);
-      } else {
-        await continueAutomaticPlanning(permissionProfile, savedProject, activePlan ?? undefined);
-      }
-    } catch (error) {
-      setPreparationLoginError(error instanceof Error ? error.message : "测试账号保存失败，请重试。");
-      setPlanningAutomation({ phase: "needs-credentials", detail: "测试账号尚未保存，项目准备暂停。" });
-    } finally {
-      setPreparationLoginSaving(false);
-    }
-  }
-
-  async function stopCurrentProject() {
-    if (!projectDraft) return;
-    const response = await stopProject(projectDraft.id);
-    setProjectRuntime(response.runtime);
-    setMessage(response.runtime.message ?? `项目状态：${response.runtime.status}`);
-  }
-
-  /**
-   * Save a test account from inside the credential interrupt. Unlike
-   * saveCurrentProjectLoginCredential this never auto-retries: resuming the
-   * paused graph is the interrupt decision's job, so firing a separate retry
-   * here would race the resume and start a duplicate run.
-   */
-  async function saveInterruptCredential(username: string, password: string) {
-    if (!projectDraft) throw new Error("请先识别项目。");
-    const usernameEnv = projectDraft.login?.usernameEnv ?? projectDetection?.loginCapability?.usernameEnv ?? "E2E_USERNAME";
-    const passwordEnv = projectDraft.login?.passwordEnv ?? projectDetection?.loginCapability?.passwordEnv ?? "E2E_PASSWORD";
-    const prepared = await saveProject({
-      ...projectDraft,
-      login: { ...projectDraft.login, method: "env", usernameEnv, passwordEnv }
-    });
-    const response = await saveProjectLoginCredential(prepared.project.id, { username, password, usernameEnv, passwordEnv });
-    setProjectDraft(response.project);
-    setSelectedProjectId(response.project.id);
-    setMessage("测试账号已加密保存，正在注入沙盒继续本次测试。");
-  }
-
-  async function recoverProjectAndRetry(mode: "auto" | "runtime" | "discovery" = "auto"): Promise<ProjectRecoveryResult | undefined> {
-    const projectId = selectedProjectId || projectDraft?.id;
-    if (!projectId) {
-      const detail = "当前没有已选择的项目，因此没有可执行的恢复操作。";
-      setMessage(detail);
-      setPlanningMessages((current) => [...current, {
-        id: `recovery_unavailable_${Date.now()}`,
-        role: "assistant",
-        content: `遇到的问题：${detail}\n系统正在做什么：未启动重试，也没有创建代码修复。\n需要你操作：先选择并保存一个项目。`,
-        createdAt: new Date().toISOString()
-      }]);
-      return undefined;
-    }
-    if (projectRecoveryBusy) return undefined;
-
-    setProjectRecoveryBusy(true);
-    const pendingId = `project_recovery_${Date.now()}`;
-    const initialText = mode === "discovery"
-      ? "遇到的问题：页面 Discovery 尚未完成。\n系统正在做什么：正在重新扫描页面、控件、网络和可执行路径。\n需要你操作：暂时无需操作。"
-      : "遇到的问题：安全沙盒或项目服务尚未就绪。\n系统正在做什么：正在重新启动沙盒、检查 Docker Desktop、项目服务和页面连通性。\n需要你操作：暂时无需操作；若 180 秒后仍不可用，系统会给出明确提示。";
-    setPlanningMessages((current) => [...current, {
-      id: pendingId,
-      role: "assistant",
-      content: initialText,
-      createdAt: new Date().toISOString()
-    }]);
-    setMessage(mode === "discovery" ? "正在重新扫描页面并绑定路径…" : "正在重新启动沙盒并诊断项目…");
-
-    try {
-      const accepted = await recoverAndRetryProject(projectId, mode, defaultCredential?.id);
-      let recovery = accepted.recovery;
-      setProjectRecovery(recovery);
-      const deadline = Date.now() + 190_000;
-      while (["accepted", "running"].includes(recovery.status) && Date.now() < deadline) {
-        await new Promise((resolve) => window.setTimeout(resolve, 900));
-        const snapshot = await getProjectRecovery(projectId);
-        recovery = snapshot.recovery;
-        setProjectRecovery(recovery);
-        setProjectRuntime(recovery.runtime);
-        setRuntimeRecoveryAdvice(recovery.advice ?? null);
-        const lastEvent = recovery.events.at(-1);
-        setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
-          ...item,
-          content: [
-            "遇到的问题：正在恢复项目测试环境。",
-            `系统正在做什么：${lastEvent?.message ?? "正在同步恢复状态。"}`,
-            `需要你操作：${recovery.userAction}`
-          ].join("\n")
-        } : item));
-      }
-      setProjectRecovery(recovery);
-      setProjectRuntime(recovery.runtime);
-      setRuntimeRecoveryAdvice(recovery.advice ?? null);
-      const lastEvent = recovery.events.at(-1);
-      const completed = recovery.status === "completed";
-      const advisorText = recovery.advice?.status === "passed" && recovery.advice.summary
-        ? `\nAI 判断：${boundedAssistantText(recovery.advice.summary, 500)}`
-        : "";
-      const finalText = completed
-        ? `遇到的问题：恢复完成。\n系统已经做了什么：${lastEvent?.message ?? "沙盒、页面连通性和 Discovery 已恢复。"}\n需要你操作：无需操作；现在可以继续生成或执行测试计划。`
-        : `遇到的问题：${lastEvent?.message ?? recovery.sourceError ?? "恢复未完成。"}\n系统已经做了什么：已执行受限恢复并保留运行状态；没有修改项目源码，也没有覆盖既有证据。${advisorText}\n需要你操作：${recovery.userAction}`;
-      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
-        ...item,
-        content: finalText,
-        suggestedAction: completed ? "start-run" : "create-repair",
-        requiresConfirmation: true
-      } : item));
-      setAssistantSuggestedAction({
-        action: completed ? "start-run" : "create-repair",
-        label: completed ? assistantActionLabel("start-run") : "在沙盒中分析启动问题"
-      });
-      setMessage(completed ? "项目环境已恢复，可以继续测试。" : recovery.userAction);
-      if (completed) {
-        setPlanningAutomation({ phase: "idle", detail: "项目恢复完成，等待继续规划或执行测试。" });
-        setPreviewSessionProjectId(projectId);
-      } else {
-        setPlanningAutomation({ phase: "blocked", detail: lastEvent?.message ?? recovery.sourceError ?? "项目恢复未完成" });
-      }
-      return recovery;
-    } catch (error) {
-      const detail = userFacingAutomationError(error instanceof Error ? error.message : "恢复请求失败");
-      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
-        ...item,
-        content: `遇到的问题：${detail}\n系统已经做了什么：恢复请求未完成，系统没有启动代码修复或覆盖已有测试证据。\n需要你操作：请稍后重试；如果持续失败，请查看运行详情。`
-      } : item));
-      setMessage(detail);
-      return undefined;
-    } finally {
-      setProjectRecoveryBusy(false);
-    }
   }
 
   function requireBrowserAuthorization(action: string) {
@@ -3658,358 +2095,6 @@ export function App() {
     await routeAssistantContent(planningInput);
   }
 
-  async function continueTestPlanning(
-    input?: string,
-    planningMode: "llm-guided" | "scan-only" = "llm-guided",
-    options: { internalInstruction?: boolean; preserveAutomationState?: boolean } = {}
-  ) {
-    const content = (input ?? planningInput).trim();
-    const fullInventoryCommand = ["全面扫描", "灰度测试"].includes(
-      content.replace(/[\s，。！？、,.!?：:；;“”"'`]/g, "")
-    );
-    // “全面扫描/灰度测试” uses the hybrid path by default: deterministic
-    // discovery guarantees a list, then the LLM prioritises and explains it.
-    // The explicit low-cost scan button can still opt into scan-only.
-    const effectivePlanningMode = fullInventoryCommand && planningMode !== "scan-only"
-      ? "llm-guided"
-      : planningMode;
-    const projectId = selectedProjectId || projectDraft?.id;
-    if (!projectId) {
-      setMessage("请先接入并识别项目，再开始规划测试。");
-      return;
-    }
-    if (!content) {
-      setMessage("请先描述你想测试什么。");
-      return;
-    }
-    const userMessage: PlanningMessage = {
-      id: `planning_user_${Date.now()}`,
-      role: "user",
-      content,
-      createdAt: new Date().toISOString()
-    };
-    if (!options.internalInstruction) {
-      setPlanningMessages((current) => [...current, userMessage]);
-    }
-    setPlanningInput("");
-    setPlanningBusy(true);
-    setPlanningConfirmed(false);
-    // A new full inventory must not keep rendering the previous project's or
-    // previous scan's large plan while the one-page smoke gate is pending.
-    if (fullInventoryCommand) {
-      setPlanningResult(null);
-      setDiscovery(null);
-    }
-    if (!options.preserveAutomationState) {
-      setPlanningAutomation({ phase: "idle", detail: "" });
-    }
-    setScenarioId("");
-    setMessage(effectivePlanningMode === "scan-only"
-      ? "正在用确定性扫描列出项目测试清单。"
-      : fullInventoryCommand
-        ? "正在扫描完整业务流程，并由 AI 排定风险和补充遗漏。"
-        : "正在分析你的目标，并由 AI 制定相关测试计划。");
-    try {
-      const response = await continuePlanningConversation({
-        projectId,
-        message: content,
-        diff: diffText,
-        bugTicket: bugTicketText,
-        history: planningMessages,
-        planningMode: effectivePlanningMode,
-        credentialId: effectivePlanningMode === "llm-guided" ? defaultCredential?.id : undefined
-      });
-      if (response.discovery) {
-        setDiscovery(response.discovery);
-        setScenarioDrafts(response.discovery.drafts);
-      }
-      const orchestrationCopy = response.discovery
-        ? discoveryOrchestrationCopy(response.discovery)
-        : null;
-      const smokeReady = !response.discovery?.orchestration
-        || response.discovery.orchestration.status === "ready";
-      // Comprehensive scans remain useful when the independent browser smoke
-      // is waiting for login: code-derived flows are still real planning
-      // output, while runtime binding remains explicitly pending.
-      const keepCodePlanWhileRuntimeWaits = fullInventoryCommand && response.planning.businessFlows.length > 0;
-      const assistantMessage: PlanningMessage = {
-        id: `planning_assistant_${Date.now()}`,
-        role: "assistant",
-        content: smokeReady || !orchestrationCopy || keepCodePlanWhileRuntimeWaits
-          ? response.planning.reply
-          : [
-            `遇到的问题：${orchestrationCopy.reason}`,
-            `系统已经做了什么：${orchestrationCopy.completed}`,
-            `需要你做什么：${orchestrationCopy.nextStep}`
-          ].join("\n"),
-        createdAt: new Date().toISOString()
-      };
-      setPlanningMessages((current) => [...current, assistantMessage]);
-      setAnalysis(response.planning.analysis);
-      const combinedRequirement = [...planningMessages, ...(options.internalInstruction ? [] : [userMessage])]
-        .filter((item) => item.role === "user")
-        .map((item) => item.content)
-        .join("\n");
-      setRequirementText(combinedRequirement);
-      if (!smokeReady && !keepCodePlanWhileRuntimeWaits) {
-        setPlanningResult(null);
-        setPlanningConfirmed(false);
-        setScenarioId("");
-        setMessage(orchestrationCopy?.status ?? "页面预检未通过，测试尚未开始。");
-        return null;
-      }
-      setExcludedPlanningFlowIds(new Set());
-      setPlanningResult(response.planning);
-      setMessage(response.planning.llmPlanning?.status === "failed"
-        ? "代码扫描已完成，但 AI 规划暂时不可用；已保留可继续编辑的规则计划。"
-        : response.planning.llmPlanning?.status === "not_configured"
-          ? "代码扫描已完成。配置 AI 模型后可获得优先级建议和追问。"
-        : !smokeReady && keepCodePlanWhileRuntimeWaits
-        ? "代码测试清单已生成；页面前置条件会在确认执行时自动处理。"
-        : response.planning.phase === "clarifying"
-        ? "系统需要你回答几个问题，回答后会更新计划。"
-        : "测试计划草案已生成，请检查业务流程后确认。");
-      return response.planning;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : "测试规划失败";
-      setPlanningMessages((current) => [...current, {
-        id: `planning_error_${Date.now()}`,
-        role: "assistant",
-        content: `暂时无法生成计划：${detail}`,
-        createdAt: new Date().toISOString()
-      }]);
-      setMessage(detail);
-      return null;
-    } finally {
-      setPlanningBusy(false);
-    }
-  }
-
-  async function ensureProjectReadyForAutomation(projectOverride?: ProjectConfig) {
-    const candidate = projectOverride ?? projectDraft ?? projectDetection?.suggestedConfig;
-    if (!candidate) throw new Error("没有可运行的项目配置，请重新识别项目。");
-    const saved = await saveProject({
-      ...candidate,
-      allowExternalProjectPath: candidate.allowExternalProjectPath ?? true
-    });
-    setProjectDraft(saved.project);
-    setSelectedProjectId(saved.project.id);
-    setProjectPathInput(saved.project.projectPath);
-    setAppUrl(saved.project.frontendUrl);
-
-    const currentConnection = await testProjectConnection(saved.project.id).catch(() => null);
-    if (currentConnection?.result.ok) {
-      setProjectConnection(currentConnection.result);
-      setPreviewSessionProjectId(saved.project.id);
-      const liveUrl = projectRuntime?.status === "running"
-        ? projectRuntime.frontendUrl ?? saved.project.frontendUrl
-        : saved.project.frontendUrl;
-      return { ...saved.project, frontendUrl: liveUrl, healthCheckUrl: liveUrl };
-    }
-    const accepted = await startProjectAsync(saved.project.id);
-    setProjectRuntime(accepted.runtime);
-    const sandboxPrepareTimeout = saved.project.manifest?.execution.mode === "oci"
-      ? (saved.project.manifest.budget.prepareTimeoutMs ?? 300_000)
-      : 0;
-    const startupDeadline = Date.now()
-      + sandboxPrepareTimeout
-      + Math.max(saved.project.timeoutMs ?? 30_000, 30_000)
-      + 10_000;
-    let startedRuntime = accepted.runtime;
-    while (Date.now() < startupDeadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, 500));
-      const snapshot = await getProjectRuntime(saved.project.id).catch(() => null);
-      if (!snapshot) {
-        setPlanningAutomation((current) => ({
-          ...current,
-          phase: "preparing-project",
-          detail: "Agent 暂时断开，正在自动重新连接并恢复启动状态。"
-        }));
-        continue;
-      }
-      startedRuntime = snapshot.runtime;
-      setProjectRuntime(startedRuntime);
-      setPlanningAutomation((current) => ({
-        ...current,
-        phase: "preparing-project",
-        detail: startedRuntime.status === "installing"
-          ? "正在沙盒中安装项目依赖；完成后会自动继续。"
-          : startedRuntime.status === "starting"
-            ? startedRuntime.message || "正在启动 Docker 沙盒和项目服务。"
-            : "正在确认项目是否可以访问。"
-      }));
-      if (!["idle", "installing", "starting"].includes(startedRuntime.status)) break;
-    }
-    if (startedRuntime.status !== "running") {
-      const diagnosed = await diagnoseProject(saved.project.id).catch(() => null);
-      if (diagnosed) setProjectDiagnosis(diagnosed.diagnosis);
-      throw new Error(startedRuntime.message ?? "项目无法启动。");
-    }
-    const connected = await testProjectConnection(saved.project.id);
-    setProjectConnection(connected.result);
-    if (!connected.result.ok) throw new Error(connected.result.message || "项目启动后仍无法访问。");
-    setPreviewSessionProjectId(saved.project.id);
-    const liveUrl = startedRuntime.frontendUrl ?? saved.project.frontendUrl;
-    setAppUrl(liveUrl);
-    return {
-      ...saved.project,
-      frontendUrl: liveUrl,
-      backendUrl: startedRuntime.backendUrl ?? saved.project.backendUrl,
-      healthCheckUrl: startedRuntime.healthCheckUrl ?? liveUrl
-    };
-  }
-
-  function chooseDiscoveryDraft(result: DiscoveryScanResult) {
-    const semanticText = `${requirementText} ${planningResult?.businessFlows.map((flow) => flow.title).join(" ") ?? ""}`.toLowerCase();
-    const scored = result.drafts.map((draft) => {
-      const draftText = `${draft.riskKind ?? ""} ${draft.actions?.join(" ") ?? ""} ${JSON.stringify(draft.scenario)}`.toLowerCase();
-      const terms = semanticText.split(/[^\p{L}\p{N}_-]+/u).filter((term) => term.length >= 2);
-      const matches = terms.filter((term) => draftText.includes(term)).length;
-      const riskBonus = /登录|权限|login|permission/.test(semanticText) && draft.riskKind === "auth" ? 8
-        : /接口|api|网络|network/.test(semanticText) && draft.riskKind === "api_contract" ? 8
-          : /筛选|列表|表格|filter|table/.test(semanticText) && draft.riskKind === "table" ? 8
-            : 0;
-      return { draft, score: matches + riskBonus };
-    });
-    return scored.sort((left, right) => right.score - left.score)[0]?.draft;
-  }
-
-  async function executeConfirmedScenarioAutomatically(
-    selectedScenarioId: string | undefined,
-    grantedProfile = permissionProfile,
-    targetOverride?: {
-      appUrl: string;
-      projectId: string;
-      batchMode?: boolean;
-      coverageScenarioIds?: string[];
-      coverageInventory?: Array<{
-        id: string;
-        title: string;
-        status?: "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
-        kind: "page" | "component" | "api" | "scenario" | "data" | "background-task";
-        target: string;
-        sourceNodeIds: string[];
-        sourceCount: number;
-        surfaces?: Array<"page" | "api" | "data" | "background-task">;
-        requiredEvidenceKinds?: string[];
-        preconditions?: string[];
-      }>;
-      coverageMode?: "targeted" | "full";
-      dynamicBrowser?: boolean;
-    }
-  ) {
-    if (!grantedProfile.observe || !grantedProfile.browserControl) {
-      setPlanningAutomation({
-        phase: "needs-permission",
-        detail: "测试路径已准备好。允许本次浏览器操作后，系统会自动继续。",
-        scenarioId: selectedScenarioId
-      });
-      setMessage("测试路径已准备好，等待浏览器操作授权。");
-      setRunPreviewModalOpen(true);
-      return;
-    }
-    closeDrawers();
-    // Preparation and permission use the modal; real execution belongs only
-    // in the centre embedded browser.
-    setRunPreviewModalOpen(false);
-    setPlanningAutomation({ phase: "starting-run", detail: "正在创建运行并自动完成计划审批。", scenarioId: selectedScenarioId });
-    const operationProjectId = targetOverride?.projectId ?? (selectedProjectId || projectDraft?.id || "");
-    const workspaceRequestId = beginWorkspaceOperation("executing", operationProjectId);
-    setIsRunning(true);
-    try {
-      const created = await createVisualRun(targetOverride?.appUrl ?? previewUrl, grantedProfile, selectedScenarioId, {
-        requirement: requirementText,
-        diff: diffText,
-        projectId: targetOverride?.projectId ?? (selectedProjectId || projectDraft?.id),
-        executionMode: selectedProjectExecutionMode,
-        coverageScenarioIds: targetOverride?.coverageScenarioIds,
-        coverageInventory: targetOverride?.coverageInventory,
-        coverageMode: targetOverride?.coverageMode,
-        dynamicBrowser: targetOverride?.dynamicBrowser,
-        modelProfileId: defaultCredential?.id
-      });
-      // A new Run owns a new Playwright session. Drop only the previous live
-      // session metadata; the persistent project iframe stays mounted beneath
-      // the canvas until the new Run publishes its first frame.
-      setBrowserSession(null);
-      setActiveRunId(created.run.id);
-      setActiveRun(created.run);
-      let runnable = created.run;
-      // Compatibility for older servers/manual callers. New servers return a
-      // queued Run because this click already confirmed the plan and low-risk
-      // browser capabilities atomically.
-      if (runnable.state === "awaiting-plan-approval") {
-        runnable = (await approveRunPlan(runnable.id, runnable.version)).run;
-      }
-      if (runnable.state === "awaiting-permission") {
-        runnable = (await grantRunPermissions(runnable.id, runnable.version)).run;
-      }
-      setActiveRun(runnable);
-      setPlanningAutomation({ phase: "running", detail: "AI 正在操作浏览器并采集截图、DOM、网络和 Trace。", scenarioId: selectedScenarioId });
-      setMessage("计划已确认，AI 正在自动执行测试。");
-      const report = await waitForRunReport(created.run.id);
-      setResult(report);
-      dispatchWorkspace({
-        type: "run-completed",
-        requestId: workspaceRequestId,
-        projectId: operationProjectId,
-        report
-      });
-      setPlanningAutomation({ phase: "ready", detail: report.summary, scenarioId: selectedScenarioId });
-      setMessage(report.summary);
-      const finalStatus = report.finalStatus ?? report.gateStatus
-        ?? (report.verdict === "continue" ? "pass" : report.verdict === "stop_and_fix" ? "fail" : "needs-human-review");
-      setAutomationFailures([]);
-      setPlanningMessages((current) => {
-        const withoutSupersededFailure = current.filter((item) => !item.id.startsWith("automation_failure_analysis_") && !item.id.startsWith("progress:run:"));
-        if (withoutSupersededFailure.some((item) => item.id === `run_outcome_${created.run.id}`)) return withoutSupersededFailure;
-        return [...withoutSupersededFailure, {
-          id: `run_outcome_${created.run.id}`,
-          role: "assistant",
-          content: finalStatus === "pass"
-            ? `本次测试已经完成。机器结论：通过。${report.summary}`
-            : `本次测试已经结束。机器结论：${finalStatus}。${report.summary}`,
-          createdAt: new Date().toISOString(),
-          reasoningSummary: {
-            phase: "completed",
-            observations: [`Run ${created.run.id} 已完成`],
-            assessment: report.summary,
-            nextStep: finalStatus === "pass" ? "可以查看本次证据和测试报告。" : "继续处理报告中仍未完成的路径。",
-            userAction: "无需处理先前的临时阻塞提示。",
-            confidence: "high"
-          },
-          requiresConfirmation: false
-        }];
-      });
-      return {
-        scenarioId: selectedScenarioId,
-        success: finalStatus === "pass",
-        finalStatus,
-        detail: report.summary
-      };
-    } catch (error) {
-      const detail = userFacingAutomationError(error instanceof Error ? error.message : "自动化测试启动失败");
-      dispatchWorkspace({
-        type: "operation-failed",
-        requestId: workspaceRequestId,
-        projectId: operationProjectId,
-        error: detail
-      });
-      if (!targetOverride?.batchMode) {
-        setPlanningAutomation({ phase: "blocked", detail, scenarioId: selectedScenarioId });
-        setMessage(detail);
-      }
-      return {
-        scenarioId: selectedScenarioId,
-        success: false,
-        finalStatus: "blocked" as const,
-        detail
-      };
-    } finally {
-      setIsRunning(false);
-    }
-  }
-
   function grantBrowserPermissionAndContinue() {
     const nextPermission = { ...permissionProfile, observe: true, browserControl: true };
     setPermissionProfile(nextPermission);
@@ -4021,320 +2106,6 @@ export function App() {
       void executeConfirmedScenarioAutomatically(planningAutomation.scenarioId, nextPermission);
     } else {
       void continueAutomaticPlanning(nextPermission);
-    }
-  }
-
-  async function continueAutomaticPlanning(
-    grantedProfile = permissionProfile,
-    projectOverride?: ProjectConfig,
-    planningOverride?: PlanningConversationResult
-  ) {
-    const activePlanning = planningOverride ?? planningResult;
-    if (!activePlanning) return;
-    const comprehensiveRun = /全面|灰度|全量|所有业务|所有功能|full|comprehensive/i.test(
-      `${requirementText} ${activePlanning.plan.sessionName}`
-    );
-    // Permission is the first user decision. Do not prepare a sandbox and then
-    // jump backwards to an authorization step.
-    if (!grantedProfile.observe || !grantedProfile.browserControl) {
-      setPlanningAutomation({
-        phase: "needs-permission",
-        detail: "先允许本次浏览器操作，授权后系统会依次准备沙盒、扫描页面并生成可执行路径。"
-      });
-      setMessage("等待本次沙盒浏览器操作授权。");
-      setRunPreviewModalOpen(true);
-      return;
-    }
-    setAutomationFailures([]);
-    setPlanningAutomation({ phase: "preparing-project", detail: "正在启动并连接被测项目。" });
-    setMessage("计划已确认，正在自动准备项目。");
-    // Track the scenario selected by this invocation. React state updates are
-    // asynchronous, so reading planningAutomation in catch could attribute a
-    // new ANDFlow failure to a stale scenario from the previous project.
-    let activeScenarioId: string | undefined;
-    try {
-      const project = await ensureProjectReadyForAutomation(projectOverride);
-      if (project.manifest?.execution.mode === "oci" || selectedProjectExecutionMode === "oci") {
-        const coverageInventory = activePlanning.businessFlows.map((flow) => ({
-          id: flow.id,
-          title: flow.title,
-          status: flow.status,
-          kind: flow.kind,
-          target: flow.target,
-          sourceNodeIds: flow.sourceNodeIds ?? [],
-          sourceCount: Math.max(1, flow.sourceCount || flow.sourceNodeIds?.length || 1),
-          surfaces: flow.surfaces,
-          requiredEvidenceKinds: flow.requiredEvidenceKinds,
-          preconditions: flow.requiredInformation
-        }));
-        const runnableCoverageCount = coverageInventory.filter((item) => item.status === "executable" || item.status === "auto-bindable").length;
-        const businessFunctionCount = activePlanning.businessFunctionCount ?? activePlanning.businessFunctions?.length ?? 0;
-        const businessFunctionStatus = activePlanning.projectOverview?.statusCounts;
-        const runnableFunctionCount = businessFunctionStatus?.ready ?? runnableCoverageCount;
-        const pendingFunctionCount = businessFunctionStatus
-          ? businessFunctionStatus["needs-confirmation"] + businessFunctionStatus.blocked + businessFunctionStatus.unknown
-          : Math.max(0, businessFunctionCount - runnableFunctionCount);
-        setPlanningMessages((current) => [...current, {
-          id: `dynamic_browser_handoff_${Date.now()}`,
-          role: "assistant",
-          content: `项目服务已连通。已识别 ${businessFunctionCount} 个业务功能，其中 ${runnableFunctionCount} 个可以开始验证，${pendingFunctionCount} 个会在执行时补充条件。AI 会在可见页面中操作并检查结果；只有遇到账号或高风险操作才会询问你。`,
-          createdAt: new Date().toISOString()
-        }]);
-        setPlanningAutomation({
-          phase: "starting-run",
-          detail: "正在创建自主浏览器 Run；首个页面观测或动作产生后会立即显示在测试现场。"
-        });
-        const parentOutcome = await executeConfirmedScenarioAutomatically(undefined, grantedProfile, {
-          appUrl: project.frontendUrl,
-          projectId: project.id,
-          batchMode: true,
-          coverageScenarioIds: [],
-          coverageInventory,
-          coverageMode: comprehensiveRun ? "full" : "targeted",
-          dynamicBrowser: true
-        });
-        if (parentOutcome?.success) {
-          setAutomationFailures([]);
-          setPlanningAutomation({ phase: "ready", detail: parentOutcome.detail });
-          setMessage(parentOutcome.detail);
-        } else {
-          const failure: AutomationFailure = {
-            scenarioId: "dynamic-browser-agent",
-            title: "动态浏览器自动化",
-            target: project.frontendUrl,
-            stage: "execution",
-            detail: parentOutcome?.detail ?? "动态浏览器 Run 未返回结果"
-          };
-          setAutomationFailures([failure]);
-          await analyzeAutomationFailures([failure], 0);
-          setPlanningAutomation({ phase: "blocked", detail: failure.detail });
-          setMessage(failure.detail);
-        }
-        return;
-      }
-      setPlanningAutomation({ phase: "discovering", detail: "正在读取真实页面、控件、接口和可验证结果。" });
-      const reusableDiscovery = discovery
-        && discovery.target.projectId === project.id
-        && discovery.orchestration?.status === "ready"
-        && Date.now() - new Date(discovery.observation.capturedAt).getTime() < 10 * 60_000
-        ? discovery
-        : undefined;
-      const response = reusableDiscovery
-        ? { discovery: reusableDiscovery }
-        : await runDiscoveryScan({
-            appUrl: project.frontendUrl,
-            projectId: project.id,
-            sourceContexts: activePlanning.analysis.sourceContexts,
-            goal: requirementText || activePlanning.plan.sessionName,
-            credentialId: defaultCredential?.id
-          });
-      setDiscovery(response.discovery);
-      setScenarioDrafts(response.discovery.drafts);
-      // A login wall is not a defect: the page loaded and was observed. Stop the
-      // automation and hand the operator a concrete, owner-tagged action instead
-      // of a generic "no executable path" failure.
-      if (response.discovery.status === "waiting-auth") {
-        setPlanningMessages((current) => [...current, {
-          id: `discovery_waiting_auth_${Date.now()}`,
-          role: "assistant",
-          content: response.discovery.message,
-          createdAt: new Date().toISOString(),
-          repairPlan: {
-            owner: "user",
-            type: "credential_required",
-            executable: false,
-            problem: "被测页面是登录入口，未配置可用的测试账号。",
-            steps: [
-              "打开凭据管理，新增本项目可用的测试账号。",
-              "不要在对话中直接发送密码，凭据只在服务端加密保存。",
-              "保存后重新执行页面扫描。"
-            ],
-            validation: "重新扫描后页面不再停留在登录页，且能发现可操作控件。",
-            message: response.discovery.message,
-            status: "pending",
-            // A login wall is cleared by binding an account, never by re-granting
-            // browser permission — the action must open the credential form.
-            action: "configure-credentials"
-          }
-        }]);
-        setPlanningAutomation({
-          // NOT "needs-permission": browser control is already granted here, and
-          // showing the permission dialog leaves the user pressing a button that
-          // cannot clear the block.
-          phase: "needs-credentials",
-          detail: "被测页面需要登录，请先配置测试账号再重新扫描。"
-        });
-        setRevealProjectLoginSettings(true);
-        setMessage("被测页面需要登录，请先配置测试账号。");
-        return;
-      }
-      if (response.discovery.status === "failed") throw new Error(response.discovery.message);
-      const recommendedIds = response.discovery.recommendedScenarioIds?.length
-        ? response.discovery.recommendedScenarioIds
-        : response.discovery.recommendedScenarioId
-          ? [response.discovery.recommendedScenarioId]
-          : [];
-      const selectedDrafts = recommendedIds.length
-        ? recommendedIds
-            .map((id) => response.discovery.drafts.find((draft) => draft.scenarioId === id))
-            .filter((draft): draft is HarnessGapScenarioDraft => Boolean(draft))
-        : [chooseDiscoveryDraft(response.discovery)].filter((draft): draft is HarnessGapScenarioDraft => Boolean(draft));
-      // Keep every already-validated scenario from the static coverage
-      // compiler. Runtime Discovery supplements unknown pages; it must not
-      // replace known API/permission/business scenarios with just the first
-      // currently visible page.
-      const compiledScenarioIds = Array.from(new Set(
-        activePlanning.businessFlows
-          .filter((flow) => flow.status === "executable" && Boolean(flow.scenarioId))
-          .map((flow) => flow.scenarioId!)
-      ));
-      if (!selectedDrafts.length && !compiledScenarioIds.length) {
-        throw new Error("页面扫描没有找到可安全执行的测试路径。");
-      }
-      setPlanningMessages((current) => [...current, {
-        id: `discovery_summary_${Date.now()}`,
-        role: "assistant",
-        content: `真实页面扫描完成：已确认 ${selectedDrafts.length} 个低风险业务功能可以开始验证。尚未确认的功能会保留在清单中，不会被误报为已测试。`,
-        createdAt: new Date().toISOString()
-      }]);
-      const selectionMode = response.discovery.selectionProvenance?.mode === "llm-assisted"
-        ? "LLM 已在真实页面候选中选定最符合目标的路径"
-        : response.discovery.selectionProvenance?.mode === "deterministic-fallback"
-          ? "LLM 选择不可用，已采用验证过的安全基线路径"
-          : selectedDrafts.length > 1
-            ? `全面灰度模式已选出 ${selectedDrafts.length} 条低风险真实页面路径`
-            : "规则已找到唯一高置信度路径";
-      setPlanningAutomation({
-        phase: "binding",
-        detail: `${selectionMode}；正在确认页面元素、操作、预期结果和证据要求。`,
-        scenarioId: selectedDrafts[0]?.scenarioId
-      });
-      const approvedScenarioIds: string[] = [...compiledScenarioIds];
-      const bindingFailures: AutomationFailure[] = [];
-      const bindingRepairs: string[] = [];
-      for (const [index, draft] of selectedDrafts.entries()) {
-        activeScenarioId = draft.scenarioId;
-        setPlanningAutomation({
-          phase: "binding",
-          detail: `正在确认第 ${index + 1}/${selectedDrafts.length} 条路径的页面元素、操作、预期结果和证据要求。`,
-          scenarioId: draft.scenarioId
-        });
-        const probed = await probeScenarioDraft(draft.scenarioId, defaultCredential?.id);
-        setScenarioDrafts((current) => [probed.draft, ...current.filter((item) => item.scenarioId !== probed.draft.scenarioId)]);
-        const plannedFlow = activePlanning.businessFlows.find((flow) =>
-          flow.scenarioId === draft.scenarioId || flow.id === draft.gapId
-        );
-        const scenarioTitle = typeof draft.scenario["title"] === "string"
-          ? draft.scenario["title"]
-          : undefined;
-        const failureTitle = plannedFlow?.title ?? scenarioTitle ?? draft.scenarioId;
-        const successfulRepairs = (probed.draft.repairAttempts ?? []).filter((attempt) => attempt.status === "repaired");
-        if (successfulRepairs.length) {
-          bindingRepairs.push(
-            `${draft.scenarioId}：${successfulRepairs.map((attempt) =>
-              `${attempt.strategy === "llm-assisted" ? "AI" : "规则"}修复 ${attempt.changedFields.join("、")}`
-            ).join("；")}`
-          );
-        }
-        if (probed.draft.selectorProbeStatus !== "passed") {
-          bindingFailures.push({
-            scenarioId: draft.scenarioId,
-            title: failureTitle,
-            target: probed.draft.probeUrl ?? probed.draft.probeTrace?.navigationUrl,
-            stage: "binding",
-            detail: probed.draft.missingInfo?.join("、") || "无法验证选择器和预期结果",
-            requiredInformation: probed.draft.missingInfo ?? []
-          });
-          continue;
-        }
-        const approved = await approveScenarioDraft(draft.scenarioId);
-        if (approved.draft.draftReviewStatus === "approved") {
-          if (!approvedScenarioIds.includes(approved.draft.scenarioId)) {
-            approvedScenarioIds.push(approved.draft.scenarioId);
-          }
-        } else {
-          bindingFailures.push({
-            scenarioId: draft.scenarioId,
-            title: failureTitle,
-            target: approved.draft.probeUrl ?? approved.draft.probeTrace?.navigationUrl,
-            stage: "binding",
-            detail: approved.draft.missingInfo?.join("、") || "测试路径未通过自动可执行性校验",
-            requiredInformation: approved.draft.missingInfo ?? []
-          });
-        }
-      }
-      if (bindingRepairs.length) {
-        setPlanningMessages((current) => [...current, {
-          id: `binding_repair_${Date.now()}`,
-          role: "assistant",
-          content: `页面操作已自动重新确认并验证：${bindingRepairs.join("；")}。所有调整都限制在已观察到的按钮、标题、testId 和网络请求内，没有修改被测项目代码。`,
-          createdAt: new Date().toISOString()
-        }]);
-      }
-      if (!approvedScenarioIds.length) {
-        await analyzeAutomationFailures(bindingFailures, 0);
-        const detail = `${bindingFailures.length} 条候选路径未能在实际页面确认操作和预期结果，已完成 LLM/规则归因；没有可安全执行的路径被伪装成通过。`;
-        setPlanningAutomation({ phase: "blocked", detail });
-        setMessage(detail);
-        return;
-      }
-      setScenarioId(approvedScenarioIds[0]!);
-      const scenarioResponse = await listScenarios();
-      setScenarios(scenarioResponse.scenarios);
-      setPlanningAutomation({
-        phase: "starting-run",
-        detail: `正在创建 1 个父运行并调度 ${approvedScenarioIds.length} 条独立路径。${bindingFailures.length ? `另有 ${bindingFailures.length} 条绑定失败，已保留诊断。` : ""}`,
-        scenarioId: approvedScenarioIds[0]
-      });
-      setScenarioId(approvedScenarioIds[0]!);
-      // A comprehensive scan is also an auditable inventory. Pass every flow
-      // into the parent coverage ledger: executable scenarios become child
-      // runs, while unbound/unsafe flows remain explicit blocked dispositions
-      // instead of silently disappearing from the final report.
-      const coverageIdsForRun = comprehensiveRun
-        ? Array.from(new Set(activePlanning.businessFlows.map((flow) => flow.scenarioId ?? flow.id)))
-        : approvedScenarioIds;
-      const parentOutcome = await executeConfirmedScenarioAutomatically(approvedScenarioIds[0]!, grantedProfile, {
-        appUrl: project.frontendUrl,
-        projectId: project.id,
-        batchMode: true,
-        coverageScenarioIds: coverageIdsForRun
-      });
-      const completedCount = parentOutcome?.success ? approvedScenarioIds.length : 0;
-      const executionFailures: AutomationFailure[] = parentOutcome?.success
-        ? []
-        : [{
-            scenarioId: approvedScenarioIds[0]!,
-            title: activePlanning.businessFlows.find((flow) => flow.scenarioId === approvedScenarioIds[0])?.title,
-            target: project.frontendUrl,
-            stage: "execution",
-            detail: parentOutcome?.detail ?? "父运行未返回有效聚合结果"
-          }];
-      const queuedFailures = [
-        ...bindingFailures,
-        ...executionFailures
-      ];
-      if (queuedFailures.length) {
-        await analyzeAutomationFailures(queuedFailures, completedCount);
-        const detail = `已继续完成 ${completedCount} 条路径；${queuedFailures.length} 条失败链路已交给 AI 归因，等待确认修复后重试。`;
-        setPlanningAutomation({ phase: "blocked", detail });
-        setMessage(detail);
-      } else {
-        setAutomationFailures([]);
-        const detail = `${completedCount} 条测试路径已全部执行完成。`;
-        setPlanningAutomation({ phase: "ready", detail, scenarioId: approvedScenarioIds.at(-1) });
-        setMessage(detail);
-      }
-    } catch (error) {
-      const detail = userFacingAutomationError(error instanceof Error ? error.message : "自动生成可执行测试路径失败");
-      setAutomationFailures([{
-        scenarioId: activeScenarioId ?? "automation-preparation",
-        title: "自动化测试准备",
-        stage: "execution",
-        detail
-      }]);
-      setPlanningAutomation({ phase: "blocked", detail });
-      setMessage(detail);
     }
   }
 
@@ -4766,195 +2537,6 @@ export function App() {
     generationRequestRef.current?.controller.abort("user_cancelled");
   }
 
-  async function runPatrolOnce() {
-    if (!requireBrowserAuthorization("执行核心路径巡检")) return;
-    setIsPatrolling(true);
-    setMessage("正在执行一次核心路径巡检。");
-    try {
-      const response = await runPatrol({
-        appUrl,
-        projectId: selectedProjectId || projectDraft?.id,
-        scenarioId,
-        credentialId: defaultCredential?.id,
-        requirement: requirementText,
-        diff: diffText,
-        plan: plan ?? undefined,
-        notify: recipients(),
-        permissionProfile
-      });
-      setResult(response.run);
-      setPatrolRun(response.patrol);
-      setDeliveries((current) => [response.delivery, ...current]);
-      setMessage(`巡检完成：${response.run.verdict}，已生成值班推送。`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "巡检失败");
-    } finally {
-      setIsPatrolling(false);
-    }
-  }
-
-  async function startScheduler() {
-    if (!requireBrowserAuthorization("启动会接管浏览器的定时巡检")) return;
-    setIsScheduling(true);
-    setMessage("正在保存并启动核心路径巡检计划。");
-    try {
-      const planPayload = {
-        id: "core_path_daily",
-        title: "核心路径定时巡检",
-        appUrl,
-        projectId: selectedProjectId || projectDraft?.id,
-        scenarioId,
-        intervalMs: 60_000,
-        cron: "*/1 * * * *",
-        notify: recipients(),
-        retryPolicy: { maxRetries: 2, backoffMs: 2000 },
-        escalationPolicy: {
-          failureThreshold: 2,
-          riskTrendThreshold: "regressed" as const,
-          notify: recipients()
-        },
-        permissionProfile
-      };
-      const saved = await savePatrolPlan(planPayload);
-      const response = await startPatrolJob(planPayload);
-      setPatrolPlans((current) => [saved.plan, ...current.filter((job) => job.id !== saved.plan.id)]);
-      setPatrolJobs((current) => [response.job, ...current.filter((job) => job.id !== response.job.id)]);
-      setMessage("定时巡检计划已保存并启动；失败会按 retry policy 重试。");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "启动巡检失败");
-    } finally {
-      setIsScheduling(false);
-    }
-  }
-
-  async function stopScheduler() {
-    setIsScheduling(true);
-    setMessage("正在停止核心路径定时巡检。");
-    try {
-      const response = await stopPatrolJob({ id: "core_path_daily" });
-      setPatrolJobs((current) => [response.job, ...current.filter((job) => job.id !== response.job.id)]);
-      setMessage("定时巡检已停止。");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "停止巡检失败");
-    } finally {
-      setIsScheduling(false);
-    }
-  }
-
-  async function runSavedPatrolPlan(id: string) {
-    if (!requireBrowserAuthorization("执行巡检计划")) return;
-    setIsPatrolling(true);
-    try {
-      const response = await runPatrolPlanNow(id);
-      setResult(response.run);
-      setPatrolRun(response.patrol);
-      setDeliveries((current) => [response.delivery, ...current]);
-      await refresh();
-      setMessage(`巡检计划执行完成：${response.run.verdict}`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "执行巡检计划失败");
-    } finally {
-      setIsPatrolling(false);
-    }
-  }
-
-  async function removeSavedPatrolPlan(id: string) {
-    try {
-      await deletePatrolPlan(id);
-      setPatrolPlans((current) => current.filter((planItem) => planItem.id !== id));
-      setMessage(`巡检计划已删除：${id}`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "删除巡检计划失败");
-    }
-  }
-
-  async function deliverRun() {
-    setMessage("正在生成值班推送。");
-    try {
-      const response = await deliverRunToBot({
-        runId: result?.id,
-        provider: botProvider,
-        channel: botChannel,
-        recipients: recipients(),
-        includeScreenshots: botIncludeScreenshots,
-        githubPrUrl: optionalTrim(botGithubPrUrl)
-      });
-      setDeliveries((current) => [response.delivery, ...current]);
-      setMessage("值班推送记录已生成。");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "推送失败");
-    }
-  }
-
-  async function openHistoricalRun(runId: string) {
-    setMessage(`正在读取历史运行：${runId}`);
-    try {
-      const bundle = await getRunBundle(runId);
-      setResult(runResultFromBundle(bundle));
-      setActiveRunId(runId);
-      setCentreSurface("preview");
-      const [projection, sessionResponse] = await Promise.all([
-        getRunProjection(runId),
-        getRunBrowserSession(runId)
-      ]);
-      setActiveRun(projection.run);
-      setBrowserSession(sessionResponse.session);
-      setBrowserFrameRevision((current) => current + 1);
-      setLiveRun(null);
-      setCommitCheck(null);
-      setRequirementAcceptance(null);
-      setPatrolRun(null);
-      setRightDrawerOpen(true);
-      setLeftDrawerOpen(false);
-      setMessage(`已打开历史运行：${runId}`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "读取历史运行失败");
-    }
-  }
-
-  async function runRetentionDryRun() {
-    try {
-      const response = await runStorageRetention({ apply: false, archive: true });
-      await refresh();
-      setMessage(`Retention dry-run: actions=${String(response.retention.actionCount ?? 0)}.`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Retention dry-run 失败");
-    }
-  }
-
-  async function setGapStatus(gap: HarnessGap, status: HarnessGap["status"]) {
-    try {
-      const response = await updateHarnessGap(gap.id, { status });
-      setHarnessGaps((current) => current.map((item) => item.id === gap.id ? response.gap : item));
-      setMessage(`Harness gap 已标记为 ${status}。`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "更新 harness gap 失败");
-    }
-  }
-
-  async function draftScenarioFromGap(gap: HarnessGap) {
-    try {
-      const response = await createHarnessGapDraft(gap.id);
-      setGapDrafts((current) => ({ ...current, [gap.id]: response.draft }));
-      setMessage(`已生成 scenario 草案：${response.draft.scenarioId}。`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "生成 scenario 草案失败");
-    }
-  }
-
-  async function installScenarioFromGap(gap: HarnessGap) {
-    try {
-      const response = await installHarnessGapDraft(gap.id);
-      setGapDrafts((current) => ({ ...current, [gap.id]: response.draft }));
-      setHarnessGaps((current) => current.map((item) => item.id === gap.id ? { ...item, status: "implemented" } : item));
-      await refresh();
-      setScenarioId(response.draft.scenarioId);
-      setMessage(`已安装 scenario 到 registry：${response.draft.scenarioId}。`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "安装 scenario 草案失败");
-    }
-  }
-
   /* ===== Drawer content renderers ===== */
 
   function renderContextDrawer() {
@@ -5003,6 +2585,15 @@ export function App() {
                       return <li key={label} className={stateCls}>{label}</li>;
                     })}
                   </ol>
+                  {selectedProjectId ? (
+                    <ReadinessPanel
+                      report={readinessReport}
+                      loading={readinessLoading}
+                      bootstrapping={bootstrapBusy}
+                      onRefresh={refreshReadiness}
+                      onBootstrap={runBootstrap}
+                    />
+                  ) : null}
                   {currentFlowStep <= 2 && !readinessReady ? (
                     <div className="readiness-gate" role="alert">
                       <strong>进入第 2 步前需先就绪：</strong>
@@ -5047,223 +2638,51 @@ export function App() {
             onApplyRecoveryCandidate={applyAiRecoveryCandidate}
           />
 
-          <section className="planning-conversation" aria-label="测试规划对话">
-            <header>
-              <div>
-                <h3>测试规划</h3>
-                <p>用自然语言描述目标，系统先扫描项目，再由 AI 排定优先级、提出问题并生成可确认的测试计划。</p>
-              </div>
-              <div className="planning-header-actions">
-                {planningResult && <span>{planningResult.llmPlanning?.status === "passed" ? "AI 辅助规划" : planningResult.coverage.scope === "comprehensive" ? "全面灰度" : "定向测试"}</span>}
-                <button type="button" disabled={planningBusy || !hasSelectedProject} onClick={() => void continueTestPlanning("请对当前项目进行全面灰度扫描，只盘点流程和覆盖缺口，不调用 AI。", "scan-only")}>快速扫描（省 Token）</button>
-              </div>
-            </header>
+          <PlanningConversationPanel
+            hasSelectedProject={hasSelectedProject}
+            planningResult={planningResult}
+            planningMessages={planningMessages}
+            planningBusy={planningBusy}
+            planningConfirmed={planningConfirmed}
+            planningAutomation={planningAutomation}
+            planningAutomationBusy={planningAutomationBusy}
+            planningHasBlockingQuestions={planningHasBlockingQuestions}
+            planningFunctionPageLoading={planningFunctionPageLoading}
+            planningInput={planningInput}
+            currentFlowStep={currentFlowStep}
+            isRunning={isRunning}
+            composerRef={requirementComposerRef}
+            activeRun={activeRun}
+            result={result}
+            repairVerifiedScenarioIds={repairVerifiedScenarioIds}
+            credentials={credentials}
+            defaultCredential={defaultCredential}
+            missingProjectApiCredentials={missingProjectApiCredentials}
+            apiCredentialFeedbackRequired={apiCredentialFeedbackRequired}
+            onQuickScan={() => void continueTestPlanning("请对当前项目进行全面灰度扫描，只盘点流程和覆盖缺口，不调用 AI。", "scan-only")}
+            onExcludeFlow={excludePlanningFlow}
+            onEditFlowTitle={editPlanningFlowTitle}
+            onAddFlow={addPlanningFlow}
+            onLoadFunctions={(candidate) => void fetchPlanningFunctions(candidate)}
+            onConfirmPlan={() => void confirmPlanningDraft()}
+            onGrantBrowserPermission={grantBrowserPermissionAndContinue}
+            onBindProjectCredentials={(credentialId, source) => void bindMissingProjectApiCredentials(credentialId, source)}
+            onOpenCredentialSettings={openCredentialSettings}
+            onContinuePlanning={() => void continueAutomaticPlanning()}
+            onModifyPlan={() => {
+              setPlanningConfirmed(false);
+              setPlanningAutomation({ phase: "idle", detail: "" });
+            }}
+            onOpenRepairWorkspace={(runId) => void openCodeRepairWorkspace(runId)}
+            onPlanningInputChange={setPlanningInput}
+            onQuestionSelect={(question) => setPlanningInput(`关于“${question}”，我的回答是：`)}
+            onSubmit={() => void continueTestPlanning()}
+          />
 
-            <div className="planning-messages" aria-live="polite">
-              {planningMessages.map((item) => (
-                <article className={`planning-message ${item.role}`} key={item.id}>
-                  <strong>{item.role === "assistant" ? "AI 测试官" : "你"}</strong>
-                  <p>{item.content}</p>
-                  <KnowledgeBasis message={item} />
-                </article>
-              ))}
-              {planningBusy && <article className="planning-message assistant pending"><strong>AI 测试官</strong><p>正在扫描代码和整理业务流程…</p></article>}
-            </div>
-
-            {planningResult && (
-              <section className="planning-draft">
-                {planningResult.projectOverview ? (
-                  <section className="project-overview" aria-label="项目用途">
-                    <strong>项目用途</strong>
-                    <p>{planningResult.projectOverview.purpose}</p>
-                  </section>
-                ) : null}
-                <div className="planning-coverage business-function-overview">
-                  <article><strong>{planningResult.businessFunctionCount ?? planningResult.businessFunctions?.length ?? 0}</strong><span>识别到的业务功能</span></article>
-                  <article><strong>{planningResult.projectOverview?.statusCounts?.ready ?? planningResult.businessFunctions?.filter((feature) => feature.status === "ready").length ?? 0}</strong><span>可直接规划</span></article>
-                  <article><strong>{planningResult.projectOverview?.statusCounts?.["needs-confirmation"] ?? planningResult.businessFunctions?.filter((feature) => feature.status === "needs-confirmation").length ?? 0}</strong><span>需要补充条件</span></article>
-                  <article><strong>{((planningResult.projectOverview?.statusCounts?.blocked ?? 0) + (planningResult.projectOverview?.statusCounts?.unknown ?? 0)) || (planningResult.businessFunctions?.filter((feature) => feature.status === "blocked" || feature.status === "unknown").length ?? 0)}</strong><span>待确认</span></article>
-                </div>
-                {planningResult.businessFlows?.length && !planningConfirmed ? (
-                  <PlanningFlowEditor
-                    flows={planningResult.businessFlows}
-                    disabled={planningAutomationBusy}
-                    onExclude={(flowId) => excludePlanningFlow(flowId)}
-                    onEditTitle={(flowId, title) => editPlanningFlowTitle(flowId, title)}
-                    onAdd={(title) => addPlanningFlow(title)}
-                  />
-                ) : null}
-                {(activeRun || result) && planningResult?.businessFlows?.some((flow) => flow.scenarioId) ? (
-                  <FeatureTestProgress
-                    flows={planningResult.businessFlows}
-                    conclusions={result?.conclusions ?? []}
-                    runActive={Boolean(activeRun?.state) && !["completed", "failed", "blocked", "cancelled", "awaiting-human-review"].includes(activeRun?.state ?? "")}
-                    repairVerifiedScenarioIds={repairVerifiedScenarioIds}
-                    onRepair={(runId) => void openCodeRepairWorkspace(runId)}
-                  />
-                ) : null}
-                {planningResult.businessGraph ? (
-                  <details className="planning-technical-basis">
-                    <summary>查看处理依据</summary>
-                    <p>Agent 已建立业务功能与内部测试路径的映射。运行时会在沙盒中重新绑定页面、接口和验证条件。</p>
-                    <small>业务图版本 {planningResult.businessGraph.version} · 快照 {planningResult.businessFunctionSnapshotHash?.slice(0, 12) ?? planningResult.businessGraph.projectSnapshotHash.slice(0, 12)}</small>
-                    {planningResult.businessGraph.diagnostics.length ? <p>{planningResult.businessGraph.diagnostics.join("；")}</p> : null}
-                  </details>
-                ) : null}
-                {planningResult.llmPlanning?.status === "passed" && (
-                  <section className="llm-planning-advice" aria-label="AI 测试规划建议">
-                    <strong>AI 规划建议</strong>
-                    <p>{planningResult.llmPlanning.summary}</p>
-                    <small>{planningResult.llmPlanning.model} · {planningResult.llmPlanning.durationMs ? `${(planningResult.llmPlanning.durationMs / 1000).toFixed(1)} 秒` : "已完成"}</small>
-                  </section>
-                )}
-                {planningResult.llmPlanning?.status === "not_configured" && (
-                  <section className="llm-planning-advice muted" aria-label="AI 规划未配置">
-                    <strong>尚未启用 AI 规划</strong>
-                    <p>当前仅完成快速代码扫描。配置 API Key 后，自然语言规划会自动获得优先级建议和补充问题。</p>
-                  </section>
-                )}
-                {planningResult.clarificationQuestions.length > 0 && (
-                  <div className="planning-questions">
-                    <strong>{planningHasBlockingQuestions ? "执行前必须确认" : "可选补充（不影响确认）"}</strong>
-                    {planningResult.clarificationQuestions.map((question) => (
-                      <button type="button" key={question} onClick={() => setPlanningInput(`关于“${question}”，我的回答是：`)}>{question}</button>
-                    ))}
-                  </div>
-                )}
-                {planningResult.businessFunctions?.length ? (
-                  <BusinessFunctionList
-                    functions={planningResult.businessFunctions}
-                    total={planningResult.businessFunctionCount}
-                    nextCursor={planningResult.businessFunctionPage?.nextCursor}
-                    loading={planningFunctionPageLoading}
-                    onLoadMore={() => void fetchPlanningFunctions(planningResult)}
-                  />
-                ) : (
-                  <section className="business-function-empty">
-                    <strong>业务功能正在整理</strong>
-                    <p>当前历史计划没有保存业务功能摘要；重新扫描后，Agent 会按功能展示，技术路径仅在处理依据中保留。</p>
-                  </section>
-                )}
-                <button
-                  className="confirm-planning-button"
-                  type="button"
-                  disabled={planningHasBlockingQuestions || planningConfirmed || planningAutomationBusy}
-                  onClick={() => void confirmPlanningDraft()}
-                >
-                  {planningAutomationBusy
-                    ? "正在自动准备并执行"
-                    : planningConfirmed
-                      ? (isRunning ? "测试执行中" : "计划已确认 · 等待执行启动")
-                      : planningHasBlockingQuestions ? "回答问题后确认" : "确认并自动执行"}
-                </button>
-                {planningConfirmed && planningAutomation.phase !== "idle" && (
-                  <section className={`planning-next-step ${planningAutomation.phase === "blocked" || planningAutomation.phase === "needs-permission" ? "planning-next-step--blocked" : ""}`} aria-live="polite">
-                    <strong>
-                      {planningAutomation.phase === "preparing-project" ? "正在准备项目"
-                        : planningAutomation.phase === "discovering" ? "正在理解真实页面"
-                          : planningAutomation.phase === "binding" ? "正在生成可执行测试步骤"
-                            : planningAutomation.phase === "starting-run" ? "正在启动自动化测试"
-                              : planningAutomation.phase === "running" ? "AI 正在执行测试"
-                                : planningAutomation.phase === "ready" ? "自动化测试已完成"
-                                  : planningAutomation.phase === "needs-permission" ? "需要一次浏览器授权"
-                                    : "自动化暂时无法继续"}
-                    </strong>
-                    <p>{planningAutomation.detail}</p>
-                    {planningAutomation.phase === "needs-permission" && (
-                      <button
-                        type="button"
-                        onClick={grantBrowserPermissionAndContinue}
-                      >
-                        允许本次浏览器操作并继续
-                      </button>
-                    )}
-                    {planningAutomation.phase === "blocked" && (
-                      apiCredentialFeedbackRequired ? (
-                        <div className="planning-credential-actions">
-                          <p>
-                            项目需要 {missingProjectApiCredentials.map((item) => item.envName).join("、")}。
-                            选择后会安全注入沙盒，并从当前步骤自动继续。
-                          </p>
-                          {missingProjectApiCredentials.some((item) => item.exposure === "browser") && (
-                            <small>该变量会进入浏览器代码，建议使用可撤销的测试 Key。</small>
-                          )}
-                          <button
-                            type="button"
-                            disabled={!defaultCredential?.id || planningAutomationBusy}
-                            onClick={() => defaultCredential?.id && void bindMissingProjectApiCredentials(defaultCredential.id, "test-system")}
-                          >
-                            沿用当前测试模型凭据
-                          </button>
-                          <select
-                            aria-label="为被测项目选择其他 API Key"
-                            defaultValue=""
-                            disabled={planningAutomationBusy}
-                            onChange={(event) => {
-                              if (event.target.value) void bindMissingProjectApiCredentials(event.target.value, "dedicated");
-                            }}
-                          >
-                            <option value="">选择其他已保存凭据…</option>
-                            {credentials.filter((item) => item.id !== defaultCredential?.id).map((credential) => (
-                              <option key={credential.id} value={credential.id}>
-                                {credential.name} · {credential.model}
-                              </option>
-                            ))}
-                          </select>
-                          <button type="button" onClick={openCredentialSettings}>添加新的 API Key</button>
-                        </div>
-                      ) : (
-                        <div className="row-actions">
-                          <button type="button" onClick={() => void continueAutomaticPlanning()}>
-                            重新检查并继续
-                          </button>
-                          <button type="button" onClick={() => {
-                            setPlanningConfirmed(false);
-                            setPlanningAutomation({ phase: "idle", detail: "" });
-                          }}>修改计划</button>
-                        </div>
-                      )
-                    )}
-                  </section>
-                )}
-              </section>
-            )}
-
-            <form className={`planning-composer${currentFlowStep === 4 ? " is-flow-focus" : ""}`} onSubmit={(event) => { event.preventDefault(); void continueTestPlanning(); }}>
-              <textarea
-                ref={requirementComposerRef}
-                aria-label="描述测试目标"
-                value={planningInput}
-                onChange={(event) => setPlanningInput(event.target.value)}
-                rows={3}
-                placeholder="例如：全面灰度测试；重点检查登录、权限、数据刷新和报告生成。"
-              />
-              <button className="primary" type="submit" disabled={planningBusy || !planningInput.trim()}>
-                <Send size={15} />
-                {planningBusy ? "规划中" : "发送"}
-              </button>
-            </form>
-          </section>
-
-          <details className="optional-context">
-            <summary>补充输入（可选）：代码变更、缺陷单、PR 和远程文档</summary>
-            <label>
-              代码变更（Git diff）
-              <textarea value={diffText} onChange={(event) => setDiffText(event.target.value)} rows={6} />
-              <small className="field-hint">可粘贴本次提交或 PR 的代码差异；没有也可以只按需求测试。</small>
-            </label>
-
-            <label>
-              缺陷或任务编号（TAPD，可选）
-              <textarea value={bugTicketText} onChange={(event) => setBugTicketText(event.target.value)} rows={3} />
-            </label>
-
-            <label>
-              PR 来源（可选）
-              <input value={prUrl} onChange={(event) => setPrUrl(event.target.value)} placeholder="https://github.com/.../pull/123" />
-            </label>
-
-            <ConnectorPanel
+          <ContextSupplementPanel
+            diffText={diffText}
+            bugTicketText={bugTicketText}
+            prUrl={prUrl}
             requirementPath={requirementPath}
             requirementUrl={requirementUrl}
             bugTicketPath={bugTicketPath}
@@ -5273,6 +2692,10 @@ export function App() {
             openApiUrl={openApiUrl}
             strictInput={strictInput}
             hasRemoteConnectorInput={hasRemoteConnectorInput()}
+            analysis={analysis}
+            onDiffTextChange={setDiffText}
+            onBugTicketTextChange={setBugTicketText}
+            onPrUrlChange={setPrUrl}
             onRequirementPathChange={setRequirementPath}
             onRequirementUrlChange={setRequirementUrl}
             onBugTicketPathChange={setBugTicketPath}
@@ -5281,205 +2704,10 @@ export function App() {
             onOpenApiPathChange={setOpenApiPath}
             onOpenApiUrlChange={setOpenApiUrl}
             onStrictInputChange={setStrictInput}
-            />
-            <button type="button" onClick={loadConnectedContext}>
-              <Link2 size={16} />
-              读取以上资料
-            </button>
-          </details>
+            onLoadContext={() => void loadConnectedContext()}
+            onSelectScenario={setScenarioId}
+          />
 
-          {analysis && (
-            <details className="analysis-box analysis-details">
-              <summary>查看系统如何生成这些测试内容</summary>
-              <>
-                <div className="chip-list">
-                  {analysis.changedAreas.map((area) => (
-                    <span key={area}>{area}</span>
-                  ))}
-                </div>
-                <div className="source-list">
-                  {analysis.sources.map((source) => (
-                    <article key={source.kind}>
-                      <strong>{source.title}</strong>
-                      <span>{source.status}</span>
-                      <p>{source.summary}</p>
-                    </article>
-                  ))}
-                </div>
-                <SourceStatusPanel sources={analysis.sourceContexts} />
-                <ImpactPanel impact={analysis.impactAnalysis} />
-                <div className="candidate-list">
-                  {analysis.scenarioCandidates.map((candidate) => (
-                    <article key={candidate.id} className={candidate.executable ? "ready" : "pending"}>
-                      <strong>{candidate.title}</strong>
-                      <p>{candidate.reason}</p>
-                      <span>
-                        {candidate.riskLevel} · {candidate.source} · {candidate.executable ? "executable" : "needs harness"}
-                      </span>
-                      {candidate.mappedScenarioId && (
-                        <button type="button" onClick={() => setScenarioId(candidate.mappedScenarioId!)}>
-                          改用这项测试
-                        </button>
-                      )}
-                    </article>
-                  ))}
-                </div>
-              </>
-            </details>
-          )}
-
-          {false && (
-          <details className="optional-context" open={false} onToggle={() => undefined}>
-            <summary>AI 模型与权限（可选）</summary>
-            <section className="credential-box">
-            <h3>AI 模型凭据</h3>
-            <form onSubmit={submitCredential}>
-              <input
-                aria-label="名称"
-                value={form.name}
-                onChange={(event) => setForm({ ...form, name: event.target.value })}
-                placeholder="名称"
-              />
-              <select
-                aria-label="Provider"
-                value={form.provider}
-                onChange={(event) => setForm({ ...form, provider: event.target.value })}
-              >
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="openai-compatible">OpenAI-compatible</option>
-                <option value="custom">Custom</option>
-              </select>
-              <div className="button-row" aria-label="本地模型预设">
-                <button type="button" onClick={() => setForm({ ...form, name: "Ollama Local", provider: "openai-compatible", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen3:8b", apiKey: form.apiKey || "ollama", tags: "llm,local,ollama" })}>Ollama 预设</button>
-                <button type="button" onClick={() => setForm({ ...form, name: "vLLM Local", provider: "openai-compatible", baseUrl: "http://127.0.0.1:8000/v1", model: "local-model", apiKey: form.apiKey || "local", tags: "llm,local,vllm" })}>vLLM 预设</button>
-              </div>
-              <input
-                aria-label="Base URL"
-                value={form.baseUrl}
-                onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
-                placeholder="Base URL"
-              />
-              <input
-                aria-label="模型"
-                value={form.model}
-                onChange={(event) => setForm({ ...form, model: event.target.value })}
-                placeholder="模型"
-              />
-              <input
-                aria-label="API Key"
-                type="password"
-                value={form.apiKey}
-                onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
-                placeholder="API Key 不会进入前端持久化"
-              />
-              <input
-                aria-label="标签"
-                value={form.tags}
-                onChange={(event) => setForm({ ...form, tags: event.target.value })}
-                placeholder="标签，逗号分隔"
-              />
-              <input
-                aria-label="Owner"
-                value={form.owner}
-                onChange={(event) => setForm({ ...form, owner: event.target.value })}
-                placeholder="Owner"
-              />
-              <input
-                aria-label="Scopes"
-                value={form.scopes}
-                onChange={(event) => setForm({ ...form, scopes: event.target.value })}
-                placeholder="scopes，逗号分隔"
-              />
-              <label className="checkbox-row">
-                <input
-                  checked={form.isDefault}
-                  onChange={(event) => setForm({ ...form, isDefault: event.target.checked })}
-                  type="checkbox"
-                />
-                设为默认 Key
-              </label>
-              <div className="form-actions">
-                <button type="submit">
-                  <Save size={15} />
-                  {editingCredentialId ? "保存修改" : "保存 Key"}
-                </button>
-                {editingCredentialId && (
-                  <button type="button" onClick={cancelEdit}>
-                    <XCircle size={15} />
-                    取消编辑
-                  </button>
-                )}
-              </div>
-            </form>
-
-            <div className="credential-list">
-              {credentials.map((credential) => (
-                <article key={credential.id}>
-                  <div>
-                    <strong>{credential.name}</strong>
-                    <span>{credential.provider} · {credential.apiKeyMasked}</span>
-                    <span>{credential.model} · {credential.tags.join(", ") || "无标签"}</span>
-                    <span>owner={credential.owner ?? "n/a"} · scopes={(credential.scopes ?? []).join(", ") || "default"} · rotations={credential.rotationHistory?.length ?? 0}</span>
-                  </div>
-                  <div className="row-actions">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const response = await testCredential(credential.id);
-                        setMessage(response.message);
-                      }}
-                    >
-                      <FileSearch size={15} />
-                      测试连接
-                    </button>
-                    <button
-                      className="icon-button"
-                      type="button"
-                      title="编辑"
-                      onClick={() => editCredential(credential)}
-                    >
-                      <Pencil size={15} />
-                    </button>
-                    <button
-                      className="icon-button"
-                      disabled={credential.isDefault}
-                      type="button"
-                      title="设为默认"
-                      onClick={async () => {
-                        await updateCredential(credential.id, { isDefault: true });
-                        await refresh();
-                      }}
-                    >
-                      <Star size={15} />
-                    </button>
-                    <button
-                      className="icon-button"
-                      type="button"
-                      title="删除"
-                      onClick={async () => {
-                        await deleteCredential(credential.id);
-                        await refresh();
-                      }}
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-            </section>
-            <SecurityPanel
-              security={securitySummary}
-              credentials={credentials}
-              grants={projectGrants}
-              selectedProjectId={selectedProjectId}
-              onCreateGrant={createGrant}
-              onRotateCredential={rotateSelectedCredential}
-            />
-          </details>
-          )}
         </div>
       </>
     );
@@ -5504,90 +2732,6 @@ export function App() {
     );
   }
 
-  async function toggleBrowserControl() {
-    if (!activeRunId || browserControlBusy) return;
-    setBrowserControlBusy(true);
-    try {
-      const response = browserSession?.owner === "user"
-        ? await releaseRunBrowserControl(activeRunId)
-        : await acquireRunBrowserControl(activeRunId);
-      setBrowserSession(response.session);
-      setBrowserFrameRevision((current) => current + 1);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "浏览器控制权切换失败");
-    } finally {
-      setBrowserControlBusy(false);
-    }
-  }
-
-  async function syncSharedBrowserViewport(viewport: { width: number; height: number }) {
-    // Keep the Playwright session at its stable desktop viewport. Resizing it
-    // to the transient CSS size of the Workbench caused a feedback loop:
-    // sidebar/toolbar reflow changed the page viewport, which changed the
-    // page layout and stream dimensions again, producing the visible
-    // large/small flicker and soft text. The canvas already scales the fixed
-    // compositor frame to the available surface without changing the tested
-    // page itself.
-    void viewport;
-  }
-
-  async function clickSharedBrowser(input: { x: number; y: number; imageWidth: number; imageHeight: number }) {
-    if (!activeRunId || !browserSession || ["closed", "failed"].includes(browserSession.status)) return;
-    try {
-      // Clicking the shared canvas is an explicit user takeover. Acquire the
-      // same Playwright session before forwarding coordinates so the user can
-      // intervene immediately instead of clicking an inert screenshot.
-      if (browserSession.owner !== "user") {
-        const acquired = await acquireRunBrowserControl(activeRunId);
-        setBrowserSession(acquired.session);
-      }
-      await sendRunBrowserInput(activeRunId, {
-        kind: "click",
-        x: Math.max(0, Math.min(Math.round(input.x), Math.round(input.imageWidth) - 1)),
-        y: Math.max(0, Math.min(Math.round(input.y), Math.round(input.imageHeight) - 1))
-      });
-      setBrowserFrameRevision((current) => current + 1);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "页面操作失败");
-    }
-  }
-
-  async function pressSharedBrowserKey(key: "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown" | "Space") {
-    if (!activeRunId || !browserSession || ["closed", "failed"].includes(browserSession.status)) return;
-    try {
-      if (browserSession.owner !== "user") {
-        const acquired = await acquireRunBrowserControl(activeRunId);
-        setBrowserSession(acquired.session);
-      }
-      await sendRunBrowserInput(activeRunId, { kind: "press", key });
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "键盘操作失败");
-    }
-  }
-
-  async function typeSharedBrowserText(text: string) {
-    if (!activeRunId || !browserSession || !text || ["closed", "failed"].includes(browserSession.status)) return;
-    try {
-      if (browserSession.owner !== "user") {
-        const acquired = await acquireRunBrowserControl(activeRunId);
-        setBrowserSession(acquired.session);
-      }
-      await sendRunBrowserInput(activeRunId, { kind: "type", text });
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "页面输入失败");
-    }
-  }
-
-  async function typeIntoSharedBrowser() {
-    if (!activeRunId || browserSession?.owner !== "user" || !browserManualInput) return;
-    try {
-      await sendRunBrowserInput(activeRunId, { kind: "type", text: browserManualInput });
-      setBrowserManualInput("");
-      setBrowserFrameRevision((current) => current + 1);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "页面输入失败");
-    }
-  }
 
   return (
     <main className="app-shell minimal-shell">
@@ -5641,7 +2785,42 @@ export function App() {
           </button>
         </div>
       </header>
-      {renderApiSettingsDialog()}
+      <ApiSettingsDialog
+        open={apiSettingsOpen}
+        credentialFormOpen={credentialFormOpen}
+        editingCredentialId={editingCredentialId}
+        form={form}
+        credentials={credentials}
+        projectDraft={projectDraft}
+        projectDetection={projectDetection}
+        defaultCredentialId={defaultCredential?.id}
+        loginUsername={preparationLoginUsername}
+        loginPassword={preparationLoginPassword}
+        onClose={() => setApiSettingsOpen(false)}
+        onToggleCredentialForm={() => {
+          if (credentialFormOpen) {
+            cancelEdit();
+            return;
+          }
+          cancelEdit();
+          setCredentialFormOpen(true);
+        }}
+        onCancelEdit={cancelEdit}
+        onFormChange={setForm}
+        onSubmitCredential={submitCredential}
+        onLoginUsernameChange={setPreparationLoginUsername}
+        onLoginPasswordChange={setPreparationLoginPassword}
+        onSaveProjectLogin={(username, password) => saveCurrentProjectLoginCredential({
+          username,
+          password,
+          usernameEnv: projectDraft?.login?.usernameEnv ?? projectDetection?.loginCapability?.usernameEnv ?? "E2E_USERNAME",
+          passwordEnv: projectDraft?.login?.passwordEnv ?? projectDetection?.loginCapability?.passwordEnv ?? "E2E_PASSWORD"
+        }).then(() => undefined)}
+        onTestCredential={(credentialId) => void testCredential(credentialId).then((response) => setMessage(response.message))}
+        onEditCredential={editCredential}
+        onMakeDefault={(credentialId) => void updateCredential(credentialId, { isDefault: true }).then(() => refresh())}
+        onDeleteCredential={(credentialId) => void deleteCredential(credentialId).then(() => refresh())}
+      />
 
       {runPreviewModalOpen ? (
         <div className="run-preview-overlay" role="dialog" aria-modal="true" aria-label="AI 测试准备与授权">
@@ -5767,261 +2946,86 @@ export function App() {
           {renderEvidenceDrawer()}
         </aside>
 
-        <aside className="simple-sidebar">
-          <section className="sidebar-planning-assistant" aria-label="AI 测试助手规划">
-              <header>
-                <div>
-                  <span className="section-kicker">AI 测试助手</span>
-                  <h3>规划测试</h3>
-                </div>
-              </header>
-              <span className="sidebar-current-project">当前项目：{selectedProjectName}</span>
-              <div
-                ref={planningMessagesViewportRef}
-                className="sidebar-planning-messages"
-                aria-live="polite"
-                onScroll={(event) => {
-                  const viewport = event.currentTarget;
-                  planningMessagesPinnedRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 48;
-                }}
-              >
-                {visiblePlanningMessages.map((item, index) => {
-                  const attachesRunActions = assistantFeedbackRequired
-                    && item.role === "assistant"
-                    && item.content === runAssistantMessage
-                    && !visiblePlanningMessages.slice(index + 1).some((candidate) => candidate.content === runAssistantMessage);
-                  const attachedSuggestedAction = item.suggestedAction && item.suggestedAction !== "none"
-                    ? item.suggestedAction
-                    : undefined;
-                  const isLatestAssistant = item.id === latestPlanningAssistant?.id;
-                  return (
-                    <WorkbenchSectionBoundary
-                      label="这条助手消息"
-                      key={item.id}
-                    >
-                    <AssistantConversationMessage
-                      message={item}
-                      // Only the latest assistant message may act: re-running a
-                      // stale plan would fight the current run state.
-                      onRepairPlanAction={isLatestAssistant ? executeRepairPlanAction : undefined}
-                      onOpenRepairEvidence={openRepairPlanEvidence}
-                      repairPlanActionStatus={repairPlanActionStatus ?? undefined}
-                      actions={attachesRunActions ? (
-                        <RunAssistantPanel
-                          message={runAssistantMessage}
-                          blocked={runIsBlocked || screenshotRateLimited}
-                          authRequired={authFeedbackRequired}
-                          credentialReady={credentialReadyForRetry}
-                          apiCredentialRequired={apiCredentialFeedbackRequired}
-                          apiCredentialEnvNames={missingProjectApiCredentials.map((candidate) => candidate.envName)}
-                          browserExposedApiCredential={missingProjectApiCredentials.some((candidate) => candidate.exposure === "browser")}
-                          credentials={credentials}
-                          defaultCredentialId={defaultCredential?.id}
-                          busy={planningBusy || isRunning || planningAutomationBusy || assistantChatBusy || projectRecoveryBusy}
-                          onSubmit={submitRunAssistantFeedback}
-                          onConfigureCredentials={openProjectLoginSettings}
-                          onRetryWithCredentials={retryWithConfiguredLogin}
-                          onBindApiCredential={bindMissingProjectApiCredentials}
-                          onOpenApiSettings={openCredentialSettings}
-                          reviewRequired={reviewRequired}
-                          reviewReason={reviewReason}
-                          onReviewReasonChange={setReviewReason}
-                          onAcceptRisk={() => controlActiveRun("decision-override")}
-                          autoRepairAvailable={assistantAutoRepairAvailable}
-                          autoRepairLabel={runtimeRecoveryAvailable
-                            ? "重新启动沙盒并诊断"
-                            : discoveryRecoveryAvailable ? "重新扫描页面并绑定路径"
-                            : pathBindingRepairable ? "重新绑定并验证路径"
-                              : startupRepairAvailable ? "在沙盒中分析启动问题" : "生成沙盒代码修复"}
-                          autoRepairDescription={runtimeRecoveryAvailable
-                            ? "系统会自动启动 Docker Desktop（如需要）、重新启动沙盒、检查健康状态并重新扫描页面；不会修改项目源码。"
-                            : discoveryRecoveryAvailable
-                              ? "页面已经连通；系统只会重新扫描页面、控件和网络并重新绑定路径，不会修改项目源码或覆盖已有证据。"
-                            : pathBindingRepairable
-                              ? "根据已探测页面重新绑定入口、控件和验证条件，然后立即复验。不会修改项目源码。"
-                              : startupRepairAvailable
-                                ? "读取已保存的启动状态和日志，只修改沙盒中的启动/构建配置；原项目只读，联网安装需单独确认。"
-                                : "读取失败断言和证据，在沙盒副本中生成最小补丁，并展示 Diff 与验证结果。"}
-                          onAutoRepair={runtimeRecoveryAvailable
-                            ? async () => { await recoverProjectAndRetry("runtime"); }
-                            : discoveryRecoveryAvailable ? async () => { await recoverProjectAndRetry("discovery"); }
-                            : pathBindingRepairable ? repairBlockedPlanning : openCodeRepairWorkspace}
-                          onEditPlan={() => {
-                            setPlanningConfirmed(false);
-                            setPlanningAutomation({ phase: "idle", detail: "" });
-                          }}
-                          conversationVisible={false}
-                        />
-                      ) : attachedSuggestedAction === "start-run" ? (
-                        <div className="assistant-command-preview assistant-plan-command">
-                          {planningResult && discoveryAllowsPlanning ? (
-                            <>
-                              <strong>本次准备测试 {planningResult.businessFunctionCount ?? planningResult.businessFunctions?.length ?? 0} 个业务功能</strong>
-                              <div className="assistant-plan-summary">
-                                <span>Agent 会在内部编排页面、接口和数据测试路径</span>
-                                {(planningResult.businessFunctions?.filter((feature) => feature.status !== "ready").length ?? 0) > 0
-                                  ? <span>{planningResult.businessFunctions?.filter((feature) => feature.status !== "ready").length} 个功能需补充条件</span>
-                                  : null}
-                              </div>
-                              {planningResult.businessFunctions?.length ? <BusinessFunctionList
-                                functions={planningResult.businessFunctions}
-                                total={planningResult.businessFunctionCount}
-                                nextCursor={planningResult.businessFunctionPage?.nextCursor}
-                                loading={planningFunctionPageLoading}
-                                onLoadMore={() => void fetchPlanningFunctions(planningResult)}
-                              /> : null}
-                              <button
-                                className="assistant-suggested-action"
-                                type="button"
-                                disabled={assistantChatBusy || isRunning || planningHasBlockingQuestions}
-                                onClick={() => void executeAssistantSuggestedAction(attachedSuggestedAction)}
-                              >
-                                {planningHasBlockingQuestions ? "请先补充必要信息" : "确认并开始测试"}
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <strong>测试清单尚未生成</strong>
-                              <span>系统会先扫描项目并列出页面、功能和接口，再允许确认执行。</span>
-                              <button
-                                className="assistant-suggested-action"
-                                type="button"
-                                disabled={assistantChatBusy || planningBusy}
-                                onClick={() => void continueTestPlanning(latestPlanningGoal(), "llm-guided")}
-                              >
-                                按当前目标生成清单
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      ) : attachedSuggestedAction ? (
-                        <div className="assistant-command-preview">
-                          <span>{item.requiresConfirmation === false ? "可立即执行" : "确认后执行"}</span>
-                          <button
-                            className="assistant-suggested-action"
-                            type="button"
-                            disabled={assistantChatBusy}
-                            onClick={() => void executeAssistantSuggestedAction(attachedSuggestedAction)}
-                          >
-                            {assistantActionLabel(attachedSuggestedAction)}
-                          </button>
-                        </div>
-                      ) : isLatestAssistant && !assistantChatBusy ? (
-                        <div className="assistant-quick-commands" aria-label="可以继续这样问">
-                          {assistantQuickCommands.slice(0, 3).map((command) => (
-                            <button key={command} type="button" onClick={() => void routeAssistantContent(command)}>
-                              {command}
-                            </button>
-                          ))}
-                        </div>
-                      ) : undefined}
-                    />
-                    </WorkbenchSectionBoundary>
-                  );
-                })}
-                {planningBusy ? (
-                  <AssistantConversationMessage message={{
-                    id: "planning_pending",
-                    role: "assistant",
-                    content: "正在分析项目和可执行路径…",
-                    createdAt: new Date().toISOString()
-                  }} />
-                ) : null}
-                {/* A pending decision is part of the conversation chronology,
-                    not a persistent widget above it. New assistant messages
-                    and the decision now share the same scroll flow. */}
-                {isUserActionableInterrupt(agentProjection?.pendingInterrupt) ? (
-                  <InterruptDecisionPanel
-                    interrupt={agentProjection!.pendingInterrupt!}
-                    busy={interruptBusy}
-                    error={interruptError ?? undefined}
-                    onDecide={(decision, note) => submitInterruptDecision(decision, note)}
-                    onOpenEvidence={openInterruptEvidence}
-                    onSaveCredentials={saveInterruptCredential}
-                    onOpenCredentials={() => {
-                      setLeftDrawerOpen(true);
-                      setMessage("请在项目设置中配置测试账号，配置完成后回到此处提交决策。");
-                    }}
-                    onRecoverSandbox={() => void executeAssistantSuggestedAction("retry-runtime")}
-                    onReopenDiscovery={() => void executeAssistantSuggestedAction("retry-discovery")}
-                    onOpenRepairWorkspace={() => void openCodeRepairWorkspace()}
-                  />
-                ) : null}
-              </div>
-              {discovery?.orchestration && discovery.orchestration.status !== "ready" ? (
-                <DiscoveryOrchestrationNotice discovery={discovery} />
-              ) : null}
-              {planningResult && discoveryAllowsPlanning ? (
-                <div className={`sidebar-planning-result ${planningSummaryCollapsed ? "collapsed" : ""}`}>
-                  <button
-                    className="sidebar-planning-result-toggle"
-                    type="button"
-                    aria-expanded={!planningSummaryCollapsed}
-                    onClick={() => setPlanningSummaryCollapsed((current) => !current)}
-                  >
-                    <span>
-                      <strong>{planningResult.businessFunctionCount ?? planningResult.businessFunctions?.length ?? 0} 个业务功能</strong>
-                      <small>Agent 会在内部维护测试路径</small>
-                    </span>
-                    <span>{planningSummaryCollapsed ? "展开" : "收起"}</span>
-                  </button>
-                  {!planningSummaryCollapsed ? (
-                    <>
-                      {planningResult.businessFunctions?.length ? (
-                        <BusinessFunctionList
-                          functions={planningResult.businessFunctions}
-                          total={planningResult.businessFunctionCount}
-                          nextCursor={planningResult.businessFunctionPage?.nextCursor}
-                          loading={planningFunctionPageLoading}
-                          onLoadMore={() => void fetchPlanningFunctions(planningResult)}
-                        />
-                      ) : <p className="business-function-empty">业务功能摘要尚未生成，请重新扫描。</p>}
-                      <button
-                        className="primary execute-plan-button"
-                        type="button"
-                        disabled={planningHasBlockingQuestions || planningAutomationBusy || isRunning}
-                        onClick={() => void confirmPlanningDraft()}
-                      >
-                        {planningAutomationBusy || isRunning
-                          ? "自动测试进行中"
-                          : planningHasBlockingQuestions
-                            ? "请先补充信息"
-                            : planningConfirmed && planningAutomation.phase === "blocked"
-                              ? "继续自动测试"
-                              : planningConfirmed ? "重新执行计划" : "确认并执行"}
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-              ) : null}
-              <form className="sidebar-planning-composer" onSubmit={(event) => {
-                event.preventDefault();
-                if (planningInput.trim()) void routeAssistantInput();
-              }}>
-                <textarea
-                  aria-label="向 AI 测试助手提问或描述测试目标"
-                  value={planningInput}
-                  onChange={(event) => setPlanningInput(event.target.value)}
-                  rows={3}
-                  placeholder="可问“现在测试到哪了？”；输入“全面扫描”可生成测试清单。"
-                />
-                <button
-                  className="primary composer-send-button"
-                  type="submit"
-                  disabled={planningBusy || assistantChatBusy || !planningInput.trim()}
-                  aria-label={planningBusy || assistantChatBusy ? "AI 正在回复" : "发送给 AI 测试助手"}
-                  title={planningBusy || assistantChatBusy ? "AI 正在回复" : "发送"}
-                >
-                  {assistantChatBusy ? <Activity size={14} /> : <Send size={14} />}
-                </button>
-              </form>
-            </section>
-
-          <div className="sidebar-footer">
-            <span>{runHistory.length} 次历史运行</span>
-            <button onClick={() => setRightDrawerOpen(true)} type="button">打开记录</button>
-          </div>
-        </aside>
+        <AssistantPlanningSidebar
+          selectedProjectName={selectedProjectName}
+          messages={visiblePlanningMessages}
+          messagesViewportRef={planningMessagesViewportRef}
+          onMessagesScroll={(viewport) => { planningMessagesPinnedRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 48; }}
+          planningBusy={planningBusy}
+          assistantChatBusy={assistantChatBusy}
+          planningAutomationBusy={planningAutomationBusy}
+          isRunning={isRunning}
+          projectRecoveryBusy={projectRecoveryBusy}
+          assistantFeedbackRequired={assistantFeedbackRequired}
+          runAssistantMessage={runAssistantMessage}
+          runIsBlocked={runIsBlocked}
+          screenshotRateLimited={screenshotRateLimited}
+          authFeedbackRequired={authFeedbackRequired}
+          credentialReadyForRetry={credentialReadyForRetry}
+          apiCredentialFeedbackRequired={apiCredentialFeedbackRequired}
+          missingProjectApiCredentials={missingProjectApiCredentials}
+          credentials={credentials}
+          defaultCredential={defaultCredential}
+          reviewRequired={reviewRequired}
+          reviewReason={reviewReason}
+          assistantAutoRepairAvailable={assistantAutoRepairAvailable}
+          runtimeRecoveryAvailable={runtimeRecoveryAvailable}
+          discoveryRecoveryAvailable={discoveryRecoveryAvailable}
+          pathBindingRepairable={pathBindingRepairable}
+          startupRepairAvailable={startupRepairAvailable}
+          planningResult={planningResult}
+          discoveryAllowsPlanning={discoveryAllowsPlanning}
+          planningFunctionPageLoading={planningFunctionPageLoading}
+          planningHasBlockingQuestions={planningHasBlockingQuestions}
+          planningConfirmed={planningConfirmed}
+          planningAutomationPhase={planningAutomation.phase}
+          planningSummaryCollapsed={planningSummaryCollapsed}
+          planningInput={planningInput}
+          discovery={discovery}
+          agentProjection={agentProjection}
+          interruptBusy={interruptBusy}
+          interruptError={interruptError ?? undefined}
+          pendingInterruptActionable={isUserActionableInterrupt(agentProjection?.pendingInterrupt)}
+          repairPlanActionStatus={repairPlanActionStatus ?? undefined}
+          history={runHistory}
+          onRepairPlanAction={executeRepairPlanAction}
+          onOpenRepairEvidence={openRepairPlanEvidence}
+          onSubmitRunFeedback={submitRunAssistantFeedback}
+          onConfigureCredentials={openProjectLoginSettings}
+          onRetryWithCredentials={retryWithConfiguredLogin}
+          onBindApiCredential={bindMissingProjectApiCredentials}
+          onOpenApiSettings={openCredentialSettings}
+          onReviewReasonChange={setReviewReason}
+          onAcceptRisk={() => controlActiveRun("decision-override")}
+          onAutoRepair={runtimeRecoveryAvailable
+            ? () => recoverProjectAndRetry("runtime")
+            : discoveryRecoveryAvailable ? () => recoverProjectAndRetry("discovery")
+              : pathBindingRepairable ? repairBlockedPlanning : openCodeRepairWorkspace}
+          onEditPlan={() => {
+            setPlanningConfirmed(false);
+            setPlanningAutomation({ phase: "idle", detail: "" });
+          }}
+          onExecuteSuggestedAction={executeAssistantSuggestedAction}
+          onContinuePlanning={() => continueTestPlanning(latestPlanningGoal(), "llm-guided")}
+          onRouteAssistantContent={routeAssistantContent}
+          assistantActionLabel={assistantActionLabel}
+          latestPlanningAssistantId={latestPlanningAssistant?.id}
+          assistantQuickCommands={assistantQuickCommands}
+          onLoadPlanningFunctions={() => planningResult && fetchPlanningFunctions(planningResult)}
+          onConfirmPlanningDraft={confirmPlanningDraft}
+          onPlanningSummaryCollapsedChange={setPlanningSummaryCollapsed}
+          onPlanningInputChange={setPlanningInput}
+          onRouteAssistantInput={routeAssistantInput}
+          onInterruptDecision={submitInterruptDecision}
+          onOpenInterruptEvidence={openInterruptEvidence}
+          onSaveInterruptCredentials={saveInterruptCredential}
+          onOpenInterruptCredentials={() => {
+            setLeftDrawerOpen(true);
+            setMessage("请在项目设置中配置测试账号，配置完成后回到此处提交决策。");
+          }}
+          onOpenRepairWorkspace={openCodeRepairWorkspace}
+          onOpenHistory={() => setRightDrawerOpen(true)}
+        />
 
         <div
           className="sidebar-resize-handle"
@@ -6043,425 +3047,107 @@ export function App() {
           key={`workspace:${selectedProjectId || "none"}`}
           className="main-panel simple-main"
         >
-          {false && projectPreviewReady && (!planningConfirmed || planningBusy || planningAutomation.phase === "blocked" || planningAutomation.phase === "needs-permission") ? (
-            <section className="assistant-planning-stage" aria-label="AI 测试助手规划">
-              <header>
-                <div>
-                  <span className="section-kicker">AI 测试助手</span>
-                  <h3>告诉我想验证什么</h3>
-                  <p>用自然语言描述目标。系统会先复用低成本扫描，再在复杂、陌生或有冲突时调用 LLM 制定可执行计划。</p>
-                </div>
-                <button type="button" disabled={planningBusy} onClick={() => void continueTestPlanning("请对当前项目进行全面灰度扫描，只盘点流程和覆盖缺口，不调用 AI。", "scan-only")}>快速扫描</button>
-              </header>
-              <div className="assistant-planning-messages" aria-live="polite">
-                {planningMessages.slice(-3).map((item) => (
-                  <article className={item.role} key={item.id}>
-                    <strong>{item.role === "assistant" ? "AI 测试官" : "你"}</strong>
-                    <p>{item.content}</p>
-                  </article>
-                ))}
-                {planningBusy ? <article className="assistant pending"><strong>AI 测试官</strong><p>正在分析项目、需求与可执行路径…</p></article> : null}
-              </div>
-              {planningResult ? (
-                <div className="assistant-planning-result">
-                  <div className="planning-coverage">
-                    <article><strong>{planningResult!.coverage.discovered}</strong><span>识别流程</span></article>
-                    <article><strong>{planningResult!.coverage.executable}</strong><span>可直接执行</span></article>
-                    <article><strong>{planningResult!.coverage.autoBindable ?? 0}</strong><span>等待页面确认</span></article>
-                    <article><strong>{planningResult!.coverage.gaps}</strong><span>需补条件</span></article>
-                  </div>
-                  <div className="model-budget-summary">
-                    <strong>本次模型预算</strong>
-                    <span>Planner ≤ 2 · 浏览器决策 ≤ 12 · Judge ≤ 1 · Triage ≤ 1</span>
-                    <span>总 Token ≤ 12,000 · 总模型时间 ≤ 120 秒</span>
-                    <small>价格未知时显示 unknown；达到预算后保留机器结论并转人工复核。</small>
-                  </div>
-                  {planningResult!.clarificationQuestions.length ? <p className="assistant-question">{planningResult!.clarificationQuestions[0]}</p> : null}
-                  <button
-                    className="primary"
-                    type="button"
-                    disabled={planningHasBlockingQuestions || planningConfirmed || planningAutomationBusy}
-                    onClick={() => void confirmPlanningDraft()}
-                  >
-                    {planningAutomationBusy ? "正在准备执行" : planningConfirmed ? "计划已确认" : planningHasBlockingQuestions ? "请先补充信息" : "确认计划并开始测试"}
-                  </button>
-                </div>
-              ) : null}
-              <form className={`planning-composer${currentFlowStep === 4 ? " is-flow-focus" : ""}`} onSubmit={(event) => { event.preventDefault(); void continueTestPlanning(); }}>
-                <textarea aria-label="描述测试目标" value={planningInput} onChange={(event) => setPlanningInput(event.target.value)} rows={3} placeholder="例如：全面灰度测试；重点检查登录、权限、数据刷新和报告生成。" />
-                <button className="primary" type="submit" disabled={planningBusy || !planningInput.trim()}><Send size={15} />{planningBusy ? "规划中" : "发送"}</button>
-              </form>
-            </section>
-          ) : null}
 
-          <section className="live-view simple-live-view" aria-label="项目工作区">
-            <header className="live-view-toolbar">
-              <div className="live-view-window-dots" aria-hidden="true">
-                <span />
-                <span />
-                <span />
-              </div>
-              <div className="centre-surface-switch" role="tablist" aria-label="中央工作区模式">
-                <button type="button" role="tab" aria-selected={centreSurface === "preview"} className={centreSurface === "preview" ? "active" : ""} onClick={() => setCentreSurface("preview")}>预览</button>
-                <button type="button" role="tab" aria-selected={centreSurface === "code"} className={centreSurface === "code" ? "active" : ""} onClick={() => void openProjectCodeWorkspace()}><Code2 size={14} />代码</button>
-              </div>
-              <span className="live-view-mode">
-                {centreSurface === "code" ? "项目代码（沙盒副本）" : projectPreviewReady || activeRunId ? "项目浏览器现场" : "沙盒测试现场"}
-              </span>
-              {centreSurface === "preview" ? <code title={browserSession?.currentUrl ?? previewUrl}>{(browserSession?.currentUrl ?? previewUrl) || "尚未启动项目"}</code> : <code>{selectedProjectName || "未选择项目"}</code>}
-              {centreSurface === "preview" && !browserSession && projectPreviewReady && (
-                <button type="button" onClick={() => setPreviewRevision((current) => current + 1)} aria-label="刷新项目预览">
-                  <RefreshCw size={14} />
-                  刷新
-                </button>
-              )}
-              {centreSurface === "preview" && activeRunId && browserSession && !["closed", "failed"].includes(browserSession.status) ? (
-                <div className="shared-browser-controls">
-                  <span>{browserSession.owner === "user" ? "你正在操作" : "AI 正在操作"}</span>
-                  {browserSession.owner === "user" ? (
-                    <>
-                      <input value={browserManualInput} onChange={(event) => setBrowserManualInput(event.target.value)} placeholder="点击画面中的输入框后，在这里输入" aria-label="共享浏览器输入" />
-                      <button type="button" disabled={!browserManualInput} onClick={() => void typeIntoSharedBrowser()}>输入</button>
-                    </>
-                  ) : null}
-                  <button type="button" disabled={browserControlBusy} onClick={() => void toggleBrowserControl()}>
-                    {browserControlBusy ? "切换中…" : browserSession.owner === "user" ? "交还 AI" : "接管页面"}
-                  </button>
-                </div>
-              ) : null}
-            </header>
-            {centreSurface === "code" ? (
-              repairWorkspaceOpen && repairSession ? (
-                <React.Suspense fallback={(
-                  <div className="live-view-placeholder code-workspace-loading" role="status" aria-live="polite">
-                    <div className="live-view-dots"><span /><span /><span /></div>
-                    <p>正在按需载入代码编辑器…</p>
-                  </div>
-                )}>
-                  <RepairWorkspace
-                    session={repairSession}
-                    embedded
-                    canApply={viteEnv.VITE_REPAIR_HOST_APPLY_ENABLED === "true"}
-                    onListFiles={() => listRepairWorkspaceFiles(repairSession.id).then((response) => response.files)}
-                    onLoadFile={(filePath) => getRepairFile(repairSession.id, filePath).then((response) => response.file)}
-                    onSaveFile={saveRepairFile}
-                    onValidate={validateCurrentRepair}
-                    onExport={exportCurrentRepair}
-                    onApply={applyCurrentRepair}
-                    onClose={() => setCentreSurface("preview")}
-                  />
-                </React.Suspense>
-              ) : (
-                <div className="live-view-placeholder code-workspace-loading">
-                  <div className="live-view-dots"><span /><span /><span /></div>
-                  <p>{repairBusy ? "正在载入项目代码…" : "选择项目后即可在这里查看受控代码副本。"}</p>
-                </div>
-              )
-            ) : projectPreviewReady || activeRunId ? (
-              <div className={`live-view-content shared-browser-view ${browserSession?.owner === "user" ? "user-controlled" : "agent-controlled"} ${browserSession && ["closed", "failed"].includes(browserSession.status) ? "session-ended" : ""}`}>
-                <WorkbenchSectionBoundary label="实时浏览器">
-                <SharedBrowserCanvas
-                  runId={activeRunId ?? undefined}
-                  session={browserSession}
-                  fallbackUrl={projectPreviewReady ? previewUrl : undefined}
-                  refreshRevision={previewRevision}
-                  onLoadIssue={setScreenshotIssue}
-                  onInteract={clickSharedBrowser}
-                  onPressKey={pressSharedBrowserKey}
-                  onTypeText={typeSharedBrowserText}
-                  onViewportChange={syncSharedBrowserViewport}
-                />
-                </WorkbenchSectionBoundary>
-                <span className={`live-capture-badge ${browserSession?.owner === "user" || isUserActionableInterrupt(agentProjection?.pendingInterrupt) || !browserSession ? "waiting" : ""}`}>
-                  <Activity size={13} /> {(() => {
-                    const pending = isUserActionableInterrupt(agentProjection?.pendingInterrupt);
-                    const pendingCredential = pending && agentProjection?.pendingInterrupt?.kind === "credential";
-                    // A run paused on a credential prompt is waiting on the
-                    // operator, not "AI operating" — saying otherwise hides
-                    // exactly the action the user must take.
-                    if (pendingCredential) return "等待你授权使用测试账号";
-                    if (pending) return "等待你的操作";
-                    if (!activeRunId) return "项目已加载 · 等待开始测试";
-                    if (!browserSession) return "测试准备中 · 当前页面保持可用";
-                    if (browserSession.status === "closed") return "本次测试最后画面";
-                    if (browserSession.status === "failed") return "浏览器会话已结束 · 保留最后画面";
-                    return browserSession.owner === "user" ? "用户控制中" : "AI 正在真实操作";
-                  })()}
-                </span>
-              </div>
-            ) : (
-              <div className="live-view-placeholder">
-                <div className="live-view-grid" />
-                {hasSelectedProject ? (
-                  <>
-                    <div className="live-view-scanner" />
-                    <div className="live-view-dots">
-                      <span />
-                      <span />
-                      <span />
-                    </div>
-                    <p>启动并检查项目后，这里会显示测试页面</p>
-                  </>
-                ) : (
-                  <div className="live-view-project-setup" aria-label="配置测试项目">
-                    <strong>先配置要测试的项目</strong>
-                    <p>选择本地项目后，系统会在沙盒中识别、启动并显示测试页面。</p>
-                    <button className="primary" type="button" onClick={() => { setLeftDrawerOpen(true); setRightDrawerOpen(false); }}>点击配置</button>
-                  </div>
-                )}
-              </div>
-            )}
-          </section>
+          <LiveWorkspacePanel
+            centreSurface={centreSurface}
+            selectedProjectName={selectedProjectName}
+            projectPreviewReady={projectPreviewReady}
+            hasSelectedProject={hasSelectedProject}
+            activeRunId={activeRunId}
+            browserSession={browserSession}
+            browserManualInput={browserManualInput}
+            browserControlBusy={browserControlBusy}
+            previewUrl={previewUrl}
+            previewRevision={previewRevision}
+            agentProjection={agentProjection}
+            repairWorkspaceOpen={repairWorkspaceOpen}
+            repairSession={repairSession}
+            repairBusy={repairBusy}
+            canApplyRepair={viteEnv.VITE_REPAIR_HOST_APPLY_ENABLED === "true"}
+            onCentreSurfaceChange={setCentreSurface}
+            onOpenCodeWorkspace={() => void openProjectCodeWorkspace()}
+            onRefreshPreview={() => setPreviewRevision((current) => current + 1)}
+            onBrowserManualInputChange={setBrowserManualInput}
+            onTypeManualInput={() => void typeIntoSharedBrowser()}
+            onToggleBrowserControl={() => void toggleBrowserControl()}
+            onLoadIssue={setScreenshotIssue}
+            onInteract={clickSharedBrowser}
+            onPressKey={pressSharedBrowserKey}
+            onTypeText={typeSharedBrowserText}
+            onViewportChange={syncSharedBrowserViewport}
+            onOpenProjectConfig={() => {
+              setLeftDrawerOpen(true);
+              setRightDrawerOpen(false);
+            }}
+            onListFiles={(sessionId) => listRepairWorkspaceFiles(sessionId).then((response) => response.files)}
+            onLoadFile={(sessionId, filePath) => getRepairFile(sessionId, filePath).then((response) => response.file)}
+            onSaveFile={saveRepairFile}
+            onValidateRepair={validateCurrentRepair}
+            onExportRepair={exportCurrentRepair}
+            onApplyRepair={applyCurrentRepair}
+          />
 
-          <section className="timeline-stage">
-            <div className="section-title-row">
-              <div>
-                <span className="section-kicker">执行记录</span>
-                <h3>Agent 正在做什么</h3>
-                <p>按时间顺序查看操作、结果和已保存的证据。</p>
-              </div>
-              <button
-                className="timeline-plan-button"
-                disabled={!workspaceSelectors.canGenerate(workspaceState) && workspaceState.phase !== "generating"}
-                onClick={workspaceState.phase === "generating" ? cancelPlanGeneration : regeneratePlan}
-                type="button"
-              >
-                {workspaceState.phase === "generating" ? <X size={15} /> : <ListChecks size={15} />}
-                {workspaceState.phase === "generating" ? "取消生成" : workspaceState.phase === "failed" ? "重试生成计划" : "重新生成计划"}
-              </button>
-              {activeRunId && ["fail", "blocked", "needs-human-review"].includes(String(latestDecision)) ? (
-                <button className="timeline-plan-button" disabled={repairBusy} onClick={() => void openCodeRepairWorkspace()} type="button">
-                  <Pencil size={15} />
-                  {repairBusy ? "正在准备修复" : "分析并修复"}
-                </button>
-              ) : null}
-            </div>
-            {workspaceState.generation ? (
-              <p className="muted">
-                计划来源：{workspaceState.generation.source}
-                {workspaceState.generation.model ? ` · 模型：${workspaceState.generation.model}` : ""}
-                {` · ${workspaceState.generation.validationStatus === "validated" ? "已校验" : "待校验"}`}
-                {` · ${new Date(workspaceState.generation.generatedAt).toLocaleTimeString()}`}
-              </p>
-            ) : null}
-            {workspaceState.error ? <p className="error-text" role="alert">{workspaceState.error}</p> : null}
-            {agentProjection && activeRunId ? (
-              <div className="agent-live-status" aria-live="polite">
-                <span className={`agent-live-status__dot agent-live-status__dot--${agentProjection.status}`} />
-                <strong>{agentProjection.currentNode ?? "准备中"}</strong>
-                <span>{agentProjection.status === "interrupted" ? "等待你的确认" : agentProjection.status === "running" ? "正在执行" : agentProjection.status === "failed" ? "执行失败" : "已完成"}</span>
-                <span>{Math.round((agentProjection.progress ?? 0) * 100)}%</span>
-                {agentProjection.recoveryDecision ? <span>恢复：{agentProjection.recoveryDecision.action}</span> : null}
-                {agentProjection.recoveryResult?.userMessage ? <span>{agentProjection.recoveryResult.userMessage}</span> : null}
-              </div>
-            ) : null}
-            <div className="run-view-toggle" role="tablist" aria-label="运行视图模式">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={runViewMode === "dialogue"}
-                className={`run-view-toggle__btn${runViewMode === "dialogue" ? " is-active" : ""}`}
-                onClick={() => setRunViewMode("dialogue")}
-              >对话</button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={runViewMode === "trajectory"}
-                className={`run-view-toggle__btn${runViewMode === "trajectory" ? " is-active" : ""}`}
-                onClick={() => setRunViewMode("trajectory")}
-              >轨迹</button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={runViewMode === "report"}
-                className={`run-view-toggle__btn${runViewMode === "report" ? " is-active" : ""}`}
-                onClick={() => setRunViewMode("report")}
-              >报告</button>
-            </div>
-            {runViewMode === "dialogue" ? (
-              <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
-            ) : runViewMode === "trajectory" ? (
-              <TrajectoryPanel runId={activeRunId} loopEvents={displayedLoopEvents ?? []} />
-            ) : (
-              <FeatureTestReport
-                flows={planningResult?.businessFlows ?? []}
-                conclusions={result?.conclusions ?? []}
-                onViewTrajectory={() => setRunViewMode("trajectory")}
-              />
-            )}
-          </section>
+          <ExecutionTimelinePanel
+            workspaceState={workspaceState}
+            canGenerate={workspaceSelectors.canGenerate(workspaceState)}
+            activeRunId={activeRunId}
+            latestDecision={String(latestDecision)}
+            repairBusy={repairBusy}
+            agentProjection={agentProjection}
+            reviewCase={reviewCase}
+            runViewMode={runViewMode}
+            result={result}
+            planningResult={planningResult}
+            displayedLoopEvents={displayedLoopEvents}
+            onGenerateOrCancel={workspaceState.phase === "generating" ? cancelPlanGeneration : regeneratePlan}
+            onOpenRepairWorkspace={() => void openCodeRepairWorkspace()}
+            onRunViewModeChange={setRunViewMode}
+          />
 
-          <details className="advanced-section">
-            <summary>
-              <span>
-                <strong>高级能力与运行细节</strong>
-                <small>Discovery、巡检、推送、存储和完整计划</small>
-              </span>
-            </summary>
-            <div className="advanced-stack">
-              <DiscoveryPanel
-                discovery={discovery}
-                drafts={scenarioDrafts}
-                onScan={runDiscovery}
-                onProbeDraft={probeDraft}
-                onApproveDraft={approveDraft}
-              />
-
-              <div className="compact-action-row">
-                <button disabled={isPatrolling} onClick={runPatrolOnce} type="button">
-                  <CalendarClock size={16} />
-                  {isPatrolling ? "巡检中" : "巡检一次"}
-                </button>
-                <button disabled={isScheduling} onClick={startScheduler} type="button">
-                  <Timer size={16} />
-                  启动定时
-                </button>
-                <button disabled={isScheduling} onClick={stopScheduler} type="button">
-                  <Square size={16} />
-                  停止定时
-                </button>
-                <button disabled={!result} onClick={deliverRun} type="button">
-                  <Send size={16} />
-                  推送值班
-                </button>
-              </div>
-
-              <BotDeliveryPanel
-                provider={botProvider}
-                channel={botChannel}
-                recipients={notifyList}
-                githubPrUrl={botGithubPrUrl}
-                includeScreenshots={botIncludeScreenshots}
-                deliveries={deliveries}
-                disabled={!result}
-                onProviderChange={setBotProvider}
-                onChannelChange={setBotChannel}
-                onRecipientsChange={setNotifyList}
-                onGithubPrUrlChange={setBotGithubPrUrl}
-                onIncludeScreenshotsChange={setBotIncludeScreenshots}
-                onDeliver={deliverRun}
-              />
-
-              <PatrolPanel
-                patrolJobs={patrolJobs}
-                patrolPlans={patrolPlans}
-                trend={patrolTrend}
-                onRunPlan={runSavedPatrolPlan}
-                onDeletePlan={removeSavedPatrolPlan}
-              />
-
-              <StoragePanel storage={storageStatus} archives={storageArchives} onDryRunRetention={runRetentionDryRun} />
-              <BenchmarkPanel summary={benchmarkSummary} />
-              <HistoryPanel runs={runHistory} activeRunId={result?.id} onOpenRun={openHistoricalRun} />
-
-              <section className="capability-grid">
-                <h3>平台能力映射</h3>
-                {capabilities.map((capability) => (
-                  <article key={capability.id}>
-                    <header>
-                      <strong>{capability.title}</strong>
-                      <span>{capability.status}</span>
-                    </header>
-                    <p>{capability.purpose}</p>
-                    <code>{capability.demoAction}</code>
-                  </article>
-                ))}
-              </section>
-
-              {activeExecutablePlan && (
-                <section className="levels">
-                  <h3>Executable Plan Contract</h3>
-                  <article className={activeExecutablePlan.status === "valid" ? "passed" : "warning"}>
-                    <strong>{activeExecutablePlan.id}</strong>
-                    <p>{activeExecutablePlan.source} · {activeExecutablePlan.status} · steps={activeExecutablePlan.steps.length}</p>
-                  </article>
-                  {activeExecutablePlan.steps.map((step) => (
-                    <article className="level" key={step.id}>
-                      <header>
-                        <strong>{step.title}</strong>
-                        <span>{step.scenarioId}</span>
-                      </header>
-                      <p>assertions: {step.assertions.join(", ")}</p>
-                      <p>evidence: {step.evidenceRequirements.join(", ")}</p>
-                    </article>
-                  ))}
-                </section>
-              )}
-
-              <section className="harness-gap-box">
-                <h3>Harness Gaps</h3>
-                {harnessGaps.slice().reverse().slice(0, 6).map((gap) => {
-                  const draft = gapDrafts[gap.id];
-                  return (
-                    <article key={gap.id} className={`gap ${gap.status}`}>
-                      <header>
-                        <strong>{gap.missingScenarioTitle}</strong>
-                        <span>{gap.status}</span>
-                      </header>
-                      <p>{gap.requirementSummary}</p>
-                      <p>验证条件：{gap.suggestedOracle}</p>
-                      <code>{gap.requiredCapabilities.join(", ")}</code>
-                      {draft && (
-                        <div className="draft-box">
-                          <strong>{draft.scenarioId}</strong>
-                          <span>review={draft.draftReviewStatus ?? "draft"} · probe={draft.selectorProbeStatus ?? "not_run"}</span>
-                          {draft.missingInfo?.length ? <span>missing: {draft.missingInfo.join(", ")}</span> : null}
-                          {draft.scenarioFile && (
-                            <AuthenticatedArtifactLink artifactUrl={draft.scenarioFile}>
-                              打开草案
-                            </AuthenticatedArtifactLink>
-                          )}
-                          {draft.installedFile && <span>installed: {draft.installedFile}</span>}
-                        </div>
-                      )}
-                      <div className="row-actions">
-                        <button type="button" onClick={() => draftScenarioFromGap(gap)}>生成草案</button>
-                        <button type="button" onClick={() => installScenarioFromGap(gap)}>探测并批准入库</button>
-                        <button type="button" onClick={() => setGapStatus(gap, "dismissed")}>忽略</button>
-                      </div>
-                    </article>
-                  );
-                })}
-                {harnessGaps.length === 0 && <p className="empty">暂无未覆盖 harness gap。</p>}
-              </section>
-
-              <section className="risk-list">
-                <h3>风险清单</h3>
-                {plan?.risks.map((risk) => (
-                  <article key={risk.id} className={`risk ${risk.level}`}>
-                    <span>{risk.level}</span>
-                    <div>
-                      <strong>{risk.title}</strong>
-                      <p>{risk.evidence}</p>
-                    </div>
-                  </article>
-                ))}
-              </section>
-
-              <section className="levels">
-                <h3>显式灰度层级</h3>
-                {plan?.levels.map((level) => (
-                  <article className="level" key={level.id}>
-                    <header>
-                      <strong>{level.title}</strong>
-                      <span>{level.id}</span>
-                    </header>
-                    <p>{level.description}</p>
-                    {level.paths.map((path) => (
-                      <details key={path.id} open={level.id === "core_path"}>
-                        <summary>{path.title}</summary>
-                        <ol>
-                          {path.steps.map((step) => (
-                            <li key={step}>{step}</li>
-                          ))}
-                        </ol>
-                      </details>
-                    ))}
-                  </article>
-                ))}
-              </section>
-            </div>
-          </details>
+          <AdvancedCapabilitiesSection
+            discovery={discovery}
+            scenarioDrafts={scenarioDrafts}
+            onScan={runDiscovery}
+            onProbeDraft={probeDraft}
+            onApproveDraft={approveDraft}
+            isPatrolling={isPatrolling}
+            onRunPatrolOnce={runPatrolOnce}
+            isScheduling={isScheduling}
+            onStartScheduler={startScheduler}
+            onStopScheduler={stopScheduler}
+            result={result}
+            onDeliverRun={deliverRun}
+            botProvider={botProvider}
+            botChannel={botChannel}
+            notifyList={notifyList}
+            botGithubPrUrl={botGithubPrUrl}
+            botIncludeScreenshots={botIncludeScreenshots}
+            deliveries={deliveries}
+            onBotProviderChange={setBotProvider}
+            onBotChannelChange={setBotChannel}
+            onNotifyListChange={setNotifyList}
+            onBotGithubPrUrlChange={setBotGithubPrUrl}
+            onBotIncludeScreenshotsChange={setBotIncludeScreenshots}
+            patrolJobs={patrolJobs}
+            patrolPlans={patrolPlans}
+            patrolTrend={patrolTrend}
+            onRunSavedPatrolPlan={runSavedPatrolPlan}
+            onRemoveSavedPatrolPlan={removeSavedPatrolPlan}
+            storageStatus={storageStatus}
+            storageArchives={storageArchives}
+            onRunRetentionDryRun={runRetentionDryRun}
+            benchmarkSummary={benchmarkSummary}
+            runHistory={runHistory}
+            onOpenHistoricalRun={openHistoricalRun}
+            capabilities={capabilities}
+            activeExecutablePlan={activeExecutablePlan}
+            harnessGaps={harnessGaps}
+            gapDrafts={gapDrafts}
+            onDraftScenarioFromGap={draftScenarioFromGap}
+            onInstallScenarioFromGap={installScenarioFromGap}
+            onSetGapStatus={setGapStatus}
+            plan={plan}
+          />
         </section>
 
         {finalVerdictReady ? (

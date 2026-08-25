@@ -50,7 +50,14 @@ try {
   ({ run } = await api(`/v1/runs/${run.id}/plan-approval`, "POST", { expectedVersion: run.version, actor: "ci-smoke", idempotencyKey: `${key}:plan` }));
   ({ run } = await api(`/v1/runs/${run.id}/permissions`, "POST", { expectedVersion: run.version, actor: "ci-smoke", idempotencyKey: `${key}:permission` }));
   const terminal = new Set(["completed", "failed", "blocked", "awaiting-human-review", "cancelled"]);
-  while (!terminal.has(run.state)) { await new Promise((resolve) => setTimeout(resolve, 500)); ({ run } = await api(`/v1/runs/${run.id}`)); }
+  const terminalDeadline = Date.now() + Number(process.env.UNIFIED_RUN_TIMEOUT_MS ?? 180_000);
+  while (!terminal.has(run.state)) {
+    if (Date.now() >= terminalDeadline) {
+      throw new Error(`unified_run_terminal_timeout:${run.id}:${run.state}:version=${run.version}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    ({ run } = await api(`/v1/runs/${run.id}`));
+  }
   const { report } = await api(`/v1/runs/${run.id}/report`);
   const { artifacts } = await api(`/v1/runs/${run.id}/artifacts`);
   if (!report.finalStatus || !report.machineGate || !report.judgeRecommendation) throw new Error("unified_decision_missing");

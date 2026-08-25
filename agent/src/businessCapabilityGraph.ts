@@ -76,7 +76,7 @@ const ignoredDirectories = new Set([
   ".git", ".next", ".nuxt", ".output", ".ai-test-officer", "node_modules", "dist", "build", "coverage", ".venv", "venv", "vendor"
 ]);
 const sensitiveNames = /(^|\/)(?:\.env(?:\.|$)|id_rsa|id_ed25519|.*\.pem|.*\.key|credentials?\.(?:json|ya?ml))$/i;
-const sourceExtension = /\.(?:[cm]?[jt]sx?|vue|svelte|py|html?)$/i;
+const sourceExtension = /\.(?:[cm]?[jt]sx?|vue|svelte|py|html?|go|rs|java|rb|php)$/i;
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
@@ -92,6 +92,11 @@ function lineOf(source: string, position: number) {
 
 function parserFor(file: string) {
   if (/\.html?$/i.test(file)) return "html-markup";
+  if (/\.go$/i.test(file)) return "go-source";
+  if (/\.rs$/i.test(file)) return "rust-source";
+  if (/\.java$/i.test(file)) return "java-source";
+  if (/\.rb$/i.test(file)) return "ruby-source";
+  if (/\.php$/i.test(file)) return "php-source";
   if (/\.vue$/i.test(file)) return "vue-template-script";
   if (/\.svelte$/i.test(file)) return "svelte-component";
   if (/\.py$/i.test(file)) return "python-ast-signals";
@@ -110,7 +115,7 @@ function normalizedRoute(value: string) {
 
 function displayName(value: string) {
   return value
-    .replace(/\.(?:[cm]?[jt]sx?|vue|svelte|py)$/i, "")
+    .replace(/\.(?:[cm]?[jt]sx?|vue|svelte|py|html?|go|rs|java|rb|php)$/i, "")
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/[._/-]+/g, " ")
     .replace(/\b(?:index|page|route|view|component)\b/gi, "")

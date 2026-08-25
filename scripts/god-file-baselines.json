@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "baselineCommit": "479ca2a",
+  "reductionRatio": 0.5,
+  "files": {
+    "workbench-ui/src/App.tsx": {
+      "baselineLines": 6486,
+      "maxLines": 3243,
+      "todo": "Continue moving page composition into pages, hooks and stores until the composition root is small."
+    },
+    "agent/src/server.ts": {
+      "baselineLines": 4385,
+      "maxLines": 2192,
+      "todo": "Move remaining compatibility routes and process wiring into server app/startup modules."
+    },
+    "agent/src/agentGraphService.ts": {
+      "baselineLines": 2804,
+      "maxLines": 1402,
+      "todo": "Move graph construction, persistence and recovery wiring into the graph modules."
+    },
+    "agent/src/testRunner.ts": {
+      "baselineLines": 2409,
+      "maxLines": 1204,
+      "todo": "Move remaining compatibility orchestration into runner modules."
+    }
+  }
+}

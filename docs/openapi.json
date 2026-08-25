@@ -1381,6 +1381,7 @@
                 "enum": [
                   "transient-observation",
                   "transient-model",
+                  "model-rate-limited",
                   "budget-exhausted",
                   "policy-blocked",
                   "user-input-required"
@@ -3604,6 +3605,64 @@
             },
             "default": []
           },
+          "binding": {
+            "type": "object",
+            "properties": {
+              "compilerVersion": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "bound",
+                  "needs-input",
+                  "unsupported",
+                  "blocked-by-capability",
+                  "coverage-gap"
+                ]
+              },
+              "entryRoute": {
+                "type": "string"
+              },
+              "operationId": {
+                "type": "string"
+              },
+              "actionPathIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "oracleIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "requiredCapabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "reason": {
+                "type": "string"
+              },
+              "boundAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "compilerVersion",
+              "status"
+            ]
+          },
           "structuredPlan": {
             "type": "object",
             "properties": {
@@ -3943,10 +4002,13 @@
           "disposition": {
             "type": "string",
             "enum": [
+              "pending",
+              "binding",
+              "executing",
               "executed",
-              "excluded",
+              "failed",
               "blocked",
-              "pending"
+              "excluded"
             ]
           },
           "dispositionReason": {
@@ -4070,6 +4132,18 @@
           "inputSummarySha256": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "inputPreview": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "outputPreview": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "reasoningPreview": {
+            "type": "string",
+            "maxLength": 2048
           },
           "actionDslVersion": {
             "type": "string",
@@ -6273,6 +6347,7 @@
             "enum": [
               "transient-observation",
               "transient-model",
+              "model-rate-limited",
               "budget-exhausted",
               "policy-blocked",
               "user-input-required"

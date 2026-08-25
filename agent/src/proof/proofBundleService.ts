@@ -73,6 +73,10 @@ export interface FinalizeProofBundleResult {
  * facts for the same attempt is a credibility conflict, never an overwrite.
  */
 export function buildProofBundleId(input: FinalizeProofBundleInput): string {
+  const evidenceHash = (item: EvidenceItem) => {
+    const { canonicalSha256: existingHash, ...unsigned } = item;
+    return existingHash ?? canonicalSha256(unsigned);
+  };
   const artifactProjection = (input.artifactsV2 ?? [])
     .map((item) => ({
       id: item.id,
@@ -98,7 +102,9 @@ export function buildProofBundleId(input: FinalizeProofBundleInput): string {
     reasons: [...(input.draft.reasons ?? [])].sort(),
     reasonDetails: input.draft.reasonDetails ?? [],
     assertionFailures: [...(input.draft.assertionFailures ?? [])].sort(),
-    evidenceIds: (input.evidence ?? []).map((item) => item.id).sort(),
+    evidence: (input.evidence ?? [])
+      .map((item) => ({ id: item.id, canonicalSha256: evidenceHash(item) }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
     artifacts: artifactProjection,
     // `artifact_integrity.json`, reports and the run bundle are expected
     // self-references. Only the security-relevant counters belong in the
@@ -121,7 +127,14 @@ export function finalizeProofBundle(input: FinalizeProofBundleInput): FinalizePr
   const evidenceById = new Map<string, EvidenceItem>((input.evidence ?? []).map((item) => [item.id, item]));
   const artifactsById = new Map<string, ArtifactV2>((input.artifactsV2 ?? []).map((item) => [item.id, item]));
 
-  const verdict = validateProofBundle(input);
+  const verdict = validateProofBundle({
+    ...input,
+    expectedBinding: {
+      runId: input.runId,
+      scenarioId: input.scenarioId,
+      attemptId: input.attemptId
+    }
+  });
   const gateReasonProofs = buildGateReasonProofs(input.draft, evidenceById, artifactsById);
 
   const issues = [...verdict.issues];
@@ -132,6 +145,17 @@ export function finalizeProofBundle(input: FinalizeProofBundleInput): FinalizePr
     // become "needs review"; passes become "needs review".
     status = "needs-human-review";
     issues.push("gate_reason_proof_missing");
+  }
+
+  // A producer may only draft pass. The verified gate must still fail closed
+  // when the bundle is incomplete, ungrounded, out of identity scope, or the
+  // execution/coverage facts do not support release eligibility.
+  const gateEligible = input.gateEligibleFacts
+    ? deriveGateEligible(verdict, input.gateEligibleFacts)
+    : false;
+  if (status === "pass" && (verdict.issues.length > 0 || !verdict.evidenceComplete || !verdict.evidenceGrounded || (input.gateEligibleFacts && !gateEligible))) {
+    status = "blocked";
+    issues.push("pass_downgraded_by_proof_invariant");
   }
 
   const machineGate: VerifiedMachineGate = {
@@ -147,10 +171,6 @@ export function finalizeProofBundle(input: FinalizeProofBundleInput): FinalizePr
   // Gate eligibility is a *computed* fact: execution must have succeeded and the
   // requirement must be covered, on top of verified integrity + grounded evidence.
   // Callers that do not supply the facts fail closed to ineligible by default.
-  const gateEligible = input.gateEligibleFacts
-    ? deriveGateEligible(verdict, input.gateEligibleFacts)
-    : false;
-
   return { machineGate, verdict, issues, gateReasonProofs, gateEligible };
 }
 

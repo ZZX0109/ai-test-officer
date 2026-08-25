@@ -7,7 +7,8 @@ import {
   llmBudgetSchema,
   type BrowserActionDecision,
   type BrowserAgentAction,
-  type BrowserObservation
+  type BrowserObservation,
+  type LlmBudget
 } from "@ai-test-officer/contracts";
 import { decrypt, getCredential } from "../credentialStore.js";
 import {
@@ -255,6 +256,7 @@ export async function decideNextBrowserActions(input: {
   credentialId?: string;
   allowedRouteIds: string[];
   previousResults: Array<{ action: string; status: string; summary: string }>;
+  budget?: Partial<LlmBudget>;
 }): Promise<BrowserActionDecision> {
   if (!input.credentialId) return browserActionDecisionSchema.parse({
     schemaVersion: "1.0", decisionId: `browser_decision_${randomUUID()}`,
@@ -371,13 +373,14 @@ export async function decideNextBrowserActions(input: {
     // aggregates actual usage for observability, but a planning/login call can
     // no longer exhaust every later business path before it is attempted.
     budget: llmBudgetSchema.parse({
-      maxBrowserActionCalls: 6,
+      ...input.budget,
+      maxBrowserActionCalls: input.budget?.maxBrowserActionCalls ?? 6,
       // This is an independent per-CoverageItem allowance, not the parent
       // run's aggregate usage. A normal page path needs several
       // observe/decide cycles; 12k allowed one complete Codex decision but
       // rejected the second during conservative preflight reservation.
-      maxTotalTokens: 30_000,
-      totalTimeoutMs: 120_000
+      maxTotalTokens: input.budget?.maxTotalTokens ?? 30_000,
+      totalTimeoutMs: input.budget?.totalTimeoutMs ?? 120_000
     }),
     knowledgeContext: context,
     maxToolRounds: 0,

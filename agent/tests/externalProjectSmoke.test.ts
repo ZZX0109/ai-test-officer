@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { cp, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { saveProject, startProject, stopProject, testProjectConnection } from "../src/projectAdapter.js";
 import { detectProject } from "../src/projectDetection.js";
@@ -31,7 +30,16 @@ function restoreEnv(name: string, value: string | undefined) {
 export async function testExternalProjectSmoke() {
   if (process.env.RUN_EXTERNAL_PROJECT_SMOKE !== "1") return;
 
-  const tempRoot = await mkdtemp(path.join(tmpdir(), "ai-test-officer-external-smoke-"));
+  // A Docker-socket client may run inside a Linux validation container. Its
+  // `/tmp` is not automatically visible to the Docker daemon, so callers can
+  // provide a host-mounted directory outside this repository for the copied
+  // project. The default keeps ordinary local test runs self-contained.
+  const configuredScratchRoot = process.env.EXTERNAL_PROJECT_SMOKE_ROOT;
+  const scratchRoot = configuredScratchRoot
+    ? path.resolve(configuredScratchRoot)
+    : path.join(rootDir, "reports", "external-project-smoke");
+  await mkdir(scratchRoot, { recursive: true });
+  const tempRoot = await mkdtemp(path.join(scratchRoot, "ai-test-officer-external-smoke-"));
   const projectPath = path.join(tempRoot, "customer-portal-lite");
   const projectId = `external_project_smoke_${Date.now()}`;
   const port = await freePort();
@@ -43,6 +51,10 @@ export async function testExternalProjectSmoke() {
   process.env.HEADLESS = "1";
 
   try {
+    if (configuredScratchRoot) {
+      const relative = path.relative(rootDir, tempRoot);
+      assert.equal(relative.startsWith("..") || path.isAbsolute(relative), true, "configured external smoke root must be outside the repository");
+    }
     await cp(path.join(rootDir, "fixtures", "customer-portal-lite"), projectPath, { recursive: true });
     const timestamp = new Date().toISOString();
     const detection = await detectProject(projectPath);
@@ -68,7 +80,12 @@ export async function testExternalProjectSmoke() {
         ? {
           ...detected.manifest,
           projectId,
-          environmentAllowlist: Array.from(new Set([...detected.manifest.environmentAllowlist, "PORT"]))
+          environmentAllowlist: Array.from(new Set([...detected.manifest.environmentAllowlist, "PORT"])),
+          // This copied fixture has no install or runtime egress requirement.
+          // State the deny policy explicitly so the test proves an uploaded
+          // project can run safely in a clean environment without borrowing a
+          // developer's proxy credentials.
+          network: { ...detected.manifest.network, mode: "deny", allowedHosts: [], enforcement: "none" }
         }
         : undefined,
       cleanupCommand: "",
@@ -88,7 +105,11 @@ export async function testExternalProjectSmoke() {
     });
 
     const runtime = await startProject(projectId);
-    assert.equal(runtime.status, "running");
+    assert.equal(
+      runtime.status,
+      "running",
+      `external project startup failed: ${runtime.failureReason ?? "unknown"}:${runtime.message ?? "no_message"}`
+    );
     const health = await testProjectConnection(project);
     assert.equal(health.ok, true);
 

@@ -533,6 +533,13 @@ export async function appendHumanOverrideConclusion(input: {
   reason: string;
   status: string;
 }) {
+  const actor = input.actor.trim();
+  const reason = input.reason.trim();
+  if (!actor) throw new Error("human_override_reviewer_missing");
+  if (!reason) throw new Error("human_override_reason_missing");
+  if (!(["approved", "blocked", "accepted-risk"] as const).includes(input.status as "approved" | "blocked" | "accepted-risk")) {
+    throw new Error("human_override_status_invalid");
+  }
   const bundle = await readRunBundle(input.resultRunId);
   const previous = [...(bundle.conclusions ?? [])]
     .reverse()
@@ -541,7 +548,7 @@ export async function appendHumanOverrideConclusion(input: {
   const createdAt = new Date().toISOString();
   const base = {
     schemaVersion: "1.0" as const,
-    conclusionId: stableId("conclusion", bundle.runId, "human-override", createdAt, input.actor),
+    conclusionId: stableId("conclusion", bundle.runId, "human-override", createdAt, actor),
     runId: previous.runId,
     scenarioId: previous.scenarioId,
     attemptId: previous.attemptId,
@@ -568,8 +575,8 @@ export async function appendHumanOverrideConclusion(input: {
     nodeType: "conclusion" as const,
     payload: {
       conclusion,
-      actor: input.actor,
-      reason: input.reason
+      actor,
+      reason
     },
     createdAt
   };
@@ -599,8 +606,8 @@ export async function appendHumanOverrideConclusion(input: {
   bundle.proofEdges = [...(bundle.proofEdges ?? []), supersedes];
   bundle.result.humanDecision = {
     status: input.status === "blocked" ? "blocked" : input.status === "accepted-risk" ? "accepted-risk" : "approved",
-    actor: input.actor,
-    reason: input.reason,
+    actor,
+    reason,
     decidedAt: createdAt
   };
   const manifest = await writeProofArtifacts(bundle);

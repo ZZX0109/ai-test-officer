@@ -22,7 +22,7 @@ export interface SandboxReadinessContext {
 }
 
 export async function containerImageIsAvailable(
-  engine: "docker" | "podman",
+  engine: "docker",
   image: string,
   ctx: SandboxReadinessContext
 ) {

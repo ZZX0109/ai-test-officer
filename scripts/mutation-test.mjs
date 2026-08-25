@@ -24,7 +24,7 @@ const cases = [
   {
     id: "proof-dangling-evidence",
     file: "agent/src/proof/proofBundleValidator.ts",
-    find: "const evidenceGrounded = unresolved.length === 0 && (hasClaims ? minimalEvidenceSet.length > 0 : evidence.length > 0);",
+    find: "const evidenceGrounded = unresolved.length === 0\n    && !passWithoutClaim\n    && (hasClaims ? minimalEvidenceSet.length > 0 : evidence.length > 0);",
     replace: "const evidenceGrounded = true;",
     test: "proofBundleValidator.test.ts",
     exported: "testProofBundleValidator"

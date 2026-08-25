@@ -13,7 +13,7 @@ export function upsertAssistantProgress(messages: PlanningMessage[], message: Pl
 export function commandFallbackAction(message: string, runState?: string): Exclude<AssistantSuggestedAction, "none"> | undefined {
   const normalized = message.replace(/\s+/g, "").toLowerCase();
   if (/查看.*(证据|截图|日志|trace)|打开.*(证据|截图|日志)/i.test(normalized)) return "open-evidence";
-  if (/docker|podman|沙盒|启动.*项目|前端.*打不开|端口.*不可达/i.test(normalized)) return "retry-runtime";
+  if (/docker|沙盒|启动.*项目|前端.*打不开|端口.*不可达/i.test(normalized)) return "retry-runtime";
   if (/重新扫描|扫描页面|discovery/i.test(normalized)) return "retry-discovery";
   if (/暂停|先停一下|等一下/i.test(normalized)) return "pause-run";
   if (/取消|终止|停止测试/i.test(normalized)) return "cancel-run";

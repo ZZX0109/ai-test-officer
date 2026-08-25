@@ -1708,7 +1708,7 @@ export interface components {
                 /** @enum {string} */
                 status: "act" | "complete" | "blocked" | "needs-confirmation";
                 /** @enum {string} */
-                reasonCode?: "transient-observation" | "transient-model" | "budget-exhausted" | "policy-blocked" | "user-input-required";
+                reasonCode?: "transient-observation" | "transient-model" | "model-rate-limited" | "budget-exhausted" | "policy-blocked" | "user-input-required";
                 summary: string;
                 actions: ({
                     actionId: string;
@@ -2256,6 +2256,22 @@ export interface components {
             oracleIds: string[];
             /** @default [] */
             requiredEvidenceKinds: ("screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log")[];
+            binding?: {
+                compilerVersion: string;
+                /** @enum {string} */
+                status: "pending" | "bound" | "needs-input" | "unsupported" | "blocked-by-capability" | "coverage-gap";
+                entryRoute?: string;
+                operationId?: string;
+                /** @default [] */
+                actionPathIds: string[];
+                /** @default [] */
+                oracleIds: string[];
+                /** @default [] */
+                requiredCapabilities: string[];
+                reason?: string;
+                /** Format: date-time */
+                boundAt?: string;
+            };
             structuredPlan?: {
                 scenarioId: string;
                 steps: {
@@ -2323,7 +2339,7 @@ export interface components {
                 requiredEvidenceKinds: ("screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log")[];
             };
             /** @enum {string} */
-            disposition: "executed" | "excluded" | "blocked" | "pending";
+            disposition: "pending" | "binding" | "executing" | "executed" | "failed" | "blocked" | "excluded";
             dispositionReason?: string;
             scenarioId?: string;
             attemptId?: string;
@@ -2357,6 +2373,9 @@ export interface components {
             promptVersion?: string;
             promptSha256?: string;
             inputSummarySha256?: string;
+            inputPreview?: string;
+            outputPreview?: string;
+            reasoningPreview?: string;
             actionDslVersion?: string;
             outputSchemaVersion?: string;
             graphVersion?: string;
@@ -2904,7 +2923,7 @@ export interface components {
             /** @enum {string} */
             status: "act" | "complete" | "blocked" | "needs-confirmation";
             /** @enum {string} */
-            reasonCode?: "transient-observation" | "transient-model" | "budget-exhausted" | "policy-blocked" | "user-input-required";
+            reasonCode?: "transient-observation" | "transient-model" | "model-rate-limited" | "budget-exhausted" | "policy-blocked" | "user-input-required";
             summary: string;
             actions: ({
                 actionId: string;

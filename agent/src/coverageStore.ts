@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
 import {
   compiledPlanSchema,
   coverageItemSchema,
@@ -10,9 +9,20 @@ import {
   type ProjectManifest
 } from "@ai-test-officer/contracts";
 import { getScenario, hasScenario } from "./scenarios.js";
+import { getDatabasePool } from "./databaseRuntime.js";
+import { dynamicBrowserBinding, manifestBinding } from "./runtimeBinding.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const localLocks = new Map<string, Promise<void>>();
+
+function pathBudget(surface: CoverageItem["surface"], browser = surface === "page") {
+  return {
+    maxBrowserActionCalls: browser ? 6 : 1,
+    maxTotalTokens: browser ? 30_000 : 5_000,
+    totalTimeoutMs: browser ? 120_000 : 60_000,
+    maxAttempts: 2
+  };
+}
 
 const terminalCoverageDispositions = new Set<CoverageItem["disposition"]>([
   "executed",
@@ -102,6 +112,19 @@ export function createCoverageItems(input: {
         ? [step.action.oracleId]
         : []))),
       requiredEvidenceKinds: scenario.compiledPlanContract?.requiredEvidenceKinds ?? [],
+      binding: manifestBinding({
+        surface,
+        flowId: scenario.id,
+        route: scenario.compiledPlanContract?.routePath,
+        oracleIds: Array.from(new Set(actions.flatMap((step) => step.action.action === "assert"
+          || step.action.action === "api-request"
+          || step.action.action === "data-assert"
+          || step.action.action === "wait-job"
+          || step.action.action === "command-check"
+          ? [step.action.oracleId] : []))),
+        blockedReason: scenario.compiledPlanContract ? undefined : "compiled_plan_contract_missing"
+      }),
+      budget: pathBudget(surface, surface === "page"),
       disposition: scenario.compiledPlanContract ? "pending" : "blocked",
       dispositionReason: scenario.compiledPlanContract ? undefined : "compiled_plan_contract_missing",
       scenarioId: scenario.id,
@@ -155,6 +178,8 @@ export function createDynamicBrowserCoverageItems(input: {
     // candidates remain pending until the manifest executor either binds them
     // or records a concrete blocked reason; their mere presence must not stop
     // already executable browser paths from starting.
+    binding: dynamicBrowserBinding({ pathId: path.id, surface, status: path.status, reason: dispositionReason, requiredEvidenceKinds: path.requiredEvidenceKinds }),
+    budget: pathBudget(surface, browserPath),
     disposition: !staticallyBlocked ? "pending" : "blocked",
     dispositionReason,
     scenarioId: `dynamic_${path.id.replace(/[^a-zA-Z0-9_-]+/g, "_")}`,
@@ -205,6 +230,15 @@ function structuredCoverageItem(input: {
     actionPathIds: [input.flowId],
     oracleIds: [oracleId],
     requiredEvidenceKinds: ["operation-log"],
+    binding: manifestBinding({
+      surface: input.surface,
+      flowId: input.flowId,
+      operationId: input.operationId,
+      route: input.route,
+      oracleIds: [oracleId],
+      blockedReason: input.blockedReason
+    }),
+    budget: pathBudget(input.surface, false),
     structuredPlan,
     disposition: input.blockedReason ? "blocked" : "pending",
     dispositionReason: input.blockedReason,
@@ -244,6 +278,8 @@ export function createManifestCoverageItems(input: {
       },
       blockedReason: operation.destructive
         ? "destructive_operation_requires_explicit_fixture_and_approval"
+        : ["POST", "PUT", "PATCH", "DELETE"].includes(operation.method) && !operation.idempotency
+          ? "mutable_api_operation_idempotency_contract_missing"
         : (/\{[^}]+\}/.test(operation.pathTemplate) || !["GET", "HEAD", "OPTIONS"].includes(operation.method)) && !operation.fixtureRef
           ? "api_operation_requires_declared_fixture"
           : undefined,
@@ -322,16 +358,13 @@ export function createManifestCoverageItems(input: {
 
 export async function readCoverageItems(runId: string): Promise<CoverageItem[]> {
   if (process.env.DATABASE_URL) {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
-    try {
-      const result = await pool.query<{ payload: unknown }>(
-        "SELECT payload FROM coverage_items_v1 WHERE run_id=$1 ORDER BY created_at,id",
-        [runId]
-      );
-      return result.rows.map((row) => coverageItemSchema.parse(row.payload));
-    } finally {
-      await pool.end();
-    }
+    const pool = getDatabasePool();
+    if (!pool) throw new Error("DATABASE_URL is required for durable coverage items");
+    const result = await pool.query<{ payload: unknown }>(
+      "SELECT payload FROM coverage_items_v1 WHERE run_id=$1 ORDER BY created_at,id",
+      [runId]
+    );
+    return result.rows.map((row) => coverageItemSchema.parse(row.payload));
   }
   try {
     return coverageItemSchema.array().parse(JSON.parse(await readFile(coverageFile(runId), "utf8")));
@@ -344,7 +377,8 @@ export async function saveCoverageItems(runId: string, items: CoverageItem[]) {
   const parsed = coverageItemSchema.array().parse(items);
   if (parsed.some((item) => item.runId !== runId)) throw new Error("coverage_run_mismatch");
   if (process.env.DATABASE_URL) {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+    const pool = getDatabasePool();
+    if (!pool) throw new Error("DATABASE_URL is required for durable coverage items");
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -362,7 +396,6 @@ export async function saveCoverageItems(runId: string, items: CoverageItem[]) {
       throw error;
     } finally {
       client.release();
-      await pool.end();
     }
   }
   await withLock(runId, async () => {

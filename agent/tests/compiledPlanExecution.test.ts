@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
-import type { CompiledPlan } from "@ai-test-officer/contracts";
+import { coverageItemSchema, type CompiledPlan } from "@ai-test-officer/contracts";
 import type { Page } from "playwright";
-import { buildQueuedRunRequest } from "../src/runOrchestrator.js";
+import type { GrayPlan } from "../src/types.js";
+import {
+  blockUndispatchableCoverageItems,
+  buildDynamicPathPlan,
+  buildQueuedRunRequest,
+  classifyParentCoverageDispatch
+} from "../src/runOrchestrator.js";
+import { createDynamicBrowserCoverageItems } from "../src/coverageStore.js";
 import { assertCompiledPlanBinding, executeCompiledAction, targetFrontendUrl } from "../src/testRunner.js";
 import { getScenario } from "../src/scenarios.js";
 
@@ -21,6 +28,74 @@ function filterPlan(): CompiledPlan {
 }
 
 export async function testCompiledPlanExecution() {
+  const dynamicPlan = {
+    sessionName: "full scan",
+    risks: [
+      { id: "risk-a", level: "high", title: "A", evidence: "source", pathIds: ["flow-a"], coverageDisposition: "required" },
+      { id: "risk-b", level: "medium", title: "B", evidence: "source", pathIds: ["flow-b"], coverageDisposition: "required" }
+    ],
+    levels: [{
+      id: "core",
+      title: "Core",
+      description: "paths",
+      paths: [
+        { id: "flow-a", title: "A", riskReason: "a", expectedFrom: "requirement", steps: ["observe"], retry: 1 },
+        { id: "flow-b", title: "B", riskReason: "b", expectedFrom: "requirement", steps: ["observe"], retry: 1 }
+      ]
+    }]
+  } as GrayPlan;
+  const childPlan = buildDynamicPathPlan(dynamicPlan, "flow-b");
+  assert.deepEqual(childPlan.levels.flatMap((level) => level.paths).map((path) => path.id), ["flow-b"]);
+  assert.deepEqual(childPlan.risks.map((risk) => risk.id), ["risk-b"]);
+
+  // A full scan may discover hundreds of runtime-bindable paths. Dispatch must
+  // preserve all of them; it is the queue's job to bound concurrency, not the
+  // compiler's job to truncate the inventory. Every non-dispatchable pending
+  // item is returned with a concrete blocked reason instead of being dropped.
+  const fullScanItems = createDynamicBrowserCoverageItems({
+    runId: "run_full_scan_200",
+    paths: Array.from({ length: 200 }, (_, index) => ({
+      id: `page_${index + 1}`,
+      title: `Page ${index + 1}`,
+      status: "auto-bindable" as const,
+      surface: "page" as const
+    }))
+  });
+  const fullScanDispatch = classifyParentCoverageDispatch({ items: fullScanItems, dynamicParent: true });
+  assert.equal(fullScanDispatch.executable.length, 200, "all 200 runtime paths must receive child-run dispatch");
+  assert.equal(fullScanDispatch.undispatchable.length, 0);
+
+  const boundWithoutExecutor = coverageItemSchema.parse({
+    ...fullScanItems[0],
+    id: "coverage_bound_without_executor",
+    flowId: "api:missing-executor",
+    surface: "api",
+    scenarioId: undefined,
+    binding: {
+      compilerVersion: "runtime-binding-v1",
+      status: "bound",
+      actionPathIds: ["api:missing-executor"],
+      oracleIds: ["api:missing-executor:oracle"],
+      requiredCapabilities: ["targetNetwork"]
+    }
+  });
+  const failClosedDispatch = classifyParentCoverageDispatch({
+    items: [...fullScanItems.slice(0, 1), boundWithoutExecutor],
+    dynamicParent: true
+  });
+  assert.deepEqual(
+    failClosedDispatch.undispatchable.map(({ item, reason }) => [item.id, reason]),
+    [["coverage_bound_without_executor", "coverage_bound_path_not_dispatchable"]]
+  );
+  const normalizedCoverage = blockUndispatchableCoverageItems({
+    items: [...fullScanItems.slice(0, 1), boundWithoutExecutor],
+    undispatchable: failClosedDispatch.undispatchable
+  });
+  const normalizedGap = normalizedCoverage.find((item) => item.id === "coverage_bound_without_executor");
+  assert.equal(normalizedGap?.disposition, "blocked");
+  assert.equal(normalizedGap?.binding?.status, "coverage-gap");
+  assert.equal(normalizedGap?.dispositionReason, "coverage_bound_path_not_dispatchable");
+
   const scenario = getScenario("task_filter_completed");
   const compiledPlan = filterPlan();
   assert.equal(assertCompiledPlanBinding(compiledPlan, scenario).steps.length, 5);

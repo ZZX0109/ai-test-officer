@@ -47,6 +47,12 @@ export interface ProofBundleInput {
   judgeReport?: LayeredJudgeReport;
   oracles?: OracleDefinition[];
   riskCoverageMatrix?: RiskCoverageItem[];
+  /** Optional run/scenario/attempt identity enforced at the minting boundary. */
+  expectedBinding?: {
+    runId: string;
+    scenarioId?: string;
+    attemptId?: string;
+  };
 }
 
 export interface GateReasonEvidence {
@@ -81,6 +87,22 @@ export function validateProofBundle(input: ProofBundleInput): ProofVerdict {
   const evidence = input.evidence ?? [];
   const evidenceIds = new Set(evidence.map((item) => item.id));
 
+  // A clean hash is not enough: an intact artifact from a sibling Run or
+  // Attempt is still invalid evidence. Enforce the identity at the same
+  // validator boundary that computes the credibility booleans.
+  if (input.expectedBinding) {
+    for (const artifact of input.artifactsV2 ?? []) {
+      if (artifact.runId !== input.expectedBinding.runId) issues.push(`artifact_run_mismatch:${artifact.id}`);
+      if (input.expectedBinding.scenarioId && artifact.scenarioId !== input.expectedBinding.scenarioId) issues.push(`artifact_scenario_mismatch:${artifact.id}`);
+      if (input.expectedBinding.attemptId && artifact.attemptId !== input.expectedBinding.attemptId) issues.push(`artifact_attempt_mismatch:${artifact.id}`);
+    }
+    for (const item of evidence) {
+      if (item.runId !== input.expectedBinding.runId) issues.push(`evidence_run_mismatch:${item.id}`);
+      if (input.expectedBinding.scenarioId && item.scenarioId && item.scenarioId !== input.expectedBinding.scenarioId) issues.push(`evidence_scenario_mismatch:${item.id}`);
+      if (input.expectedBinding.attemptId && item.attemptId && item.attemptId !== input.expectedBinding.attemptId) issues.push(`evidence_attempt_mismatch:${item.id}`);
+    }
+  }
+
   // 1. Artifact integrity — only "verified" when a report exists AND is clean.
   let artifactIntegrityVerified = false;
   if (input.artifactIntegrity) {
@@ -112,8 +134,29 @@ export function validateProofBundle(input: ProofBundleInput): ProofVerdict {
   const unresolved = [...referenced].filter((id) => !evidenceIds.has(id));
   for (const id of unresolved) issues.push(`evidence ref not found in bundle: ${id}`);
   const minimalEvidenceSet = [...referenced].filter((id) => evidenceIds.has(id));
+  // Evidence is not credible merely because its top-level record exists. Any
+  // artifact link carried by that record must resolve to the same persisted
+  // Artifact v2 set; otherwise a stale/synthetic screenshot can masquerade as
+  // runtime proof. Keep this check at the minting boundary so every producer
+  // gets the same fail-closed behavior.
+  const artifactIds = new Set((input.artifactsV2 ?? []).map((artifact) => artifact.id));
+  const missingArtifactRefs = (evidence).flatMap((item) => (item.artifactIds ?? [])
+    .filter((artifactId) => !artifactIds.has(artifactId))
+    .map((artifactId) => `${item.id}:${artifactId}`));
+  for (const ref of missingArtifactRefs) issues.push(`evidence artifact ref not found in bundle: ${ref}`);
+
+  // Oracle definitions are executable claims, not plan metadata. A non-empty
+  // oracle list with no evidence refs means the oracle was never observed and
+  // must not contribute to a credible pass.
+  const unexecutedOracles = (input.oracles ?? []).filter((oracle) => oracle.evidenceRefs.length === 0);
+  for (const oracle of unexecutedOracles) issues.push(`oracle not executed: ${oracle.id}`);
+
   const hasClaims = referenced.size > 0;
-  const evidenceGrounded = unresolved.length === 0 && (hasClaims ? minimalEvidenceSet.length > 0 : evidence.length > 0);
+  const passWithoutClaim = input.machineGate?.status === "pass" && !hasClaims;
+  if (passWithoutClaim) issues.push("pass_claim_missing");
+  const evidenceGrounded = unresolved.length === 0
+    && !passWithoutClaim
+    && (hasClaims ? minimalEvidenceSet.length > 0 : evidence.length > 0);
 
   // 4. Gate reasons -> minimal evidence set; flag reasons with no evidence linkage (P0.4).
   const gateReasonEvidence: GateReasonEvidence[] = (input.machineGate?.reasonDetails ?? []).map((detail) => ({
@@ -134,7 +177,7 @@ export function validateProofBundle(input: ProofBundleInput): ProofVerdict {
 
   // 5. Completeness — required artifact kinds present among eligible artifacts + integrity verified.
   const artifacts = input.artifactsV2 ?? [];
-  let evidenceComplete = artifactIntegrityVerified;
+  let evidenceComplete = artifactIntegrityVerified && missingArtifactRefs.length === 0 && unexecutedOracles.length === 0;
   if (input.requiredArtifactKinds && input.requiredArtifactKinds.length > 0) {
     const eligibleKinds = new Set(
       artifacts.filter((artifact) => artifactGateEligibility(artifact).eligible).map((artifact) => artifact.kind)

@@ -198,6 +198,24 @@ export async function testProofGraph() {
   assert.equal(verifyEvidenceManifest(bundle, manifest, changedKnowledge).valid, false);
 
   await writeRunBundle(bundle);
+  await assert.rejects(
+    () => appendHumanOverrideConclusion({
+      resultRunId: bundle.runId,
+      actor: "   ",
+      reason: "必须有 reviewer",
+      status: "accepted-risk"
+    }),
+    /human_override_reviewer_missing/
+  );
+  await assert.rejects(
+    () => appendHumanOverrideConclusion({
+      resultRunId: bundle.runId,
+      actor: "reviewer@example.test",
+      reason: "   ",
+      status: "accepted-risk"
+    }),
+    /human_override_reason_missing/
+  );
   const override = await appendHumanOverrideConclusion({
     resultRunId: bundle.runId,
     actor: "reviewer@example.test",

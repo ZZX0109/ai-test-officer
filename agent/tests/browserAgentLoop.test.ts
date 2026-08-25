@@ -306,6 +306,17 @@ export async function testBrowserAgentLoop() {
       artifactIntegrity,
       requiredArtifactKinds: ["screenshot", "dom", "operation-log", "trace"],
       machineGate: { status: "pass", reasons: [], reasonDetails: [], assertionFailures: [] },
+      oracles: [{
+        id: "oracle-proof",
+        pathId: "dynamic-browser-path",
+        assertionName: "dynamic browser evidence exists",
+        expectedFrom: "existing_test",
+        preconditions: [],
+        action: "complete dynamic browser flow",
+        postconditions: ["runtime artifacts are captured"],
+        requiresHumanConfirmation: false,
+        evidenceRefs: [evidence[0]?.id ?? ""]
+      }],
       gateEligibleFacts: { executionSucceeded: true, requirementCovered: true }
     });
     assert.equal(finalized.machineGate.status, "pass");

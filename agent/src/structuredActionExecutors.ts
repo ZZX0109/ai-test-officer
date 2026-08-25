@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Pool } from "pg";
 import {
   type ActionDsl,
   type EvidenceLocator,
@@ -10,14 +9,38 @@ import {
 } from "@ai-test-officer/contracts";
 import {
   buildOciInvocation,
+  createEgressNetworkController,
   runAllowlistedCommand
 } from "@ai-test-officer/execution-worker";
+import { claimActionExecutionReceipt, completeActionExecutionReceipt } from "./actionExecutionReceiptStore.js";
+import { getDatabasePool } from "./databaseRuntime.js";
 import { redactText } from "./redaction.js";
 import { testProjectConnection } from "./projectAdapter.js";
 import type { ProjectConfig, TargetAppRuntime } from "./types.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MUTABLE_API_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function shouldPauseAfterMutableApiEffect(input: { runId?: string; actionId?: string; operationId: string }) {
+  const encoded = process.env.ACTION_RECEIPT_FAULT_RULE_B64;
+  if (!encoded) return false;
+  try {
+    const rule = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>;
+    return rule.runId === input.runId && rule.actionId === input.actionId && rule.operationId === input.operationId;
+  } catch {
+    return false;
+  }
+}
+
+/** Test-only crash point: after the target acknowledged a mutable request but
+ * before the local durable receipt is completed. It is unreachable without an
+ * exact Base64URL rule injected into a disposable process environment. */
+async function pauseAfterMutableApiEffect(input: { runId?: string; actionId?: string; operationId: string }) {
+  if (!shouldPauseAfterMutableApiEffect(input)) return;
+  console.error(`[fault-injection] mutable_api_effect:${input.operationId}:${input.runId}:${input.actionId}`);
+  await new Promise<void>(() => undefined);
+}
 
 export type StructuredAction = Extract<
   ActionDsl,
@@ -88,6 +111,7 @@ async function requestOperation(input: {
   operationId: string;
   fixtureRef?: string;
   signal?: AbortSignal;
+  headers?: Record<string, string>;
 }) {
   const operation = allowedOperation(input.manifest, input.operationId);
   const baseValue = operation.baseUrlRef === "backend"
@@ -114,7 +138,10 @@ async function requestOperation(input: {
     : JSON.stringify(fixture);
   const response = await fetch(destination, {
     method: operation.method,
-    headers: body ? { "content-type": "application/json" } : undefined,
+    headers: {
+      ...(body ? { "content-type": "application/json" } : {}),
+      ...(input.headers ?? {})
+    },
     body,
     signal: input.signal
   });
@@ -125,6 +152,32 @@ async function requestOperation(input: {
     response,
     content,
     passed: operation.allowedStatusCodes.includes(response.status)
+  };
+}
+
+function apiActionResult(result: Awaited<ReturnType<typeof requestOperation>>): StructuredActionResult {
+  return {
+    passed: result.passed,
+    summary: result.passed
+      ? `API operation ${result.operation.operationId} returned ${result.response.status}.`
+      : `API operation ${result.operation.operationId} returned disallowed status ${result.response.status}.`,
+    locator: {
+      requestId: result.response.headers.get("x-request-id") ?? `request_${sha256(`${result.operation.operationId}:${Date.now()}`).slice(0, 20)}`,
+      method: result.operation.method,
+      statusCode: result.response.status,
+      operationId: result.operation.operationId,
+      bodySha256: sha256(result.content.bytes)
+    },
+    payload: {
+      operationId: result.operation.operationId,
+      method: result.operation.method,
+      pathTemplate: result.operation.pathTemplate,
+      path: `${result.destination.pathname}${result.destination.search}`,
+      status: result.response.status,
+      responseBytes: result.content.bytes.byteLength,
+      responseSha256: sha256(result.content.bytes),
+      responseExcerpt: redactText(result.content.text).slice(0, 4_000)
+    }
   };
 }
 
@@ -187,7 +240,12 @@ async function executeDataAssert(input: {
   let rollbackVerified = false;
   const connection = readConnection(input.project, source.connectionEnv);
   if (source.kind === "postgres") {
-    const pool = new Pool({ connectionString: connection, max: 1 });
+    // All PostgreSQL work must use the process-wide pool. Creating a one-off
+    // Pool here both defeats connection limits and makes a retry/recovery path
+    // leak connections. The shared runtime owns pool shutdown; this executor
+    // only borrows and releases a client.
+    const pool = getDatabasePool(connection);
+    if (!pool) throw new Error("data_source_database_pool_unavailable");
     const client = await pool.connect();
     try {
       await client.query("BEGIN READ ONLY");
@@ -196,7 +254,6 @@ async function executeDataAssert(input: {
       rollbackVerified = true;
     } finally {
       client.release();
-      await pool.end();
     }
   } else if (source.kind === "sqlite") {
     const database = new DatabaseSync(connection, { readOnly: true });
@@ -245,6 +302,8 @@ async function executeCommandCheck(input: {
   project: ProjectConfig;
   action: Extract<StructuredAction, { action: "command-check" }>;
   signal?: AbortSignal;
+  runId?: string;
+  attemptId?: string;
 }) {
   if (input.action.commandId === "health") {
     const result = await testProjectConnection(input.project);
@@ -268,26 +327,65 @@ async function executeCommandCheck(input: {
   if (!command) throw new Error("command_check_not_declared:test");
   if (input.manifest.execution.mode !== "oci") throw new Error("command_check_requires_oci");
   const projectRoot = resolveProjectRoot(input.project);
-  const invocation = buildOciInvocation({
-    engine: input.manifest.execution.engine,
-    image: input.manifest.execution.image!,
-    manifest: input.manifest,
-    repositoryRoot: projectRoot,
-    command,
-    prepareCommand: input.manifest.commands.install
+  const networkRequired = input.manifest.network.mode !== "deny";
+  const baseProxyUrl = process.env.ATO_EGRESS_PROXY_URL;
+  if (networkRequired && !baseProxyUrl) throw new Error("egress_proxy_not_configured");
+  if (networkRequired && !process.env.ATO_EGRESS_PROXY_CONTAINER_NAME) throw new Error("egress_proxy_container_not_configured");
+  if (networkRequired && !process.env.ATO_EGRESS_POLICY_SECRET) throw new Error("egress_policy_secret_not_configured");
+  const policyHash = sha256(JSON.stringify({ mode: input.manifest.network.mode, allowedHosts: [...input.manifest.network.allowedHosts].sort() }));
+  const controller = createEgressNetworkController({
+    run: async (args) => {
+      const result = await runAllowlistedCommand({
+        command: { executable: "docker", args, timeoutMs: 30_000 },
+        cwd: projectRoot,
+        env: {},
+        allowedExecutables: ["docker"],
+        signal: input.signal,
+        maxLogBytes: 8_000
+      });
+      return { exitCode: result.exitCode ?? 1, stderr: result.stderr };
+    }
   });
-  const result = await runAllowlistedCommand({
-    command: {
-      executable: invocation.executable,
-      args: invocation.args,
-      timeoutMs: command.timeoutMs ?? input.manifest.budget.stepTimeoutMs
-    },
-    cwd: projectRoot,
-    env: {},
-    allowedExecutables: [invocation.executable],
-    signal: input.signal,
-    maxLogBytes: input.manifest.budget.maxLogBytes
-  });
+  const network = networkRequired
+    ? await controller.ensure({
+      projectId: input.project.id,
+      runId: input.runId ?? "unknown-run",
+      attemptId: input.attemptId ?? "unknown-attempt",
+      policyHash,
+      allowedHosts: input.manifest.network.allowedHosts,
+      allowedPorts: [80, 443],
+      policySecret: process.env.ATO_EGRESS_POLICY_SECRET,
+      proxyUrl: baseProxyUrl,
+      proxyContainer: process.env.ATO_EGRESS_PROXY_CONTAINER_NAME
+    })
+    : undefined;
+  let result;
+  try {
+    const invocation = buildOciInvocation({
+      engine: input.manifest.execution.engine,
+      image: input.manifest.execution.image!,
+      manifest: input.manifest,
+      repositoryRoot: projectRoot,
+      command,
+      prepareCommand: input.manifest.commands.install,
+      networkName: network?.name,
+      proxyUrl: network?.proxyUrl
+    });
+    result = await runAllowlistedCommand({
+      command: {
+        executable: invocation.executable,
+        args: invocation.args,
+        timeoutMs: command.timeoutMs ?? input.manifest.budget.stepTimeoutMs
+      },
+      cwd: projectRoot,
+      env: {},
+      allowedExecutables: [invocation.executable],
+      signal: input.signal,
+      maxLogBytes: input.manifest.budget.maxLogBytes
+    });
+  } finally {
+    if (network) await controller.teardown(network);
+  }
   const safeStdout = redactText(result.stdout);
   const safeStderr = redactText(result.stderr);
   return {
@@ -319,40 +417,40 @@ export async function executeStructuredAction(input: {
   project: ProjectConfig;
   target: TargetAppRuntime;
   signal?: AbortSignal;
+  runId?: string;
+  attemptId?: string;
+  actionId?: string;
 }): Promise<StructuredActionResult> {
   const action = input.action;
   if (action.action === "api-request") {
+    const operation = allowedOperation(input.manifest, action.operationId);
+    const mutable = MUTABLE_API_METHODS.has(operation.method);
+    if (mutable && !operation.idempotency) {
+      throw new Error(`mutable_api_operation_idempotency_contract_missing:${operation.operationId}`);
+    }
+    const receipt = mutable
+      ? await claimActionExecutionReceipt({ runId: input.runId, actionId: input.actionId, operationId: operation.operationId })
+      : undefined;
+    if (receipt?.status === "completed") {
+      if (!receipt.result || typeof receipt.result !== "object") throw new Error("mutable_api_action_receipt_result_invalid");
+      return receipt.result as StructuredActionResult;
+    }
     const result = await requestOperation({
       manifest: input.manifest,
       project: input.project,
       target: input.target,
       operationId: action.operationId,
       fixtureRef: action.fixtureRef,
-      signal: input.signal
+      signal: input.signal,
+      ...(receipt ? { headers: { [operation.idempotency!.requestHeader]: receipt.idempotencyKey } } : {})
     });
-    return {
-      passed: result.passed,
-      summary: result.passed
-        ? `API operation ${result.operation.operationId} returned ${result.response.status}.`
-        : `API operation ${result.operation.operationId} returned disallowed status ${result.response.status}.`,
-      locator: {
-        requestId: result.response.headers.get("x-request-id") ?? `request_${sha256(`${result.operation.operationId}:${Date.now()}`).slice(0, 20)}`,
-        method: result.operation.method,
-        statusCode: result.response.status,
-        operationId: result.operation.operationId,
-        bodySha256: sha256(result.content.bytes)
-      },
-      payload: {
-        operationId: result.operation.operationId,
-        method: result.operation.method,
-        pathTemplate: result.operation.pathTemplate,
-        path: `${result.destination.pathname}${result.destination.search}`,
-        status: result.response.status,
-        responseBytes: result.content.bytes.byteLength,
-        responseSha256: sha256(result.content.bytes),
-        responseExcerpt: redactText(result.content.text).slice(0, 4_000)
-      }
-    };
+    if (receipt && result.response.headers.get(operation.idempotency!.responseHeader) !== receipt.idempotencyKey) {
+      throw new Error(`mutable_api_operation_idempotency_echo_missing:${operation.operationId}`);
+    }
+    const projected = apiActionResult(result);
+    await pauseAfterMutableApiEffect({ runId: input.runId, actionId: input.actionId, operationId: operation.operationId });
+    if (receipt) await completeActionExecutionReceipt({ receipt, result: projected });
+    return projected;
   }
   if (action.action === "data-assert") {
     return executeDataAssert({ manifest: input.manifest, project: input.project, action });
@@ -362,7 +460,9 @@ export async function executeStructuredAction(input: {
       manifest: input.manifest,
       project: input.project,
       action,
-      signal: input.signal
+      signal: input.signal,
+      runId: input.runId,
+      attemptId: input.attemptId
     });
   }
   const task = input.manifest.backgroundTasks.find((candidate) => candidate.id === action.backgroundTaskId);

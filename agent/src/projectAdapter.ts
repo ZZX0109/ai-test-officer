@@ -1,6 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createServer } from "node:net";
 import { constants } from "node:fs";
 import { access, chmod, lstat, mkdir, readFile, readdir, readlink, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -16,22 +15,28 @@ import type {
 } from "./types.js";
 import { redactRecord, redactText } from "./redaction.js";
 import { commandSpecSchema, projectManifestSchema, type CommandSpec } from "@ai-test-officer/contracts";
-import { buildOciInvocation, classifyRuntimeFailure } from "@ai-test-officer/execution-worker";
+import { buildOciInvocation, classifyRuntimeFailure, runAllowlistedCommand } from "@ai-test-officer/execution-worker";
 import { getProjectLoginSecret } from "./projectLoginStore.js";
 import { decrypt, getCredential } from "./credentialStore.js";
+import { probeIsolatedSandboxHealth } from "./isolatedNetworkHealth.js";
 import { parseLegacyCommandString } from "./shellArgv.js";
 import { ensureContainerImageReady } from "./sandboxImageReadiness.js";
 import { ensureDependenciesInstallable } from "./dependencyReadiness.js";
+import { prepareOciEgress, type OciEgressLease } from "./ociEgress.js";
+import { runProjectLifecycleCommands } from "./projectLifecycle.js";
+import { projectWithIsolatedRuntimeUrls } from "./isolatedRuntimeUrls.js";
+import { portFromUrl, projectWithSandboxRuntimeUrls, replaceUrlPort } from "./sandboxRuntimeUrls.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const projectDir = path.join(rootDir, "data", "projects");
 const sandboxCacheDir = path.join(rootDir, "reports", "sandbox-cache");
 type RunningProcess = { config: ProjectProcessConfig; process: ChildProcess };
-type OciContainerRef = { engine: "docker" | "podman"; containerName: string };
+type OciContainerRef = { engine: "docker"; containerName: string };
 type RunningProject = {
   process?: ChildProcess;
   processes?: RunningProcess[];
   ociContainers?: OciContainerRef[];
+  egress?: OciEgressLease;
   status: ProjectRuntimeStatus;
 };
 const runningProjects = new Map<string, RunningProject>();
@@ -39,14 +44,28 @@ const projectStartPromises = new Map<string, Promise<ProjectRuntimeStatus>>();
 const sandboxRecoveryPromises = new Map<string, Promise<void>>();
 const recoveredSandboxMonitors = new Set<string>();
 const processLogs = new WeakMap<ChildProcess, { stdout: string; stderr: string }>();
-const ociProcesses = new WeakMap<ChildProcess, { engine: "docker" | "podman"; containerName: string }>();
+const ociProcesses = new WeakMap<ChildProcess, { engine: "docker"; containerName: string }>();
 const activeRuntimeStatuses = new Set<ProjectRuntimeStatus["status"]>(["installing", "starting", "running"]);
+const PROJECT_ROOT_TEMPLATE = /^\$\{([A-Z][A-Z0-9_]*)\}(.*)$/;
 
 function now() {
   return new Date().toISOString();
 }
 
+function expandProjectPathTemplate(projectPath: string) {
+  const match = projectPath.match(PROJECT_ROOT_TEMPLATE);
+  if (!match) return projectPath;
+  const configuredRoot = process.env[match[1]];
+  if (!configuredRoot) return projectPath;
+  const suffix = match[2].replace(/^[/\\]+/, "");
+  return suffix ? path.resolve(configuredRoot, suffix) : path.resolve(configuredRoot);
+}
+
 function safeProjectPath(project: Pick<ProjectConfig, "projectPath" | "allowExternalProjectPath">) {
+  const template = project.projectPath.match(PROJECT_ROOT_TEMPLATE);
+  if (template && !process.env[template[1]]) {
+    throw new Error(`external_project_root_missing:${template[1]}`);
+  }
   const resolved = path.isAbsolute(project.projectPath)
     ? path.resolve(project.projectPath)
     : path.resolve(rootDir, project.projectPath);
@@ -187,7 +206,7 @@ async function directoryHasEntries(directory: string) {
 }
 
 async function initializeSandboxVolume(input: {
-  engine: "docker" | "podman";
+  engine: "docker";
   image: string;
   name: string;
   projectId: string;
@@ -236,6 +255,12 @@ export async function prepareSandboxDependencyCache(
   }
 ) {
   if (project.manifest?.execution.mode !== "oci") return undefined;
+  // Pre-installed dependencies: the source already carries node_modules/.venv,
+  // so skip the volume-based dependency cache (and its one-shot chown
+  // containers) entirely. The execution worker copies the dependency
+  // directories into the writable /workspace tmpfs and skips the install
+  // command, letting the project start without any registry egress.
+  if (project.manifest.execution.preinstalledDependencies) return undefined;
   const dependencyDescriptorRoot = options?.dependencyDescriptorRoot ?? cwd;
   const digest = createHash("sha256");
   digest.update(project.manifest.execution.image ?? "");
@@ -405,6 +430,7 @@ function normalizeProjectConfig(input: ProjectConfig): ProjectConfig {
     : manifest;
   return {
     ...input,
+    projectPath: expandProjectPathTemplate(input.projectPath),
     manifest: enforcedManifest,
     allowExternalProjectPath: input.allowExternalProjectPath ?? false,
     processes: input.processes?.map((processConfig) => ({
@@ -597,6 +623,10 @@ export async function getProjectRuntimeStatusWithRecovery(id: string): Promise<P
       const project = await getProject(id);
       if (project) {
         const health = await testProjectConnection(projectWithActiveRuntime(project));
+        // --internal in-container probe (see isolatedNetworkHealth.ts): a host-side re-check reports a healthy deny-mode sandbox as dead.
+        if (!health.ok && (await probeIsolatedSandboxHealth(project, 5_000))?.ok) {
+          return cached;
+        }
         if (!health.ok) {
           const failed: ProjectRuntimeStatus = {
             ...cached,
@@ -633,7 +663,7 @@ export async function getProjectRuntimeStatusWithRecovery(id: string): Promise<P
   }
   const project = await getProject(id);
   if (!project || project.manifest?.execution.mode !== "oci") return cached;
-  // Runtime polling is on the UI's hot path. Docker/Podman can take several
+  // Runtime polling is on the UI's hot path. Docker can take several
   // seconds to answer while starting or recovering, so never make the page
   // wait for a container inspection. A single background recovery updates the
   // in-memory state for the next poll instead.
@@ -808,9 +838,12 @@ async function withProjectSecrets(project: ProjectConfig) {
   };
 }
 
-export async function testProjectConnection(project: ProjectConfig): Promise<ProjectHealthCheckResult> {
+export async function testProjectConnection(
+  project: ProjectConfig,
+  options: { useActiveRuntime?: boolean } = {}
+): Promise<ProjectHealthCheckResult> {
   const startedAt = Date.now();
-  const hydrated = await withProjectSecrets(projectWithActiveRuntime(project));
+  const hydrated = await withProjectSecrets(options.useActiveRuntime === false ? project : projectWithActiveRuntime(project));
   const runtimeProject = hydrated.project;
   const resolvedPath = safeProjectPath(runtimeProject);
   const timeoutMs = runtimeProject.timeoutMs ?? 20_000;
@@ -878,86 +911,6 @@ export function projectWithActiveRuntime(project: ProjectConfig): ProjectConfig 
   };
 }
 
-function portFromUrl(value?: string) {
-  if (!value) return undefined;
-  try {
-    const parsed = new URL(value);
-    return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
-  } catch {
-    return undefined;
-  }
-}
-
-function replaceUrlPort(value: string | undefined, hostPort: number) {
-  if (!value) return value;
-  try {
-    const parsed = new URL(value);
-    parsed.protocol = "http:";
-    parsed.hostname = "127.0.0.1";
-    parsed.port = String(hostPort);
-    return parsed.toString();
-  } catch {
-    return value;
-  }
-}
-
-/**
- * OCI targets receive a fresh loopback bridge for every launch. This prevents
- * an unrelated local service on a fixed port from being shown as this run.
- */
-async function allocateLoopbackPort() {
-  return new Promise<number>((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = typeof address === "object" && address ? address.port : undefined;
-      server.close((error) => error
-        ? reject(error)
-        : port
-          ? resolve(port)
-          : reject(new Error("loopback_port_unavailable")));
-    });
-  });
-}
-
-async function projectWithSandboxRuntimeUrls(project: ProjectConfig) {
-  if (project.manifest?.execution.mode !== "oci") {
-    return {
-      project,
-      containerPortFor: (_url?: string) => undefined,
-      portBindings: [] as Array<{ hostPort: number; containerPort: number }>
-    };
-  }
-  const hostPorts = new Map<number, number>();
-  const bridgeUrl = async (url?: string) => {
-    const containerPort = portFromUrl(url);
-    if (!url || !containerPort) return url;
-    let hostPort = hostPorts.get(containerPort);
-    if (!hostPort) {
-      hostPort = await allocateLoopbackPort();
-      hostPorts.set(containerPort, hostPort);
-    }
-    return replaceUrlPort(url, hostPort);
-  };
-  return {
-    project: {
-      ...project,
-      frontendUrl: await bridgeUrl(project.frontendUrl) ?? project.frontendUrl,
-      backendUrl: await bridgeUrl(project.backendUrl) ?? project.backendUrl,
-      healthCheckUrl: await bridgeUrl(project.healthCheckUrl) ?? project.healthCheckUrl,
-      processes: project.processes
-        ? await Promise.all(project.processes.map(async (processConfig) => ({
-          ...processConfig,
-          healthCheckUrl: await bridgeUrl(processConfig.healthCheckUrl)
-        })))
-        : project.processes
-    },
-    containerPortFor: (url?: string) => portFromUrl(url),
-    portBindings: [...hostPorts.entries()].map(([containerPort, hostPort]) => ({ hostPort, containerPort }))
-  };
-}
-
 async function captureProcessOutput(executable: string, args: string[], timeoutMs = 5_000, maxBytes = 512 * 1024) {
   return new Promise<{ exitCode: number | null; stdout: string; stderr: string }>((resolve) => {
     const child = spawn(executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
@@ -996,18 +949,17 @@ async function inspectManagedContainerFailure(running: RunningProject | undefine
   return undefined;
 }
 
-export async function containerEngineIsReady(engine: "docker" | "podman") {
-  const result = await captureProcessOutput(engine, ["info"], 5_000, 64 * 1024);
+export async function containerEngineIsReady() {
+  const result = await captureProcessOutput("docker", ["info"], 5_000, 64 * 1024);
   return result.exitCode === 0;
 }
 
 async function ensureContainerEngineReady(project: ProjectConfig): Promise<ProjectRuntimeStatus | undefined> {
   if (project.manifest?.execution.mode !== "oci") return undefined;
-  const engine = project.manifest.execution.engine;
-  if (await containerEngineIsReady(engine)) return undefined;
+  if (await containerEngineIsReady()) return undefined;
 
   const autoStartEnabled = process.env.CONTAINER_RUNTIME_AUTOSTART !== "0";
-  const canLaunchDockerDesktop = autoStartEnabled && process.platform === "darwin" && engine === "docker";
+  const canLaunchDockerDesktop = autoStartEnabled && process.platform === "darwin";
   if (!canLaunchDockerDesktop) {
     return {
       projectId: project.id,
@@ -1016,7 +968,7 @@ async function ensureContainerEngineReady(project: ProjectConfig): Promise<Proje
       updatedAt: now(),
       stoppedAt: now(),
       failureReason: "container_runtime_unavailable",
-      message: `${engine} is installed but its daemon is unavailable. Automatic desktop startup is not supported in this environment.`
+      message: "Docker is installed but its daemon is unavailable. Automatic desktop startup is not supported in this environment."
     };
   }
 
@@ -1066,7 +1018,7 @@ async function ensureContainerEngineReady(project: ProjectConfig): Promise<Proje
 
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (await containerEngineIsReady(engine)) {
+    if (await containerEngineIsReady()) {
       runningProjects.delete(project.id);
       return undefined;
     }
@@ -1162,6 +1114,13 @@ async function inspectRunningSandbox(project: ProjectConfig) {
     const runtimeProject = projectWithPortMappings(project, mappings);
     const logResult = await captureProcessOutput(engine, ["logs", "--tail", "40", containerName]);
     const health = await testProjectConnection(runtimeProject);
+    // --internal in-container probe (see isolatedNetworkHealth.ts).
+    if (!health.ok) {
+      const probe = await probeIsolatedSandboxHealth(runtimeProject, Math.min(project.timeoutMs ?? 20_000, 5_000));
+      if (probe?.ok) {
+        health.ok = true; health.reason = "none"; health.status = "passed"; health.health = probe; health.message = "Project connection is healthy (in-container probe on the --internal network).";
+      }
+    }
     const installing = !health.ok && (
       Boolean(project.installCommandSpec ?? project.manifest.commands.install)
       || /Progress:\s+resolved|Corepack is about to download|postinstall/i.test(`${logResult.stdout}\n${logResult.stderr}`)
@@ -1217,6 +1176,21 @@ function monitorRecoveredSandbox(projectId: string, runtimeProject: ProjectConfi
         const running = runningProjects.get(projectId);
         if (!running || !["installing", "starting"].includes(running.status.status)) return;
         const health = await testProjectConnection(runtimeProject);
+        // --internal in-container probe (see isolatedNetworkHealth.ts).
+        const probe = await probeIsolatedSandboxHealth(runtimeProject, 5_000);
+        if (probe?.ok) {
+          running.status = {
+            ...running.status,
+            status: "running",
+            phase: "ready",
+            progressPercent: 100,
+            remainingMs: 0,
+            updatedAt: now(),
+            failureReason: "none",
+            message: "Recovered sandbox is healthy and ready for the embedded browser (in-container probe on the --internal network)."
+          };
+          return;
+        }
         if (health.ok) {
           running.status = {
             ...running.status,
@@ -1252,6 +1226,7 @@ function monitorRecoveredSandbox(projectId: string, runtimeProject: ProjectConfi
   })();
 }
 
+type ExecutionContext = { runId?: string; attemptId?: string };
 function spawnManagedProcess(input: {
   project: ProjectConfig;
   cwd: string;
@@ -1260,6 +1235,8 @@ function spawnManagedProcess(input: {
   containerPort?: number;
   portBindings?: Array<{ hostPort: number; containerPort: number }>;
   dependencyCache?: Awaited<ReturnType<typeof prepareSandboxDependencyCache>>;
+  networkName?: string;
+  proxyUrl?: string;
 }) {
   const isLegacy = typeof input.command === "string";
   if (isLegacy && process.env.NODE_ENV === "production" && process.env.ALLOW_LEGACY_SHELL_COMMANDS !== "1") {
@@ -1279,7 +1256,7 @@ function spawnManagedProcess(input: {
         repositoryRoot: input.cwd,
         command: commandSpecSchema.parse(input.command),
         prepareCommand: input.project.installCommandSpec,
-        dependencyCache: input.dependencyCache,
+        dependencyCache: input.dependencyCache, networkName: input.networkName, proxyUrl: input.proxyUrl,
         portBindings: input.portBindings?.length
           ? input.portBindings
           : hostPort && containerPort
@@ -1290,7 +1267,7 @@ function spawnManagedProcess(input: {
         cwd: input.cwd,
         shell: false,
         detached: process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         env: commandEnv(input.project)
       });
       ociProcesses.set(spawned, { engine: execution.engine, containerName: invocation.containerName });
@@ -1375,8 +1352,16 @@ async function waitForHealthy(project: ProjectConfig, projectId?: string) {
     : project.timeoutMs ?? 20_000;
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const result = await testProjectConnection(project);
+    // The launch path has already resolved the endpoint for this concrete
+    // runtime. Do not replace it with a stale status entry while the status
+    // is still transitioning from `starting` to `running`.
+    const result = await testProjectConnection(project, { useActiveRuntime: false });
     if (result.ok) return result;
+    // --internal in-container probe (see isolatedNetworkHealth.ts): host-side fetch cannot reach a deny-mode sandbox.
+    const probe = await probeIsolatedSandboxHealth(project, Math.min(timeoutMs, 5_000));
+    if (probe?.ok) {
+      return Object.assign(result, { ok: true, reason: "none" as const, status: "passed" as const, health: probe, message: "Project connection is healthy (in-container probe on the --internal network)." });
+    }
     const detectedRuntimeUrl = project.manifest?.execution.mode === "oci"
       ? undefined
       : detectedLocalServerUrl(projectId);
@@ -1393,7 +1378,7 @@ async function waitForHealthy(project: ProjectConfig, projectId?: string) {
     if (projectId && runningProjects.get(projectId)?.status.status === "failed") return result;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  return testProjectConnection(project);
+  return testProjectConnection(project, { useActiveRuntime: false });
 }
 
 async function runManagedCommand(input: {
@@ -1404,8 +1389,10 @@ async function runManagedCommand(input: {
   cwd: string;
   timeoutMs: number;
   status?: ProjectRuntimeStatus;
+  networkName?: string;
+  proxyUrl?: string;
 }) {
-  const child = spawnManagedProcess({ project: input.project, cwd: input.cwd, command: input.commandSpec ?? input.command });
+  const child = spawnManagedProcess({ project: input.project, cwd: input.cwd, command: input.commandSpec ?? input.command, networkName: input.networkName, proxyUrl: input.proxyUrl });
   if (input.status) {
     runningProjects.set(input.projectId, { process: child, status: { ...input.status, pid: child.pid } });
   }
@@ -1492,6 +1479,7 @@ async function terminateRunningProject(running: RunningProject) {
       candidate.engine === item.engine && candidate.containerName === item.containerName) === index);
   await Promise.all(containers.map(({ engine, containerName }) =>
     captureProcessOutput(engine, ["rm", "--force", containerName], 15_000)));
+  if (running.egress) try { await running.egress.controller.teardown(running.egress.handle); } catch { /* cleanup is best effort after target teardown */ }
 }
 
 function projectProcesses(project: ProjectConfig): ProjectProcessConfig[] {
@@ -1527,7 +1515,7 @@ function buildProcessStatuses(processes: RunningProcess[], status: "starting" | 
   }));
 }
 
-async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
+async function startProjectOnce(id: string, context: ExecutionContext = {}): Promise<ProjectRuntimeStatus> {
   const storedProject = await getProject(id);
   if (!storedProject) {
     return { projectId: id, status: "failed", failureReason: "config_missing", message: "Project config not found." };
@@ -1611,9 +1599,6 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
     redactText
   });
   if (containerImageFailure) return containerImageFailure;
-  // Pre-flight private-dependency detection: a project needing a private
-  // registry / SSH key / private index must fail fast here with a clear
-  // blocker, not install halfway inside the sandbox and exit generically.
   const privateDependencyFailure = await ensureDependenciesInstallable(project, cwd, now);
   if (privateDependencyFailure) return privateDependencyFailure;
   const recoveredSandbox = await inspectRunningSandbox(project);
@@ -1634,18 +1619,11 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
         ...runtimeProject.manifest,
         budget: {
           ...runtimeProject.manifest.budget,
-          // A cold dependency snapshot is a one-time environment preparation
-          // step. Large monorepos must not be killed by the normal warm-start
-          // deadline before their reusable cache has been created.
           prepareTimeoutMs: Math.max(runtimeProject.manifest.budget.prepareTimeoutMs ?? 300_000, 900_000)
         }
       }
     };
   }
-  // The Agent process may restart while a trusted local dev server remains
-  // healthy. Re-adopt its observable state instead of spawning a duplicate
-  // process that immediately fails on the same port. We intentionally do not
-  // assign a PID: an unowned process must never be terminated by the Agent.
   if (project.allowExternalProjectPath && project.manifest?.execution.mode !== "oci") {
     const existingHealth = await testProjectConnection(project);
     if (existingHealth.ok) {
@@ -1724,6 +1702,17 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
       return failed;
     }
   }
+  let egress: RunningProject["egress"]; try { egress = await prepareOciEgress(runtimeProject, context); } catch (error) {
+    return { projectId: id, status: "failed", phase: "failed", updatedAt: now(), stoppedAt: now(), failureReason: "egress_policy_not_configured", message: error instanceof Error ? error.message : "egress_policy_not_configured" };
+  }
+  const lifecycleResult = await runProjectLifecycleCommands({ manifest: runtimeProject.manifest, projectId: id, runId: context.runId, cwd, networkName: egress?.handle.name, proxyUrl: egress?.handle.proxyUrl,
+    timeoutMs: (_kind, command) => command.timeoutMs ?? runtimeProject.timeoutMs ?? 20_000,
+    run: (command) => runManagedCommand({ projectId: command.projectId, project: runtimeProject, command: "", commandSpec: command.command, cwd: command.cwd, timeoutMs: command.timeoutMs, networkName: command.networkName, proxyUrl: command.proxyUrl }),
+    teardown: async () => { if (egress) await egress.controller.teardown(egress.handle); } });
+  if (!lifecycleResult.ok) {
+    const output = lifecycleResult.output;
+    return { projectId: id, status: "failed", phase: "failed", updatedAt: now(), stoppedAt: now(), failureReason: lifecycleResult.failureReason, message: `Project lifecycle command failed: ${lifecycleResult.failureReason}.${output ? ` output=${output.slice(-2_000)}` : ""}` };
+  }
   const processes = configuredProcesses.map((processConfig, index) => {
     const runtimeProcess = runtimeProcesses[index] ?? processConfig;
     return {
@@ -1734,12 +1723,8 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
         command: runtimeProcess.commandSpec ?? runtimeProcess.command,
         healthCheckUrl: runtimeProcess.healthCheckUrl,
         containerPort: sandboxRuntime.containerPortFor(processConfig.healthCheckUrl ?? project.healthCheckUrl),
-        // A single workspace command commonly starts several services (for
-        // example Vite on 8080 and an API on 3000). Publish every discovered
-        // endpoint from that one container; otherwise the UI becomes reachable
-        // while the required backend health check waits forever.
         portBindings: configuredProcesses.length === 1 ? sandboxRuntime.portBindings : undefined,
-        dependencyCache
+        dependencyCache, networkName: egress?.handle.name, proxyUrl: egress?.handle.proxyUrl
       })
     };
   });
@@ -1767,11 +1752,28 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
   const spawnedOciContainers = processes
     .map((managed) => ociProcesses.get(managed.process))
     .filter((item): item is OciContainerRef => Boolean(item));
+  const activeRuntimeProject = await projectWithIsolatedRuntimeUrls({
+    project,
+    containers: spawnedOciContainers,
+    networkName: egress?.handle.name,
+    inspect: captureProcessOutput
+  });
+  // `testProjectConnection` preferentially uses the active runtime status.
+  // Publish the isolated network endpoint before the first health probe;
+  // otherwise that helper overwrites `activeRuntimeProject` with the
+  // host-published address (which is intentionally unreachable from a
+  // Docker-socket client running in a separate Linux container).
+  status.frontendUrl = activeRuntimeProject.frontendUrl;
+  status.backendUrl = activeRuntimeProject.backendUrl;
+  status.healthCheckUrl = activeRuntimeProject.healthCheckUrl;
+  status.processes = buildProcessStatuses(processes, "starting").map((item, index) => ({
+    ...item,
+    healthCheckUrl: activeRuntimeProject.processes?.[index]?.healthCheckUrl ?? item.healthCheckUrl
+  }));
   runningProjects.set(id, {
     process: processes[0]?.process,
     processes,
-    ociContainers: spawnedOciContainers,
-    status
+    ociContainers: spawnedOciContainers, egress, status
   });
   const ownsProcess = (running: RunningProject, process: ChildProcess) =>
     running.process === process || running.processes?.some((item) => item.process === process) === true;
@@ -1813,10 +1815,10 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
       };
     });
   }
-  const health = await waitForHealthy(runtimeProject, id);
+  const health = await waitForHealthy(activeRuntimeProject, id);
   const processFailure = runningProjects.get(id)?.status;
   if (processFailure?.status === "failed") {
-    await terminateRunningProject({ processes, status: processFailure });
+    await terminateRunningProject({ processes, status: processFailure, egress });
     const retainedFailure = {
       ...processFailure,
       processes: buildProcessStatuses(processes, "failed", processFailure.failureReason)
@@ -1845,10 +1847,13 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
     remainingMs: 0,
     progressPercent: health.ok ? 100 : undefined,
     updatedAt: now(),
-    frontendUrl: detectedRuntimeUrl ?? runtimeProject.frontendUrl,
-    backendUrl: runtimeProject.backendUrl,
-    healthCheckUrl: detectedRuntimeUrl ?? runtimeProject.healthCheckUrl,
-    processes: buildProcessStatuses(processes, health.ok ? "running" : "failed", healthFailureReason),
+    frontendUrl: detectedRuntimeUrl ?? activeRuntimeProject.frontendUrl,
+    backendUrl: activeRuntimeProject.backendUrl,
+    healthCheckUrl: detectedRuntimeUrl ?? activeRuntimeProject.healthCheckUrl,
+    processes: buildProcessStatuses(processes, health.ok ? "running" : "failed", healthFailureReason).map((item, index) => ({
+      ...item,
+      healthCheckUrl: activeRuntimeProject.processes?.[index]?.healthCheckUrl ?? item.healthCheckUrl
+    })),
     failureReason: healthFailureReason,
     message: health.ok
       ? health.message
@@ -1857,20 +1862,19 @@ async function startProjectOnce(id: string): Promise<ProjectRuntimeStatus> {
   runningProjects.set(id, {
     process: processes[0]?.process,
     processes,
-    ociContainers: spawnedOciContainers,
-    status: updated
+    ociContainers: spawnedOciContainers, egress, status: updated
   });
   if (!health.ok) {
-    await terminateRunningProject({ processes, status: updated });
+    await terminateRunningProject({ processes, status: updated, egress });
     runningProjects.set(id, { status: updated });
   }
   return updated;
 }
 
-export function startProject(id: string): Promise<ProjectRuntimeStatus> {
+export function startProject(id: string, context: ExecutionContext = {}): Promise<ProjectRuntimeStatus> {
   const current = projectStartPromises.get(id);
   if (current) return current;
-  const task = startProjectOnce(id).finally(() => {
+  const task = startProjectOnce(id, context).finally(() => {
     if (projectStartPromises.get(id) === task) projectStartPromises.delete(id);
   });
   projectStartPromises.set(id, task);

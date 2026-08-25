@@ -1,7 +1,7 @@
 {
   "id": "e2e_vite",
   "name": "e2e vite",
-  "projectPath": "/tmp/e2e-vite",
+  "projectPath": "${E2E_VITE_PROJECT_ROOT}",
   "allowExternalProjectPath": true,
   "installCommand": "npm install",
   "installCommandSpec": {
@@ -134,5 +134,5 @@
     }
   },
   "createdAt": "2026-08-18T15:24:00.867Z",
-  "updatedAt": "2026-08-18T15:59:24.244Z"
+  "updatedAt": "2026-08-19T10:40:24.412Z"
 }

@@ -15,10 +15,12 @@ import type {
   RiskLevel
 } from "@ai-test-officer/contracts";
 import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 // ─── Policy Engine ───────────────────────────────────────────────
 
-interface PolicyRule {
+export interface PolicyRule {
   ruleId: string;
   description: string;
   capabilityPattern: RegExp;
@@ -26,6 +28,55 @@ interface PolicyRule {
   requireParamsValidation: boolean;
   requiredApprovals: number;
   maxAffectedRows: number;
+  validateParams?: (params: Record<string, unknown>) => string[];
+}
+
+export interface WriteSafetyStore {
+  loadWorkflows(): Promise<ApprovalWorkflow[]>;
+  saveWorkflow(workflow: ApprovalWorkflow): Promise<void>;
+  appendLog(log: WriteOperationLog): Promise<void>;
+  findLogByIdempotencyKey(idempotencyKey: string): Promise<WriteOperationLog | undefined>;
+}
+
+class MemoryWriteSafetyStore implements WriteSafetyStore {
+  private workflows = new Map<string, ApprovalWorkflow>();
+  private logs: WriteOperationLog[] = [];
+  async loadWorkflows() { return [...this.workflows.values()]; }
+  async saveWorkflow(workflow: ApprovalWorkflow) { this.workflows.set(workflow.workflowId, workflow); }
+  async appendLog(log: WriteOperationLog) { this.logs.push(log); }
+  async findLogByIdempotencyKey(idempotencyKey: string) { return this.logs.find((log) => log.traceId === idempotencyKey); }
+}
+
+interface WriteSafetyState { workflows: ApprovalWorkflow[]; logs: WriteOperationLog[]; }
+
+/** Durable local fallback. Production deployments can replace this with a DB-backed store. */
+export class FileWriteSafetyStore implements WriteSafetyStore {
+  private loaded = false;
+  private state: WriteSafetyState = { workflows: [], logs: [] };
+  private writeChain: Promise<void> = Promise.resolve();
+  constructor(private readonly file: string) {}
+  private async ensureLoaded() {
+    if (this.loaded) return;
+    this.loaded = true;
+    try {
+      this.state = JSON.parse(await readFile(this.file, "utf8")) as WriteSafetyState;
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  private async flush() {
+    this.writeChain = this.writeChain.then(async () => {
+      await mkdir(path.dirname(this.file), { recursive: true });
+      const temp = `${this.file}.${process.pid}.tmp`;
+      await writeFile(temp, JSON.stringify(this.state), { mode: 0o600 });
+      await rename(temp, this.file);
+    });
+    return this.writeChain;
+  }
+  async loadWorkflows() { await this.ensureLoaded(); return this.state.workflows.map((item) => ({ ...item, decisions: [...item.decisions] })); }
+  async saveWorkflow(workflow: ApprovalWorkflow) { await this.ensureLoaded(); this.state.workflows = this.state.workflows.filter((item) => item.workflowId !== workflow.workflowId); this.state.workflows.push(workflow); await this.flush(); }
+  async appendLog(log: WriteOperationLog) { await this.ensureLoaded(); if (!this.state.logs.some((item) => item.logId === log.logId)) this.state.logs.push(log); await this.flush(); }
+  async findLogByIdempotencyKey(idempotencyKey: string) { await this.ensureLoaded(); return this.state.logs.find((log) => log.traceId === idempotencyKey); }
 }
 
 const DEFAULT_POLICY_RULES: PolicyRule[] = [
@@ -96,6 +147,7 @@ export interface WriteSafetyConfig {
   policyRules?: PolicyRule[];
   requireApprovalForRiskAbove?: RiskLevel;
   approvalTimeoutMs?: number;
+  store?: WriteSafetyStore;
 }
 
 export class WriteSafetyLayer {
@@ -103,10 +155,19 @@ export class WriteSafetyLayer {
   private pendingApprovals = new Map<string, ApprovalWorkflow>();
   private operationLogs: WriteOperationLog[] = [];
   private config: WriteSafetyConfig;
+  private readonly store: WriteSafetyStore;
+  private loaded = false;
 
   constructor(config?: WriteSafetyConfig) {
     this.config = config ?? {};
     this.rules = this.config.policyRules ?? DEFAULT_POLICY_RULES;
+    this.store = this.config.store ?? new MemoryWriteSafetyStore();
+  }
+
+  private async ensureLoaded() {
+    if (this.loaded) return;
+    this.loaded = true;
+    for (const workflow of await this.store.loadWorkflows()) this.pendingApprovals.set(workflow.workflowId, workflow);
   }
 
   // ─── Step 1: 接收 LLM Action Proposal ───────────────────────
@@ -127,6 +188,7 @@ export class WriteSafetyLayer {
   // ─── Step 2: Policy Check ────────────────────────────────────
 
   async policyCheck(action: WriteAction): Promise<PolicyCheckResult> {
+    await this.ensureLoaded();
     const applicableRules = this.rules.filter(
       (rule) => rule.capabilityPattern.test(action.capability)
     );
@@ -147,10 +209,17 @@ export class WriteSafetyLayer {
     const riskCompare = compareRiskLevel(action.riskLevel, highestRule.minRiskLevel);
 
     if (riskCompare >= 0) {
-      // 风险足够高，需要按规则检查
       const violations: PolicyRule[] = [];
-      if (!highestRule.requireParamsValidation) {
-        // 参数验证通过
+      const paramsBytes = Buffer.byteLength(JSON.stringify(action.params));
+      if (paramsBytes > 64 * 1024) violations.push(highestRule);
+      if (highestRule.requireParamsValidation) {
+        const invalidKeys = Object.keys(action.params).filter((key) => key === "__proto__" || key === "constructor" || key === "prototype");
+        const customIssues = highestRule.validateParams?.(action.params) ?? [];
+        if (invalidKeys.length > 0 || customIssues.length > 0) violations.push(highestRule);
+      }
+      const estimatedRows = action.params.estimatedAffectedRows ?? action.params.affectedRows;
+      if (estimatedRows !== undefined && (typeof estimatedRows !== "number" || !Number.isInteger(estimatedRows) || estimatedRows < 0 || estimatedRows > highestRule.maxAffectedRows)) {
+        violations.push(highestRule);
       }
 
       if (violations.length > 0) {
@@ -183,8 +252,14 @@ export class WriteSafetyLayer {
   // ─── Step 3: Permission Approval ────────────────────────────
 
   async createApprovalWorkflow(action: WriteAction): Promise<ApprovalWorkflow> {
+    await this.ensureLoaded();
+    const existing = this.pendingApprovals.get(`wf_${action.actionId}`);
+    if (existing) return existing;
     const workflowId = `wf_${action.actionId}`;
-    const requiredApprovals = this.getRequiredApprovals(action.riskLevel);
+    const matching = this.rules
+      .filter((rule) => rule.capabilityPattern.test(action.capability) && compareRiskLevel(action.riskLevel, rule.minRiskLevel) >= 0)
+      .sort((a, b) => compareRiskLevel(b.minRiskLevel, a.minRiskLevel))[0];
+    const requiredApprovals = matching?.requiredApprovals ?? this.getRequiredApprovals(action.riskLevel);
 
     const nodes = requiredApprovals > 0
       ? [
@@ -235,6 +310,7 @@ export class WriteSafetyLayer {
     };
 
     this.pendingApprovals.set(workflowId, workflow);
+    await this.store.saveWorkflow(workflow);
     return workflow;
   }
 
@@ -244,6 +320,9 @@ export class WriteSafetyLayer {
     action: WriteAction,
     executor: (action: WriteAction) => Promise<WriteExecutionResult>
   ): Promise<WriteExecutionResult> {
+    await this.ensureLoaded();
+    const existing = await this.store.findLogByIdempotencyKey(action.idempotencyKey);
+    if (existing?.executionResult) return existing.executionResult;
     const workflow = this.pendingApprovals.get(`wf_${action.actionId}`);
     if (!workflow || workflow.status !== "approved") {
       return {
@@ -258,6 +337,7 @@ export class WriteSafetyLayer {
     if (new Date(workflow.expiresAt).getTime() <= Date.now()) {
       workflow.status = "expired";
       this.pendingApprovals.set(workflow.workflowId, workflow);
+      await this.store.saveWorkflow(workflow);
       return {
         executionId: `exec_${action.actionId}`,
         actionId: action.actionId,
@@ -290,8 +370,19 @@ export class WriteSafetyLayer {
     };
 
     try {
-      const result = await executor(action);
+      let result = await executor(action);
       log.executionResult = result;
+      const rule = this.rules
+        .filter((candidate) => candidate.capabilityPattern.test(action.capability) && compareRiskLevel(action.riskLevel, candidate.minRiskLevel) >= 0)
+        .sort((a, b) => compareRiskLevel(b.minRiskLevel, a.minRiskLevel))[0];
+      if (rule && result.affectedRows > rule.maxAffectedRows) {
+        result = {
+          ...result,
+          status: "failed",
+          error: { code: "affected_rows_limit_exceeded", message: `Affected rows ${result.affectedRows} exceed policy limit ${rule.maxAffectedRows}.`, rollbackPerformed: false }
+        };
+        log.executionResult = result;
+      }
       log.finalStatus = result.status === "executed" ? "executed" : "failed";
       log.updatedAt = result.executedAt;
     } catch (err: unknown) {
@@ -312,6 +403,7 @@ export class WriteSafetyLayer {
     }
 
     this.operationLogs.push(log);
+    await this.store.appendLog(log);
     return log.executionResult!;
   }
 
@@ -341,15 +433,22 @@ export class WriteSafetyLayer {
     return this.pendingApprovals.get(workflowId);
   }
 
-  approveWorkflow(workflowId: string, decidedBy: string, reason?: string): ApprovalWorkflow {
+  async approveWorkflow(workflowId: string, decidedBy: string, reason?: string): Promise<ApprovalWorkflow> {
+    await this.ensureLoaded();
     const workflow = this.pendingApprovals.get(workflowId);
     if (!workflow) throw new Error("approval_workflow_not_found");
     if (workflow.status !== "pending") return workflow;
+    if (new Date(workflow.expiresAt).getTime() <= Date.now()) {
+      workflow.status = "expired";
+      await this.store.saveWorkflow(workflow);
+      return workflow;
+    }
     const node = workflow.nodes[workflow.currentNodeIndex];
     workflow.decisions.push({ nodeId: node.nodeId, decidedBy, decision: "approved", reason, decidedAt: new Date().toISOString() });
     workflow.currentNodeIndex += 1;
     if (workflow.currentNodeIndex >= workflow.nodes.length) workflow.status = "approved";
     this.pendingApprovals.set(workflowId, workflow);
+    await this.store.saveWorkflow(workflow);
     return workflow;
   }
 }
@@ -373,7 +472,8 @@ export function getWriteSafetyLayer(config?: WriteSafetyConfig): WriteSafetyLaye
     instance = new WriteSafetyLayer(config);
   }
   if (!instance) {
-    instance = new WriteSafetyLayer();
+    const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
+    instance = new WriteSafetyLayer({ store: new FileWriteSafetyStore(path.join(rootDir, "reports", "write-safety", "state.json")) });
   }
   return instance;
 }

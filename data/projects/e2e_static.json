@@ -1,7 +1,7 @@
 {
   "id": "e2e_static",
   "name": "e2e static",
-  "projectPath": "/tmp/e2e-static",
+  "projectPath": "${E2E_STATIC_PROJECT_ROOT}",
   "allowExternalProjectPath": true,
   "installCommand": "npm install",
   "installCommandSpec": {

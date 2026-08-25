@@ -2,7 +2,88 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { commandSpecSchema, defaultResourceBudget, projectManifestSchema, type CommandSpec, type ProjectManifest, type ResourceBudget } from "@ai-test-officer/contracts";
+import { commandSpecSchema, defaultResourceBudget, projectManifestSchema, type CommandSpec, type ProjectManifest, type ResourceBudget, type ReadinessReport } from "@ai-test-officer/contracts";
+export { buildRunScopedProxyUrl, createEgressNetworkController, createIsolatedNetworkController, egressNetworkName, isolatedNetworkName, type EgressCommandRunner, type EgressNetworkHandle } from "./egressNetworkController.js";
+
+export function networkPolicyHash(network: ProjectManifest["network"]) {
+  return createHash("sha256").update(JSON.stringify({
+    mode: network.mode,
+    enforcement: network.enforcement,
+    allowedHosts: [...network.allowedHosts].sort(),
+    allowedPorts: [80, 443]
+  })).digest("hex");
+}
+
+export interface ExecutionEnvironment<TargetHandle = unknown, BrowserHandle = unknown, EvidenceItem = unknown> {
+  prepare(): Promise<ReadinessReport>;
+  launchTarget(): Promise<TargetHandle>;
+  launchBrowser(): Promise<BrowserHandle>;
+  collectArtifacts(): Promise<EvidenceItem[]>;
+  teardown(): Promise<void>;
+}
+
+export function createExecutionEnvironment<TTarget, TBrowser, TEvidence>(input: ExecutionEnvironment<TTarget, TBrowser, TEvidence>) {
+  let state: "new" | "prepared" | "target-launched" | "browser-launched" | "collected" | "closed" = "new";
+  let preparedReport: ReadinessReport | undefined;
+  let preparePromise: Promise<ReadinessReport> | undefined;
+  let teardownPromise: Promise<void> | undefined;
+  return {
+    async prepare() {
+      if (state === "closed") throw new Error("execution_environment_closed");
+      if (preparedReport) return preparedReport;
+      if (!preparePromise) {
+        preparePromise = (async () => {
+          const report = await input.prepare();
+          if (report.status === "blocked") throw new Error("execution_environment_not_ready");
+          preparedReport = report;
+          state = "prepared";
+          return report;
+        })();
+      }
+      return preparePromise;
+    },
+    async launchTarget() {
+      if (state === "new") await this.prepare();
+      if (state === "closed") throw new Error("execution_environment_closed");
+      if (state === "prepared") {
+        const target = await input.launchTarget();
+        state = "target-launched";
+        return target;
+      }
+      throw new Error(`execution_environment_invalid_state:${state}:launchTarget`);
+    },
+    async launchBrowser() {
+      if (state === "new") await this.prepare();
+      if (state === "prepared") await this.launchTarget();
+      if (state === "closed") throw new Error("execution_environment_closed");
+      if (state === "target-launched") {
+        const browser = await input.launchBrowser();
+        state = "browser-launched";
+        return browser;
+      }
+      throw new Error(`execution_environment_invalid_state:${state}:launchBrowser`);
+    },
+    async collectArtifacts() {
+      if (state === "new" || state === "prepared" || state === "target-launched") await this.launchBrowser();
+      if (state === "closed") throw new Error("execution_environment_closed");
+      if (state === "browser-launched") {
+        const artifacts = await input.collectArtifacts();
+        state = "collected";
+        return artifacts;
+      }
+      throw new Error(`execution_environment_invalid_state:${state}:collectArtifacts`);
+    },
+    async teardown() {
+      if (teardownPromise) return teardownPromise;
+      teardownPromise = (async () => {
+        if (state === "closed") return;
+        state = "closed";
+        await input.teardown();
+      })();
+      return teardownPromise;
+    }
+  } satisfies ExecutionEnvironment<TTarget, TBrowser, TEvidence>;
+}
 
 export type RuntimeFailureReason =
   | "command_not_found"
@@ -18,7 +99,7 @@ export type RuntimeFailureReason =
 
 export function classifyRuntimeFailure(error: unknown, stderr = ""): RuntimeFailureReason {
   const text = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.toLowerCase();
-  if (/docker (api|daemon)|docker\.sock|podman.*socket|cannot connect to.*container/.test(text)) return "container_runtime_unavailable";
+  if (/docker (api|daemon)|docker\.sock|cannot connect to.*container/.test(text)) return "container_runtime_unavailable";
   if (/enoent|command not found|not recognized/.test(text)) return "command_not_found";
   if (/cannot find module|module not found|missing dependency|npm err.*enoent/.test(text)) return "dependency_missing";
   if (/eaddrinuse|address already in use|port.*in use/.test(text)) return "port_conflict";
@@ -108,12 +189,14 @@ export async function runAllowlistedCommand(input: {
 }
 
 export function buildOciInvocation(input: {
-  engine: "docker" | "podman";
+  engine: "docker";
   image: string;
   manifest: ProjectManifest;
   repositoryRoot: string;
   command: CommandSpec;
   prepareCommand?: CommandSpec;
+  networkName?: string;
+  proxyUrl?: string;
   portBindings?: Array<{ hostPort: number; containerPort: number }>;
   dependencyCache?: {
     key: string;
@@ -140,7 +223,32 @@ export function buildOciInvocation(input: {
   const workspace = resolveManifestWorkspace(manifest, input.repositoryRoot);
   const token = createHash("sha256").update(`${manifest.projectId}:${randomUUID()}`).digest("hex").slice(0, 20);
   const containerName = `ato-${manifest.projectId}-${token}`;
-  const network = manifest.network.mode === "deny" ? "none" : "bridge";
+  const networkPolicy = manifest.network;
+  // Deny-policy runs receive a run-scoped internal bridge from the Agent when
+  // a browser port must be published. Keep `none` as the direct-call fallback
+  // for non-browser commands and unit-level invocation tests.
+  const network = networkPolicy.mode === "deny"
+    ? input.networkName ?? process.env.ATO_DENY_NETWORK_NAME ?? "none"
+    : input.networkName ?? process.env.ATO_EGRESS_NETWORK_NAME;
+  const proxyUrl = input.proxyUrl ?? process.env.ATO_EGRESS_PROXY_URL;
+  if (networkPolicy.mode !== "deny") {
+    if (networkPolicy.enforcement !== "external-egress-proxy") {
+      throw new Error("network_policy_enforcement_required");
+    }
+    if (!network || !/^ato-egress-[a-zA-Z0-9_.-]+$/.test(network)) {
+      throw new Error("egress_network_not_configured");
+    }
+    if (!proxyUrl || !/^https?:\/\/[^\s/]+(?::\d+)?$/i.test(proxyUrl)) {
+      throw new Error("egress_proxy_not_configured");
+    }
+    if (networkPolicy.allowedHosts.length === 0) {
+      throw new Error("egress_allowed_hosts_missing");
+    }
+  }
+  if (networkPolicy.mode === "deny" && network !== "none" && (!network || !/^ato-isolated-[a-zA-Z0-9_.-]+$/.test(network))) {
+    throw new Error("isolated_network_not_configured");
+  }
+  const networkPolicySha256 = networkPolicyHash(networkPolicy);
   const parallelRuntime = (input.portBindings?.length ?? 0) > 1
     || input.command.args.includes("--parallel")
     || manifest.ports.length > 1;
@@ -176,8 +284,8 @@ export function buildOciInvocation(input: {
     .some((command) => command.executable === "pnpm" || command.executable === "yarn");
   const packageManagerBootstrap = requiresCorepack
     ? dependencyCache
-      ? "mkdir -p /workspace/.ato-bin /sandbox-cache/corepack; export COREPACK_HOME=/sandbox-cache/corepack; corepack enable --install-directory /workspace/.ato-bin; export PATH=/workspace/.ato-bin:$PATH"
-      : "mkdir -p /tmp/ato-bin /tmp/ato-corepack; export COREPACK_HOME=/tmp/ato-corepack; corepack enable --install-directory /tmp/ato-bin; export PATH=/tmp/ato-bin:$PATH"
+      ? "if ! command -v pnpm >/dev/null 2>&1 && ! command -v yarn >/dev/null 2>&1; then mkdir -p /workspace/.ato-bin /sandbox-cache/corepack; export COREPACK_HOME=/sandbox-cache/corepack; corepack enable --install-directory /workspace/.ato-bin; export PATH=/workspace/.ato-bin:$PATH; fi"
+      : "if ! command -v pnpm >/dev/null 2>&1 && ! command -v yarn >/dev/null 2>&1; then mkdir -p /tmp/ato-bin /tmp/ato-corepack; export COREPACK_HOME=/tmp/ato-corepack; corepack enable --install-directory /tmp/ato-bin; export PATH=/tmp/ato-bin:$PATH; fi"
     : "";
   // Some checked-in Vite/CRA configurations force a browser open even when
   // the discovered command does not pass --open.  The sandbox has no desktop
@@ -210,7 +318,12 @@ export function buildOciInvocation(input: {
   const prepareCommand = input.prepareCommand
     ? [input.prepareCommand.executable, ...input.prepareCommand.args].map(shellQuote).join(" ")
     : "";
-  const prepare = prepareCommand && dependencyCache
+  // When the source project carries pre-installed dependencies (host
+  // node_modules / .venv populated to avoid a cold install that needs registry
+  // egress), skip the prepare (install) command entirely — the dependency
+  // directories are copied into the workspace below.
+  const preinstalledDependencies = Boolean(manifest.execution.preinstalledDependencies);
+  const prepare = (prepareCommand && dependencyCache && !preinstalledDependencies)
     ? [
       `cache_marker=${dependencyCache.storageMode === "volume" ? "/sandbox-meta" : "/sandbox-cache"}/prepared-${dependencyCache.key}`,
       `cache_lock=${dependencyCache.storageMode === "volume" ? "/sandbox-meta" : "/sandbox-cache"}/preparing-${dependencyCache.key}`,
@@ -228,16 +341,22 @@ export function buildOciInvocation(input: {
       "touch \"$cache_marker\"; rmdir \"$cache_lock\"; trap - EXIT INT TERM",
       "else echo ATO_DEPENDENCY_CACHE_HIT; fi; fi"
     ].join("; ")
-    : prepareCommand;
+    : (preinstalledDependencies ? "echo ATO_PREINSTALLED_DEPENDENCIES_SKIP_INSTALL" : prepareCommand);
+  // Copy dependency directories into the writable workspace when the project
+  // ships pre-installed deps; otherwise exclude them so the prepare (install)
+  // step populates a fresh workspace/node_modules from the offline store.
+  const dependencyExclude = preinstalledDependencies
+    ? "--exclude=.git --exclude=./dist --exclude=./build --exclude=node_modules"
+    : "--exclude=node_modules --exclude=.git --exclude=dist --exclude=build";
   const workspaceBootstrap = dependencyCache
     ? [
       `source_marker=/workspace/.ato-source-${dependencyCache.sourceFingerprint}`,
       "if [ -f \"$source_marker\" ]; then export ATO_SOURCE_CHANGED=0; echo ATO_SOURCE_CACHE_HIT",
       "else find /workspace -mindepth 1 -maxdepth 1 ! -name node_modules ! -name .python-packages ! -name .venv ! -name venv ! -name .bundle ! -name vendor ! -name .ato-bin -exec rm -rf {} +",
-      "tar -C /source --exclude=node_modules --exclude=.git --exclude=dist --exclude=build -cf - . | tar -C /workspace -xf -",
+      `tar -C /source ${dependencyExclude} -cf - . | tar -C /workspace -xf -`,
       "rm -f /workspace/.ato-source-*; touch \"$source_marker\"; export ATO_SOURCE_CHANGED=1; fi"
     ].join("; ")
-    : "tar -C /source --exclude=node_modules --exclude=.git --exclude=dist --exclude=build -cf - . | tar -C /workspace -xf -";
+    : `tar -C /source ${dependencyExclude} -cf - . | tar -C /workspace -xf -`;
   const bootstrap = [
     "set -eu",
     "mkdir -p /workspace",
@@ -255,9 +374,18 @@ export function buildOciInvocation(input: {
       "run", "--rm", "--read-only", "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
       // Keep every sandbox bounded while allowing multi-process targets a
       // larger, still finite profile.
-      "--cpus", String(cpus), "--memory", `${memoryGiB}g`, "--memory-swap", `${memoryGiB}g`, "--pids-limit", String(pidsLimit), "--user", "65532:65532", "--network", network,
+      "--cpus", String(cpus), "--memory", `${memoryGiB}g`, "--memory-swap", `${memoryGiB}g`, "--pids-limit", String(pidsLimit), "--user", "65532:65532", "--network", network!,
       "--label", "ai-test-officer.managed=true",
       "--label", `ai-test-officer.project-id=${manifest.projectId}`,
+      "--label", `ai-test-officer.network-mode=${networkPolicy.mode}`,
+      "--label", `ai-test-officer.network-policy-sha256=${networkPolicySha256}`,
+      ...(networkPolicy.mode === "deny" ? [] : [
+        "--label", `ai-test-officer.allowed-hosts=${networkPolicy.allowedHosts.join(",")}`,
+        "--env", `HTTP_PROXY=${proxyUrl}`,
+        "--env", `HTTPS_PROXY=${proxyUrl}`,
+        "--env", "NO_PROXY=localhost,127.0.0.1,::1",
+        "--env", `ATO_EGRESS_POLICY_SHA256=${networkPolicySha256}`
+      ]),
       ...portArgs,
       "--env", "HOME=/tmp/ato-home",
       // Servers that default to 127.0.0.1 are reachable only from inside the
@@ -316,7 +444,15 @@ export function buildOciInvocation(input: {
             "--mount", `type=bind,src=${dependencyCache.workspaceRoot},dst=/workspace`,
             "--mount", `type=bind,src=${dependencyCache.packageCacheRoot},dst=/sandbox-cache`
           ]
-        : ["--tmpfs", "/workspace:rw,exec,nosuid,size=3g,uid=65532,gid=65532"]),
+        : [
+            "--tmpfs", "/workspace:rw,exec,nosuid,size=8g,uid=65532,gid=65532",
+            // preinstalledDependencies: bind-mount the host's node_modules
+            // (writable, so vite/esbuild can write .vite/.cache into it) instead
+            // of copying it into the RAM-backed /workspace tmpfs. Copying a
+            // multi-GB node_modules into the tmpfs OOM-kills the sandbox on VMs
+            // with limited RAM; the bind mount keeps node_modules on disk.
+            ...(preinstalledDependencies ? ["--mount", `type=bind,src=${workspace}/node_modules,dst=/workspace/node_modules`] : [])
+          ]),
       "--workdir", "/workspace",
       "--name", containerName,
       "--entrypoint", "/bin/sh", input.image,

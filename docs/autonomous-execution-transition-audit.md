@@ -32,14 +32,14 @@
 
 ## 仍需移除的结构性过渡层
 
-1. **全量动态路径仍共享单 Run 模型预算**
-   - 默认每个 Run 只有 12 次 Browser Action LLM 调用，全面扫描可能产生数百条待绑定路径。
-   - 当前预算耗尽会明确 blocked，虽然不会误报 pass，但无法完成完整接管。
-   - 正式方案：parent run 按 CoverageItem 创建 path child run；每个 child 有独立动作/时间/Token 预算，parent 只聚合 disposition 与 Proof。
+1. **动态页面路径已迁移到独立 child Graph**
+   - 动态 parent 在权限确认后由 Worker 只负责按 CoverageItem 调度；每条可执行页面路径创建确定性的 path child run。
+   - child 拥有独立 Browser Graph、Attempt、LLM budget、Evidence 和 Machine Gate，parent 只聚合 disposition 与 Proof。
+   - `needs-input`、`coverage-gap` 和未绑定的非页面候选仍保留为明确 blocked，不会伪装成可执行路径。
 
-2. **`auto-bindable` 还不等于真实运行时绑定**
-   - 当前静态编译器能发现代码候选，但尚未为每条候选建立页面 route/control/API/Oracle 的确定绑定。
-   - 正式方案：增加 Runtime Binding Compiler；只有绑定成功的 CoverageItem 才进入 child run，绑定失败保留真实 observation 和缺失项。
+2. **`auto-bindable` 仍不等于真实运行时绑定**
+   - Runtime Binding Compiler 已输出结构化状态、入口、Capability、Oracle 和预算，但动态页面的控件绑定仍在 child Graph 的真实 Observation 阶段完成。
+   - 只有已进入可执行 disposition 的页面候选才创建 child；绑定失败保留真实 observation 和缺失项。
 
 3. **`POST /v1/runs` 仍同步推进确认事件**
    - Active 模式已经由 Graph 决定最终状态，但 API 为避免重复审批，仍会在启动 Graph 前同步调用规划并写入 `plan_approved`/`permission_granted`。
@@ -61,4 +61,3 @@
 - 不得由前端、Worker 和 Graph 同时写最终结论。
 - 不得用旧 Run、旧 Attempt 或本地缓存覆盖当前持久化结果。
 - 不得为了“顺利完成”降低 Proof Bundle 或 Machine Gate；应修复执行编排，而不是伪造通过。
-

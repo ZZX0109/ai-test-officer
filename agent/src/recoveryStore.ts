@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
 import { recoveryActionResultSchema, recoveryDecisionSchema, agentObservationSchema, type AgentObservation, type RecoveryActionResult, type RecoveryDecision } from "@ai-test-officer/contracts";
+import { getDatabasePool } from "./databaseRuntime.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const file = path.join(rootDir, "reports", "agent-recovery", "records.json");
-let pool: Pool | undefined;
 type RecoveryRecord = { decisions: RecoveryDecision[]; actions: RecoveryActionResult[]; observations: AgentObservation[] };
 
 async function local(): Promise<RecoveryRecord> {
@@ -20,9 +19,7 @@ async function persistLocal(record: RecoveryRecord) {
 }
 
 function database() {
-  if (!process.env.DATABASE_URL) return undefined;
-  pool ??= new Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
-  return pool;
+  return getDatabasePool();
 }
 
 export async function persistRecoveryDecision(input: RecoveryDecision) {

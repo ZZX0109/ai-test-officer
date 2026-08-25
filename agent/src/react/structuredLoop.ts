@@ -32,6 +32,8 @@ export async function runStructuredReActLoop(input: {
   project: ProjectConfig;
   target: TargetAppRuntime;
   signal?: AbortSignal;
+  runId?: string;
+  attemptId?: string;
   maxSteps?: number;
 }): Promise<StructuredReActLoopResult> {
   const maxSteps = Math.min(input.maxSteps ?? 50, 50);
@@ -65,7 +67,10 @@ export async function runStructuredReActLoop(input: {
         manifest: input.manifest,
         project: input.project,
         target: input.target,
-        signal: input.signal
+        signal: input.signal,
+        runId: input.runId,
+        attemptId: input.attemptId,
+        actionId: step.id
       });
       turns.push({
         stepId: step.id,

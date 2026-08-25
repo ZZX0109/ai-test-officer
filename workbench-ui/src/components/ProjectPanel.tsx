@@ -94,6 +94,7 @@ export function ProjectPanel({
     credential_missing: "项目需要登录测试账号，但所需测试凭据尚未配置。",
     permission_denied: "系统或沙盒拒绝了启动权限。macOS 原生依赖被拦截时可重新安装依赖后再试。",
     container_runtime_unavailable: "安全沙盒服务尚未就绪。macOS 本地运行时系统会自动启动 Docker Desktop；仅在未安装或启动超时时才需要手动处理。",
+    egress_policy_not_configured: "项目要求经过 egress proxy，但当前运行没有配置 proxy、代理容器或策略密钥；系统已按 fail-closed 阻断。",
     budget_exceeded: "依赖安装或启动超过了项目资源预算，已安全终止。",
     cleanup_failed: "项目进程已停止，但清理命令失败，请查看残留进程和日志。",
     cancelled: "本次启动已被取消，相关进程正在清理。",

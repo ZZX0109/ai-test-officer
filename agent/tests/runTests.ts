@@ -92,6 +92,12 @@ import { testBusinessCapabilityGraph } from "./businessCapabilityGraph.test.js";
 import { testPlanningInventoryStore } from "./planningInventoryStore.test.js";
 import { testBusinessFunctionCompiler } from "./businessFunctionCompiler.test.js";
 import { testShellArgvSafety } from "./shellArgv.test.js";
+import { testReadinessAndReview } from "./readinessAndReview.test.js";
+import { testOutboxRetryAndDeduplication } from "./outboxStore.test.js";
+import { testArtifactObjectReconciliationApply, testArtifactObjectReconciliationPlan } from "./artifactObjectReconciliation.test.js";
+import { testOperationalSloAlerts } from "./operationalSlo.test.js";
+import { testCapacityMatrix } from "./capacityMatrix.test.js";
+import { testSecurityAdversarialMatrix } from "./securityAdversarialMatrix.test.js";
 
 async function main() {
   await testBrowserAgentLoop();
@@ -102,6 +108,12 @@ async function main() {
   testProofBundleValidator();
   testEvidenceArtifactLinker();
   await testSustainabilityModules();
+  await testOutboxRetryAndDeduplication();
+  testArtifactObjectReconciliationPlan();
+  await testArtifactObjectReconciliationApply();
+  testOperationalSloAlerts();
+  await testCapacityMatrix();
+  await testSecurityAdversarialMatrix();
   await testDurableSustainabilityRestart();
   testProofBundleIntegrity();
   await testConnectorEnvelope();
@@ -187,6 +199,7 @@ async function main() {
   await testServiceHealthContract();
   await testRunBundleArchive();
   testShellArgvSafety();
+  await testReadinessAndReview();
   await import("../src/selfTest.js");
 }
 

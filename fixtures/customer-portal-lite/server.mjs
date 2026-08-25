@@ -1,9 +1,35 @@
 import http from "node:http";
 
 const port = Number(process.env.PORT ?? 0);
+// The standalone fixture must run without a workspace-level dependency tree.
+// Its database mode is opt-in for production acceptance; only then load the
+// PostgreSQL driver. This keeps an uploaded/offline copy runnable while still
+// failing immediately if an explicitly requested database runtime is missing.
+const pool = process.env.TARGET_DATABASE_URL
+  ? (() => import("pg").then(({ default: pg }) => new pg.Pool({ connectionString: process.env.TARGET_DATABASE_URL, max: 2 })))()
+  : undefined;
+const idempotentWrites = new Map();
+
+async function customerRows(query) {
+  const activePool = await pool;
+  if (!activePool) return query ? ["Acme Renewal"] : ["Globex Expansion"];
+  const result = await activePool.query(
+    "SELECT name FROM customers WHERE ($1 = '' OR name ILIKE '%' || $1 || '%') ORDER BY id",
+    [query]
+  );
+  return result.rows.map((row) => row.name);
+}
 
 function json(response, value) {
   response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify(value));
+}
+
+function idempotentWrite(response, status, value, key) {
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "idempotency-key": key
+  });
   response.end(JSON.stringify(value));
 }
 
@@ -129,14 +155,47 @@ function html(response, variant = "") {
 </html>`);
 }
 
-const server = http.createServer((request, response) => {
+const server = http.createServer(async (request, response) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-  if (url.pathname === "/health") return json(response, { ok: true, service: "customer-portal-lite" });
+  if (url.pathname === "/health") {
+    try {
+      const activePool = await pool;
+      if (activePool) await activePool.query("SELECT 1");
+      return json(response, { ok: true, service: "customer-portal-lite", database: Boolean(activePool) });
+    } catch {
+      response.writeHead(503, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ ok: false, service: "customer-portal-lite", database: false }));
+    }
+  }
   if (url.pathname === "/api/customers" && url.searchParams.get("status") === "error") {
     response.writeHead(503, { "content-type": "application/json; charset=utf-8" });
     return response.end(JSON.stringify({ ok: false, error: "customer_api_failure" }));
   }
-  if (url.pathname === "/api/customers") return json(response, { ok: true, query: url.searchParams.get("query"), items: ["Acme Renewal"] });
+  if (url.pathname === "/api/customers") {
+    try {
+      return json(response, { ok: true, query: url.searchParams.get("query"), items: await customerRows(url.searchParams.get("query") ?? "") });
+    } catch {
+      response.writeHead(503, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ ok: false, error: "customer_database_failure" }));
+    }
+  }
+  if (url.pathname === "/api/test-idempotent-write" && request.method === "POST") {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key) {
+      response.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+      return response.end(JSON.stringify({ ok: false, error: "idempotency_key_required" }));
+    }
+    const existing = idempotentWrites.get(key);
+    if (existing) return idempotentWrite(response, 201, { ok: true, ...existing, replayed: true }, key);
+    const record = { writeCount: idempotentWrites.size + 1, key };
+    idempotentWrites.set(key, record);
+    return idempotentWrite(response, 201, { ok: true, ...record, replayed: false }, key);
+  }
+  if (url.pathname === "/api/test-idempotent-write" && request.method === "GET") {
+    const key = url.searchParams.get("key") ?? "";
+    const record = idempotentWrites.get(key);
+    return json(response, { ok: Boolean(record), ...(record ?? { writeCount: 0, key }) });
+  }
   if (url.pathname === "/api/schema-check") return json(response, { ok: true, contract: url.searchParams.get("contract") });
   return html(response, url.searchParams.get("fixtureVariantId") ?? "");
 });

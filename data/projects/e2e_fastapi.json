@@ -1,7 +1,7 @@
 {
   "id": "e2e_fastapi",
   "name": "e2e fastapi",
-  "projectPath": "/tmp/e2e-fastapi",
+  "projectPath": "${E2E_FASTAPI_PROJECT_ROOT}",
   "allowExternalProjectPath": true,
   "installCommand": "pip install -r requirements.txt",
   "installCommandSpec": {

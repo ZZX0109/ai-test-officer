@@ -180,7 +180,11 @@ export async function createPlanningConversation(input: {
     graph,
     capabilityGraph,
     analysis,
-    discoveryReadiness
+    discoveryReadiness,
+    runtimeObservations: discovery ? [
+      ...discovery.networkEndpoints.map((item) => ({ url: item.url, method: item.method, statusCode: item.status, source: "network" as const })),
+      { url: discovery.observation.finalUrl, source: "browser" as const, evidenceRefs: discovery.observation.screenshot ? [discovery.observation.screenshot.storageUri] : [] }
+    ] : []
   });
   injectLoginGateFlow(planning, discovery, project);
   if (request.planningMode === "llm-guided") {

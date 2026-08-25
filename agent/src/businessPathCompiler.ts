@@ -185,10 +185,19 @@ export function compileBusinessPaths(input: {
     }))];
     const hasAuth = nodes.some((node) => node.kind === "auth-guard");
     const hasAction = nodes.some((node) => node.kind === "ui-action" || node.kind === "frontend-call" || node.kind === "api-route");
+    const heuristicParser = nodes.some((node) => node.metadata?.extraction === "regex-heuristic");
     const confidence = nodes.some((node) => node.confidence === "high") ? "high" : nodes.some((node) => node.confidence === "medium") ? "medium" : "low";
-    const status: BusinessPathStatus = surfaces.includes("page") && input.browserEnabled
+    // The browser runtime can autonomously exercise API routes too — it
+    // navigates to the declared route URL and asserts on the response body /
+    // status — proven end-to-end by FastAPI clean-pass runs. Treating api
+    // surfaces as auto-bindable when the browser is enabled removes the
+    // misleading "needs-input" label that previously hid these flows behind
+    // a hand-confirmation gate the runtime did not actually require.
+    const status: BusinessPathStatus = heuristicParser
+      ? "needs-input"
+      : (surfaces.includes("page") || surfaces.includes("api")) && input.browserEnabled
       ? "auto-bindable"
-      : surfaces.some((surface) => surface === "api" || surface === "data" || surface === "background-task")
+      : surfaces.some((surface) => surface === "data" || surface === "background-task")
         ? "needs-input"
         : "coverage-gap";
     const actions = [
@@ -230,7 +239,9 @@ export function compileBusinessPaths(input: {
       ])],
       sourceNodeIds: nodes.map((node) => node.id),
       sourceLocations: nodes.flatMap((node) => node.source ? [node.source] : []),
-      reason: hasAction
+      reason: heuristicParser
+        ? "该路径来自正则启发式解析，需运行时确认实际路由或处理器绑定后才能自动执行。"
+        : hasAction
         ? `由 ${nodes.length} 个代码节点组成，入口、交互、接口和后续处理关系均保留可追溯来源；运行时会验证实际操作和预期结果。`
         : "已从代码中识别出该功能，等待在实际页面中确认操作步骤和预期结果。"
     };

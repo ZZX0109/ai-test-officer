@@ -8,21 +8,23 @@
 //
 // Run via `npm run size-guard`. Excludes generated code and build output.
 
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import path from "node:path";
 import process from "node:process";
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const THRESHOLD = Number(process.env.SIZE_GUARD_THRESHOLD ?? 2000);
+const NEW_FILE_THRESHOLD = Number(process.env.SIZE_GUARD_NEW_FILE_THRESHOLD ?? 800);
+const execFileAsync = promisify(execFile);
+const BASELINE_CONFIG = JSON.parse(await readFile(path.join(ROOT, "scripts", "god-file-baselines.json"), "utf8"));
 
-// Files exceeding THRESHOLD that pre-date the guard. Each must be removed from
-// this list when its decomposition lands; do not add new entries here.
-const ALLOWLIST = new Map([
-  ["agent/src/server.ts", "Phase 2: extract remaining routers into server/routes/"],
-  ["agent/src/agentGraphService.ts", "Phase 2: split into graph-hooks / projection / recovery-adapter"],
-  ["agent/src/testRunner.ts", "Phase 2: split into lifecycle-policy / executable-plan-binding / attempt-runner"],
-  ["workbench-ui/src/App.tsx", "Phase 2: sink panel state into Panel components and state/ reducers"]
-]);
+// The four P0-2 gates are explicit, checked-in baselines rather than prose in
+// a document. A file can remain above the generic threshold during migration,
+// but it cannot grow back above half of its recorded pre-refactor size.
+const REDUCTION_GATES = new Map(Object.entries(BASELINE_CONFIG.files));
+const ALLOWLIST = new Map([...REDUCTION_GATES.entries()].filter(([file]) => file === "workbench-ui/src/App.tsx"));
 
 const SCAN_ROOTS = ["agent/src", "packages", "workbench-ui/src", "app-under-test/src"];
 const EXCLUDE_DIR_SEGMENTS = new Set(["dist", "generated", "node_modules", ".workbuddy"]);
@@ -47,11 +49,21 @@ async function* walk(relativeRoot) {
 }
 
 async function lineCount(relativeFile) {
-  const { readFile } = await import("node:fs/promises");
   const content = await readFile(path.join(ROOT, relativeFile), "utf8");
   // Count lines the way wc does: trailing newline does not add an empty line.
   if (content.length === 0) return 0;
   return content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
+}
+
+function sourcePath(relativeFile) {
+  return /\.[cm]?tsx?$/.test(relativeFile)
+    && !relativeFile.split(path.sep).some((segment) => EXCLUDE_DIR_SEGMENTS.has(segment));
+}
+
+async function addedSourceFiles() {
+  const tracked = await execFileAsync("git", ["diff", "--name-only", "--diff-filter=A", "HEAD"], { cwd: ROOT });
+  const untracked = await execFileAsync("git", ["ls-files", "--others", "--exclude-standard"], { cwd: ROOT });
+  return new Set(`${tracked.stdout}\n${untracked.stdout}`.split(/\r?\n/).map((file) => file.trim()).filter(sourcePath));
 }
 
 async function main() {
@@ -60,8 +72,31 @@ async function main() {
     for await (const file of walk(root)) {
       const count = await lineCount(file);
       if (count <= THRESHOLD) continue;
-      if (ALLOWLIST.has(file)) continue;
+      const allowed = ALLOWLIST.get(file);
+      if (allowed) {
+        if (count > allowed.maxLines) violations.push({ file, count, baselineExceeded: allowed.maxLines });
+        continue;
+      }
       violations.push({ file, count });
+    }
+  }
+
+  // New business files must stay below the decomposition budget. This checks
+  // both staged/unstaged additions and intentionally untracked files, so a
+  // large file cannot evade the guard before it is added to Git.
+  const addedFiles = await addedSourceFiles();
+  for (const file of addedFiles) {
+    const count = await lineCount(file);
+    if (count > NEW_FILE_THRESHOLD) violations.push({ file, count, newFileExceeded: NEW_FILE_THRESHOLD });
+  }
+
+  // Recompute the P0-2 reduction gates independently of the generic threshold
+  // scan. This keeps the acceptance criterion active even after a file drops
+  // below 2,000 lines and would otherwise stop being inspected.
+  for (const [file, gate] of REDUCTION_GATES) {
+    const count = await lineCount(file);
+    if (count > gate.maxLines && !violations.some((item) => item.file === file)) {
+      violations.push({ file, count, baselineExceeded: gate.maxLines });
     }
   }
 
@@ -79,8 +114,8 @@ async function main() {
 
   if (violations.length > 0) {
     console.error(`size-guard: ${violations.length} file(s) exceed ${THRESHOLD} lines and are not allowlisted:`);
-    for (const { file, count } of violations.sort((a, b) => b.count - a.count)) {
-      console.error(`  ${file}: ${count} lines (split the file or raise the budget via SIZE_GUARD_THRESHOLD only with review)`);
+    for (const { file, count, baselineExceeded, newFileExceeded } of violations.sort((a, b) => b.count - a.count)) {
+      console.error(`  ${file}: ${count} lines${baselineExceeded ? ` (50% gate ${baselineExceeded} exceeded)` : ""}${newFileExceeded ? ` (new-file budget ${newFileExceeded} exceeded)` : ""} (split the file or update the reviewed baseline)`);
     }
     console.error("");
     console.error("The allowlist is reserved for pre-existing god files under active decomposition.");

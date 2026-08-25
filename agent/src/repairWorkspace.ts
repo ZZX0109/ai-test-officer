@@ -3,7 +3,6 @@ import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, opendir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { zipSync, strToU8 } from "fflate";
-import { Pool } from "pg";
 import {
   artifactV2Schema,
   commandSpecSchema,
@@ -27,6 +26,8 @@ import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
 import { finalizeProofBundle, proofCredibility, type MachineGateDraft } from "./proof/proofBundleService.js";
 import { persistExecutionResult } from "./executionPersistence.js";
 import { prepareSandboxDependencyCache } from "./projectAdapter.js";
+import { prepareOciEgress } from "./ociEgress.js";
+import { getDatabasePool } from "./databaseRuntime.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const repairsRoot = path.join(rootDir, "reports", "repairs");
@@ -39,12 +40,9 @@ const binaryExtensions = /\.(?:png|jpe?g|gif|webp|ico|pdf|zip|gz|tar|woff2?|ttf|
 const highRiskPaths = /(^|\/)(migrations?|auth|payments?|billing|infra|deploy|terraform|\.github)(\/|$)|(^|\/)(dockerfile|package\.json)$/i;
 const dependencyDescriptorPaths = /(^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|\.yarnrc\.yml|requirements\.txt|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile\.lock|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|Gemfile|Gemfile\.lock|composer\.json|composer\.lock|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.lockfile)$/i;
 const maxEditableBytes = 1024 * 1024;
-let postgresPool: Pool | undefined;
 
 function pool() {
-  if (!process.env.DATABASE_URL) return undefined;
-  postgresPool ??= new Pool({ connectionString: process.env.DATABASE_URL });
-  return postgresPool;
+  return getDatabasePool();
 }
 
 function sessionDir(id: string) {
@@ -61,6 +59,10 @@ function workspaceDir(id: string) {
 
 function sourceSnapshotDir(id: string) {
   return path.join(sessionDir(id), "source");
+}
+
+function projectSourceRoot(projectPath: string) {
+  return path.isAbsolute(projectPath) ? path.resolve(projectPath) : path.resolve(rootDir, projectPath);
 }
 
 function normalizeRelative(input: string) {
@@ -353,7 +355,7 @@ export async function createRepairSession(input: {
   failureClass?: RepairSession["failureClass"];
 }) {
   if (process.env.REPAIR_SANDBOX_ENABLED === "false") throw new Error("repair_sandbox_disabled");
-  const sourceRoot = path.resolve(input.project.projectPath);
+  const sourceRoot = projectSourceRoot(input.project.projectPath);
   const sourceStat = await lstat(sourceRoot);
   if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) throw new Error("repair_source_invalid");
   const id = `repair_${randomUUID()}`;
@@ -895,7 +897,7 @@ export async function validateRepairSession(
   const dependencyCache = await prepareSandboxDependencyCache(project, workspaceDir(id), {
     dependencyDescriptorRoot: options.allowNetworkInstall && dependencyDescriptorsChanged
       ? workspaceDir(id)
-      : path.resolve(project.projectPath),
+      : projectSourceRoot(project.projectPath),
     workspaceNamespace: `repair-validation-${id}`
   });
   const installCommand = project.installCommandSpec ?? project.manifest.commands.install;
@@ -959,26 +961,34 @@ export async function validateRepairSession(
     stderr: string;
   }> = [];
   for (const item of validationCommands) {
-    const invocation = buildOciInvocation({
-      engine: project.manifest.execution.engine,
-      image: project.manifest.execution.image,
-      manifest: project.manifest,
-      repositoryRoot: workspaceDir(id),
-      command: item.command,
-      prepareCommand: project.installCommandSpec ?? project.manifest.commands.install,
-      dependencyCache
-    });
-    const result = await runAllowlistedCommand({
-      command: {
-        executable: invocation.executable,
-        args: invocation.args,
-        timeoutMs: item.command.timeoutMs ?? 600_000
-      },
-      cwd: rootDir,
-      env: {},
-      allowedExecutables: [project.manifest.execution.engine],
-      maxLogBytes: project.manifest.budget.maxLogBytes
-    });
+    const egress = await prepareOciEgress(project, { runId: childRunId, attemptId: `${childRunId}_attempt_1` });
+    let result;
+    try {
+      const invocation = buildOciInvocation({
+        engine: project.manifest.execution.engine,
+        image: project.manifest.execution.image,
+        manifest: project.manifest,
+        repositoryRoot: workspaceDir(id),
+        command: item.command,
+        prepareCommand: project.installCommandSpec ?? project.manifest.commands.install,
+        dependencyCache,
+        networkName: egress?.handle.name,
+        proxyUrl: egress?.handle.proxyUrl
+      });
+      result = await runAllowlistedCommand({
+        command: {
+          executable: invocation.executable,
+          args: invocation.args,
+          timeoutMs: item.command.timeoutMs ?? 600_000
+        },
+        cwd: rootDir,
+        env: {},
+        allowedExecutables: [project.manifest.execution.engine],
+        maxLogBytes: project.manifest.budget.maxLogBytes
+      });
+    } finally {
+      if (egress) await egress.controller.teardown(egress.handle);
+    }
     stageResults.push({
       stage: item.stage,
       command: item.command,
@@ -1076,7 +1086,7 @@ export async function applyRepairSession(id: string, project: ProjectConfig, opt
   const session = await readRepairSession(id);
   if (!session) throw new Error("repair_session_not_found");
   if (session.validation?.status !== "passed") throw new Error("repair_validation_required");
-  const sourceRoot = path.resolve(project.projectPath);
+  const sourceRoot = projectSourceRoot(project.projectPath);
   if (await treeDigest(sourceRoot) !== session.baseSourceSha256) throw new Error("source_changed");
   const files = await scanChanges(session);
   if (files.some((item) => item.risk === "forbidden")) throw new Error("repair_contains_forbidden_change");

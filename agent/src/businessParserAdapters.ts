@@ -1,5 +1,11 @@
 import { spawn } from "node:child_process";
 import ts from "typescript";
+import { parse as parseNativeAst, registerDynamicLanguage } from "@ast-grep/napi";
+import goLanguage from "@ast-grep/lang-go";
+import rustLanguage from "@ast-grep/lang-rust";
+import javaLanguage from "@ast-grep/lang-java";
+import rubyLanguage from "@ast-grep/lang-ruby";
+import phpLanguage from "@ast-grep/lang-php";
 import type { BusinessCapabilityEdgeKind, BusinessCapabilityNodeKind } from "./businessCapabilityGraph.js";
 
 export interface ParserSourceFile {
@@ -33,8 +39,16 @@ export interface ParsedBusinessFile {
   diagnostics: string[];
 }
 
+export interface BusinessParser {
+  id: string;
+  supports: (file: ParserSourceFile) => boolean;
+  parse: (file: ParserSourceFile) => ParsedBusinessFile | Promise<ParsedBusinessFile>;
+}
+
 const requestMethods = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
 const authNames = new Set(["requireauth", "requirelogin", "authenticate", "authorization", "protectedroute", "authguard", "useauth", "isauthenticated", "permission", "role"]);
+
+registerDynamicLanguage({ go: goLanguage, rust: rustLanguage, java: javaLanguage, ruby: rubyLanguage, php: phpLanguage });
 
 function normaliseRoute(value: string) {
   return value.replace(/^https?:\/\/[^/]+/i, "").replace(/[?#].*$/, "")
@@ -439,11 +453,175 @@ function parseHtmlFile(file: ParserSourceFile): ParsedBusinessFile {
   return { adapter: "html-markup", facts, relations: [], diagnostics: [] };
 }
 
+type NativeLanguage = "go" | "rust" | "java" | "ruby" | "php";
+
+function nativeAstRouteFact(file: ParserSourceFile, language: NativeLanguage): ParsedBusinessFile {
+  const facts: ParsedBusinessFact[] = [];
+  const seen = new Set<string>();
+  const root = parseNativeAst(language, file.source).root();
+  const javaPrefix = language === "java" ? file.source.match(/@RequestMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/i)?.[1] ?? "" : "";
+  const add = (node: { text(): string; range(): { start: { line: number } } }, method: string, route: string, framework: string) => {
+    const normalized = normaliseRoute(route);
+    const key = `${language}:${method}:${normalized}:${node.range().start.line}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    facts.push({ key, kind: "api-route", label: `${method} ${normalized}`, line: node.range().start.line + 1, confidence: "high", metadata: { route: normalized, method, framework, extraction: "ast" } });
+  };
+  type NativeAstNode = { kind(): unknown; text(): string; children(): unknown[]; range(): { start: { line: number } } };
+  const visit = (node: NativeAstNode) => {
+    const text = node.text();
+    const kind = String(node.kind());
+    if (language === "go" && ["call_expression", "selector_expression"].includes(kind)) {
+      const match = text.match(/(?:HandleFunc|Handle|Get|Post|Put|Patch|Delete|Head|Options)\s*\(\s*["`]([^"`]+)["`]/i);
+      if (match) {
+        const verb = text.match(/(?:^|\.)(Get|Post|Put|Patch|Delete|Head|Options)\s*\(/i)?.[1]?.toUpperCase() ?? "ANY";
+        add(node, verb, match[1], "go-http");
+      }
+    } else if (language === "rust" && kind === "call_expression") {
+      const match = text.match(/\.route\s*\(\s*["`]([^"`]+)["`]\s*,\s*(get|post|put|patch|delete|head|options)\s*\(/i);
+      if (match) add(node, match[2].toUpperCase(), match[1], "axum");
+    } else if (language === "java" && kind === "method_declaration") {
+      const match = text.match(/@(Get|Post|Put|Patch|Delete)Mapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/i);
+      if (match) add(node, ({ Get: "GET", Post: "POST", Put: "PUT", Patch: "PATCH", Delete: "DELETE" } as Record<string, string>)[match[1]] ?? "ANY", `${javaPrefix}${match[2]}`, "spring");
+    } else if (language === "ruby" && kind === "call") {
+      const match = text.match(/\b(get|post|put|patch|delete)\s+["']([^"']+)["']/i);
+      if (match) add(node, match[1].toUpperCase(), match[2], "sinatra-rails");
+      const resource = text.match(/\bresources?\s+:([A-Za-z_]\w*)/i);
+      if (resource) add(node, "REST", `/${resource[1]}`, "rails");
+    } else if (language === "php" && kind === "scoped_call_expression") {
+      const match = text.match(/(?:Route|router|app)::?(?:get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']/i);
+      const method = text.match(/(?:Route|router|app)::?(get|post|put|patch|delete)/i)?.[1];
+      if (match && method) add(node, method.toUpperCase(), match[1], /^Route::/i.test(text.trim()) ? "laravel" : "php-router");
+    }
+    for (const child of node.children()) visit(child as NativeAstNode);
+  };
+  visit(root as unknown as NativeAstNode);
+  return { adapter: `${language}-ast-grep`, facts, relations: [], diagnostics: [] };
+}
+
+function parseNativeAstFile(file: ParserSourceFile, language: NativeLanguage): ParsedBusinessFile {
+  return nativeAstRouteFact(file, language);
+}
+
+// Backend-heavy stacks that ship HTTP routes (Go/Rust/Java/Ruby/PHP) used to
+// fall through to the TypeScript parser and produce zero capability nodes, so
+// projects in those stacks had no business flows for the planner to bind — the
+// same bare-HTML gap that parseHtmlFile closes for static sites. These adapters
+// extract HTTP route registrations from each stack's idiomatic syntax with the
+// same regex approach parseHtmlFile uses, producing api-route nodes the planner
+// turns into per-endpoint business paths.
+const goVerbs = ["get", "post", "put", "patch", "delete", "head", "options"];
+
+function parseGoFile(file: ParserSourceFile): ParsedBusinessFile {
+  const facts: ParsedBusinessFact[] = [];
+  const source = file.source;
+  for (const match of source.matchAll(/\.(Get|Post|Put|Patch|Delete|Head|Options)\s*\(\s*"([^"]+)"/gi)) {
+    const method = match[1].toLowerCase();
+    if (!goVerbs.includes(method)) continue;
+    const route = normaliseRoute(match[2]);
+    facts.push({ key: `go:route:${match.index ?? 0}:${method}:${route}`, kind: "api-route", label: `${method.toUpperCase()} ${route}`, line: htmlLineOf(source, match.index ?? 0), confidence: "medium", metadata: { route, method: method.toUpperCase(), framework: "go-http", extraction: "regex-heuristic" } });
+  }
+  for (const match of source.matchAll(/\b(?:HandleFunc|Handle)\s*\(\s*"([^"]+)"/g)) {
+    const route = normaliseRoute(match[1]);
+    facts.push({ key: `go:handle:${match.index ?? 0}:${route}`, kind: "api-route", label: `ANY ${route}`, line: htmlLineOf(source, match.index ?? 0), confidence: "low", metadata: { route, method: "ANY", framework: "go-http", extraction: "regex-heuristic" } });
+  }
+  return { adapter: "go-source", facts, relations: [], diagnostics: ["heuristic_regex_parser:go"] };
+}
+
+const rustVerbs = ["get", "post", "put", "patch", "delete", "head", "options"];
+
+function parseRustFile(file: ParserSourceFile): ParsedBusinessFile {
+  const facts: ParsedBusinessFact[] = [];
+  const source = file.source;
+  for (const match of source.matchAll(/\.route\s*\(\s*"([^"]+)"\s*,\s*(get|post|put|patch|delete|head|options)\s*\(/gi)) {
+    const method = match[2].toLowerCase();
+    if (!rustVerbs.includes(method)) continue;
+    const route = normaliseRoute(match[1]);
+    facts.push({ key: `rust:route:${match.index ?? 0}:${method}:${route}`, kind: "api-route", label: `${method.toUpperCase()} ${route}`, line: htmlLineOf(source, match.index ?? 0), confidence: "medium", metadata: { route, method: method.toUpperCase(), framework: "axum", extraction: "regex-heuristic" } });
+  }
+  for (const match of source.matchAll(/web::(get|post|put|patch|delete)\s*\(\s*\)\s*\.to/gi)) {
+    facts.push({ key: `rust:actix:${match.index ?? 0}`, kind: "handler", label: `${match[1]} handler`, line: htmlLineOf(source, match.index ?? 0), confidence: "low", metadata: { method: match[1].toUpperCase(), framework: "actix-web" } });
+  }
+  return { adapter: "rust-source", facts, relations: [], diagnostics: ["heuristic_regex_parser:rust"] };
+}
+
+const javaVerbs: Record<string, string> = { Get: "GET", Post: "POST", Put: "PUT", Patch: "PATCH", Delete: "DELETE" };
+
+function parseJavaFile(file: ParserSourceFile): ParsedBusinessFile {
+  const facts: ParsedBusinessFact[] = [];
+  const source = file.source;
+  const classMapping = /@RequestMapping\s*\(\s*(?:value\s*=\s*)?"([^"]+)"/.exec(source)?.[1];
+  const prefix = classMapping ? normaliseRoute(classMapping) : "";
+  for (const match of source.matchAll(/@(Get|Post|Put|Patch|Delete)Mapping\s*\(\s*(?:value\s*=\s*)?"([^"]+)"/g)) {
+    const method = javaVerbs[match[1]] ?? "ANY";
+    const route = normaliseRoute((prefix + match[2]) || "/");
+    facts.push({ key: `java:route:${match.index ?? 0}:${method}:${route}`, kind: "api-route", label: `${method} ${route}`, line: htmlLineOf(source, match.index ?? 0), confidence: "medium", metadata: { route, method, framework: "spring", extraction: "regex-heuristic" } });
+  }
+  for (const match of source.matchAll(/@RequestMapping\s*\(\s*(?:value\s*=\s*)?"([^"]+)"[^)]*method\s*=\s*RequestMethod\.(\w+)/g)) {
+    const route = normaliseRoute((prefix + match[1]) || "/");
+    const method = match[2].toUpperCase();
+    facts.push({ key: `java:rm:${match.index ?? 0}:${method}:${route}`, kind: "api-route", label: `${method} ${route}`, line: htmlLineOf(source, match.index ?? 0), confidence: "medium", metadata: { route, method, framework: "spring", extraction: "regex-heuristic" } });
+  }
+  return { adapter: "java-source", facts, relations: [], diagnostics: ["heuristic_regex_parser:java"] };
+}
+
+function parseRubyFile(file: ParserSourceFile): ParsedBusinessFile {
+  const facts: ParsedBusinessFact[] = [];
+  const source = file.source;
+  for (const match of source.matchAll(/\b(get|post|put|patch|delete)\s+['"]([^'"]+)['"]/gi)) {
+    const method = match[1].toLowerCase();
+    const route = normaliseRoute(match[2]);
+    facts.push({ key: `ruby:route:${match.index ?? 0}:${method}:${route}`, kind: "api-route", label: `${method.toUpperCase()} ${route}`, line: htmlLineOf(source, match.index ?? 0), confidence: "medium", metadata: { route, method: method.toUpperCase(), framework: "sinatra-rails", extraction: "regex-heuristic" } });
+  }
+  for (const match of source.matchAll(/\bresources?\s+:([A-Za-z_]\w*)/gi)) {
+    facts.push({ key: `ruby:resource:${match.index ?? 0}:${match[1]}`, kind: "api-route", label: `REST ${match[1]}`, line: htmlLineOf(source, match.index ?? 0), confidence: "medium", metadata: { route: `/${match[1]}`, method: "REST", framework: "rails" } });
+  }
+  return { adapter: "ruby-source", facts, relations: [], diagnostics: ["heuristic_regex_parser:ruby"] };
+}
+
+function parsePhpFile(file: ParserSourceFile): ParsedBusinessFile {
+  const facts: ParsedBusinessFact[] = [];
+  const source = file.source;
+  for (const match of source.matchAll(/->\s*(get|post|put|patch|delete)\s*\(\s*['"]([^'"]+)['"]/gi)) {
+    const method = match[1].toLowerCase();
+    const route = normaliseRoute(match[2]);
+    facts.push({ key: `php:route:${match.index ?? 0}:${method}:${route}`, kind: "api-route", label: `${method.toUpperCase()} ${route}`, line: htmlLineOf(source, match.index ?? 0), confidence: "medium", metadata: { route, method: method.toUpperCase(), framework: "slim-laravel", extraction: "regex-heuristic" } });
+  }
+  for (const match of source.matchAll(/Route::(get|post|put|patch|delete)\s*\(\s*['"]([^'"]+)['"]/gi)) {
+    const method = match[1].toLowerCase();
+    const route = normaliseRoute(match[2]);
+    facts.push({ key: `php:laravel:${match.index ?? 0}:${method}:${route}`, kind: "api-route", label: `${method.toUpperCase()} ${route}`, line: htmlLineOf(source, match.index ?? 0), confidence: "medium", metadata: { route, method: method.toUpperCase(), framework: "laravel", extraction: "regex-heuristic" } });
+  }
+  return { adapter: "php-source", facts, relations: [], diagnostics: ["heuristic_regex_parser:php"] };
+}
+
+export const businessParserRegistry: BusinessParser[] = [
+  { id: "html-markup", supports: (file) => /\.html?$/i.test(file.relative), parse: parseHtmlFile },
+  { id: "go-ast", supports: (file) => /\.go$/i.test(file.relative), parse: (file) => parseNativeAstFile(file, "go") },
+  { id: "rust-ast", supports: (file) => /\.rs$/i.test(file.relative), parse: (file) => parseNativeAstFile(file, "rust") },
+  { id: "java-ast", supports: (file) => /\.java$/i.test(file.relative), parse: (file) => parseNativeAstFile(file, "java") },
+  { id: "ruby-ast", supports: (file) => /\.rb$/i.test(file.relative), parse: (file) => parseNativeAstFile(file, "ruby") },
+  { id: "php-ast", supports: (file) => /\.php$/i.test(file.relative), parse: (file) => parseNativeAstFile(file, "php") },
+  { id: "go-heuristic-fallback", supports: (file) => /\.go$/i.test(file.relative), parse: parseGoFile },
+  { id: "rust-heuristic-fallback", supports: (file) => /\.rs$/i.test(file.relative), parse: parseRustFile },
+  { id: "java-heuristic-fallback", supports: (file) => /\.java$/i.test(file.relative), parse: parseJavaFile },
+  { id: "ruby-heuristic-fallback", supports: (file) => /\.rb$/i.test(file.relative), parse: parseRubyFile },
+  { id: "php-heuristic-fallback", supports: (file) => /\.php$/i.test(file.relative), parse: parsePhpFile },
+  { id: "python-ast", supports: (file) => /\.py$/i.test(file.relative), parse: parseFastApi },
+  { id: "vue-ast", supports: (file) => /\.vue$/i.test(file.relative), parse: (file) => parseTypeScriptFile(file, "vue") },
+  { id: "next-ast", supports: (file) => /(?:^|\/)(?:app|pages)\//i.test(file.relative), parse: (file) => parseTypeScriptFile(file, "next") },
+  { id: "typescript-ast", supports: (file) => /\.(?:[cm]?[jt]sx?)$/i.test(file.relative), parse: (file) => parseTypeScriptFile(file, "react") }
+];
+
 export async function parseBusinessSource(file: ParserSourceFile): Promise<ParsedBusinessFile> {
-  if (/\.html?$/i.test(file.relative)) return parseHtmlFile(file);
-  if (/\.py$/i.test(file.relative)) return parseFastApi(file);
-  if (/\.vue$/i.test(file.relative)) return parseTypeScriptFile(file, "vue");
-  if (/(?:^|\/)(?:app|pages)\//i.test(file.relative)) return parseTypeScriptFile(file, "next");
-  if (/\.(?:[cm]?[jt]sx?)$/i.test(file.relative)) return parseTypeScriptFile(file, "react");
-  return parseTypeScriptFile(file, "typescript");
+  const index = businessParserRegistry.findIndex((candidate) => candidate.supports(file));
+  const parser = index >= 0 ? businessParserRegistry[index] : undefined;
+  if (!parser) return parseTypeScriptFile(file, "typescript");
+  try { return await parser.parse(file); }
+  catch (error) {
+    const fallback = businessParserRegistry.slice(index + 1).find((candidate) => candidate.supports(file));
+    if (!fallback) throw error;
+    const parsed = await fallback.parse(file);
+    return { ...parsed, diagnostics: [`ast_parser_unavailable:${error instanceof Error ? error.message : String(error)}`, ...parsed.diagnostics] };
+  }
 }

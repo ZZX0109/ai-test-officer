@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { acceptsExecutionResult, isIdempotentReplay, runEventStore, SqliteRunEventStore } from "../src/runEventStore.js";
+import { durableGateLeaseRecoveryDecision } from "../src/durableGateLeaseRecovery.js";
+import { shouldPauseAfterCommittedRunEvent } from "../src/faultInjection.js";
 
 export async function testRunEventStore() {
   const suffix = randomUUID();
@@ -37,13 +39,62 @@ export async function testRunEventStore() {
   assert.equal(acceptsExecutionResult(collectingProjection, { workerAttemptId: "late-attempt", executionGeneration: 4 }), false);
   assert.equal(acceptsExecutionResult(collectingProjection, { workerAttemptId: `attempt-${suffix}`, executionGeneration: 3 }), false);
   assert.equal(acceptsExecutionResult(run, { workerAttemptId: `attempt-${suffix}`, executionGeneration: 4 }), false, "a Worker result is accepted only after evidence collection is durably published");
-  run = await runEventStore.append({ runId, type: "run_paused", expectedVersion: 6, actor: "tester", idempotencyKey: `pause-${suffix}` });
+  run = await runEventStore.append({ runId, type: "run_retrying", expectedVersion: 6, actor: "lease-recovery", idempotencyKey: `retry-${suffix}` });
+  assert.equal(run.state, "queued", "an expired Worker lease must create a fresh durable queue generation");
+  assert.equal(run.activeExecutionAttemptId, undefined);
+  assert.equal(run.executionGeneration, undefined);
+  assert.equal(acceptsExecutionResult({ ...run, state: "collecting" }, { workerAttemptId: `attempt-${suffix}`, executionGeneration: 4 }), false, "the old Worker generation stays fenced after retry");
+  run = await runEventStore.append({ runId, type: "run_paused", expectedVersion: 7, actor: "tester", idempotencyKey: `pause-${suffix}` });
   assert.equal(run.state, "paused");
   assert.equal(run.executionStatus, "waiting-user");
-  run = await runEventStore.append({ runId, type: "run_resumed", expectedVersion: 7, actor: "tester", idempotencyKey: `resume-${suffix}` });
-  assert.equal(run.state, "running");
+  run = await runEventStore.append({ runId, type: "run_resumed", expectedVersion: 8, actor: "tester", idempotencyKey: `resume-${suffix}` });
+  assert.equal(run.state, "queued");
   assert.equal(run.executionStatus, "running");
-  assert.equal((await runEventStore.events(runId)).length, 8);
+  assert.equal((await runEventStore.events(runId)).length, 9);
+
+  const persistedGateRun = {
+    ...run,
+    state: "judging" as const,
+    runKind: "path" as const,
+    input: { ...run.input, requirement: "gate-after-commit" },
+    machineGate: {
+      status: "pass" as const,
+      reasons: [],
+      reasonDetails: [],
+      assertionFailures: [],
+      evidenceComplete: true
+    }
+  };
+  const persistedGateRecovery = durableGateLeaseRecoveryDecision(persistedGateRun);
+  assert.equal(persistedGateRecovery.eventType, "run_completed", "a committed verified Gate finalizes instead of replaying external execution");
+  assert.equal(persistedGateRecovery.payload.finalStatus, "pass");
+  assert.equal(persistedGateRecovery.payload.recoveryReason, "worker_lease_expired_after_gate_commit");
+  const stalledCheckpointRecovery = durableGateLeaseRecoveryDecision(persistedGateRun, "stalled_judging_checkpoint_after_gate_commit");
+  assert.equal(stalledCheckpointRecovery.eventType, "run_completed");
+  assert.equal(stalledCheckpointRecovery.payload.recoveryReason, "stalled_judging_checkpoint_after_gate_commit");
+  assert.equal(
+    shouldPauseAfterCommittedRunEvent({ run: persistedGateRun, eventType: "run_judging" }, {
+      FAULT_INJECTION_ENABLED: "1",
+      FAULT_INJECTION_RULES_B64: Buffer.from(JSON.stringify([
+        { eventType: "plan_approved", requirement: "approval-after-commit", runKind: "parent" },
+        { eventType: "run_judging", requirement: "gate-after-commit", runKind: "path" }
+      ])).toString("base64url")
+    }),
+    true,
+    "the crash checkpoint requires both process configuration and one exact event/Run rule"
+  );
+  assert.equal(
+    shouldPauseAfterCommittedRunEvent({ run: persistedGateRun, eventType: "run_judging" }, {
+      FAULT_INJECTION_ENABLED: "1",
+      FAULT_INJECTION_RULES_B64: Buffer.from(JSON.stringify([
+        { eventType: "run_judging", requirement: "other-run", runKind: "path" }
+      ])).toString("base64url")
+    }),
+    false
+  );
+  const noGateRecovery = durableGateLeaseRecoveryDecision({ ...persistedGateRun, machineGate: undefined });
+  assert.equal(noGateRecovery.eventType, "run_blocked", "a malformed judging checkpoint must fail closed rather than manufacture pass");
+  assert.equal(noGateRecovery.payload.finalStatus, "blocked");
 
   const legacyCompletedId = `legacy_completed_${suffix}`;
   let legacyCompleted = await runEventStore.create({ runId: legacyCompletedId, actor: "tester", idempotencyKey: `legacy-create-${suffix}` });

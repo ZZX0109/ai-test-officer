@@ -78,6 +78,15 @@ assert.equal(resolveFinalStatus({
   judgeRecommendation: { status: "pass", summary: "wrong", evidenceRefs: [] },
   humanDecision: { status: "approved", actor: "reviewer", reason: "override", decidedAt: "2026-07-14T00:00:00.000Z" }
 }), "fail");
+assert.equal(resolveFinalStatus({
+  machineGate: { status: "blocked", reasons: ["missing_artifact"], assertionFailures: [], evidenceComplete: false },
+  judgeRecommendation: { status: "pass", summary: "wrong", evidenceRefs: [] },
+  humanDecision: { status: "approved", actor: "reviewer", reason: "override", decidedAt: "2026-07-14T00:00:00.000Z" }
+}), "blocked");
+assert.equal(resolveFinalStatus({
+  machineGate: { status: "needs-human-review", reasons: ["ambiguous"], assertionFailures: [], evidenceComplete: true },
+  judgeRecommendation: { status: "pass", summary: "wrong", evidenceRefs: [] }
+}), "needs-human-review");
 assert.equal(defaultResourceBudget.maxAttempts, 2);
 const browserDecisionWithReason = browserActionDecisionSchema.parse({
   schemaVersion: "1.0",

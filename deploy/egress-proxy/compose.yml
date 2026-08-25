@@ -1,0 +1,23 @@
+services:
+  egress-proxy:
+    build: .
+    environment:
+      PORT: "3128"
+      ATO_EGRESS_ALLOWED_HOSTS: ${ATO_EGRESS_ALLOWED_HOSTS:?set an explicit comma-separated allowlist}
+      ATO_EGRESS_ALLOWED_PORTS: ${ATO_EGRESS_ALLOWED_PORTS:-80,443}
+      ATO_EGRESS_POLICY_SECRET: ${ATO_EGRESS_POLICY_SECRET:-}
+      ATO_EGRESS_AUDIT_FILE: /var/log/ato/egress.jsonl
+    volumes:
+      - egress-audit:/var/log/ato
+    networks:
+      - ato-egress
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3128/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+networks:
+  ato-egress:
+    name: ${ATO_EGRESS_NETWORK_NAME:-ato-egress-default}
+volumes:
+  egress-audit:

@@ -6,6 +6,7 @@ import { getScenario, hasScenario } from "./scenarios.js";
 import type { LlmPlanningAdvice } from "./llmPlanningAdvisor.js";
 import type { DiscoveryConnectivityResult } from "./smokeFirstDiscovery.js";
 import type { BusinessFunction, ProjectOverview } from "./businessFunctionCompiler.js";
+import { mergeRuntimeBusinessPaths, type RuntimePathObservation } from "./businessRuntimePathMerge.js";
 
 export type PlanningPhase = "clarifying" | "draft-ready";
 export type BusinessFlowStatus = "executable" | "auto-bindable" | "needs-input" | "coverage-gap";
@@ -43,6 +44,8 @@ export interface PlannedBusinessFlow {
   oracleCandidates?: string[];
   requiredEvidenceKinds?: string[];
   sourceLocations?: BusinessSourceLocation[];
+  runtimeObserved?: boolean;
+  runtimeEvidenceRefs?: string[];
 }
 
 export interface PlanningConversationResult {
@@ -192,6 +195,7 @@ function buildFlows(input: {
   goal: string;
   comprehensive: boolean;
   discoveryReadiness?: DiscoveryConnectivityResult;
+  runtimeObservations?: RuntimePathObservation[];
 }): PlannedBusinessFlow[] {
   const runtimeBlocked = Boolean(input.discoveryReadiness && input.discoveryReadiness.status !== "ready");
   // A full scan is a code-derived inventory first. Runtime readiness decides
@@ -226,12 +230,12 @@ function buildFlows(input: {
     ? `运行时页面预检尚未完成（${input.discoveryReadiness?.reason ?? "等待页面状态"}）；该代码路径已列入清单，确认执行时会先恢复页面状态再绑定动作与 oracle。`
     : undefined;
   if (input.capabilityGraph) {
-    const compiled = compileBusinessPaths({
+    const compiled = mergeRuntimeBusinessPaths(compileBusinessPaths({
       graph: input.capabilityGraph,
       goal: input.goal,
       comprehensive: input.comprehensive,
       browserEnabled: supportsBrowserDiscovery
-    });
+    }), input.runtimeObservations ?? []);
     for (const path of compiled) {
       const primarySurface = path.surfaces.includes("page") ? "page"
         : path.surfaces.includes("api") ? "api"
@@ -259,7 +263,9 @@ function buildFlows(input: {
         requiredEvidenceKinds: path.requiredEvidenceKinds,
         sourceNodeIds: path.sourceNodeIds,
         sourceCount: path.sourceNodeIds.length,
-        sourceLocations: path.sourceLocations
+        sourceLocations: path.sourceLocations,
+        runtimeObserved: path.runtimeObserved,
+        runtimeEvidenceRefs: path.runtimeEvidenceRefs
       });
     }
     // Existing verified scenarios are retained as separate executable
@@ -443,6 +449,7 @@ export function buildPlanningConversation(input: {
   capabilityGraph?: BusinessCapabilityGraph;
   analysis: IntakeAnalysis;
   discoveryReadiness?: DiscoveryConnectivityResult;
+  runtimeObservations?: RuntimePathObservation[];
 }): PlanningConversationResult {
   // Only user messages are requirements. Assistant copy often contains the
   // words “全面扫描” as an instruction hint; including it here made every
@@ -469,7 +476,8 @@ export function buildPlanningConversation(input: {
     analysis: input.analysis,
     goal: goalText,
     comprehensive,
-    discoveryReadiness: input.discoveryReadiness
+    discoveryReadiness: input.discoveryReadiness,
+    runtimeObservations: input.runtimeObservations
   });
   const loginSignals = input.graph.nodes.some((node) => /login|signin|auth|登录|认证/i.test(`${node.label} ${node.file ?? ""}`));
   const loginAnswered = /无需登录|不需要登录|测试账号|账号[:：]|用户名|密码|已配置登录/i.test(fullText);

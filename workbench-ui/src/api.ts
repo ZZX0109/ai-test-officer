@@ -52,6 +52,7 @@ import type {
   StorageArchive,
   StorageStatus,
   TargetAppRuntime,
+  ReadinessReport,
   PatrolTrend
 } from "./types";
 import { getAccessToken } from "./auth";
@@ -1435,11 +1436,42 @@ export function getStorageStatus() {
   return request<{ storage: StorageStatus }>("/api/storage/status");
 }
 
-// First-run readiness gate: Docker/Podman availability is checked BEFORE the
+// First-run readiness gate: Docker availability is checked BEFORE the
 // Workbench attempts to start a project, so a missing runtime surfaces as a
 // clear prerequisite prompt instead of failing mid-startup.
-export function getReadiness(engine: "docker" | "podman" = "docker") {
-  return request<{ docker: { available: boolean; engine: "docker" | "podman" } }>(`/api/readiness?engine=${engine}`);
+export function getReadiness() {
+  return request<{ docker: { available: boolean; engine: "docker" } }>("/api/readiness");
+}
+
+export function getProjectReadiness(projectId: string) {
+  return request<{ report: ReadinessReport }>(`/v1/projects/${encodeURIComponent(projectId)}/readiness`);
+}
+
+export function bootstrapProject(projectId: string, dryRun = false) {
+  return request<{
+    bootstrapId?: string;
+    status: "dry-run" | "running" | "completed" | "blocked" | "failed";
+    report: ReadinessReport;
+    steps: Array<{ id: string; status: string; message: string; updatedAt: string }>;
+  }>(`/v1/projects/${encodeURIComponent(projectId)}/bootstrap`, {
+    method: "POST",
+    body: JSON.stringify({ dryRun })
+  });
+}
+
+export function getRunReviewCase(runId: string) {
+  return request<{ reviewCase: import("./types").ReviewCase | null }>(`/v1/runs/${encodeURIComponent(runId)}/review-case`);
+}
+
+export function checkProjectCredentialSetup(projectId: string, modelCredentialId?: string) {
+  return request<{
+    projectId: string;
+    status: "ready" | "blocked";
+    checks: Array<{ id: string; status: "ready" | "blocked"; message: string; remediation?: string }>;
+  }>(`/v1/projects/${encodeURIComponent(projectId)}/credential-setup/check`, {
+    method: "POST",
+    body: JSON.stringify(modelCredentialId ? { modelCredentialId } : {})
+  });
 }
 
 export function getSecuritySummary() {

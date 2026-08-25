@@ -1,16 +1,13 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
 import { agentGraphProjectionSchema, type AgentGraphProjection } from "@ai-test-officer/contracts";
+import { getDatabasePool } from "./databaseRuntime.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const file = path.join(rootDir, "reports", "agent-graph", "projections.json");
-let postgresPool: Pool | undefined;
 
 function pool() {
-  if (!process.env.DATABASE_URL) return undefined;
-  postgresPool ??= new Pool({ connectionString: process.env.DATABASE_URL });
-  return postgresPool;
+  return getDatabasePool();
 }
 
 async function readLocal(): Promise<Record<string, AgentGraphProjection>> {

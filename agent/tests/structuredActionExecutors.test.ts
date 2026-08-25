@@ -7,6 +7,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { projectManifestSchema } from "@ai-test-officer/contracts";
 import { executeStructuredAction } from "../src/structuredActionExecutors.js";
+import { closeDatabasePools, databasePoolStats, getDatabasePool } from "../src/databaseRuntime.js";
 import { runStructuredReActLoop } from "../src/react/structuredLoop.js";
 import { createDynamicBrowserCoverageItems, createManifestCoverageItems } from "../src/coverageStore.js";
 import type { ProjectConfig } from "../src/types.js";
@@ -16,6 +17,14 @@ function sha256(value: string) {
 }
 
 export async function testStructuredActionExecutors() {
+  const sharedConnection = "postgres://test-user:test-password@127.0.0.1:65432/test_db";
+  const firstPool = getDatabasePool(sharedConnection);
+  const secondPool = getDatabasePool(sharedConnection);
+  assert.ok(firstPool);
+  assert.equal(firstPool, secondPool, "all repositories must reuse one Pool per connection string");
+  assert.equal(databasePoolStats().filter((item) => item.connectionHash).length > 0, true);
+  await closeDatabasePools();
+
   const dynamicCoverage = createDynamicBrowserCoverageItems({
     runId: "run-dynamic-dispositions",
     paths: [
@@ -25,9 +34,13 @@ export async function testStructuredActionExecutors() {
     ]
   });
   assert.equal(dynamicCoverage.find((item) => item.flowId === "login")?.disposition, "pending");
+  assert.equal(dynamicCoverage.find((item) => item.flowId === "login")?.binding?.status, "pending");
+  assert.equal(dynamicCoverage.find((item) => item.flowId === "login")?.budget?.maxBrowserActionCalls, 6);
   assert.equal(dynamicCoverage.find((item) => item.flowId === "approval")?.disposition, "blocked");
+  assert.equal(dynamicCoverage.find((item) => item.flowId === "approval")?.binding?.status, "needs-input");
   assert.match(dynamicCoverage.find((item) => item.flowId === "approval")?.dispositionReason ?? "", /business_path_needs_input/);
   assert.equal(dynamicCoverage.find((item) => item.flowId === "unknown")?.disposition, "blocked");
+  assert.equal(dynamicCoverage.find((item) => item.flowId === "unknown")?.binding?.status, "coverage-gap");
   assert.match(dynamicCoverage.find((item) => item.flowId === "unknown")?.dispositionReason ?? "", /business_path_coverage_gap/);
 
   const directory = await mkdtemp(path.join(tmpdir(), "ato-structured-"));
@@ -72,6 +85,7 @@ export async function testStructuredActionExecutors() {
     apiOperations: [
       { operationId: "listTasks", method: "GET", pathTemplate: "/api/tasks", baseUrlRef: "backend", allowedStatusCodes: [200] },
       { operationId: "getTask", method: "GET", pathTemplate: "/api/tasks/{id}", baseUrlRef: "backend", allowedStatusCodes: [200], fixtureRef: "api-params" },
+      { operationId: "unsafeWrite", method: "POST", pathTemplate: "/api/tasks", baseUrlRef: "backend", allowedStatusCodes: [201], fixtureRef: "api-params" },
       { operationId: "jobStatus", method: "GET", pathTemplate: "/api/job", baseUrlRef: "backend", allowedStatusCodes: [200] }
     ],
     dataSources: [{
@@ -122,7 +136,9 @@ export async function testStructuredActionExecutors() {
       })
     });
     assert.equal(coverage.some((item) => item.flowId === "api:listTasks" && item.disposition === "pending" && item.structuredPlan), true);
+    assert.equal(coverage.find((item) => item.flowId === "api:listTasks")?.budget?.maxTotalTokens, 5_000);
     assert.equal(coverage.some((item) => item.flowId === "api:getTask" && item.disposition === "pending"), true);
+    assert.equal(coverage.some((item) => item.flowId === "api:unsafeWrite" && item.disposition === "blocked" && item.dispositionReason === "mutable_api_operation_idempotency_contract_missing"), true);
     assert.equal(coverage.some((item) => item.flowId === "api:deleteTask" && item.disposition === "blocked"), true);
     assert.equal(coverage.some((item) => item.flowId === "data:fixture-db:active-tasks" && item.disposition === "blocked"), true);
     assert.equal(coverage.some((item) => item.flowId === "job:analysis-job" && item.disposition === "pending"), true);
@@ -144,6 +160,17 @@ export async function testStructuredActionExecutors() {
     });
     assert.equal(parameterizedApi.passed, true);
     assert.equal(parameterizedApi.payload.path, "/api/tasks/1");
+    await assert.rejects(
+      executeStructuredAction({
+        action: { action: "api-request", operationId: "unsafeWrite", oracleId: "write-forbidden" },
+        manifest,
+        project,
+        target: { frontendUrl: baseUrl, backendUrl: baseUrl },
+        runId: "run-write",
+        actionId: "write-task"
+      }),
+      /mutable_api_operation_idempotency_contract_missing/
+    );
     await assert.rejects(
       executeStructuredAction({
         action: { action: "api-request", operationId: "arbitraryUrl", oracleId: "forbidden" },

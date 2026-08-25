@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "title": "AI Test Officer Operational SLO",
+  "uid": "ato-operational-slo",
+  "tags": ["ai-test-officer", "slo", "fail-closed"],
+  "refresh": "30s",
+  "panels": [
+    { "type": "stat", "title": "Stalled Runs", "metric": "ai_test_officer_slo_stalled_runs", "severity": "critical" },
+    { "type": "stat", "title": "Missing Artifact Replicas", "metric": "ai_test_officer_slo_missing_artifact_replicas", "severity": "critical" },
+    { "type": "stat", "title": "Pending Outbox", "metric": "ai_test_officer_slo_pending_outbox", "severity": "warning" },
+    { "type": "stat", "title": "Expired Leases", "metric": "ai_test_officer_slo_expired_leases", "severity": "warning" },
+    { "type": "stat", "title": "SLO Availability", "metric": "ai_test_officer_slo_database_configured", "severity": "critical" },
+    { "type": "timeseries", "title": "Active Alerts", "metric": "ai_test_officer_slo_alert", "groupBy": ["alert_id", "severity"] }
+  ],
+  "provenance": "Template for a Prometheus/Grafana deployment; it is not a production dashboard execution report."
+}

@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
 import {
   agentMessageSchema,
   knowledgeConflictSchema,
@@ -16,15 +15,13 @@ import {
 } from "@ai-test-officer/contracts";
 import { publishKnowledgeLifecycle } from "./lifecycle.js";
 import { redactForModel } from "./redaction.js";
+import { getDatabasePool } from "../databaseRuntime.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const knowledgeRoot = path.join(rootDir, "reports", "knowledge");
-let postgresPool: Pool | undefined;
 
 function pool() {
-  if (!process.env.DATABASE_URL) return undefined;
-  postgresPool ??= new Pool({ connectionString: process.env.DATABASE_URL });
-  return postgresPool;
+  return getDatabasePool();
 }
 
 function canonicalize(value: unknown): unknown {

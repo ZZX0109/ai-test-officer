@@ -1,0 +1,716 @@
+{
+  "schemaVersion": "1.0",
+  "datasetId": "experience-memory-sealed-v1",
+  "status": "labels-ready-provider-run-required",
+  "purpose": "固定五十条查询、相关经验标签、同义表达、跨项目表达和无关干扰项；不把标签集冒充语义检索结果。",
+  "queryCount": 50,
+  "requiredMetrics": [
+    "Recall@5",
+    "Recall@10",
+    "MRR",
+    "false-recall-rate",
+    "source-traceability"
+  ],
+  "cases": [
+    {
+      "queryId": "memory_q_001",
+      "query": "登录按钮改名后找不到",
+      "expectedFailureType": "selector_not_found",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "selector_not_found",
+      "relevantEntryIds": [
+        "label_selector_not_found"
+      ],
+      "distractorEntryIds": [
+        "label_timeout",
+        "label_network_error"
+      ]
+    },
+    {
+      "queryId": "memory_q_002",
+      "query": "提交按钮的选择器漂移了",
+      "expectedFailureType": "selector_not_found",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "selector_not_found",
+      "relevantEntryIds": [
+        "label_selector_not_found"
+      ],
+      "distractorEntryIds": [
+        "label_timeout",
+        "label_network_error"
+      ]
+    },
+    {
+      "queryId": "memory_q_003",
+      "query": "页面元素存在但旧 selector 无法定位",
+      "expectedFailureType": "selector_not_found",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "selector_not_found",
+      "relevantEntryIds": [
+        "label_selector_not_found"
+      ],
+      "distractorEntryIds": [
+        "label_timeout",
+        "label_network_error"
+      ]
+    },
+    {
+      "queryId": "memory_q_004",
+      "query": "跨项目的表单控件名称发生变化",
+      "expectedFailureType": "selector_not_found",
+      "projectType": "external-project",
+      "paraphraseGroup": "selector_not_found",
+      "relevantEntryIds": [
+        "label_selector_not_found"
+      ],
+      "distractorEntryIds": [
+        "label_timeout",
+        "label_network_error"
+      ]
+    },
+    {
+      "queryId": "memory_q_005",
+      "query": "组件重构导致按钮定位失败",
+      "expectedFailureType": "selector_not_found",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "selector_not_found",
+      "relevantEntryIds": [
+        "label_selector_not_found"
+      ],
+      "distractorEntryIds": [
+        "label_timeout",
+        "label_network_error"
+      ]
+    },
+    {
+      "queryId": "memory_q_006",
+      "query": "异步列表一直没有完成",
+      "expectedFailureType": "timeout",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "timeout",
+      "relevantEntryIds": [
+        "label_timeout"
+      ],
+      "distractorEntryIds": [
+        "label_assertion_failed",
+        "label_page_crash"
+      ]
+    },
+    {
+      "queryId": "memory_q_007",
+      "query": "后台任务超过等待时间",
+      "expectedFailureType": "timeout",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "timeout",
+      "relevantEntryIds": [
+        "label_timeout"
+      ],
+      "distractorEntryIds": [
+        "label_assertion_failed",
+        "label_page_crash"
+      ]
+    },
+    {
+      "queryId": "memory_q_008",
+      "query": "慢接口导致页面操作超时",
+      "expectedFailureType": "timeout",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "timeout",
+      "relevantEntryIds": [
+        "label_timeout"
+      ],
+      "distractorEntryIds": [
+        "label_assertion_failed",
+        "label_page_crash"
+      ]
+    },
+    {
+      "queryId": "memory_q_009",
+      "query": "跨项目的加载状态长期不结束",
+      "expectedFailureType": "timeout",
+      "projectType": "external-project",
+      "paraphraseGroup": "timeout",
+      "relevantEntryIds": [
+        "label_timeout"
+      ],
+      "distractorEntryIds": [
+        "label_assertion_failed",
+        "label_page_crash"
+      ]
+    },
+    {
+      "queryId": "memory_q_010",
+      "query": "网络变慢后步骤没有在预算内返回",
+      "expectedFailureType": "timeout",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "timeout",
+      "relevantEntryIds": [
+        "label_timeout"
+      ],
+      "distractorEntryIds": [
+        "label_assertion_failed",
+        "label_page_crash"
+      ]
+    },
+    {
+      "queryId": "memory_q_011",
+      "query": "页面显示了错误的业务结果",
+      "expectedFailureType": "assertion_failed",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "assertion_failed",
+      "relevantEntryIds": [
+        "label_assertion_failed"
+      ],
+      "distractorEntryIds": [
+        "label_network_error",
+        "label_auth_failure"
+      ]
+    },
+    {
+      "queryId": "memory_q_012",
+      "query": "断言文本与期望值不一致",
+      "expectedFailureType": "assertion_failed",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "assertion_failed",
+      "relevantEntryIds": [
+        "label_assertion_failed"
+      ],
+      "distractorEntryIds": [
+        "label_network_error",
+        "label_auth_failure"
+      ]
+    },
+    {
+      "queryId": "memory_q_013",
+      "query": "成功提示没有出现",
+      "expectedFailureType": "assertion_failed",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "assertion_failed",
+      "relevantEntryIds": [
+        "label_assertion_failed"
+      ],
+      "distractorEntryIds": [
+        "label_network_error",
+        "label_auth_failure"
+      ]
+    },
+    {
+      "queryId": "memory_q_014",
+      "query": "跨项目的状态判断失败",
+      "expectedFailureType": "assertion_failed",
+      "projectType": "external-project",
+      "paraphraseGroup": "assertion_failed",
+      "relevantEntryIds": [
+        "label_assertion_failed"
+      ],
+      "distractorEntryIds": [
+        "label_network_error",
+        "label_auth_failure"
+      ]
+    },
+    {
+      "queryId": "memory_q_015",
+      "query": "机器 Oracle 检测到预期不符",
+      "expectedFailureType": "assertion_failed",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "assertion_failed",
+      "relevantEntryIds": [
+        "label_assertion_failed"
+      ],
+      "distractorEntryIds": [
+        "label_network_error",
+        "label_auth_failure"
+      ]
+    },
+    {
+      "queryId": "memory_q_016",
+      "query": "请求返回 503",
+      "expectedFailureType": "network_error",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "network_error",
+      "relevantEntryIds": [
+        "label_network_error"
+      ],
+      "distractorEntryIds": [
+        "label_page_crash",
+        "label_data_mismatch"
+      ]
+    },
+    {
+      "queryId": "memory_q_017",
+      "query": "接口连接被中断",
+      "expectedFailureType": "network_error",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "network_error",
+      "relevantEntryIds": [
+        "label_network_error"
+      ],
+      "distractorEntryIds": [
+        "label_page_crash",
+        "label_data_mismatch"
+      ]
+    },
+    {
+      "queryId": "memory_q_018",
+      "query": "跨项目的 API 请求失败",
+      "expectedFailureType": "network_error",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "network_error",
+      "relevantEntryIds": [
+        "label_network_error"
+      ],
+      "distractorEntryIds": [
+        "label_page_crash",
+        "label_data_mismatch"
+      ]
+    },
+    {
+      "queryId": "memory_q_019",
+      "query": "网络响应格式错误",
+      "expectedFailureType": "network_error",
+      "projectType": "external-project",
+      "paraphraseGroup": "network_error",
+      "relevantEntryIds": [
+        "label_network_error"
+      ],
+      "distractorEntryIds": [
+        "label_page_crash",
+        "label_data_mismatch"
+      ]
+    },
+    {
+      "queryId": "memory_q_020",
+      "query": "目标服务拒绝连接",
+      "expectedFailureType": "network_error",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "network_error",
+      "relevantEntryIds": [
+        "label_network_error"
+      ],
+      "distractorEntryIds": [
+        "label_page_crash",
+        "label_data_mismatch"
+      ]
+    },
+    {
+      "queryId": "memory_q_021",
+      "query": "浏览器页面崩溃",
+      "expectedFailureType": "page_crash",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "page_crash",
+      "relevantEntryIds": [
+        "label_page_crash"
+      ],
+      "distractorEntryIds": [
+        "label_auth_failure",
+        "label_environment_issue"
+      ]
+    },
+    {
+      "queryId": "memory_q_022",
+      "query": "渲染进程意外退出",
+      "expectedFailureType": "page_crash",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "page_crash",
+      "relevantEntryIds": [
+        "label_page_crash"
+      ],
+      "distractorEntryIds": [
+        "label_auth_failure",
+        "label_environment_issue"
+      ]
+    },
+    {
+      "queryId": "memory_q_023",
+      "query": "切换路由后页面白屏并关闭",
+      "expectedFailureType": "page_crash",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "page_crash",
+      "relevantEntryIds": [
+        "label_page_crash"
+      ],
+      "distractorEntryIds": [
+        "label_auth_failure",
+        "label_environment_issue"
+      ]
+    },
+    {
+      "queryId": "memory_q_024",
+      "query": "跨项目的 SPA 页面崩溃",
+      "expectedFailureType": "page_crash",
+      "projectType": "external-project",
+      "paraphraseGroup": "page_crash",
+      "relevantEntryIds": [
+        "label_page_crash"
+      ],
+      "distractorEntryIds": [
+        "label_auth_failure",
+        "label_environment_issue"
+      ]
+    },
+    {
+      "queryId": "memory_q_025",
+      "query": "浏览器上下文丢失",
+      "expectedFailureType": "page_crash",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "page_crash",
+      "relevantEntryIds": [
+        "label_page_crash"
+      ],
+      "distractorEntryIds": [
+        "label_auth_failure",
+        "label_environment_issue"
+      ]
+    },
+    {
+      "queryId": "memory_q_026",
+      "query": "登录凭据被拒绝",
+      "expectedFailureType": "auth_failure",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "auth_failure",
+      "relevantEntryIds": [
+        "label_auth_failure"
+      ],
+      "distractorEntryIds": [
+        "label_data_mismatch",
+        "label_flaky_test"
+      ]
+    },
+    {
+      "queryId": "memory_q_027",
+      "query": "权限不足无法访问页面",
+      "expectedFailureType": "auth_failure",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "auth_failure",
+      "relevantEntryIds": [
+        "label_auth_failure"
+      ],
+      "distractorEntryIds": [
+        "label_data_mismatch",
+        "label_flaky_test"
+      ]
+    },
+    {
+      "queryId": "memory_q_028",
+      "query": "跨项目的会话过期",
+      "expectedFailureType": "auth_failure",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "auth_failure",
+      "relevantEntryIds": [
+        "label_auth_failure"
+      ],
+      "distractorEntryIds": [
+        "label_data_mismatch",
+        "label_flaky_test"
+      ]
+    },
+    {
+      "queryId": "memory_q_029",
+      "query": "认证回调失败",
+      "expectedFailureType": "auth_failure",
+      "projectType": "external-project",
+      "paraphraseGroup": "auth_failure",
+      "relevantEntryIds": [
+        "label_auth_failure"
+      ],
+      "distractorEntryIds": [
+        "label_data_mismatch",
+        "label_flaky_test"
+      ]
+    },
+    {
+      "queryId": "memory_q_030",
+      "query": "用户角色不能完成授权操作",
+      "expectedFailureType": "auth_failure",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "auth_failure",
+      "relevantEntryIds": [
+        "label_auth_failure"
+      ],
+      "distractorEntryIds": [
+        "label_data_mismatch",
+        "label_flaky_test"
+      ]
+    },
+    {
+      "queryId": "memory_q_031",
+      "query": "数据库记录与页面内容不一致",
+      "expectedFailureType": "data_mismatch",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "data_mismatch",
+      "relevantEntryIds": [
+        "label_data_mismatch"
+      ],
+      "distractorEntryIds": [
+        "label_environment_issue",
+        "label_other"
+      ]
+    },
+    {
+      "queryId": "memory_q_032",
+      "query": "接口返回的数据不是预期对象",
+      "expectedFailureType": "data_mismatch",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "data_mismatch",
+      "relevantEntryIds": [
+        "label_data_mismatch"
+      ],
+      "distractorEntryIds": [
+        "label_environment_issue",
+        "label_other"
+      ]
+    },
+    {
+      "queryId": "memory_q_033",
+      "query": "跨项目的金额字段不匹配",
+      "expectedFailureType": "data_mismatch",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "data_mismatch",
+      "relevantEntryIds": [
+        "label_data_mismatch"
+      ],
+      "distractorEntryIds": [
+        "label_environment_issue",
+        "label_other"
+      ]
+    },
+    {
+      "queryId": "memory_q_034",
+      "query": "提交后列表没有反映新数据",
+      "expectedFailureType": "data_mismatch",
+      "projectType": "external-project",
+      "paraphraseGroup": "data_mismatch",
+      "relevantEntryIds": [
+        "label_data_mismatch"
+      ],
+      "distractorEntryIds": [
+        "label_environment_issue",
+        "label_other"
+      ]
+    },
+    {
+      "queryId": "memory_q_035",
+      "query": "数据快照与 Oracle 不一致",
+      "expectedFailureType": "data_mismatch",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "data_mismatch",
+      "relevantEntryIds": [
+        "label_data_mismatch"
+      ],
+      "distractorEntryIds": [
+        "label_environment_issue",
+        "label_other"
+      ]
+    },
+    {
+      "queryId": "memory_q_036",
+      "query": "项目依赖没有安装成功",
+      "expectedFailureType": "environment_issue",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "environment_issue",
+      "relevantEntryIds": [
+        "label_environment_issue"
+      ],
+      "distractorEntryIds": [
+        "label_flaky_test",
+        "label_selector_not_found"
+      ]
+    },
+    {
+      "queryId": "memory_q_037",
+      "query": "端口被占用导致启动失败",
+      "expectedFailureType": "environment_issue",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "environment_issue",
+      "relevantEntryIds": [
+        "label_environment_issue"
+      ],
+      "distractorEntryIds": [
+        "label_flaky_test",
+        "label_selector_not_found"
+      ]
+    },
+    {
+      "queryId": "memory_q_038",
+      "query": "跨项目的运行时健康检查失败",
+      "expectedFailureType": "environment_issue",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "environment_issue",
+      "relevantEntryIds": [
+        "label_environment_issue"
+      ],
+      "distractorEntryIds": [
+        "label_flaky_test",
+        "label_selector_not_found"
+      ]
+    },
+    {
+      "queryId": "memory_q_039",
+      "query": "容器缺少系统库",
+      "expectedFailureType": "environment_issue",
+      "projectType": "external-project",
+      "paraphraseGroup": "environment_issue",
+      "relevantEntryIds": [
+        "label_environment_issue"
+      ],
+      "distractorEntryIds": [
+        "label_flaky_test",
+        "label_selector_not_found"
+      ]
+    },
+    {
+      "queryId": "memory_q_040",
+      "query": "测试环境无法连接依赖服务",
+      "expectedFailureType": "environment_issue",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "environment_issue",
+      "relevantEntryIds": [
+        "label_environment_issue"
+      ],
+      "distractorEntryIds": [
+        "label_flaky_test",
+        "label_selector_not_found"
+      ]
+    },
+    {
+      "queryId": "memory_q_041",
+      "query": "同一用例有时通过有时失败",
+      "expectedFailureType": "flaky_test",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "flaky_test",
+      "relevantEntryIds": [
+        "label_flaky_test"
+      ],
+      "distractorEntryIds": [
+        "label_other",
+        "label_timeout"
+      ]
+    },
+    {
+      "queryId": "memory_q_042",
+      "query": "重试后成功但首次结果不稳定",
+      "expectedFailureType": "flaky_test",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "flaky_test",
+      "relevantEntryIds": [
+        "label_flaky_test"
+      ],
+      "distractorEntryIds": [
+        "label_other",
+        "label_timeout"
+      ]
+    },
+    {
+      "queryId": "memory_q_043",
+      "query": "跨项目的等待竞态导致偶发失败",
+      "expectedFailureType": "flaky_test",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "flaky_test",
+      "relevantEntryIds": [
+        "label_flaky_test"
+      ],
+      "distractorEntryIds": [
+        "label_other",
+        "label_timeout"
+      ]
+    },
+    {
+      "queryId": "memory_q_044",
+      "query": "并发运行时结果不一致",
+      "expectedFailureType": "flaky_test",
+      "projectType": "external-project",
+      "paraphraseGroup": "flaky_test",
+      "relevantEntryIds": [
+        "label_flaky_test"
+      ],
+      "distractorEntryIds": [
+        "label_other",
+        "label_timeout"
+      ]
+    },
+    {
+      "queryId": "memory_q_045",
+      "query": "相同输入的重复运行不一致",
+      "expectedFailureType": "flaky_test",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "flaky_test",
+      "relevantEntryIds": [
+        "label_flaky_test"
+      ],
+      "distractorEntryIds": [
+        "label_other",
+        "label_timeout"
+      ]
+    },
+    {
+      "queryId": "memory_q_046",
+      "query": "无法归类的测试异常",
+      "expectedFailureType": "other",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "other",
+      "relevantEntryIds": [
+        "label_other"
+      ],
+      "distractorEntryIds": [
+        "label_selector_not_found",
+        "label_assertion_failed"
+      ]
+    },
+    {
+      "queryId": "memory_q_047",
+      "query": "日志不足以判断根因",
+      "expectedFailureType": "other",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "other",
+      "relevantEntryIds": [
+        "label_other"
+      ],
+      "distractorEntryIds": [
+        "label_selector_not_found",
+        "label_assertion_failed"
+      ]
+    },
+    {
+      "queryId": "memory_q_048",
+      "query": "跨项目的未知失败",
+      "expectedFailureType": "other",
+      "projectType": "fixture-project",
+      "paraphraseGroup": "other",
+      "relevantEntryIds": [
+        "label_other"
+      ],
+      "distractorEntryIds": [
+        "label_selector_not_found",
+        "label_assertion_failed"
+      ]
+    },
+    {
+      "queryId": "memory_q_049",
+      "query": "需要人工复核的异常",
+      "expectedFailureType": "other",
+      "projectType": "external-project",
+      "paraphraseGroup": "other",
+      "relevantEntryIds": [
+        "label_other"
+      ],
+      "distractorEntryIds": [
+        "label_selector_not_found",
+        "label_assertion_failed"
+      ]
+    },
+    {
+      "queryId": "memory_q_050",
+      "query": "现有故障分类无法覆盖的症状",
+      "expectedFailureType": "other",
+      "projectType": "cross-framework",
+      "paraphraseGroup": "other",
+      "relevantEntryIds": [
+        "label_other"
+      ],
+      "distractorEntryIds": [
+        "label_selector_not_found",
+        "label_assertion_failed"
+      ]
+    }
+  ]
+}

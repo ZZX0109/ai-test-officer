@@ -27,3 +27,9 @@ The system protects credentials, requirement and diff text, screenshots, DOM/net
 Trusted local execution remains available only as an explicit compatibility choice. OCI dependency installation and the target process share one ephemeral container workspace; stopping the container removes installed dependencies and build output without modifying the uploaded source directory.
 
 Release findings without valid evidence references are rejected or downgraded to `needs_review`. Simulated and fallback results remain visible as such.
+
+`agent/tests/securityAdversarialMatrix.test.ts` is the local table-driven
+regression matrix for untrusted requirement, diff, DOM, network, OpenAPI and
+Artifact payloads plus cross-project, viewer and expired-grant authorization
+cases. It must remain separate from the still-required malicious OCI target,
+live multi-tenant deployment and provider-side red-team exercises.

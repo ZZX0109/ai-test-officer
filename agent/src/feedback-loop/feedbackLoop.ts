@@ -16,7 +16,8 @@ import {
 } from "@ai-test-officer/contracts";
 import { getMemoryService } from "../memory/index.js";
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
+import type { Pool } from "pg";
+import { getDatabasePool } from "../databaseRuntime.js";
 
 // ─── Repair experience recall ────────────────────────────────────
 
@@ -83,7 +84,7 @@ export class FeedbackLoop {
 
   constructor(store?: FeedbackStore, connectionString = process.env.DATABASE_URL) {
     this.store = store ?? createStore();
-    this.pool = !store && connectionString ? new Pool({ connectionString, max: 2 }) : undefined;
+    this.pool = !store ? getDatabasePool(connectionString) : undefined;
   }
 
   // ─── Step 1: Detect Failure ──────────────────────────────────
@@ -377,7 +378,8 @@ export class FeedbackLoop {
     return counts;
   }
 
-  async close(): Promise<void> { await this.pool?.end(); }
+  /** The process-wide database runtime owns pool shutdown. */
+  async close(): Promise<void> { return Promise.resolve(); }
 
   // ─── Private ────────────────────────────────────────────────
 

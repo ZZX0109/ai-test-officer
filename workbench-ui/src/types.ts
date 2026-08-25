@@ -17,6 +17,40 @@ export interface Credential {
   }>;
 }
 
+export type ReadinessStatus = "ready" | "repairable" | "blocked";
+export interface ReadinessCheck {
+  id: string;
+  status: ReadinessStatus;
+  severity: "info" | "warning" | "error";
+  message: string;
+  evidence: string[];
+  remediation?: string;
+  requiredBy: string[];
+  updatedAt: string;
+}
+export interface ReadinessReport {
+  projectId: string;
+  status: ReadinessStatus;
+  checks: ReadinessCheck[];
+  generatedAt: string;
+  bootstrapId?: string;
+}
+export interface ReviewCase {
+  id: string;
+  category: string;
+  severity: "low" | "medium" | "high" | "critical";
+  title: string;
+  explanation: string;
+  whatWasTried: string[];
+  evidenceRefs: string[];
+  requiredDecision: string;
+  nextAction: string;
+  cta: string;
+  canRetry: boolean;
+  canResume: boolean;
+  createdAt: string;
+}
+
 export interface GrayPlan {
   sessionName: string;
   risks: Array<{ id: string; level: string; title: string; evidence: string }>;
@@ -81,6 +115,12 @@ export interface LlmInvocation {
   fallbackReason?: string;
   fallbackImpact?: string;
   finalStatusImpact?: string;
+  // Truncated (~2 KB) previews of the request prompt, model response, and any
+  // provider reasoning text — let the trajectory show "what the model was
+  // asked / answered / reasoned" the way DSH's agent turn view does.
+  inputPreview?: string;
+  outputPreview?: string;
+  reasoningPreview?: string;
   usage: {
     promptTokens?: number;
     cachedPromptTokens?: number;
@@ -880,7 +920,7 @@ export interface ProjectConfig {
     network: { mode: "deny" | "allow-target" | "allowlist"; allowedHosts: string[] };
     fixtures: Array<{ id: string; path: string; sha256: string; destructive: boolean }>;
     capabilities: { browser: boolean; desktop: boolean; allowedBundleIds: string[] };
-    execution: { mode: "oci" | "trusted-local"; image?: string; engine: "docker" | "podman" };
+    execution: { mode: "oci" | "trusted-local"; image?: string; engine: "docker" };
     budget: {
       runTimeoutMs: number;
       prepareTimeoutMs: number;

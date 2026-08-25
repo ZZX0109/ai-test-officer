@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { runOutcomeSummaryV2Schema } from "@ai-test-officer/contracts";
 import type { ArtifactV2, MachineGate } from "@ai-test-officer/contracts";
 import { deriveGateEligible, validateProofBundle } from "../src/proof/proofBundleValidator.js";
-import { buildProofBundleId } from "../src/proof/proofBundleService.js";
+import { buildProofBundleId, finalizeProofBundle } from "../src/proof/proofBundleService.js";
 import type { ArtifactIntegrityReport, EvidenceItem } from "../src/types.js";
 
 function makeEvidence(id: string, type: EvidenceItem["type"] = "operation"): EvidenceItem {
@@ -70,6 +71,17 @@ export function testProofBundleValidator() {
   assert.deepEqual(complete.minimalEvidenceSet, ["ev_1"]);
   assert.deepEqual(complete.gateReasonEvidence, [{ code: "oracle_failed", summary: "x", evidenceRefs: ["ev_1"] }]);
   assert.deepEqual(complete.issues, []);
+
+  // A PASS must carry at least one explicit claim/oracle/conclusion linkage;
+  // arbitrary non-empty evidence is not enough to establish grounding.
+  const passWithoutClaim = validateProofBundle({
+    evidence: [makeEvidence("ev_unbound")],
+    artifactsV2: [makeArtifact("screenshot")],
+    artifactIntegrity: makeIntegrityReport(),
+    machineGate: makeMachineGate()
+  });
+  assert.equal(passWithoutClaim.evidenceGrounded, false);
+  assert.ok(passWithoutClaim.issues.includes("pass_claim_missing"));
 
   // A claim referencing evidence that does not exist is not grounded.
   const dangling = validateProofBundle({
@@ -163,4 +175,126 @@ export function testProofBundleValidator() {
   assert.equal(deriveGateEligible({ artifactIntegrityVerified: true, evidenceGrounded: true }, { executionSucceeded: true, requirementCovered: true }), true);
   assert.equal(deriveGateEligible({ artifactIntegrityVerified: false, evidenceGrounded: true }, { executionSucceeded: true, requirementCovered: true }), false);
   assert.equal(deriveGateEligible({ artifactIntegrityVerified: true, evidenceGrounded: true }, { executionSucceeded: false, requirementCovered: true }), false);
+
+  const identityMismatch = finalizeProofBundle({
+    draft: { status: "pass", reasons: [], reasonDetails: [{ code: "proof", summary: "verified", evidenceRefs: ["ev_1"] }], assertionFailures: [] },
+    runId: "run_1",
+    scenarioId: "scenario_1",
+    attemptId: "attempt_1",
+    evidence: [makeEvidence("ev_1")],
+    artifactsV2: [{ ...makeArtifact("screenshot"), runId: "other-run" }],
+    artifactIntegrity: makeIntegrityReport(),
+    requiredArtifactKinds: ["screenshot"],
+    gateEligibleFacts: { executionSucceeded: true, requirementCovered: true }
+  });
+  assert.equal(identityMismatch.machineGate.status, "blocked");
+  assert.ok(identityMismatch.verdict.issues.includes("artifact_run_mismatch:artifact_screenshot"));
+
+  const notExecuted = finalizeProofBundle({
+    draft: { status: "pass", reasons: [], reasonDetails: [{ code: "proof", summary: "verified", evidenceRefs: ["ev_1"] }], assertionFailures: [] },
+    runId: "run_1",
+    scenarioId: "scenario_1",
+    attemptId: "attempt_1",
+    evidence: [makeEvidence("ev_1")],
+    artifactsV2: [makeArtifact("screenshot")],
+    artifactIntegrity: makeIntegrityReport(),
+    requiredArtifactKinds: ["screenshot"],
+    gateEligibleFacts: { executionSucceeded: false, requirementCovered: false }
+  });
+  assert.equal(notExecuted.machineGate.status, "blocked");
+
+  // A screenshot from the right Run but the wrong Attempt is still injected
+  // evidence; the minting boundary must reject it just like a cross-Run item.
+  const attemptMismatch = finalizeProofBundle({
+    draft: { status: "pass", reasons: [], reasonDetails: [{ code: "proof", summary: "verified", evidenceRefs: ["ev_1"] }], assertionFailures: [] },
+    runId: "run_1",
+    scenarioId: "scenario_1",
+    attemptId: "attempt_1",
+    evidence: [makeEvidence("ev_1")],
+    artifactsV2: [{ ...makeArtifact("screenshot"), attemptId: "attempt_2" }],
+    artifactIntegrity: makeIntegrityReport(),
+    requiredArtifactKinds: ["screenshot"],
+    gateEligibleFacts: { executionSucceeded: true, requirementCovered: true }
+  });
+  assert.equal(attemptMismatch.machineGate.status, "blocked");
+  assert.ok(attemptMismatch.verdict.issues.includes("artifact_attempt_mismatch:artifact_screenshot"));
+
+  // Fixture-only evidence without a manifest is not runtime proof.
+  const fixtureOnly = validateProofBundle({
+    evidence: [makeEvidence("ev_1")],
+    artifactsV2: [makeArtifact("screenshot", "fixture")],
+    artifactIntegrity: makeIntegrityReport(),
+    requiredArtifactKinds: ["screenshot"]
+  });
+  assert.equal(fixtureOnly.evidenceComplete, false);
+  assert.ok(fixtureOnly.issues.some((issue) => issue.includes("screenshot")));
+
+  // Evidence records cannot point at an artifact that is absent from the
+  // persisted bundle; a dangling screenshot reference is a credibility error.
+  const danglingArtifact = validateProofBundle({
+    evidence: [{ ...makeEvidence("ev_1"), artifactIds: ["artifact_missing"] }],
+    artifactsV2: [makeArtifact("screenshot")],
+    artifactIntegrity: makeIntegrityReport(),
+    requiredArtifactKinds: ["screenshot"]
+  });
+  assert.equal(danglingArtifact.evidenceComplete, false);
+  assert.ok(danglingArtifact.issues.includes("evidence artifact ref not found in bundle: ev_1:artifact_missing"));
+
+  // An Oracle with no evidence refs was planned but never observed.
+  const oracleNotExecuted = validateProofBundle({
+    evidence: [makeEvidence("ev_1")],
+    artifactsV2: [makeArtifact("screenshot")],
+    artifactIntegrity: makeIntegrityReport(),
+    requiredArtifactKinds: ["screenshot"],
+    oracles: [{
+      id: "oracle_unexecuted",
+      pathId: "path_1",
+      assertionName: "business state",
+      expectedFrom: "requirement",
+      preconditions: [],
+      action: "click",
+      postconditions: ["state changed"],
+      requiresHumanConfirmation: false,
+      evidenceRefs: []
+    }]
+  });
+  assert.equal(oracleNotExecuted.evidenceComplete, false);
+  assert.ok(oracleNotExecuted.issues.includes("oracle not executed: oracle_unexecuted"));
+
+  // A full screenshot cannot turn a failed business assertion into a pass.
+  const businessFailure = finalizeProofBundle({
+    draft: {
+      status: "fail",
+      reasons: ["assertion_failed"],
+      reasonDetails: [{ code: "assertion_failed", summary: "订单状态错误", evidenceRefs: ["ev_1"] }],
+      assertionFailures: ["order status"]
+    },
+    runId: "run_1",
+    scenarioId: "scenario_1",
+    attemptId: "attempt_1",
+    evidence: [makeEvidence("ev_1", "assertion")],
+    artifactsV2: [makeArtifact("screenshot")],
+    artifactIntegrity: makeIntegrityReport(),
+    requiredArtifactKinds: ["screenshot"],
+    gateEligibleFacts: { executionSucceeded: true, requirementCovered: true }
+  });
+  assert.equal(businessFailure.machineGate.status, "fail");
+  assert.equal(businessFailure.verdict.evidenceComplete, true);
+
+  // An LLM/Judge pass is advisory and cannot override a failed Machine Gate.
+  const judgePassMachineFail = runOutcomeSummaryV2Schema.safeParse({
+    schemaVersion: "2.0",
+    schedulingCompleted: true,
+    executionStarted: true,
+    executionSucceeded: true,
+    requirementCovered: true,
+    requirementPassed: true,
+    artifactIntegrityVerified: true,
+    evidenceGrounded: true,
+    gateEligible: true,
+    machineGate: { status: "fail", reasons: [], reasonDetails: [], assertionFailures: ["business"], evidenceComplete: true },
+    judgeRecommendation: { status: "pass", summary: "advisory only", evidenceRefs: ["ev_1"] },
+    finalStatus: "pass"
+  });
+  assert.equal(judgePassMachineFail.success, false);
 }

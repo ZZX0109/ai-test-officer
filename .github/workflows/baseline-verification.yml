@@ -1,0 +1,47 @@
+name: Clean Linux baseline verification
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 2 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: Clean install, quality, browser, benchmark and production acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CI: "1"
+      HEADLESS: "1"
+      NODE_ENV: development
+      AGENT_API_TOKEN: ci-local-token
+      PROJECT_ID: local_demo_app
+      APP_URL: http://localhost:6173
+      SCENARIO_ID: task_filter_completed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # The script begins with npm ci and Playwright Chromium installation and
+      # then performs every P0-1 command. It also fails when the checked-out
+      # worktree is dirty before or after execution.
+      - name: Run immutable baseline matrix
+        run: npm run baseline:verify
+      - name: Upload baseline and acceptance reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-linux-baseline-${{ github.run_id }}
+          path: |
+            reports/baseline-verification/latest.json
+            reports/baseline-verification/latest.md
+            reports/production-acceptance/latest.json
+            reports/shadow-graph/latest.json
+            reports/judge-eval/latest.json
+            reports/benchmark/**
+          if-no-files-found: warn

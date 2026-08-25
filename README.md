@@ -9,7 +9,7 @@
 
 ![AI Test Officer 当前版 Workbench：项目接入、测试规划、沙盒执行与证据裁决](docs/assets/ai-test-officer-workbench-v2.png)
 
-## 当前工程状态（2026-07-28）
+## 当前工程状态（2026-08-24）
 
 当前版本已经完成 LangGraph 编排、多路径执行、Artifact v2、证明图、选择性
 LLM、OCI 沙盒和修复工作区的主体实现，处于 **Active Graph 发布验收阶段**。
@@ -22,10 +22,10 @@ LLM、OCI 沙盒和修复工作区的主体实现，处于 **Active Graph 发布
 | TypeScript typecheck 与生产构建 | 通过 |
 | Todo / Order 浏览器可信度专项 | 各 3 次通过，并验证单路径失败隔离 |
 | compiled-plan smoke 与 Demo 证据链 | 通过 |
-| PostgreSQL / Redis / MinIO / Keycloak / API / worker Compose 验收 | 14/14 通过 |
+| PostgreSQL / Redis / MinIO / Keycloak / API / worker Compose 验收 | 由 `npm run acceptance:production` 复跑确认 |
 | Production `npm audit --omit=dev` | 0 个已知漏洞 |
 | Secret scan 与运行产物隔离 | 通过 |
-| 100 次 Shadow Graph 对照 | 待完成 |
+| 100 次 Shadow Graph 对照 | Synthetic topology 100/100 通过；不等同真实项目验收 |
 | 5 个异构真实项目 Active Graph 验收 | 待完成 |
 | evaluator 隔离的新密封盲测 | 待完成 |
 
@@ -162,7 +162,7 @@ Planner 输出必须通过 Action DSL、capability、selector、route、oracle�
 executed | excluded | blocked | pending
 ```
 
-- 一个全面测试对应一个 parent run，每条独立路径对应一个 path child run。
+- 一个全面测试对应一个 parent run；每条已具备 Runtime Binding 的可执行路径对应一个 path child run。仍为 `pending` 但没有当前执行器的候选会在派发前显式标记为 `blocked`，保留准确原因而不是被跳过。
 - 单路径失败不会停止其他独立路径；父 Run 等待全部 CoverageItem 有明确处置后再聚合 Gate。
 - `browser-action` 由 Playwright 执行。
 - `api-request` 只能调用 manifest 或 OpenAPI 中允许的 operation，不能接受模型任意 URL。
@@ -401,7 +401,7 @@ LangGraph 管理 `intake → discover → coverage → plan → compile → appr
 - `thread_id` 固定为 `runId`，生产 checkpoint 保存在 PostgreSQL 的独立 `langgraph` schema。
 - 生产环境以 PostgreSQL Run Event 作为业务状态事实源；开发环境（未设 `DATABASE_URL`）回退到本地 SQLite，其余证据/覆盖/凭据 Store 当前为 JSON 文件 + 内存缓存，统一到同一后端的改造进行中（见存储章节）。checkpoint 无权直接写 `finalStatus`。
 - `POST /v1/runs` 只负责认证、幂等创建、写入事件并启动 Graph，不在路由内同步跑完整 Planner。
-- allowlist 项目可使用 `active` Graph 作为正式调度权威；默认仍为 `shadow`，直至 100 次对照验收完成。
+- 产品运行使用 `active` Graph 作为唯一正式调度权威；`shadow` 只允许由隔离 benchmark harness 显式启动，不能暗中替代执行链。
 - Graph `execute` 节点通过 BullMQ 投递 path child run，worker 结果以持久化事件恢复同一 thread。
 - 节点幂等键包含 `runId + node + attempt + inputHash`，避免恢复后重复调用模型、入队或提交 Artifact。
 - LLM 不可用时，规则路径继续执行；不能可靠推理的路径进入人工复核。
@@ -586,20 +586,25 @@ npm run build                    # 生产构建
 npm run demo:verify              # Demo 证据链验证
 npm run test:unified-run         # /v1/runs 完整运行闭环
 npm run test:credibility-browser # 浏览器可信度专项
+npm run baseline:verify          # 记录安装、质量门禁、Benchmark 和生产验收基线
 npm --workspace @ai-test-officer/agent run test:compiled-plan
 npm run acceptance:production    # 完整生产 Compose 验收
+npm run package:review           # 生成可交给外部审阅者的脱敏源码包到桌面（已有同名包时拒绝覆盖）
 npm run acceptance:lock:verify   # 验收项目完整 commit SHA 锁定校验
 npm run contracts:generate       # OpenAPI 和 Workbench 类型生成
 
 npm run benchmark:run
 npm run benchmark:evaluate
 npm run benchmark:recompute-history
+npm run judge:repeat             # 预算受控的重复 Judge 实验
 
 npm run reports:retention
 npm run reports:retention:archive
 ```
 
 运行产物写入被 Git 忽略的 `reports/`，包括截图、Trace、DOM、日志、评估结果和后台进度。
+
+`baseline:verify` 会自行启动并健康检查本地服务后运行 Workbench E2E，并只在它自己创建 supervisor 时停止服务；每周的 `Clean Linux baseline verification` GitHub Actions 工作流在全新 Ubuntu Runner 上运行同一 fail-closed 矩阵并上传基线报告。
 
 ## Benchmark 与 AI 增益
 
@@ -643,6 +648,9 @@ llm_gain_not_proven
 - [Evidence-Grounded Testing](docs/evidence-grounded-method.md)
 - [Judge Evaluation](docs/judge-evaluation.md)
 - [Benchmark Report](docs/benchmark-report.md)
+- [Data Ownership and Consistency](docs/data-ownership.md)
+- [Typed Subgraph Boundaries](docs/typed-subgraphs.md)
+- [Reviewer Handoff](docs/reviewer-handoff.md)
 - [Research-Grounded Reliability Architecture](docs/research-grounded-reliability-architecture.md)
 
 ## 生产验收
@@ -672,10 +680,11 @@ npm run acceptance:production
 
 验收覆盖 OIDC、组织隔离、幂等创建、任务入队、active-attempt 唯一性、lease、暂停/恢复/取消、服务重启、Artifact 提交和失败回滚。Docker 不可用时结果是 `blocked`，不会回退 SQLite 后声称生产通过。
 
-截至 2026-07-28，本地完整 Compose 验收为 **14/14 通过**，还额外覆盖重复权限
-事件、worker 重启、过期 lease 接管、Redis 重连、MinIO 不可用回滚，以及
-PostgreSQL/API/worker 重启恢复。验收报告位于本地 `reports/production-acceptance/`
-并默认忽略，不将环境凭据或运行日志提交到 Git。
+完整 Compose 验收由 `npm run acceptance:production` 在一次性隔离栈中复跑，覆盖重复
+权限事件、Worker 重启、入队 Run 的 API 重启恢复、过期 lease 接管、Redis 重连、MinIO
+不可用回滚，以及 PostgreSQL/API/Worker 重启恢复。验收报告位于本地
+`reports/production-acceptance/` 并默认忽略，不将环境凭据或运行日志提交到 Git；只有报告
+实际显示 `passed` 时才可将对应服务级场景视为已验证。
 
 ## 环境变量
 
@@ -692,6 +701,10 @@ PostgreSQL/API/worker 重启恢复。验收报告位于本地 `reports/productio
 | `OIDC_JWKS_URL` | JWT key endpoint |
 | `ARTIFACT_S3_BUCKET` | Artifact bucket |
 | `ARTIFACT_S3_ENDPOINT` | S3/MinIO endpoint |
+| `ARTIFACT_RECONCILE_INTERVAL_MS` | Worker S3/PostgreSQL 对账间隔（默认 15 分钟） |
+| `EXECUTION_LEASE_RECOVERY_INTERVAL_MS` | 过期执行 Lease 的扫描与版本化重投递间隔（默认 10 秒） |
+| `JUDGING_RECOVERY_GRACE_MS` | 已提交 Gate 但 Graph checkpoint 停滞时的恢复宽限期（默认 120 秒）；恢复只落终局，不重跑路径 |
+| `PLAN_APPROVAL_RESUME_RECOVERY_GRACE_MS` | 已提交计划审批但 Graph 仍停在 `plan-approval` 时的恢复宽限期（默认 120 秒）；只恢复到权限边界，不自动授予能力 |
 | `AGENT_ORCHESTRATION_MODE` | `active`（默认）；设置为 `shadow` 可紧急回退到旧执行链 |
 | `LANGGRAPH_POSTGRES_SCHEMA` | LangGraph checkpoint schema，默认 `langgraph` |
 | `REPAIR_SANDBOX_ENABLED` | 是否允许创建隔离修复会话 |
@@ -726,8 +739,8 @@ PostgreSQL/API/worker 重启恢复。验收报告位于本地 `reports/productio
 - 内置浏览器是 Workbench 的可视化表面；Playwright 执行仍发生在隔离 BrowserContext 中。
 - macOS 桌面 helper 不是当前 Web 测试发布门槛；没有签名和系统权限时 desktop capability 为 `blocked`。
 - LLM 建议不能替代确定性断言、证据完整性和人工发布责任。
-- 当前默认仍为 Shadow Graph；完成 100 次状态对照、5 个异构真实项目 Active
-  验收和 evaluator 隔离盲测后，才会把 Active Graph 设为默认。
+- 当前产品默认是 Active Graph；100 次 Shadow 对照、5 个异构真实项目验收和 evaluator
+  隔离盲测仍是发布泛化结论的前置证据，不会被开发 fixture 结果替代。
 - 自动修复默认只修改沙盒副本。应用到原项目需要 maintainer 明确确认，且必须通过
   原文件 SHA-256 并发变化检查。
 

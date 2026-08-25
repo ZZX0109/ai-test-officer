@@ -101,9 +101,12 @@ export type ProjectRuntimeFailureReason =
   | "dependency_missing"
   | "port_conflict"
   | "early_exit"
+  | "migration_failed"
+  | "seed_failed"
   | "permission_denied"
   | "container_runtime_unavailable"
   | "container_image_unavailable"
+  | "egress_policy_not_configured"
   | "budget_exceeded"
   | "cancelled"
   | "unknown";
@@ -944,6 +947,7 @@ export interface EvidenceItem {
   url?: string;
   file?: string;
   locator?: EvidenceLocator;
+  canonicalSha256?: string;
   payload: Record<string, unknown>;
 }
 

@@ -1,0 +1,32 @@
+groups:
+  - name: ai-test-officer-slo
+    rules:
+      - alert: AtoOperationalSloUnavailable
+        expr: ai_test_officer_slo_alert{alert_id="slo_unavailable"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: AI Test Officer SLO metrics are unavailable
+          description: The release decision must remain blocked until the durable metrics source recovers.
+      - alert: AtoStalledRuns
+        expr: ai_test_officer_slo_stalled_runs > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: AI Test Officer has stalled Runs
+      - alert: AtoMissingArtifactReplica
+        expr: ai_test_officer_slo_missing_artifact_replicas > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: AI Test Officer has missing Artifact replicas
+      - alert: AtoOutboxBacklog
+        expr: ai_test_officer_slo_pending_outbox >= 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: AI Test Officer Outbox backlog is above the warning threshold

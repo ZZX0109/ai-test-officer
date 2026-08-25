@@ -173,11 +173,21 @@ function buildEvidenceJudge(input: JudgeInput): JudgeResult {
 }
 
 function buildReleaseJudge(planJudge: JudgeResult, evidenceJudge: JudgeResult, input: JudgeInput): JudgeResult {
-  const evidenceRefs = unique([
+  const findingEvidenceRefs = unique([
     ...planJudge.findings.flatMap((item) => item.evidenceRefs),
     ...evidenceJudge.findings.flatMap((item) => item.evidenceRefs),
     ...input.result.conflictPacket.evidenceRefs.slice(-8)
   ]);
+  // A successful deterministic run has no negative findings by design. It
+  // still needs to cite the positive, runtime-captured assertion/evidence
+  // chain; otherwise the release conclusion is ungrounded and every clean
+  // browser run is downgraded merely because it had nothing bad to report.
+  const evidenceRefs = findingEvidenceRefs.length ? findingEvidenceRefs : unique(
+    input.evidence
+      .filter((item) => item.type === "assertion" || item.type === "dom" || item.type === "screenshot" || item.type === "trace")
+      .slice(-8)
+      .map((item) => item.id)
+  );
   const shouldBlock = evidenceJudge.verdict === "fail";
   const primaryFailureClass = evidenceJudge.findings.find((item) => item.failureClass)?.failureClass;
   const missingCitation = evidenceRefs.length === 0;

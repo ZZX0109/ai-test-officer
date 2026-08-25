@@ -355,6 +355,7 @@ export async function testKnowledgeBoundaryPlatform() {
     "llmProvider.ts",
     // Credential capability probing does not produce a business decision.
     "server.ts",
+    "server/routes/credential-admin.routes.ts",
     "sophNetResponsesRunnable.ts",
     "knowledge-boundary/executeKnowledgeBoundedLlm.ts"
   ]);

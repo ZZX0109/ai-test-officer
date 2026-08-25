@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
+import { getDatabasePool } from "./databaseRuntime.js";
 import {
   llmBudgetLedgerSchema,
   llmBudgetSchema,
@@ -227,7 +227,8 @@ export async function reserveLlmBudget(input: {
     ...(input.scopeId ? { scopeId: input.scopeId } : {})
   };
   if (process.env.DATABASE_URL) {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+    const pool = getDatabasePool();
+    if (!pool) throw new Error("DATABASE_URL is required for durable LLM budget ledger");
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -248,7 +249,6 @@ export async function reserveLlmBudget(input: {
       throw error;
     } finally {
       client.release();
-      await pool.end();
     }
   } else {
     await withLocalLock(input.runId, async () => {
@@ -269,7 +269,8 @@ export async function finalizeLlmBudget(
     estimatedCostUsd: actual.estimatedCostUsd
   };
   if (process.env.DATABASE_URL) {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+    const pool = getDatabasePool();
+    if (!pool) throw new Error("DATABASE_URL is required for durable LLM budget ledger");
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -287,7 +288,6 @@ export async function finalizeLlmBudget(
       throw error;
     } finally {
       client.release();
-      await pool.end();
     }
   }
   return withLocalLock(reservation.runId, async () => {
@@ -306,13 +306,10 @@ export async function finalizeLlmBudget(
 
 export async function readLlmBudgetLedger(runId: string, budget?: LlmBudget) {
   if (process.env.DATABASE_URL) {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
-    try {
-      const result = await pool.query<{ payload: unknown }>("SELECT payload FROM llm_budget_ledger_v1 WHERE run_id=$1", [runId]);
-      return result.rows[0] ? llmBudgetLedgerSchema.parse(result.rows[0].payload) : createLedger(runId, llmBudgetSchema.parse(budget ?? {}));
-    } finally {
-      await pool.end();
-    }
+    const pool = getDatabasePool();
+    if (!pool) throw new Error("DATABASE_URL is required for durable LLM budget ledger");
+    const result = await pool.query<{ payload: unknown }>("SELECT payload FROM llm_budget_ledger_v1 WHERE run_id=$1", [runId]);
+    return result.rows[0] ? llmBudgetLedgerSchema.parse(result.rows[0].payload) : createLedger(runId, llmBudgetSchema.parse(budget ?? {}));
   }
   return readLocal(runId, llmBudgetSchema.parse(budget ?? {}));
 }

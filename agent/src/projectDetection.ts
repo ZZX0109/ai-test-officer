@@ -677,7 +677,9 @@ function sandboxManifest(input: {
     ],
     healthCheck: { path: input.healthCheckPath ?? "/", timeoutMs: 30_000 },
     environmentAllowlist: ["NODE_ENV", "FRONTEND_PORT", "BACKEND_PORT"],
-    network: { mode: "allow-target", allowedHosts: ["127.0.0.1", "localhost"] },
+    // Non-deny OCI runs must be attached to the operator-provisioned
+    // egress-only network. The worker fails closed if that binding is absent.
+    network: { mode: "allow-target", allowedHosts: ["127.0.0.1", "localhost"], enforcement: "external-egress-proxy" },
     fixtures: [],
     apiOperations: [],
     dataSources: [],

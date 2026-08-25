@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
+import { getDatabasePool } from "./databaseRuntime.js";
 import { llmCallSchema, type LlmBudget, type LlmCall } from "@ai-test-officer/contracts";
 import type { CredentialRecord } from "./types.js";
 import { publishLlmLifecycle } from "./llmLifecycle.js";
@@ -146,15 +146,27 @@ export function reserveLlmOutputTokens(input: {
   };
 }
 
+// Truncated (~2 KB) preview of the request prompt / model response so the
+// trajectory can show "what the model was asked / answered" the way DSH's agent
+// turn view does, without persisting the full (potentially large, source-laden)
+// messages into the run store. Mirrors the inputPreview/outputPreview fields
+// on llmCallSchema.
+function previewText(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > 2048 ? `${trimmed.slice(0, 2047)}…` : trimmed;
+}
+
 async function persist(call: LlmCall) {
   const directory = path.join(rootDir, "reports", "llm-calls", call.experimentId ?? call.runId ?? "unassigned");
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, `${call.id}.json`), JSON.stringify(call, null, 2));
   if (!process.env.DATABASE_URL) return;
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+  const pool = getDatabasePool();
+  if (!pool) return;
+  const client = await pool.connect();
   try {
-    const client = await pool.connect();
-    try {
       await client.query("BEGIN");
       await client.query(
         "INSERT INTO llm_calls_v1 (id, run_id, experiment_id, purpose, provider, model, request_id, status, duration_ms, usage, error_code, created_at, transport_attempts, invocation_json, completed_at, prompt_sha256, graph_version, model_profile_id, price_catalog_version, final_status_impact) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT (id) DO NOTHING",
@@ -191,9 +203,6 @@ async function persist(call: LlmCall) {
       throw error;
     } finally {
       client.release();
-    }
-  } finally {
-    await pool.end();
   }
 }
 
@@ -499,6 +508,11 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
         promptTokens,
         completionTokens
       });
+      const text = input.credential.provider === "anthropic"
+        ? data.content?.find((item) => item.type === "text")?.text ?? ""
+        : responsesApi
+          ? data.output_text ?? data.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text" || item.type === "text")?.text ?? ""
+          : data.choices?.[0]?.message?.content ?? "";
       const call = llmCallSchema.parse({
         id,
         ...input.context,
@@ -511,6 +525,8 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
         promptSha256: sha256(`${input.system}\n${input.prompt}`),
         inputSummarySha256: sha256(input.prompt),
         redactedInputSummary: redactSummary(input.prompt),
+        inputPreview: previewText(input.prompt),
+        outputPreview: previewText(text),
         requestId: result.telemetry.requestId ?? data.id,
         queuedAt,
         startedAt,
@@ -548,11 +564,7 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
           payload: { call }
         });
       }
-      return { text: input.credential.provider === "anthropic"
-        ? data.content?.find((item) => item.type === "text")?.text ?? ""
-        : responsesApi
-          ? data.output_text ?? data.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text" || item.type === "text")?.text ?? ""
-          : data.choices?.[0]?.message?.content ?? "", call };
+      return { text, call };
     } catch (error) {
       lastError = error;
       const errorCode = error instanceof Error ? error.message.replace(/[^a-zA-Z0-9_:-]/g, "_").slice(0, 160) : "provider_error";
@@ -614,6 +626,7 @@ async function executeLlmCallAttempt(input: ExecuteLlmCallInput): Promise<{ text
     promptSha256: sha256(`${input.system}\n${input.prompt}`),
     inputSummarySha256: sha256(input.prompt),
     redactedInputSummary: redactSummary(input.prompt),
+    inputPreview: previewText(input.prompt),
     queuedAt,
     startedAt,
     completedAt,
@@ -675,7 +688,8 @@ export async function listLlmCalls(runId: string): Promise<LlmCall[]> {
     return (await withKnowledgeLinks(calls)).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   } catch {
     if (!process.env.DATABASE_URL) return [];
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+    const pool = getDatabasePool();
+    if (!pool) return [];
     try {
       let rows: Array<{ invocation_json: unknown }>;
       try {
@@ -695,8 +709,6 @@ export async function listLlmCalls(runId: string): Promise<LlmCall[]> {
       return withKnowledgeLinks(rows.map((row) => llmCallSchema.parse(row.invocation_json)));
     } catch {
       return [];
-    } finally {
-      await pool.end();
     }
   }
 }

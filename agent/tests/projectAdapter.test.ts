@@ -91,10 +91,32 @@ export async function testProjectAdapter() {
   await removeProjectFixture("install_stop_registrytest_project_adapter");
   await removeProjectFixture("redacted_env_registrytest_project_adapter");
   await removeProjectFixture("external_runtime_registrytest_project_adapter");
+  await removeProjectFixture("template_registrytest_project_adapter");
+  await removeProjectFixture("template_missing_registrytest_project_adapter");
   await removeProjectFixture("multi_process_registrytest_project_adapter");
   await removeProjectFixture("restart_after_exit_registrytest_project_adapter");
   await removeProjectFixture("cleanup_failure_registrytest_project_adapter");
   await removeProjectFixture("runtime_target_registrytest_project_adapter");
+  await withEnv({ TEST_EXTERNAL_PROJECT_ROOT: "/tmp/ai-test-officer-portable-root" }, async () => {
+    const templated = await saveProject({
+      ...defaultProjectConfig(),
+      id: "template_registrytest_project_adapter",
+      projectPath: "${TEST_EXTERNAL_PROJECT_ROOT}/sample-project",
+      allowExternalProjectPath: true
+    });
+    assert.equal(templated.projectPath, "/tmp/ai-test-officer-portable-root/sample-project");
+  });
+  await withEnv({ MISSING_EXTERNAL_PROJECT_ROOT: undefined }, async () => {
+    await assert.rejects(
+      () => saveProject({
+        ...defaultProjectConfig(),
+        id: "template_missing_registrytest_project_adapter",
+        projectPath: "${MISSING_EXTERNAL_PROJECT_ROOT}",
+        allowExternalProjectPath: true
+      }),
+      /external_project_root_missing:MISSING_EXTERNAL_PROJECT_ROOT/
+    );
+  });
   const demo = defaultProjectConfig();
   assert.equal(demo.frontendUrl, "http://localhost:6173");
   const saved = await saveProject({
@@ -454,6 +476,8 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   await removeProjectFixture(longInstall.id);
   await removeProjectFixture("redacted_env_registrytest_project_adapter");
   await removeProjectFixture("external_runtime_registrytest_project_adapter");
+  await removeProjectFixture("template_registrytest_project_adapter");
+  await removeProjectFixture("template_missing_registrytest_project_adapter");
   await removeProjectFixture("multi_process_registrytest_project_adapter");
   await removeProjectFixture("restart_after_exit_registrytest_project_adapter");
   await removeProjectFixture("cleanup_failure_registrytest_project_adapter");

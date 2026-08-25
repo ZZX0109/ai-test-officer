@@ -6,10 +6,18 @@ import { assertCurrentNodeSupported, environmentForNode } from "./node-runtime.m
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 assertCurrentNodeSupported();
+const viteAgentToken = process.env.VITE_AGENT_TOKEN ?? process.env.AGENT_API_TOKEN;
 const childEnvironment = environmentForNode(process.execPath, {
   ...process.env,
   FORCE_COLOR: "1",
-  HEADLESS: process.env.HEADLESS ?? "1"
+  HEADLESS: process.env.HEADLESS ?? "1",
+  // The Workbench talks to the local Agent through Vite's browser proxy.  When
+  // a development stack explicitly configures AGENT_API_TOKEN (as the Linux
+  // baseline does), expose the same *local development* token to that Vite
+  // process unless the caller supplied a narrower VITE_AGENT_TOKEN.  Without
+  // this hand-off the UI falls back to dev-local-token, receives 401s from the
+  // Agent, and silently renders an empty project picker.
+  ...(viteAgentToken ? { VITE_AGENT_TOKEN: viteAgentToken } : {})
 });
 const supervisorPidFile = path.join(rootDir, "reports", "background", "dev-supervisor.pid");
 const services = [

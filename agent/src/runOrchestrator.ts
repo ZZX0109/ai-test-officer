@@ -2,22 +2,56 @@ import { Queue, Worker, type Job } from "bullmq";
 import { createHash } from "node:crypto";
 import { acceptsExecutionResult, appendSystemRunEvent, runEventStore, type RunProjection } from "./runEventStore.js";
 import { runVisualGrayTest } from "./testRunner.js";
-import type { RunRequest } from "./types.js";
+import type { GrayPlan, RunRequest } from "./types.js";
 import { persistExecutionResult } from "./executionPersistence.js";
-import { acquireExecutionLease } from "./executionLease.js";
-import { getAgentGraphProjection, resumeAgentGraph, startAgentGraphForRun } from "./agentGraphService.js";
-import { readCoverageItems, updateCoverageDisposition } from "./coverageStore.js";
+import { acquireExecutionLease, listExpiredExecutionLeaseRunIds } from "./executionLease.js";
+import { listStalledJudgingRunIds, recoverStalledJudgingRun } from "./durableGateLeaseRecovery.js";
+import { listStalledApprovedPlanRunIds, recoverStalledApprovedPlanRun } from "./approvalResumeRecovery.js";
+import { getAgentGraphProjection, resumeAgentGraph, startAgentGraphForRun, startAgentGraphInBackground } from "./agentGraphService.js";
+import { readCoverageItems, saveCoverageItems, updateCoverageDisposition } from "./coverageStore.js";
 import { getScenario, hasScenario } from "./scenarios.js";
 import { buildScenarioGrayPlan } from "./plan.js";
 import { compileTrustedScenarioPlan } from "./compiledPlanContract.js";
 import { runStructuredCoveragePath } from "./structuredCoverageRunner.js";
-import { pathExecutionResultSchema } from "@ai-test-officer/contracts";
+import { llmBudgetSchema, pathExecutionResultSchema, type CoverageItem, type LlmBudget } from "@ai-test-officer/contracts";
+import { publishPendingOutbox, recordOutboxJob, type OutboxJob } from "./outboxStore.js";
+import { reconcileConfiguredArtifactStore } from "./artifactObjectReconciliation.js";
 
 const queueName = process.env.RUN_QUEUE_NAME ?? "ai-test-officer-runs";
 const activeControllers = new Map<string, AbortController>();
 let queue: Queue | undefined;
 let worker: Worker | undefined;
+let outboxTimer: NodeJS.Timeout | undefined;
+let artifactReconciliationTimer: NodeJS.Timeout | undefined;
+let leaseRecoveryTimer: NodeJS.Timeout | undefined;
 const inProcessJobs = new Set<string>();
+
+export function buildDynamicPathPlan(plan: GrayPlan, flowId: string): GrayPlan {
+  const levels = plan.levels
+    .map((level) => ({ ...level, paths: level.paths.filter((path) => path.id === flowId) }))
+    .filter((level) => level.paths.length > 0);
+  const risks = plan.risks.filter((risk) => risk.pathIds?.includes(flowId));
+  return {
+    ...plan,
+    levels,
+    risks: risks.length > 0 ? risks : plan.risks.map((risk) => ({ ...risk, pathIds: [flowId] }))
+  };
+}
+
+function dynamicCoverageInventoryItem(item: Awaited<ReturnType<typeof readCoverageItems>>[number]) {
+  return {
+    id: item.flowId,
+    title: item.module,
+    status: "auto-bindable" as const,
+    kind: "page" as const,
+    target: item.route ?? item.module,
+    sourceNodeIds: [],
+    sourceCount: 1,
+    surfaces: ["page" as const],
+    requiredEvidenceKinds: item.requiredEvidenceKinds,
+    preconditions: item.preconditions
+  };
+}
 
 async function resumeGraphAndQueueIfNeeded(runId: string, value: Record<string, unknown>) {
   try {
@@ -116,6 +150,205 @@ export function buildQueuedRunRequest(projection: RunProjection, signal: AbortSi
 const terminalRunStates = new Set(["completed", "failed", "blocked", "cancelled", "awaiting-human-review"]);
 
 /**
+ * A hard Worker crash cannot run finally/release its Lease, and BullMQ alone
+ * cannot change the durable Run state. Convert only an expired *active*
+ * execution back to queued through an append-only event. That transaction
+ * writes a fresh versioned Outbox row, while the reducer clears the old
+ * generation/attempt so late output from the dead Worker remains fenced off.
+ */
+export async function recoverExpiredExecutionLeases(limit = 25) {
+  const recovered: string[] = [];
+  for (const runId of await listExpiredExecutionLeaseRunIds(limit)) {
+    const current = await runEventStore.get(runId);
+    if (!current) continue;
+    if (current.state === "judging") {
+      try {
+        // `run_judging` is already an Event Store commit. Re-running the
+        // Worker at this point could repeat a browser/API side effect merely
+        // because the process died before its graph checkpoint advanced.
+        if (await recoverStalledJudgingRun(runId, "worker_lease_expired_after_gate_commit")) recovered.push(runId);
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("run_version_conflict:")) continue;
+      }
+      continue;
+    }
+    if (!["preparing", "running"].includes(current.state)) continue;
+    try {
+      const retried = await appendSystemRunEvent(runId, "run_retrying", {
+        reason: "worker_lease_expired",
+        previousAttemptId: current.activeExecutionAttemptId,
+        previousExecutionGeneration: current.executionGeneration
+      });
+      await enqueueRun(runId, retried.version);
+      recovered.push(runId);
+    } catch (error) {
+      // Competing API/Worker recoverers race through the same Event Store.
+      // The loser observes a version conflict and must leave the already
+      // queued replacement alone; other errors are retried on the next tick.
+      if (error instanceof Error && error.message.startsWith("run_version_conflict:")) continue;
+    }
+  }
+  return recovered;
+}
+
+/**
+ * A Graph continuation can be alive after the Worker Job has released its
+ * Lease. Recover an abandoned `judging` checkpoint from its already committed
+ * Gate; never enqueue it, because enqueueing would re-run the underlying path.
+ */
+export async function recoverStalledJudgingRuns(limit = 25) {
+  const recovered: string[] = [];
+  const configuredGraceMs = Number(process.env.JUDGING_RECOVERY_GRACE_MS ?? 120_000);
+  const minimumAgeMs = Number.isFinite(configuredGraceMs)
+    ? Math.max(1_000, configuredGraceMs)
+    : 120_000;
+  for (const runId of await listStalledJudgingRunIds({ minimumAgeMs, limit })) {
+    try {
+      if (await recoverStalledJudgingRun(runId, "stalled_judging_checkpoint_after_gate_commit")) recovered.push(runId);
+    } catch (error) {
+      // A Graph continuation or another API instance may reach a terminal
+      // event concurrently. Version conflicts mean that stronger durable
+      // transition won, so a retry would be incorrect.
+      if (error instanceof Error && error.message.startsWith("run_version_conflict:")) continue;
+    }
+  }
+  return recovered;
+}
+
+/**
+ * A plan approval is an Event Store fact, while its Graph continuation is a
+ * separate process step. Resume only an abandoned, already-approved planning
+ * interrupt; do not invent approvals or bypass the next permission boundary.
+ */
+export async function recoverStalledApprovedPlanResumes(limit = 25) {
+  const recovered: string[] = [];
+  const configuredGraceMs = Number(process.env.PLAN_APPROVAL_RESUME_RECOVERY_GRACE_MS ?? 120_000);
+  const minimumAgeMs = Number.isFinite(configuredGraceMs)
+    ? Math.max(1_000, configuredGraceMs)
+    : 120_000;
+  for (const runId of await listStalledApprovedPlanRunIds({ minimumAgeMs, limit })) {
+    try {
+      if (await recoverStalledApprovedPlanRun(runId, minimumAgeMs)) recovered.push(runId);
+    } catch {
+      // The claim expires after the grace period. Keep the original human
+      // decision durable and let a later scan retry a transient Graph failure.
+    }
+  }
+  return recovered;
+}
+
+export interface ParentCoverageDispatchClassification {
+  executable: CoverageItem[];
+  undispatchable: Array<{ item: CoverageItem; reason: string }>;
+}
+
+export interface ParentCoverageChildSpec {
+  item: CoverageItem;
+  childRunId: string;
+  dynamicBrowserPath: boolean;
+  scenarioId?: string;
+  llmBudget: LlmBudget;
+}
+
+function undispatchableCoverageReason(item: CoverageItem) {
+  const binding = item.binding;
+  if (!binding) return "runtime_binding_missing";
+  if (binding.status === "bound") return "coverage_bound_path_not_dispatchable";
+  if (binding.status === "needs-input") return binding.reason ?? "runtime_binding_needs_input";
+  if (binding.status === "blocked-by-capability") return binding.reason ?? "runtime_binding_blocked_by_capability";
+  if (binding.status === "coverage-gap") return binding.reason ?? "runtime_binding_coverage_gap";
+  return binding.reason ?? "runtime_binding_not_completed";
+}
+
+/**
+ * Partition every pending CoverageItem before any child run is created. There
+ * is deliberately no batch-size limit: concurrency belongs to the queue, not
+ * to coverage discovery. A path without a current executor is reported as an
+ * explicit blocked disposition instead of being omitted from the parent Run.
+ */
+export function classifyParentCoverageDispatch(input: {
+  items: CoverageItem[];
+  dynamicParent: boolean;
+}): ParentCoverageDispatchClassification {
+  const executable: CoverageItem[] = [];
+  const undispatchable: Array<{ item: CoverageItem; reason: string }> = [];
+  for (const item of input.items) {
+    if (item.disposition !== "pending") continue;
+    const staticExecutor = Boolean(item.structuredPlan) || (Boolean(item.scenarioId) && hasScenario(item.scenarioId!));
+    const dynamicBrowserExecutor = input.dynamicParent
+      && item.surface === "page"
+      && !item.structuredPlan
+      && !(item.scenarioId && hasScenario(item.scenarioId));
+    if (staticExecutor || dynamicBrowserExecutor) executable.push(item);
+    else undispatchable.push({ item, reason: undispatchableCoverageReason(item) });
+  }
+  return { executable, undispatchable };
+}
+
+/**
+ * Compile the executable side of a parent coverage inventory into stable
+ * child-run identities and per-path budget envelopes before any side effect is
+ * attempted. The dispatcher and scale tests share this function so a test
+ * cannot accidentally prove a different child identity or budget policy than
+ * production uses.
+ */
+export function buildParentCoverageChildSpecs(input: {
+  parentRunId: string;
+  parentLlmBudget?: unknown;
+  items: CoverageItem[];
+  dynamicParent: boolean;
+}): ParentCoverageChildSpec[] {
+  const parentLlmBudget = llmBudgetSchema.safeParse(input.parentLlmBudget ?? {});
+  return input.items.map((item) => {
+    const structuredPlan = item.structuredPlan;
+    const dynamicBrowserPath = input.dynamicParent
+      && item.surface === "page"
+      && !structuredPlan
+      && !(item.scenarioId && hasScenario(item.scenarioId));
+    const scenario = structuredPlan || dynamicBrowserPath ? undefined : getScenario(item.scenarioId!);
+    const scenarioId = structuredPlan?.scenarioId ?? scenario?.id;
+    const childRunId = `run_${createHash("sha256").update(`${input.parentRunId}:${item.id}`).digest("hex").slice(0, 28)}`;
+    return {
+      item,
+      childRunId,
+      dynamicBrowserPath,
+      ...(scenarioId ? { scenarioId } : {}),
+      llmBudget: llmBudgetSchema.parse({
+        ...(parentLlmBudget.success ? parentLlmBudget.data : {}),
+        maxBrowserActionCalls: item.budget?.maxBrowserActionCalls ?? 6,
+        maxTotalTokens: item.budget?.maxTotalTokens ?? 30_000,
+        totalTimeoutMs: item.budget?.totalTimeoutMs ?? 120_000
+      })
+    };
+  });
+}
+
+/** Persistable resolution for pending paths that have no executor this Run can use. */
+export function blockUndispatchableCoverageItems(input: {
+  items: CoverageItem[];
+  undispatchable: ParentCoverageDispatchClassification["undispatchable"];
+}) {
+  const blockedById = new Map(input.undispatchable.map(({ item, reason }) => [item.id, reason]));
+  return input.items.map((item) => {
+    const reason = blockedById.get(item.id);
+    if (!reason) return item;
+    return {
+      ...item,
+      // A `bound` contract without an executable adapter is internally
+      // inconsistent. Downgrade it before persisting the blocked result so
+      // the invariant remains true: every still-bound CoverageItem has a
+      // dispatchable child-run path.
+      binding: item.binding?.status === "bound"
+        ? { ...item.binding, status: "coverage-gap" as const, reason, boundAt: undefined }
+        : item.binding,
+      disposition: "blocked" as const,
+      dispositionReason: reason,
+      updatedAt: new Date().toISOString()
+    };
+  });
+}
+
+/**
  * A worker may finish after a Graph recovery has already moved the durable Run
  * to a new queued attempt or terminal state. Never let that stale worker write
  * an evidence/finalization transition into the newer state machine generation.
@@ -137,10 +370,15 @@ async function beginEvidenceCollection(
 
 async function dispatchParentCoverageRun(projection: RunProjection) {
   const items = await readCoverageItems(projection.id);
-  const executable = items.filter((item) =>
-    item.disposition === "pending"
-    && (Boolean(item.structuredPlan) || (Boolean(item.scenarioId) && hasScenario(item.scenarioId!)))
-  );
+  const dynamicParent = projection.planProvenance?.source === "dynamic-browser-agent";
+  const dispatch = classifyParentCoverageDispatch({ items, dynamicParent });
+  if (dispatch.undispatchable.length) {
+    await saveCoverageItems(projection.id, blockUndispatchableCoverageItems({
+      items,
+      undispatchable: dispatch.undispatchable
+    }));
+  }
+  const executable = dispatch.executable;
   if (!executable.length) {
     const childRunIds = items.map((item) => item.childRunId).filter((id): id is string => Boolean(id));
     // A parent without path children has no execution evidence to aggregate.
@@ -151,11 +389,16 @@ async function dispatchParentCoverageRun(projection: RunProjection) {
       : { childRunIds: [], pending: false, aggregateNow: false, missingChildren: true };
   }
   const children: Array<{ item: (typeof executable)[number]; runId: string; projection: RunProjection }> = [];
-  for (const item of executable) {
+  const childSpecs = buildParentCoverageChildSpecs({
+    parentRunId: projection.id,
+    parentLlmBudget: projection.input.llmBudget,
+    items: executable,
+    dynamicParent
+  });
+  for (const spec of childSpecs) {
+    const { item, childRunId, dynamicBrowserPath, scenarioId, llmBudget } = spec;
     const structuredPlan = item.structuredPlan;
-    const scenario = structuredPlan ? undefined : getScenario(item.scenarioId!);
-    const scenarioId = structuredPlan?.scenarioId ?? scenario!.id;
-    const childRunId = `run_${createHash("sha256").update(`${projection.id}:${item.id}`).digest("hex").slice(0, 28)}`;
+    const scenario = structuredPlan || dynamicBrowserPath ? undefined : getScenario(item.scenarioId!);
     const child = await runEventStore.create({
       runId: childRunId,
       actor: "agent-graph:coverage-dispatch",
@@ -165,15 +408,36 @@ async function dispatchParentCoverageRun(projection: RunProjection) {
         runKind: "path",
         parentRunId: projection.id,
         coverageItemId: item.id,
-        scenarioId,
+        ...(scenarioId ? { scenarioId } : {}),
         coverageScenarioIds: [],
         plannerMode: "deterministic",
-        judgeMode: projection.input.judgeMode ?? "deterministic"
+        judgeMode: projection.input.judgeMode ?? "deterministic",
+        ...(dynamicBrowserPath ? {
+          dynamicBrowser: true,
+          coverageInventory: [dynamicCoverageInventoryItem(item)]
+        } : {}),
+        // A parent budget is an envelope, not a license for every child to
+        // consume the full envelope. Each path gets an explicit bounded slice
+        // persisted with its child run, so retries and late deliveries cannot
+        // silently borrow another path's model budget.
+        llmBudget
       }
     });
     let ready = child;
     if (ready.state === "planning") {
-      ready = await appendSystemRunEvent(childRunId, "plan_generated", {
+      if (dynamicBrowserPath && !projection.plan) throw new Error("dynamic_parent_plan_missing");
+      ready = await appendSystemRunEvent(childRunId, "plan_generated", dynamicBrowserPath
+        ? {
+          plan: buildDynamicPathPlan(projection.plan!, item.flowId),
+          provenance: projection.planProvenance ?? {
+            source: "dynamic-browser-agent",
+            promptVersion: String(projection.input.promptVersion ?? "plan-v1"),
+            compilationStatus: "validated"
+          },
+          impactAnalysis: projection.impactAnalysis,
+          plannerRouting: projection.plannerRouting
+        }
+        : {
         plan: structuredPlan ? {
           sessionName: item.module,
           risks: [{
@@ -199,7 +463,7 @@ async function dispatchParentCoverageRun(projection: RunProjection) {
           }]
         } : buildScenarioGrayPlan(scenario!),
         compiledPlan: structuredPlan ?? compileTrustedScenarioPlan(scenario!),
-        scenarioId,
+        ...(scenarioId ? { scenarioId } : {}),
         provenance: {
           source: "deterministic",
           promptVersion: String(projection.input.promptVersion ?? "plan-v1"),
@@ -210,7 +474,18 @@ async function dispatchParentCoverageRun(projection: RunProjection) {
     }
     if (ready.state === "awaiting-plan-approval") ready = await appendSystemRunEvent(childRunId, "plan_approved");
     if (ready.state === "awaiting-permission") ready = await appendSystemRunEvent(childRunId, "permission_granted");
-    if (!terminalRunStates.has(ready.state)) {
+    if (dynamicBrowserPath && !terminalRunStates.has(ready.state)) {
+      // This child owns its own Browser Execution subgraph. It inherits the
+      // parent's already-approved capability and therefore does not create a
+      // second Worker job for the same browser path.
+      if (ready.state === "queued") ready = await appendSystemRunEvent(childRunId, "run_preparing", { delegatedFrom: projection.id });
+      if (ready.state === "preparing") ready = await appendSystemRunEvent(childRunId, "run_started", {
+        workerAttemptId: `graph:${childRunId}`,
+        executionGeneration: ready.version,
+        delegatedFrom: projection.id
+      });
+      startAgentGraphInBackground(ready);
+    } else if (!terminalRunStates.has(ready.state)) {
       // Establish the child checkpoint before its worker result can arrive.
       // Otherwise the worker would resume a graph thread that does not exist
       // and the child would remain stuck in collecting forever.
@@ -225,8 +500,11 @@ async function dispatchParentCoverageRun(projection: RunProjection) {
     });
     children.push({ item, runId: childRunId, projection: ready });
   }
-  await Promise.all(children.map(({ runId, projection: child }) =>
-    terminalRunStates.has(child.state) ? Promise.resolve() : enqueueRun(runId, child.version)
+  await Promise.all(children.map(({ runId, projection: child, item }) =>
+    terminalRunStates.has(child.state)
+      || (dynamicParent && item.surface === "page" && !item.structuredPlan && !(item.scenarioId && hasScenario(item.scenarioId)))
+      ? Promise.resolve()
+      : enqueueRun(runId, child.version)
   ));
   return { childRunIds: children.map((item) => item.runId), pending: true };
 }
@@ -242,6 +520,7 @@ async function aggregateParentCoverageRun(runId: string, expectedGeneration?: nu
   if (projections.some((item) => !item || !terminalRunStates.has(item.state))) {
     throw new Error("child_runs_pending");
   }
+  const dynamicBrowserChildren = parent.planProvenance?.source === "dynamic-browser-agent";
   await Promise.all(children.map(async (item, index) => {
     const child = projections[index]!;
     await updateCoverageDisposition({
@@ -264,9 +543,11 @@ async function aggregateParentCoverageRun(runId: string, expectedGeneration?: nu
     // old child result could mutate a newly queued parent attempt.
     if (!await beginEvidenceCollection(runId, { childRunIds, aggregate: true })) return runEventStore.get(runId);
     void resumeGraphAndQueueIfNeeded(runId, {
+      ...(dynamicBrowserChildren ? { approved: true } : {}),
       execution: {
         childRunIds,
         aggregate: true,
+        dynamicBrowserChildren,
         workerAttemptId: current.activeExecutionAttemptId,
         executionGeneration: current.executionGeneration
       }
@@ -279,21 +560,13 @@ async function scheduleParentAggregation(runId: string, executionGeneration?: nu
   const connection = redisConnection();
   if (connection) {
     queue ??= new Queue(queueName, { connection });
-    await queue.add(
-      "aggregate-parent",
-      { runId, version: executionGeneration },
-      {
-        jobId: `${runId}-aggregate`,
-        delay: 500,
-        // A parent may legitimately own long-running job paths. Keep the
-        // aggregation watchdog aligned with the default 20 minute run budget
-        // instead of expiring after roughly two minutes.
-        attempts: Math.max(2, Number(process.env.PARENT_AGGREGATION_ATTEMPTS ?? 1_200)),
-        backoff: { type: "fixed", delay: 1_000 },
-        removeOnComplete: 500,
-        removeOnFail: 500
-      }
-    );
+    await recordOutboxJob({
+      topic: "parent.aggregate",
+      aggregateId: runId,
+      idempotencyKey: `parent:${runId}:aggregate`,
+      payload: { runId, version: executionGeneration, jobId: `${runId}-aggregate` }
+    });
+    await publishOutboxToQueue();
     return;
   }
   const deadline = Date.now() + Number(process.env.PARENT_AGGREGATION_TIMEOUT_MS ?? 20 * 60_000);
@@ -321,6 +594,7 @@ async function scheduleParentAggregation(runId: string, executionGeneration?: nu
           pathStatus: "blocked"
         }, attemptId)) return;
         void resumeGraphAndQueueIfNeeded(runId, {
+          ...(current.planProvenance?.source === "dynamic-browser-agent" ? { approved: true } : {}),
           execution: {
             pathResult: pathExecutionResultSchema.parse({
               runId,
@@ -330,6 +604,7 @@ async function scheduleParentAggregation(runId: string, executionGeneration?: nu
               executionSucceeded: false,
               error: errorCode
             }),
+            ...(current.planProvenance?.source === "dynamic-browser-agent" ? { dynamicBrowserChildren: true } : {}),
             workerAttemptId: attemptId,
             executionGeneration: generation
           }
@@ -342,6 +617,12 @@ async function scheduleParentAggregation(runId: string, executionGeneration?: nu
 
 export async function executeQueuedRun(runId: string, options?: { expectedVersion?: number }) {
   const initialProjection = await runEventStore.get(runId);
+  // Dynamic browser path children are owned by their own LangGraph thread.
+  // If a stale/duplicate queue delivery exists, acknowledge it without
+  // acquiring a Worker lease or starting a second browser session.
+  if (initialProjection?.runKind === "path" && initialProjection.input.dynamicBrowser === true) {
+    return initialProjection;
+  }
   if (options?.expectedVersion !== undefined && initialProjection?.version !== options.expectedVersion) {
     return initialProjection;
   }
@@ -527,9 +808,70 @@ async function processJob(job: Job<{ runId: string; version?: number }>) {
   return executeQueuedRun(job.data.runId, { expectedVersion: job.data.version });
 }
 
-export async function startRunWorker() {
+async function publishOutboxToQueue() {
   const connection = redisConnection();
-  if (!connection || worker) return;
+  if (!connection) return 0;
+  queue ??= new Queue(queueName, { connection });
+  return publishPendingOutbox({
+    publish: async (job: OutboxJob) => {
+      if (job.topic === "run.execute") {
+        await queue!.add("execute", job.payload, {
+          jobId: job.payload.jobId,
+          removeOnComplete: 500,
+          removeOnFail: 500
+        });
+        return;
+      }
+      await queue!.add("aggregate-parent", job.payload, {
+        jobId: job.payload.jobId,
+        delay: 500,
+        // A parent may legitimately own long-running job paths. Keep the
+        // aggregation watchdog aligned with the default 20 minute run budget.
+        attempts: Math.max(2, Number(process.env.PARENT_AGGREGATION_ATTEMPTS ?? 1_200)),
+        backoff: { type: "fixed", delay: 1_000 },
+        removeOnComplete: 500,
+        removeOnFail: 500
+      });
+    }
+  });
+}
+
+export async function startRunWorker(options?: { forceWorker?: boolean }) {
+  const connection = redisConnection();
+  if (!connection) return;
+  queue ??= new Queue(queueName, { connection });
+  if (!outboxTimer) {
+    await publishOutboxToQueue();
+    outboxTimer = setInterval(() => void publishOutboxToQueue().catch(() => undefined), Math.max(1_000, Number(process.env.OUTBOX_POLL_INTERVAL_MS ?? 5_000)));
+    outboxTimer.unref();
+  }
+  if (!artifactReconciliationTimer && process.env.ARTIFACT_S3_BUCKET) {
+    const reconcile = () => reconcileConfiguredArtifactStore({ apply: true }).catch(() => undefined);
+    // Reconciliation is independent from job delivery: an S3 outage cannot
+    // stop Run dispatch, but a stale replica must be marked before a later
+    // report/Gate read can use it as evidence.
+    await reconcile();
+    artifactReconciliationTimer = setInterval(reconcile, Math.max(60_000, Number(process.env.ARTIFACT_RECONCILE_INTERVAL_MS ?? 15 * 60_000)));
+    artifactReconciliationTimer.unref();
+  }
+  if (!leaseRecoveryTimer && process.env.DATABASE_URL) {
+    const recover = () => {
+      void recoverExpiredExecutionLeases().catch(() => undefined);
+      void recoverStalledJudgingRuns().catch(() => undefined);
+      void recoverStalledApprovedPlanResumes().catch(() => undefined);
+    };
+    // Both API and external Worker processes may own this timer. The
+    // append-only version check makes the scan safe in multi-instance mode;
+    // a restarted process can recover an abandoned lease without a manual
+    // requeue operation.
+    leaseRecoveryTimer = setInterval(
+      recover,
+      Math.max(1_000, Number(process.env.EXECUTION_LEASE_RECOVERY_INTERVAL_MS ?? Math.max(1_000, Number(process.env.EXECUTION_LEASE_TTL_MS ?? 30_000) / 3)))
+    );
+    leaseRecoveryTimer.unref();
+    recover();
+  }
+  if (worker || (process.env.RUN_WORKER_IN_PROCESS === "0" && !options?.forceWorker)) return;
   worker = new Worker(queueName, processJob, { connection, concurrency: Number(process.env.RUN_WORKER_CONCURRENCY ?? 2) });
 }
 
@@ -537,12 +879,17 @@ export async function enqueueRun(runId: string, version: number) {
   const connection = redisConnection();
   if (connection) {
     queue ??= new Queue(queueName, { connection });
-    // One version maps to one idempotent delivery. A resume intentionally has a
-    // newer projection version and therefore needs a fresh job, while duplicate
-    // control requests at the same version still collapse to one BullMQ job.
-    // BullMQ rejects ':' in custom ids, so keep the version delimiter portable.
-    await queue.add("execute", { runId, version }, { jobId: `${runId}-v${version}`, removeOnComplete: 500, removeOnFail: 500 });
-    if (process.env.RUN_WORKER_IN_PROCESS !== "0") await startRunWorker();
+    // The event store writes the matching outbox row in the same PostgreSQL
+    // transaction as permission/resume/retry events. This call is the fast
+    // path; the poller repairs a crash between the event commit and Redis.
+    await recordOutboxJob({
+      topic: "run.execute",
+      aggregateId: runId,
+      idempotencyKey: `run:${runId}:execute:v${version}`,
+      payload: { runId, version, jobId: `${runId}-v${version}` }
+    });
+    await startRunWorker();
+    await publishOutboxToQueue();
     return;
   }
   if (process.env.NODE_ENV === "production") throw new Error("REDIS_URL is required in production");
@@ -556,6 +903,12 @@ export function interruptRun(runId: string) {
 }
 
 export async function closeRunOrchestrator() {
+  if (outboxTimer) clearInterval(outboxTimer);
+  outboxTimer = undefined;
+  if (artifactReconciliationTimer) clearInterval(artifactReconciliationTimer);
+  artifactReconciliationTimer = undefined;
+  if (leaseRecoveryTimer) clearInterval(leaseRecoveryTimer);
+  leaseRecoveryTimer = undefined;
   await worker?.close();
   await queue?.close();
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
-import type { MachineGate } from "@ai-test-officer/contracts";
+import type { ArtifactV2, MachineGate } from "@ai-test-officer/contracts";
+import { getDatabasePool } from "./databaseRuntime.js";
 import type { VisualRunResult } from "./types.js";
 import {
   assertAttemptBinding,
@@ -12,9 +12,58 @@ import {
 } from "./proof/proofBundleIntegrity.js";
 import { validateProofBundle, type ProofBundleInput, type ProofVerdict } from "./proof/proofBundleValidator.js";
 import type { VerifiedMachineGate } from "./proof/proofBundleService.js";
+import { canonicalSha256 } from "./canonicalHash.js";
 
-let pool: Pool | undefined;
-function database() { return process.env.DATABASE_URL ? pool ??= new Pool({ connectionString: process.env.DATABASE_URL, max: 4 }) : undefined; }
+function database() { return getDatabasePool(); }
+
+/**
+ * Object-store reconciliation writes this state into the immutable Artifact
+ * ledger rather than rewriting a historical Run Bundle. Every fresh Gate read
+ * must consult it: an object that disappeared after commit cannot remain
+ * evidence for a pass merely because an old bundle says it was present.
+ */
+export async function artifactObjectStoreIssuesForRun(runId: string) {
+  const db = database();
+  if (!db) return [] as Array<{ id: string; state: "missing" | "uncommitted" }>;
+  try {
+    const result = await db.query<{ id: string; state: "missing" | "uncommitted" }>(
+      `SELECT id, payload->>'objectStoreState' AS state
+         FROM artifacts_v1
+        WHERE run_id=$1
+          AND payload->>'objectStoreState' IN ('missing','uncommitted')`,
+      [runId]
+    );
+    return result.rows;
+  } catch {
+    // A non-migrated/local database has no reconciliation state. Production
+    // persistence remains strict at the write boundary.
+    return [];
+  }
+}
+
+export async function overlayArtifactObjectStoreStates(runId: string, artifacts: ArtifactV2[] | undefined) {
+  if (!artifacts?.length) return artifacts ?? [];
+  const stateById = new Map((await artifactObjectStoreIssuesForRun(runId)).map((item) => [item.id, item.state]));
+  return artifacts.map((artifact) => {
+    const state = stateById.get(artifact.id);
+    return state ? { ...artifact, objectStoreState: state } : artifact;
+  });
+}
+
+export async function revalidateArtifactObjectStoreState(runId: string, gate: MachineGate) {
+  const issues = await artifactObjectStoreIssuesForRun(runId);
+  if (!issues.length) return gate;
+  const reason = `artifact_object_store_missing:${issues.map((item) => item.id).join(",")}`;
+  return {
+    ...gate,
+    status: "blocked" as const,
+    reasons: Array.from(new Set([...(gate.reasons ?? []), reason])),
+    reasonDetails: [
+      ...(gate.reasonDetails ?? []),
+      { code: "artifact_object_store_missing", summary: reason, evidenceRefs: [] }
+    ].filter((detail, index, entries) => entries.findIndex((candidate) => candidate.code === detail.code && candidate.summary === detail.summary) === index)
+  };
+}
 
 /** Read a single persisted proof bundle row by its proof bundle id. */
 export async function readProofBundleRecord(proofBundleId: string): Promise<PersistedProofBundleRecord | undefined> {
@@ -56,6 +105,8 @@ export async function revalidatePersistedMachineGate(
   gate: VerifiedMachineGate,
   proofInput: ProofBundleInput
 ): Promise<MachineGate> {
+  const objectStoreValidated = await revalidateArtifactObjectStoreState(runId, gate);
+  if (objectStoreValidated.status === "blocked") return objectStoreValidated;
   const verdict = validateProofBundle(proofInput);
   const evidenceAttemptIds = (proofInput.evidence ?? [])
     .map((evidence) => evidence.attemptId)
@@ -117,7 +168,16 @@ export async function persistExecutionResult(
       await client.query("INSERT INTO artifacts_v1 (id,run_id,payload) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload", [artifact.id, controlRunId, artifact]);
     }
     for (const evidence of result.evidence) {
-      await client.query("INSERT INTO evidence_v1 (id,run_id,payload) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload", [evidence.id, controlRunId, evidence]);
+      const { canonicalSha256: existingHash, ...unsignedEvidence } = evidence;
+      const incoming = { ...unsignedEvidence, canonicalSha256: existingHash ?? canonicalSha256(unsignedEvidence) };
+      const existing = await client.query("SELECT payload FROM evidence_v1 WHERE id=$1 AND run_id=$2 FOR UPDATE", [evidence.id, controlRunId]);
+      if (existing.rows[0]) {
+        const stored = existing.rows[0].payload as Record<string, unknown>;
+        const storedHash = typeof stored.canonicalSha256 === "string" ? stored.canonicalSha256 : canonicalSha256(stored);
+        if (storedHash !== incoming.canonicalSha256) throw new CredibilityError("evidence_immutable_conflict", `Evidence ${evidence.id} changed after persistence.`);
+        continue;
+      }
+      await client.query("INSERT INTO evidence_v1 (id,run_id,payload) VALUES ($1,$2,$3)", [evidence.id, controlRunId, incoming]);
     }
     for (const item of result.coverageItems ?? []) {
       await client.query(

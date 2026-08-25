@@ -15,7 +15,14 @@ import {
   type MemoryStatistics
 } from "@ai-test-officer/contracts";
 import { createHash } from "node:crypto";
-import { Pool } from "pg";
+import type { Pool } from "pg";
+import { getDatabasePool } from "../databaseRuntime.js";
+
+/**
+ * This identifier is intentionally a compatibility marker, not an embedding
+ * provider name. Consumers must not present its results as semantic retrieval.
+ */
+export const DETERMINISTIC_HASH_RETRIEVAL_PLACEHOLDER = "deterministic-hash-v0";
 
 function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length || a.length === 0) return 0;
@@ -30,7 +37,12 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return normA && normB ? dot / Math.sqrt(normA * normB) : 0;
 }
 
-function textToEmbedding(text: string, dims = 64): number[] {
+/**
+ * Compatibility-only retrieval fingerprint. This is intentionally not called
+ * an embedding: SHA-256 has no semantic geometry. A real provider can supply
+ * `embeddingVector` and `embeddingModel` through the contract later.
+ */
+function textToDeterministicFingerprint(text: string, dims = 64): number[] {
   const hash = createHash("sha256").update(text).digest();
   return Array.from({ length: dims }, (_, index) => (hash[index % hash.length] - 128) / 128);
 }
@@ -50,7 +62,7 @@ export class MemoryService {
 
   constructor(store?: MemoryStore, connectionString = process.env.DATABASE_URL) {
     this.store = store ?? createStore();
-    this.pool = !store && connectionString ? new Pool({ connectionString, max: 2 }) : undefined;
+    this.pool = !store ? getDatabasePool(connectionString) : undefined;
   }
 
   async upsertProjectEntry(entry: ProjectMemoryEntry): Promise<void> {
@@ -99,7 +111,8 @@ export class MemoryService {
     const normalized = experienceMemoryEntrySchema.parse({
       ...entry,
       embeddingText,
-      embeddingVector: entry.embeddingVector?.length ? entry.embeddingVector : textToEmbedding(embeddingText)
+      embeddingVector: entry.embeddingVector?.length ? entry.embeddingVector : textToDeterministicFingerprint(embeddingText),
+      embeddingModel: entry.embeddingModel ?? DETERMINISTIC_HASH_RETRIEVAL_PLACEHOLDER
     });
     if (this.pool) {
       await this.pool.query(
@@ -142,7 +155,7 @@ export class MemoryService {
     if (!query.includeUnvalidated) entries = entries.filter((entry) => entry.validationResult !== "pending");
 
     if (query.semanticQuery) {
-      const vector = textToEmbedding(query.semanticQuery);
+      const vector = textToDeterministicFingerprint(query.semanticQuery);
       entries = entries
         .map((entry) => ({ entry, score: cosineSimilarity(vector, entry.embeddingVector ?? []) }))
         .filter((item) => item.score >= query.semanticThreshold)
@@ -163,6 +176,20 @@ export class MemoryService {
       limit,
       offset: 0
     });
+  }
+
+  /**
+   * Exposed to every tool caller so the placeholder cannot silently acquire a
+   * semantic-RAG claim. Real providers must replace this descriptor and pass
+   * the fixed retrieval evaluation before being labelled semantic.
+   */
+  retrievalDescriptor() {
+    return {
+      mode: DETERMINISTIC_HASH_RETRIEVAL_PLACEHOLDER,
+      label: "Deterministic Hash Retrieval Placeholder",
+      semantic: false,
+      evaluationRequired: ["Recall@5", "Recall@10", "MRR", "false-recall-rate", "source-traceability"]
+    } as const;
   }
 
   async getStatistics(projectId: string): Promise<MemoryStatistics> {
@@ -205,11 +232,13 @@ export class MemoryService {
       overallSuccessRate: total ? success / total : 0,
       strategySuccessRates,
       mostEffectiveStrategies,
+      retrievalMode: DETERMINISTIC_HASH_RETRIEVAL_PLACEHOLDER,
       generatedAt: new Date().toISOString()
     };
   }
 
-  async close(): Promise<void> { await this.pool?.end(); }
+  /** The process-wide database runtime owns pool shutdown. */
+  async close(): Promise<void> { return Promise.resolve(); }
 }
 
 let instance: MemoryService | undefined;

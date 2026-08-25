@@ -1,4 +1,4 @@
-name: ai-test-officer-acceptance
+version: "3.8"
 services:
   postgres:
     image: postgres:16-alpine
@@ -32,6 +32,17 @@ services:
     command: ["mc alias set local http://minio:9000 $$MINIO_ACCESS_KEY $$MINIO_SECRET_KEY && mc mb --ignore-existing local/ai-test-officer && mc anonymous set none local/ai-test-officer"]
     environment: { MINIO_ACCESS_KEY: "${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY}", MINIO_SECRET_KEY: "${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}" }
     networks: [control]
+  egress-proxy:
+    build: { context: ../egress-proxy, dockerfile: Dockerfile }
+    environment:
+      PORT: "3128"
+      ATO_EGRESS_ALLOWED_HOSTS: "example.com"
+      ATO_EGRESS_ALLOWED_PORTS: "80,443"
+      ATO_EGRESS_POLICY_SECRET: ${EGRESS_POLICY_SECRET:?set EGRESS_POLICY_SECRET}
+      ATO_EGRESS_AUDIT_FILE: /var/log/ato/egress.jsonl
+    volumes: ["egress-audit:/var/log/ato"]
+    networks: [egress]
+    healthcheck: { test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3128/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"], interval: 3s, timeout: 3s, retries: 30 }
   keycloak:
     image: quay.io/keycloak/keycloak:26.1
     # The stock Keycloak image is already runnable. Enabling the build-time
@@ -66,10 +77,31 @@ services:
   customer-portal-lite:
     build: { context: ../.., dockerfile: Dockerfile.production, target: benchmark-target }
     command: ["node", "fixtures/customer-portal-lite/server.mjs"]
-    environment: { HOST: 0.0.0.0, PORT: 7103 }
+    environment:
+      HOST: 0.0.0.0
+      PORT: 7103
+      TARGET_DATABASE_URL: postgresql://target_app:${TARGET_DB_PASSWORD}@target-db:5432/target_app
+    depends_on:
+      target-db-init: { condition: service_completed_successfully }
     read_only: true
     tmpfs: ["/tmp"]
     healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:7103/health"], interval: 3s, timeout: 3s, retries: 30 }
+    networks: [targets]
+  target-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: target_app
+      POSTGRES_USER: target_app
+      POSTGRES_PASSWORD: ${TARGET_DB_PASSWORD:?set TARGET_DB_PASSWORD}
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U target_app -d target_app"], interval: 3s, timeout: 3s, retries: 30 }
+    volumes: ["target-db-data:/var/lib/postgresql/data"]
+    networks: [targets]
+  target-db-init:
+    image: postgres:16-alpine
+    depends_on: { target-db: { condition: service_healthy } }
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["psql \"postgresql://target_app:$$TARGET_DB_PASSWORD@target-db:5432/target_app\" -v ON_ERROR_STOP=1 -c 'CREATE TABLE IF NOT EXISTS customers (id integer PRIMARY KEY, name text NOT NULL, amount integer NOT NULL);' -c \"INSERT INTO customers (id, name, amount) VALUES (1, 'Globex Expansion', 1200), (2, 'Acme Renewal', 9800) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, amount = EXCLUDED.amount;\""]
+    environment: { TARGET_DB_PASSWORD: "${TARGET_DB_PASSWORD:?set TARGET_DB_PASSWORD}" }
     networks: [targets]
   reports-init:
     build: { context: ../.., dockerfile: Dockerfile.production }
@@ -110,20 +142,34 @@ services:
       ALLOWED_ORIGINS: http://localhost:16174
       HEADLESS: "1"
       TRACE: "1"
+      # Disabled in normal deployments. The isolated acceptance runner enables
+      # this only for exact tagged Run/event pairs to prove recovery after a
+      # committed Gate or human approval before the Graph can checkpoint.
+      FAULT_INJECTION_ENABLED: "${FAULT_INJECTION_ENABLED:-0}"
+      FAULT_INJECTION_RULES_B64: "${FAULT_INJECTION_RULES_B64:-}"
+      JUDGING_RECOVERY_GRACE_MS: "${JUDGING_RECOVERY_GRACE_MS:-120000}"
+      PLAN_APPROVAL_RESUME_RECOVERY_GRACE_MS: "${PLAN_APPROVAL_RESUME_RECOVERY_GRACE_MS:-120000}"
+      ATO_EGRESS_PROXY_URL: http://egress-proxy:3128
+      ATO_EGRESS_PROXY_CONTAINER_NAME: egress-proxy
+      ATO_EGRESS_POLICY_SECRET: ${EGRESS_POLICY_SECRET}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       minio-init: { condition: service_completed_successfully }
       reports-init: { condition: service_completed_successfully }
       keycloak: { condition: service_started }
+      egress-proxy: { condition: service_healthy }
     read_only: true
     restart: unless-stopped
     tmpfs: ["/tmp"]
     volumes: ["agent-reports:/app/reports"]
     healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:4317/api/health"], interval: 5s, timeout: 3s, retries: 30 }
     ports: ["127.0.0.1:14317:4317"]
-    networks: [control, targets]
-    deploy: { resources: { limits: { cpus: "2", memory: 4G, pids: 512 } } }
+    networks: [control, targets, egress]
+    # Keep the acceptance topology valid for both Docker Compose v1 and v2.
+    # The ephemeral project name already isolates the stack; v1 rejects the
+    # Compose-v2-only top-level `name` field and the `pids` limit.
+    deploy: { resources: { limits: { cpus: "2", memory: 4G } } }
   worker:
     <<: *agent
     command: ["node", "agent/dist/workerCli.js"]
@@ -144,7 +190,8 @@ services:
     tmpfs: ["/tmp"]
     ports: ["127.0.0.1:16174:6174"]
     networks: [control]
-volumes: { postgres-data: {}, redis-data: {}, minio-data: {}, agent-reports: {} }
+volumes: { postgres-data: {}, redis-data: {}, minio-data: {}, agent-reports: {}, target-db-data: {}, egress-audit: {} }
 networks:
   control: { internal: false }
   targets: { internal: true }
+  egress: { internal: false }

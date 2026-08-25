@@ -1,0 +1,194 @@
+{
+  "id": "andflow_locked",
+  "name": "ANDFlow (locked revision d902dce)",
+  "projectPath": "/tmp/external-projects/andflow",
+  "allowExternalProjectPath": true,
+  "installCommand": "pnpm --filter andflow... --filter andflow-ui... install --frozen-lockfile",
+  "installCommandSpec": {
+    "executable": "pnpm",
+    "args": [
+      "--filter",
+      "andflow...",
+      "--filter",
+      "andflow-ui...",
+      "install",
+      "--frozen-lockfile"
+    ],
+    "timeoutMs": 300000
+  },
+  "startCommand": "",
+  "processes": [
+    {
+      "name": "app",
+      "command": "pnpm --parallel --filter andflow --filter andflow-ui run dev",
+      "healthCheckUrl": "http://127.0.0.1:8080",
+      "required": true,
+      "commandSpec": {
+        "executable": "pnpm",
+        "args": [
+          "--parallel",
+          "--filter",
+          "andflow",
+          "--filter",
+          "andflow-ui",
+          "run",
+          "dev"
+        ],
+        "timeoutMs": 300000
+      }
+    }
+  ],
+  "healthCheckUrl": "http://127.0.0.1:3000/api/v1/health",
+  "frontendUrl": "http://127.0.0.1:8080",
+  "backendUrl": "http://127.0.0.1:3000/api/v1/health",
+  "testCommand": "pnpm run test",
+  "testCommandSpec": {
+    "executable": "pnpm",
+    "args": [
+      "run",
+      "test"
+    ],
+    "timeoutMs": 600000
+  },
+  "login": {
+    "method": "none"
+  },
+  "apiCredentialRequirements": [
+    {
+      "envName": "LANGCHAIN_API_KEY",
+      "providerHint": "langchain",
+      "baseUrlEnv": "LANGCHAIN_BASE_URL",
+      "modelEnv": "LANGCHAIN_MODEL",
+      "exposure": "server",
+      "signals": [
+        "env:packages/server/src/commands/base.ts:LANGCHAIN_API_KEY"
+      ]
+    }
+  ],
+  "apiCredentialBindings": [
+    {
+      "envName": "LANGCHAIN_API_KEY",
+      "credentialId": "cred_767141e004e185ae"
+    },
+    {
+      "envName": "LANGCHAIN_BASE_URL",
+      "credentialId": "cred_767141e004e185ae"
+    },
+    {
+      "envName": "LANGCHAIN_MODEL",
+      "credentialId": "cred_767141e004e185ae"
+    }
+  ],
+  "env": {},
+  "timeoutMs": 30000,
+  "manifest": {
+    "schemaVersion": "1.0",
+    "projectId": "andflow_locked",
+    "workspaceRoot": ".",
+    "commands": {
+      "install": {
+        "executable": "pnpm",
+        "args": [
+          "--filter",
+          "andflow...",
+          "--filter",
+          "andflow-ui...",
+          "install",
+          "--frozen-lockfile"
+        ],
+        "timeoutMs": 300000
+      },
+      "start": {
+        "executable": "pnpm",
+        "args": [
+          "--parallel",
+          "--filter",
+          "andflow",
+          "--filter",
+          "andflow-ui",
+          "run",
+          "dev"
+        ],
+        "timeoutMs": 300000
+      },
+      "test": {
+        "executable": "pnpm",
+        "args": [
+          "run",
+          "test"
+        ],
+        "timeoutMs": 600000
+      }
+    },
+    "commandAllowlist": [
+      "npm",
+      "npx",
+      "node",
+      "pnpm",
+      "yarn",
+      "python",
+      "python3",
+      "pip",
+      "uv",
+      "uvicorn"
+    ],
+    "ports": [
+      {
+        "name": "frontend",
+        "env": "FRONTEND_PORT",
+        "purpose": "frontend"
+      },
+      {
+        "name": "backend",
+        "env": "BACKEND_PORT",
+        "purpose": "backend"
+      }
+    ],
+    "healthCheck": {
+      "path": "/api/v1/health",
+      "timeoutMs": 30000
+    },
+    "environmentAllowlist": [
+      "NODE_ENV",
+      "FRONTEND_PORT",
+      "BACKEND_PORT",
+      "LANGCHAIN_API_KEY",
+      "LANGCHAIN_BASE_URL",
+      "LANGCHAIN_MODEL"
+    ],
+    "network": {
+      "mode": "deny",
+      "allowedHosts": [],
+      "enforcement": "none"
+    },
+    "fixtures": [],
+    "apiOperations": [],
+    "dataSources": [],
+    "backgroundTasks": [],
+    "capabilities": {
+      "browser": true,
+      "desktop": false,
+      "allowedBundleIds": []
+    },
+    "execution": {
+      "mode": "oci",
+      "image": "node:20.20.2-bookworm-slim",
+      "engine": "docker"
+    },
+    "budget": {
+      "runTimeoutMs": 1200000,
+      "prepareTimeoutMs": 300000,
+      "scenarioTimeoutMs": 300000,
+      "stepTimeoutMs": 45000,
+      "maxSteps": 50,
+      "maxAttempts": 2,
+      "maxScreenshots": 100,
+      "maxVideoBytes": 524288000,
+      "maxLogBytes": 52428800,
+      "maxArtifactBytes": 1073741824,
+      "maxConcurrency": 2
+    }
+  },
+  "createdAt": "2026-08-24T13:46:27.938Z",
+  "updatedAt": "2026-08-24T14:02:13.331Z"
+}
