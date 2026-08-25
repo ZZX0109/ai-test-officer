@@ -51,7 +51,8 @@ export function createProjectRuntimeService() {
         // pre-baked pnpm/corepack cache) that re-detection, which infers only the
         // Node version, must not clobber back to the stock node:<ver>-slim image.
         image: currentManifest?.execution.image ?? detectedManifest.execution.image,
-        preinstalledDependencies: currentManifest?.execution.preinstalledDependencies
+        preinstalledDependencies: currentManifest?.execution.preinstalledDependencies,
+        preinstalledDependencyImageRoot: currentManifest?.execution.preinstalledDependencyImageRoot
       },
       network: currentManifest?.network ?? detectedManifest.network,
       budget: currentManifest?.budget ?? detectedManifest.budget,
