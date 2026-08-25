@@ -33,6 +33,7 @@ const reviewReports = [
   "reports/capacity/latest.md",
   "reports/worker-load-slo/latest.json",
   "reports/browser-concurrency/latest.json",
+  "reports/production-capacity/latest.json",
   "reports/production-slo/latest.json",
   "reports/production-slo/dashboard-validation.json",
   "reports/production-slo/monitoring-live-latest.json",

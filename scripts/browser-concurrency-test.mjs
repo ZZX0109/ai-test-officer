@@ -77,7 +77,9 @@ for (let round = 0; round < args.rounds; round++) {
       page = await context.newPage();
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15_000 });
       const title = await page.title();
-      const ts = await page.locator("#ts").textContent();
+      // The synthetic local page exposes #ts; a real Workbench/project page
+      // does not. Keep the real-page path focused on navigation + DOM reachability.
+      const ts = args.url ? null : await page.locator("#ts").textContent();
       const elapsed = performance.now() - ctxStart;
       latencies.push(elapsed);
       return { ok: true, elapsed, title, ts };
@@ -106,7 +108,7 @@ for (let round = 0; round < args.rounds; round++) {
 }
 
 await browser.close();
-server.close();
+if (server) server.close();
 const rssAfter = rssMb();
 
 allLatencies.sort((a, b) => a - b);
