@@ -119,8 +119,42 @@ try {
   if (claimsA.organization_id !== "org_oidc_a" || claimsB.organization_id !== "org_oidc_b") throw new Error("oidc_organization_claim_mismatch");
   report.checks.push("oidc_tokens_have_distinct_organization_claims");
 
+  // The production image does not mount the developer's external-project
+  // directory. Discover a project that is actually present in that image and
+  // seed only the two acceptance subjects with least-privilege editor grants.
+  const adminToken = await tokenFor("acceptance-admin", "acceptance-admin-change-me");
+  const projectCatalog = await api("GET", "/api/projects", adminToken);
+  const availableProjects = Array.isArray(projectCatalog.body.projects) ? projectCatalog.body.projects : [];
+  const preferredProjectIds = ["local_demo_app", "e2e_vite", "e2e_static", "fastapi-full-stack-template"];
+  const project = preferredProjectIds.find((id) => availableProjects.some((candidate) => candidate.id === id))
+    ?? availableProjects[0]?.id;
+  report.results = {
+    ...(report.results ?? {}),
+    projectCatalog: {
+      status: projectCatalog.status,
+      availableProjectCount: availableProjects.length,
+      selectedProjectId: project
+    }
+  };
+  if (projectCatalog.status !== 200 || !project) throw new Error("oidc_no_production_project_available");
+
+  const grantA = await api("POST", `/api/projects/${encodeURIComponent(project)}/grants`, adminToken, {
+    subject: claimsA.sub,
+    role: "editor"
+  });
+  const grantB = await api("POST", `/api/projects/${encodeURIComponent(project)}/grants`, adminToken, {
+    subject: claimsB.sub,
+    role: "editor"
+  });
+  report.results.projectGrants = {
+    orgA: { status: grantA.status, created: grantA.status === 201 },
+    orgB: { status: grantB.status, created: grantB.status === 201 }
+  };
+  if (grantA.status !== 201 || grantB.status !== 201) throw new Error("oidc_project_grant_seed_failed");
+  report.checks.push("oidc_subjects_have_own_project_grants");
+
   const runPayload = (organizationId, suffix) => ({
-    projectId: "fastapi-full-stack-template",
+    projectId: project,
     organizationId,
     actor: `oidc-${organizationId}`,
     idempotencyKey: `oidc-isolation-${suffix}-${randomUUID()}`,
@@ -138,6 +172,13 @@ try {
   const createdB = await api("POST", "/v1/runs", tokenB, runPayload("org_oidc_b", "b"));
   const runIdA = createdA.body.run?.id;
   const runIdB = createdB.body.run?.id;
+  report.results = {
+    ...(report.results ?? {}),
+    created: {
+      orgA: { status: createdA.status, error: createdA.body.error, message: createdA.body.message },
+      orgB: { status: createdB.status, error: createdB.body.error, message: createdB.body.message }
+    }
+  };
   report.checks.push("org_a_and_org_b_can_create_own_runs");
   if (createdA.status !== 201 || createdB.status !== 201 || !runIdA || !runIdB) throw new Error("oidc_own_org_create_failed");
 
