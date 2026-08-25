@@ -337,7 +337,10 @@ export async function findReusableProjectCodeSession(projectId: string) {
     }
   }
   for (const session of candidates.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
-    if (["cancelled", "failed"].includes(session.status)) continue;
+    // Skip sessions that are final (exported) or not reusable. An exported
+    // session is a completed repair artifact; a fresh session should be
+    // created for new repair work instead of mutating the exported one.
+    if (["cancelled", "failed", "exported"].includes(session.status)) continue;
     try {
       const [source, workspace] = await Promise.all([lstat(sourceSnapshotDir(session.id)), lstat(workspaceDir(session.id))]);
       if (source.isDirectory() && !source.isSymbolicLink() && workspace.isDirectory() && !workspace.isSymbolicLink()) return session;
