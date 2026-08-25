@@ -65,10 +65,39 @@ async function waitForHealth(timeoutMs = 300_000) {
   return false;
 }
 
+const oidcBase = "http://127.0.0.1:18080";
+let accessToken = null;
+
+async function obtainAccessToken() {
+  // Same password-grant flow as production-acceptance.mjs
+  const res = await fetch(`${oidcBase}/realms/ai-test-officer/protocol/openid-connect/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "password",
+      client_id: "ai-test-officer-local",
+      username: "acceptance-runner",
+      password: "acceptance-runner-change-me"
+    })
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`oidc_token_failed: ${res.status} ${text.slice(0, 200)}`);
+  }
+  const json = await res.json();
+  return json.access_token;
+}
+
+async function authHeaders() {
+  if (!accessToken) accessToken = await obtainAccessToken();
+  return { "Content-Type": "application/json", "Authorization": `Bearer ${accessToken}` };
+}
+
 async function fetchSlo() {
   try {
-    const res = await fetch(`${apiBase}/api/operations/slo`);
+    const res = await fetch(`${apiBase}/api/operations/slo`, { headers: await authHeaders() });
     const d = await res.json();
+    if (!res.ok) return { error: `slo_${res.status}`, body: JSON.stringify(d).slice(0, 200) };
     return d.slo ?? d;
   } catch (e) { return { error: String(e.message).slice(0, 120) }; }
 }
@@ -79,7 +108,7 @@ async function createRun(idx) {
   try {
     const res = await fetch(`${apiBase}/v1/runs`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await authHeaders(),
       body: JSON.stringify({
         projectId: "customer-portal-lite",
         organizationId: "local",
@@ -112,6 +141,12 @@ console.log("waiting for agent-api health…");
 const healthy = await waitForHealth();
 console.log(`health: ${healthy}`);
 
+if (healthy) {
+  console.log("obtaining OIDC access token…");
+  try { accessToken = await obtainAccessToken(); console.log(`token: ${accessToken.slice(0, 20)}…`); }
+  catch (e) { console.log(`token error: ${e.message}`); }
+}
+
 const sloBefore = await fetchSlo();
 console.log(`slo before load: databaseConfigured=${sloBefore.databaseConfigured} stalledRuns=${sloBefore.metrics?.stalledRuns} alerts=${sloBefore.alerts?.length ?? 0}`);
 
@@ -142,7 +177,7 @@ console.log(`slo after load: stalledRuns=${sloAfter.metrics?.stalledRuns} pendin
 // Capture prometheus format
 let prometheusText = "";
 try {
-  const pres = await fetch(`${apiBase}/api/operations/slo/prometheus`);
+  const pres = await fetch(`${apiBase}/api/operations/slo/prometheus`, { headers: await authHeaders() });
   prometheusText = await pres.text();
 } catch (e) { prometheusText = `# capture failed: ${String(e.message).slice(0, 100)}`; }
 

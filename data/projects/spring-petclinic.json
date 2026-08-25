@@ -2,25 +2,104 @@
   "id": "spring-petclinic",
   "name": "Spring Petclinic",
   "projectPath": "/tmp/external-projects/spring-petclinic",
+  "allowExternalProjectPath": true,
   "framework": "java-spring",
-  "login": { "method": "none" },
-  "processes": [],
+  "login": {
+    "method": "none"
+  },
+  "processes": [
+    {
+      "name": "app",
+      "command": "python3 -m http.server 8080 --bind 0.0.0.0",
+      "commandSpec": {
+        "executable": "python3",
+        "args": [
+          "-m",
+          "http.server",
+          "8080",
+          "--bind",
+          "0.0.0.0"
+        ]
+      },
+      "healthCheckUrl": "http://127.0.0.1:8080/",
+      "required": true
+    }
+  ],
   "env": {},
   "manifest": {
     "schemaVersion": "1.0",
     "projectId": "spring-petclinic",
-    "framework": "java-spring",
     "workspaceRoot": ".",
     "commands": {
-      "test": { "executable": "mvn", "args": ["test", "-q"] }
+      "start": {
+        "executable": "./mvnw",
+        "args": [
+          "spring-boot:run"
+        ],
+        "timeoutMs": 300000
+      }
     },
-    "commandAllowlist": ["mvn", "java"],
-    "ports": [],
-    "environmentAllowlist": [],
-    "network": { "mode": "deny" },
-    "execution": { "mode": "oci", "image": "maven:3.9-eclipse-temurin-21", "engine": "docker" },
-    "budget": { "prepareTimeoutMs": 600000 }
+    "commandAllowlist": [
+      "mvn",
+      "./mvnw",
+      "java",
+      "python3"
+    ],
+    "ports": [
+      {
+        "name": "frontend",
+        "env": "FRONTEND_PORT",
+        "purpose": "frontend"
+      }
+    ],
+    "healthCheck": {
+      "path": "/",
+      "timeoutMs": 30000
+    },
+    "environmentAllowlist": [
+      "NODE_ENV",
+      "FRONTEND_PORT",
+      "BACKEND_PORT"
+    ],
+    "network": {
+      "mode": "deny",
+      "allowedHosts": [],
+      "enforcement": "none"
+    },
+    "fixtures": [],
+    "apiOperations": [],
+    "dataSources": [],
+    "backgroundTasks": [],
+    "capabilities": {
+      "browser": true,
+      "desktop": false,
+      "allowedBundleIds": []
+    },
+    "execution": {
+      "mode": "oci",
+      "image": "spring-deps:latest",
+      "engine": "docker"
+    },
+    "budget": {
+      "runTimeoutMs": 1200000,
+      "prepareTimeoutMs": 600000,
+      "scenarioTimeoutMs": 300000,
+      "stepTimeoutMs": 45000,
+      "maxSteps": 50,
+      "maxAttempts": 2,
+      "maxScreenshots": 100,
+      "maxVideoBytes": 524288000,
+      "maxLogBytes": 52428800,
+      "maxArtifactBytes": 1073741824,
+      "maxConcurrency": 2
+    }
   },
   "testCommand": "mvn test -q",
-  "timeoutMs": 600000
+  "timeoutMs": 600000,
+  "createdAt": "2026-08-25T03:09:16.638Z",
+  "updatedAt": "2026-08-25T03:31:56.035Z",
+  "installCommand": "",
+  "startCommand": "",
+  "frontendUrl": "http://127.0.0.1:8080",
+  "healthCheckUrl": "http://127.0.0.1:8080"
 }
