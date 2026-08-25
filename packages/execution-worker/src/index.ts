@@ -302,7 +302,7 @@ export function buildOciInvocation(input: {
   // backend compile together. If only esbuild is OOM-killed, Vite keeps its
   // port open and looks healthy while serving an error overlay. Scale this
   // generic profile from the manifest shape, never from a project name.
-  const memoryGiB = Math.min(6, Math.max(1, input.resources?.memoryGiB ?? (parallelRuntime ? 6 : 4)));
+  const memoryGiB = Math.min(8, Math.max(1, input.resources?.memoryGiB ?? (parallelRuntime ? 8 : 4)));
   const cpus = Math.min(4, Math.max(1, input.resources?.cpus ?? (parallelRuntime ? 3 : 2)));
   const pidsLimit = Math.min(512, Math.max(64, input.resources?.pidsLimit ?? (parallelRuntime ? 384 : 256)));
   const preinstalledDependencies = Boolean(manifest.execution.preinstalledDependencies);

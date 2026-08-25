@@ -209,7 +209,7 @@ const parallelInvocation = buildOciInvocation({
     { hostPort: 3000, containerPort: 3000 }
   ]
 });
-assert.match(parallelInvocation.args.join(" "), /--cpus 3 --memory 6g --memory-swap 6g --pids-limit 384/);
+assert.match(parallelInvocation.args.join(" "), /--cpus 3 --memory 8g --memory-swap 8g --pids-limit 384/);
 assert.throws(() => buildOciInvocation({
   engine: "docker",
   image: "node:22",
