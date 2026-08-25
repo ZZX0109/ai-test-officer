@@ -17,7 +17,7 @@ const root = process.cwd();
 const OUT = path.join(root, "reports", "baseline-verification");
 await mkdir(OUT, { recursive: true });
 
-const IMAGE = "node:22-bookworm";
+const IMAGE = "mcr.microsoft.com/playwright:v1.61.1-noble";
 const CONTAINER_WORKDIR = "/workspace";
 
 const STEPS = [
@@ -28,7 +28,8 @@ const STEPS = [
   { id: "quality-contracts", command: "npm run quality:contracts 2>&1 | tail -5" },
   { id: "typecheck", command: "npm run typecheck 2>&1 | tail -8" },
   { id: "build", command: "npm run build 2>&1 | tail -8" },
-  { id: "test", command: "npm test 2>&1 | tail -20" }
+  { id: "playwright-install", command: "npx playwright install chromium 2>&1 | tail -5" },
+  { id: "test", command: "npm test 2>&1 | tail -25" }
 ];
 
 // Use set -o pipefail so `cmd | tail` propagates the real exit code
@@ -38,7 +39,6 @@ const stepScripts = STEPS.map((s) =>
 
 const initScript =
   `mkdir -p ${CONTAINER_WORKDIR} && tar x -C ${CONTAINER_WORKDIR} && ` +
-  `apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq git python3 make g++ >/dev/null 2>&1 && ` +
   `cd ${CONTAINER_WORKDIR} && git init -q && git add -A && git commit -q -m baseline-init && ` +
   stepScripts;
 
