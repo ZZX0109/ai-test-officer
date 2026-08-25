@@ -28,7 +28,8 @@ const STEPS = [
   { id: "quality-contracts", command: "npm run quality:contracts 2>&1 | tail -5" },
   { id: "typecheck", command: "npm run typecheck 2>&1 | tail -8" },
   { id: "build", command: "npm run build 2>&1 | tail -8" },
-  { id: "test", command: "npm test 2>&1 | tail -15" }
+  { id: "playwright-install", command: "npx playwright install chromium 2>&1 | tail -3" },
+  { id: "test", command: "npm test 2>&1 | tail -20" }
 ];
 
 // Use set -o pipefail so `cmd | tail` propagates the real exit code
@@ -38,7 +39,9 @@ const stepScripts = STEPS.map((s) =>
 
 const initScript =
   `mkdir -p ${CONTAINER_WORKDIR} && tar x -C ${CONTAINER_WORKDIR} && ` +
-  `apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq git python3 make g++ >/dev/null 2>&1 && ` +
+  `apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq git python3 make g++ ` +
+  `libnspr4 libnss3 libatk1.0-0 libdbus-1-3 libxcomposite1 libxdamage1 libxfixes3 ` +
+  `libxrandr2 libgbm1 libxkbcommon0 libasound2 libatspi2.0-0 >/dev/null 2>&1 && ` +
   `cd ${CONTAINER_WORKDIR} && git init -q && git add -A && git commit -q -m baseline-init && ` +
   stepScripts;
 
@@ -66,7 +69,7 @@ const result = await new Promise((resolve) => {
   const timer = setTimeout(() => {
     child.kill("SIGKILL");
     resolve({ timedOut: true, stdout, stderr });
-  }, 900_000);
+  }, 1_500_000); // 25 min overall timeout (npm ci + build + playwright + test)
 
   child.on("close", (code) => {
     clearTimeout(timer);
