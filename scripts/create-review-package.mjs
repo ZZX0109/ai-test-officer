@@ -28,7 +28,7 @@ const reviewReports = [
   "reports/fault-injection/latest.json",
   "reports/fault-injection/latest.md",
   "reports/capacity-control-plane/latest.json",
-  "reports/capacity/worker-load-latest.json",
+  "reports/worker-load-slo/latest.json",
   "reports/browser-concurrency/latest.json",
   "reports/production-slo/latest.json",
   "reports/production-slo/dashboard-validation.json",
