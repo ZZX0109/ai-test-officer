@@ -60,17 +60,34 @@ const result = await new Promise((resolve) => {
   ], { stdio: ["pipe", "pipe", "pipe"] });
 
   let stdout = "", stderr = "";
+  let settled = false;
+  const finish = (value) => {
+    if (settled) return;
+    settled = true;
+    resolve(value);
+  };
   child.stdout.on("data", (d) => { stdout += d; process.stdout.write(d); });
   child.stderr.on("data", (d) => { stderr += d; process.stderr.write(d); });
+  // If Docker Desktop is stopped or its VM is full, spawn can succeed but
+  // the daemon closes stdin before consuming the archive. Suppress the
+  // resulting EPIPE and turn it into a normal machine-readable blocker.
+  child.stdin.on("error", (error) => {
+    stderr += String(error);
+    if (/EPIPE|EIO|ECONNRESET/.test(error?.code ?? "")) finish({ timedOut: false, exitCode: 1, stdout, stderr, spawnError: error.message });
+  });
 
   const timer = setTimeout(() => {
     child.kill("SIGKILL");
-    resolve({ timedOut: true, stdout, stderr });
+    finish({ timedOut: true, stdout, stderr });
   }, 1_200_000); // 20 min overall timeout
 
   child.on("close", (code) => {
     clearTimeout(timer);
-    resolve({ timedOut: false, exitCode: code, stdout, stderr });
+    finish({ timedOut: false, exitCode: code, stdout, stderr });
+  });
+  child.on("error", (error) => {
+    clearTimeout(timer);
+    finish({ timedOut: false, exitCode: 1, stdout, stderr, spawnError: error.message });
   });
 
   child.stdin.write(archive);
@@ -105,6 +122,7 @@ const report = {
   passedCount: passed,
   totalSteps: STEPS.length,
   timedOut: result.timedOut ?? false,
+  blockers: result.spawnError ? [result.spawnError, result.stderr.slice(-1200)] : [],
   steps: stepResults,
   bugsCaught: [
     "Uncommitted contracts schemas (preinstalledDependencies, traceTelemetrySchema) — committed in R22",
