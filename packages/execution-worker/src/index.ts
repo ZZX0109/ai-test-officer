@@ -374,7 +374,7 @@ export function buildOciInvocation(input: {
       // pnpm keeps package-local link trees under workspace packages. Copy
       // those trees from the image too; their links resolve through the root
       // /workspace/node_modules store copied above.
-      `find ${shellQuote(preinstalledDependencyImageRoot ?? "")} -mindepth 2 -maxdepth 3 -type d -name node_modules -exec sh -c 'for directory do relative="\${directory#"\$1"/}"; parent="\${relative%/node_modules}"; mkdir -p "/workspace/\$parent"; cp -a "\$directory" "/workspace/\$parent/"; done' sh ${shellQuote(preinstalledDependencyImageRoot ?? "")} {} +`
+      `find ${shellQuote(preinstalledDependencyImageRoot ?? "")} -mindepth 2 -maxdepth 3 -type d -name node_modules -exec sh -c 'root="\$1"; shift; for directory do relative="\${directory#"\$root"/}"; parent="\${relative%/node_modules}"; mkdir -p "/workspace/\$parent"; cp -a "\$directory" "/workspace/\$parent/"; done' sh ${shellQuote(preinstalledDependencyImageRoot ?? "")} {} +`
     ]
     : [];
   const dependencyCache = input.dependencyCache

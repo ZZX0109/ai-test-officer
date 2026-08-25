@@ -272,6 +272,31 @@ assert.match(preinstalledArgs, new RegExp(`src=${sourceDependencyRoot.replaceAll
 assert.match(preinstalledArgs, /cp -a '\/ato-preinstalled-deps\/1' '\/workspace\/packages\/server\/node_modules'/, "monorepo dependency link trees are copied into the writable workspace");
 assert.doesNotMatch(preinstalledArgs, /MAVEN_OPTS=-Dmaven\.repo\.local=\/tmp\/maven\/repository/, "preinstalled images keep their baked Maven repository");
 assert.match(preinstalledArgs, /--exclude=\.git --exclude=\.\/dist --exclude=\.\/build/, "preinstalled deps still excludes top-level .git/dist/build (anchored so node_modules/*/dist binaries survive)");
+
+// Image-baked dependencies must not mount host node_modules (which may be
+// another OS/architecture). Copy the root store and package-local pnpm link
+// trees from the image during bootstrap instead.
+const imagePreinstalledManifest = projectManifestSchema.parse({
+  ...preinstalledManifest,
+  projectId: "demo-image-preinstalled",
+  execution: {
+    mode: "oci",
+    image: "andflow-linux-deps:latest",
+    preinstalledDependencies: true,
+    preinstalledDependencyImageRoot: "/opt/andflow"
+  }
+});
+const imageInvocation = buildOciInvocation({
+  engine: "docker", image: "andflow-linux-deps:latest", manifest: imagePreinstalledManifest, repositoryRoot: preinstalledRoot,
+  prepareCommand: imagePreinstalledManifest.commands.install,
+  command: imagePreinstalledManifest.commands.start!,
+  preinstalledDependencyRoot: sourceDependencyRoot,
+  preinstalledDependencyReadOnly: true
+});
+const imageArgs = imageInvocation.args.join(" ");
+assert.doesNotMatch(imageArgs, new RegExp(`src=${sourceDependencyRoot.replaceAll("/", "\\/")}\/node_modules`), "image-baked deps must not bind-mount host node_modules");
+assert.match(imageArgs, /test -d '\/opt\/andflow'\/node_modules/, "image-baked deps must verify the image dependency root");
+assert.match(imageArgs, /root="\$1"; shift/, "image dependency bootstrap must not treat the root argument as a package directory");
 // Contrast: the default (no preinstalled) still excludes node_modules + runs install.
 assert.match(invocation.args.join(" "), /--exclude=node_modules/, "default mode excludes node_modules (forces workspace install)");
 await rm(preinstalledRoot, { recursive: true, force: true });
