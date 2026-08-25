@@ -66,13 +66,11 @@ async function waitForRun(runId, { timeoutMs = 1000 * 60 * 12 } = {}) {
     if (!ok) throw new Error(`run_status_${body?.error || body?.status || "err"}`);
     const run = body.run ?? body;
     const state = run.state;
-    // Terminal states end the run. `awaiting-human-review` is the sealed
-    // evaluator gate (the lane has executed through plan→browser→judge and
-    // reached the human-approval step). For an automated lane runner we treat
-    // reaching the gate as the recording point: the lane *executed*; the
-    // evaluator's final verdict is a separate sealed step recorded in metrics
-    // (gateStatus reflects "needs-human-review", not "passed").
-    if (/completed|failed|aborted|cancelled|awaiting-human-review/.test(state)) return run;
+    // A run awaiting approval has not completed the lane. Recording it as a
+    // completed blind-test result would turn a fail-closed human gate into a
+    // false acceptance claim.
+    if (state === "awaiting-human-review") throw new Error("run_awaiting_human_review");
+    if (/^(completed|failed|aborted|cancelled|blocked)$/.test(state)) return run;
     await new Promise((r) => setTimeout(r, 7000));
   }
   throw new Error("run_timeout");
@@ -114,15 +112,15 @@ function recordLane(evidence, lane, model, run) {
   const lanes = Array.isArray(evidence.lanes) ? evidence.lanes : [];
   if (!lanes.includes(lane)) lanes.push(lane);
   evidence.lanes = lanes;
-  // repetitions counts completed lane-execution runs across all lanes/rep/models.
+  // Repetitions count only runs that reached a real terminal execution state.
+  // An independent evaluator still has to provide its sealed report before the
+  // audit may mark the project complete.
   evidence.repetitions = (evidence.repetitions ?? 0) + 1;
   const models = Array.isArray(evidence.models) ? evidence.models : [];
   const modelId = model || "deterministic";
   if (!models.includes(modelId)) models.push(modelId);
   evidence.models = models;
   evidence.promptVersion = evidence.promptVersion || run.input?.promptVersion || "plan-v1";
-  evidence.labelsSealed = true;       // expected verdict never in run input
-  evidence.evaluatorSeparated = true; // planner/judge are separate paths/budgets
   const metrics = (evidence.metrics && typeof evidence.metrics === "object") ? evidence.metrics : {};
   metrics[lane] = metrics[lane] || [];
   metrics[lane].push({
@@ -136,13 +134,11 @@ function recordLane(evidence, lane, model, run) {
     completedAt: run.updatedAt
   });
   evidence.metrics = metrics;
-  evidence.status = "completed";
-  // Re-evaluate completion honestly: all 5 lanes + 3 reps + 2 models required.
-  const REQUIRED = ["native-tests", "rules-plan-rules-judge", "llm-plan-rules-judge", "rules-plan-llm-judge", "full-llm"];
-  const hasAllLanes = REQUIRED.every((l) => lanes.includes(l));
-  if (!hasAllLanes || (evidence.repetitions ?? 0) < 3 || (evidence.models?.length ?? 0) < 2) {
-    evidence.status = "evidence-incomplete";
-  }
+  // The runner owns execution evidence only. It never sees labels and cannot
+  // attest evaluator separation, so its output is intentionally not an
+  // acceptance result. `external-acceptance-audit` requires an evaluator
+  // report from EXTERNAL_ACCEPTANCE_EVALUATOR_REPORTS_ROOT for completion.
+  evidence.status = "execution-recorded-awaiting-independent-evaluation";
   return evidence;
 }
 

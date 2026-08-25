@@ -23,12 +23,12 @@ const CONTAINER_WORKDIR = "/workspace";
 const STEPS = [
   { id: "install", command: "npm ci --no-audit --no-fund 2>&1 | tail -5" },
   { id: "lint", command: "npm run lint 2>&1 | tail -5" },
-  { id: "git-diff-check", command: "git diff --check 2>&1 || echo CLEAN" },
+  { id: "git-diff-check", command: "git diff --check 2>&1" },
   { id: "size-guard", command: "THRESHOLD=2000 NEW_FILE_THRESHOLD=800 node scripts/file-size-guard.mjs 2>&1 | tail -3" },
   { id: "quality-contracts", command: "npm run quality:contracts 2>&1 | tail -5" },
   { id: "typecheck", command: "npm run typecheck 2>&1 | tail -8" },
   { id: "build", command: "npm run build 2>&1 | tail -8" },
-  { id: "playwright-install", command: "npx playwright install chromium 2>&1 | tail -5" },
+  { id: "playwright-browser", command: "test -d /ms-playwright && find /ms-playwright -maxdepth 1 -type d -name 'chromium-*' -print -quit | grep -q ." },
   { id: "test", command: "npm test 2>&1 | tail -25" }
 ];
 
@@ -53,7 +53,7 @@ const result = await new Promise((resolve) => {
   const child = spawn("docker", [
     "run", "--rm",
     "-w", CONTAINER_WORKDIR,
-    "-e", "CI=1", "-e", "NODE_ENV=test", "-e", "HEADLESS=1",
+    "-e", "CI=1", "-e", "NODE_ENV=test", "-e", "HEADLESS=1", "-e", "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright",
     "-e", "GIT_AUTHOR_NAME=baseline", "-e", "GIT_AUTHOR_EMAIL=baseline@ai-test-officer.local",
     "-e", "GIT_COMMITTER_NAME=baseline", "-e", "GIT_COMMITTER_EMAIL=baseline@ai-test-officer.local",
     "-i", IMAGE, "bash", "-c", initScript
@@ -86,7 +86,7 @@ const stepResults = STEPS.map((step) => {
 });
 
 const passed = stepResults.filter((r) => r.exitCode === 0).length;
-const platform = "linux/amd64 (node:22-bookworm container)";
+const platform = `linux/amd64 (${IMAGE})`;
 const report = {
   schemaVersion: "1.0",
   generatedAt: new Date().toISOString(),
@@ -105,14 +105,35 @@ const report = {
   ],
   limitations: [
     "Docker-dependent steps (production-acceptance, fault-injection, workbench-e2e, unified-run, credibility-browser, benchmark) require Docker-in-Docker and are not run in this container.",
-    "Agent test suite includes testBrowserAgentLoop() which requires Playwright Chromium + browser system deps; the test step may fail if Playwright isn't available.",
+    "The Playwright image supplies Chromium and its Linux system dependencies at /ms-playwright; the browser-check step verifies that image contract without a network download.",
     "This baseline validates the clean-build matrix (install, lint, typecheck, build, test, size-guard, quality-contracts) on a fresh Linux environment."
   ]
 };
 
 await writeFile(path.join(OUT, "linux-latest.json"), JSON.stringify(report, null, 2));
+const markdown = [
+  "# AI Test Officer — Clean Linux Baseline Report",
+  "",
+  `Generated: ${report.generatedAt}`,
+  "",
+  `## Result: ${report.passedCount}/${report.totalSteps} clean-build steps ${report.passed ? "PASS" : "NOT READY"}`,
+  "",
+  `- Image: \`${report.image}\``,
+  `- Source: ${report.sourceMethod}`,
+  "",
+  "| Step | Status | Command |",
+  "| --- | --- | --- |",
+  ...report.steps.map((step) => `| ${step.id} | ${step.exitCode === 0 ? "PASS" : "FAIL"} | \`${step.command}\` |`),
+  "",
+  "## Scope limits",
+  "",
+  ...report.limitations.map((limitation) => `- ${limitation}`),
+  ""
+].join("\n");
+await writeFile(path.join(OUT, "linux-report.md"), markdown);
 console.log("");
 console.log(`report → reports/baseline-verification/linux-latest.json`);
+console.log(`report → reports/baseline-verification/linux-report.md`);
 console.log(`passed: ${passed}/${STEPS.length} (${platform})`);
 if (report.passed) console.log("✓ Clean Linux baseline: clean-build matrix PASSED");
 else console.log("✗ Clean Linux baseline: some steps failed (see report)");
