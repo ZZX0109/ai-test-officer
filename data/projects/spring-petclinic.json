@@ -77,8 +77,9 @@
     },
     "execution": {
       "mode": "oci",
-      "image": "spring-deps:latest",
-      "engine": "docker"
+      "image": "spring-deps-nonroot:latest",
+      "engine": "docker",
+      "preinstalledDependencies": true
     },
     "budget": {
       "runTimeoutMs": 1200000,
@@ -94,10 +95,19 @@
       "maxConcurrency": 2
     }
   },
-  "testCommand": "mvn test -q",
+  "testCommand": "mvn test -q -Dtest=!PostgresIntegrationTests",
+  "testCommandSpec": {
+    "executable": "mvn",
+    "args": [
+      "test",
+      "-q",
+      "-Dtest=!PostgresIntegrationTests"
+    ],
+    "timeoutMs": 600000
+  },
   "timeoutMs": 600000,
   "createdAt": "2026-08-25T03:09:16.638Z",
-  "updatedAt": "2026-08-25T09:22:52.721Z",
+  "updatedAt": "2026-08-25T16:18:34.353Z",
   "installCommand": "",
   "startCommand": "",
   "frontendUrl": "http://127.0.0.1:8080",

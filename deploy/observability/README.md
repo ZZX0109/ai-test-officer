@@ -11,7 +11,10 @@ Prometheus rule and dashboard templates in this directory deliberately alert
 on `slo_unavailable`; an empty metric response must never be interpreted as a
 healthy deployment.
 
-`prometheus-rules.yml` and `ato-slo-dashboard.json` are deployment templates.
-They become production evidence only after they are installed, scraped and
-observed in the target environment. The repository's isolated acceptance
-report does not claim that a live monitoring platform has been provisioned.
+`prometheus-rules.yml`, `prometheus.yml` and `ato-slo-dashboard.json` are
+installed by the production-acceptance Compose stack's `observability`
+profile. The default acceptance stack does not require the monitoring images;
+run `docker compose --profile observability up` to enable them. Prometheus
+uses a persistent `prometheus-data` volume and Grafana uses a persistent
+`grafana-data` volume; the acceptance monitor queries the live Prometheus rule
+state and Grafana health before teardown.

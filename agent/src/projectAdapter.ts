@@ -1249,6 +1249,7 @@ function spawnManagedProcess(input: {
       const execution = input.project.manifest!.execution;
       const hostPort = portFromUrl(input.healthCheckUrl);
       const containerPort = input.containerPort ?? hostPort;
+      const executionEnv = commandEnv(input.project);
       const invocation = buildOciInvocation({
         engine: execution.engine,
         image: execution.image!,
@@ -1256,6 +1257,8 @@ function spawnManagedProcess(input: {
         repositoryRoot: input.cwd,
         command: commandSpecSchema.parse(input.command),
         prepareCommand: input.project.installCommandSpec,
+        environment: executionEnv,
+        preinstalledDependencyRoot: input.cwd,
         dependencyCache: input.dependencyCache, networkName: input.networkName, proxyUrl: input.proxyUrl,
         portBindings: input.portBindings?.length
           ? input.portBindings
@@ -1268,7 +1271,7 @@ function spawnManagedProcess(input: {
         shell: false,
         detached: process.platform !== "win32",
         stdio: ["pipe", "pipe", "pipe"],
-        env: commandEnv(input.project)
+        env: executionEnv
       });
       ociProcesses.set(spawned, { engine: execution.engine, containerName: invocation.containerName });
       return spawned;

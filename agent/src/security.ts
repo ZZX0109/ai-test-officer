@@ -101,7 +101,8 @@ export function createCorsOptions(): CorsOptions {
 function isPublicRoute(req: Request) {
   return (
     req.method === "OPTIONS" ||
-    (req.method === "GET" && req.path === "/api/health")
+    (req.method === "GET" && req.path === "/api/health") ||
+    (req.method === "GET" && req.path === "/api/operations/slo/prometheus" && process.env.METRICS_PUBLIC === "1")
   );
 }
 

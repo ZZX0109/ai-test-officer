@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { BudgetTracker, buildOciInvocation, buildRunScopedProxyUrl, classifyRuntimeFailure, createEgressNetworkController, createExecutionEnvironment, createIsolatedNetworkController, egressNetworkName, isolatedNetworkName, resolveManifestWorkspace } from "../src/index.js";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import path from "node:path";
+import { BudgetTracker, buildOciInvocation, buildRunScopedProxyUrl, classifyRuntimeFailure, createEgressNetworkController, createExecutionEnvironment, createIsolatedNetworkController, egressNetworkName, isolatedNetworkName, resolveManifestWorkspace, runAllowlistedCommand, runAllowlistedInvocation } from "../src/index.js";
 import { projectManifestSchema } from "@ai-test-officer/contracts";
 
 const manifest = projectManifestSchema.parse({
@@ -24,12 +26,29 @@ const invocation = buildOciInvocation({
   command: manifest.commands.start!,
   portBindings: [{ hostPort: 5173, containerPort: 5173 }]
 });
+const generatedInvocation = await runAllowlistedInvocation({
+  command: { executable: "true", args: Array.from({ length: 129 }, () => "generated-arg") },
+  cwd: process.cwd(),
+  env: {},
+  allowedExecutables: ["true"]
+});
+assert.equal(generatedInvocation.exitCode, 0, "generated host invocations may exceed the project command argv limit");
+assert.throws(
+  () => runAllowlistedCommand({
+      command: { executable: "true", args: Array.from({ length: 129 }, () => "project-arg") },
+      cwd: process.cwd(),
+      env: {},
+      allowedExecutables: ["true"]
+    }),
+  /Array must contain at most 128 element\(s\)/
+);
 assert.match(invocation.args.join(" "), /--read-only/);
 assert.match(invocation.args.join(" "), /dst=\/source,readonly/);
 assert.match(invocation.args.join(" "), /\/workspace:rw,exec,nosuid/);
 assert.match(invocation.args.join(" "), /127\.0\.0\.1:5173:5173/);
 assert.match(invocation.args.join(" "), /npm.*ci/);
 assert.match(invocation.args.join(" "), /--user 65532:65532/);
+assert.match(invocation.args.join(" "), /SHELL=\/bin\/sh/);
 assert.match(invocation.args.join(" "), /--memory 4g --memory-swap 4g/);
 assert.match(invocation.args.join(" "), /ai-test-officer\.managed=true/);
 assert.match(invocation.args.join(" "), /ai-test-officer\.project-id=demo/);
@@ -232,18 +251,30 @@ const preinstalledManifest = projectManifestSchema.parse({
   network: { mode: "deny" },
   execution: { mode: "oci", image: "node:22", preinstalledDependencies: true }
 });
+const preinstalledRoot = await mkdtemp("/tmp/ato-execution-worker-");
+await mkdir(path.join(preinstalledRoot, "fixture", "node_modules"), { recursive: true });
+const sourceDependencyRoot = await mkdtemp("/tmp/ato-execution-worker-deps-");
+await mkdir(path.join(sourceDependencyRoot, "node_modules"), { recursive: true });
+await mkdir(path.join(sourceDependencyRoot, "packages", "server", "node_modules"), { recursive: true });
 const preinstalledInvocation = buildOciInvocation({
-  engine: "docker", image: "node:22", manifest: preinstalledManifest, repositoryRoot: "/repo",
+  engine: "docker", image: "node:22", manifest: preinstalledManifest, repositoryRoot: preinstalledRoot,
   prepareCommand: preinstalledManifest.commands.install,
   command: preinstalledManifest.commands.start!,
+  preinstalledDependencyRoot: sourceDependencyRoot,
+  preinstalledDependencyReadOnly: true,
   portBindings: [{ hostPort: 5173, containerPort: 5173 }]
 });
 const preinstalledArgs = preinstalledInvocation.args.join(" ");
 assert.match(preinstalledArgs, /ATO_PREINSTALLED_DEPENDENCIES_SKIP_INSTALL/, "preinstalled deps must skip the install command");
 assert.match(preinstalledArgs, /--exclude=node_modules/, "preinstalled deps exclude node_modules from the tmpfs copy (bind-mounted instead)");
-assert.match(preinstalledArgs, /dst=\/workspace\/node_modules/, "preinstalled deps bind-mount node_modules (avoid copying multi-GB deps into the RAM-backed tmpfs, which OOM-kills the sandbox)");
+assert.match(preinstalledArgs, new RegExp(`src=${sourceDependencyRoot.replaceAll("/", "\\/")}\/node_modules,dst=\/workspace\/node_modules,readonly`), "Repair can mount dependencies from the immutable source project");
+assert.match(preinstalledArgs, new RegExp(`src=${sourceDependencyRoot.replaceAll("/", "\\/")}\/packages\/server\/node_modules,dst=\/ato-preinstalled-deps\/1,readonly`), "monorepo package dependencies remain available in their original workspace location");
+assert.match(preinstalledArgs, /cp -a '\/ato-preinstalled-deps\/1' '\/workspace\/packages\/server\/node_modules'/, "monorepo dependency link trees are copied into the writable workspace");
+assert.doesNotMatch(preinstalledArgs, /MAVEN_OPTS=-Dmaven\.repo\.local=\/tmp\/maven\/repository/, "preinstalled images keep their baked Maven repository");
 assert.match(preinstalledArgs, /--exclude=\.git --exclude=\.\/dist --exclude=\.\/build/, "preinstalled deps still excludes top-level .git/dist/build (anchored so node_modules/*/dist binaries survive)");
 // Contrast: the default (no preinstalled) still excludes node_modules + runs install.
 assert.match(invocation.args.join(" "), /--exclude=node_modules/, "default mode excludes node_modules (forces workspace install)");
+await rm(preinstalledRoot, { recursive: true, force: true });
+await rm(sourceDependencyRoot, { recursive: true, force: true });
 
 console.log("execution worker tests passed");

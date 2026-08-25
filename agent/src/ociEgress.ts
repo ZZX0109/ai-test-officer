@@ -1,4 +1,4 @@
-import { createEgressNetworkController, createIsolatedNetworkController, networkPolicyHash, runAllowlistedCommand, type EgressNetworkHandle } from "@ai-test-officer/execution-worker";
+import { createEgressNetworkController, createIsolatedNetworkController, networkPolicyHash, runAllowlistedInvocation, type EgressNetworkHandle } from "@ai-test-officer/execution-worker";
 import type { ProjectConfig } from "./types.js";
 
 const rootDir = process.cwd().endsWith("/agent") ? process.cwd().slice(0, -6) : process.cwd();
@@ -8,8 +8,15 @@ export type OciEgressLease = { controller: OciNetworkController; handle: EgressN
 export async function prepareOciEgress(project: ProjectConfig, context: { runId?: string; attemptId?: string }): Promise<OciEgressLease | undefined> {
   const manifest = project.manifest;
   if (!manifest || manifest.execution.mode !== "oci") return undefined;
+  // Fast path: when ATO_DENY_NETWORK_NAME=none is set, skip isolated network
+  // creation entirely. buildOciInvocation falls back to --network none. This
+  // is used for repair validation where no browser ports are published and
+  // the test command runs fully offline.
+  if (manifest.network.mode === "deny" && process.env.ATO_DENY_NETWORK_NAME === "none") {
+    return undefined;
+  }
   const runner = async (args: string[]) => {
-    const result = await runAllowlistedCommand({ command: { executable: "docker", args, timeoutMs: 30_000 }, cwd: rootDir, env: {}, allowedExecutables: ["docker"], maxLogBytes: 8_000 });
+    const result = await runAllowlistedInvocation({ command: { executable: "docker", args, timeoutMs: 30_000 }, cwd: rootDir, env: {}, allowedExecutables: ["docker"], maxLogBytes: 8_000 });
     return { exitCode: result.exitCode ?? 1, stderr: result.stderr };
   };
   if (manifest.network.mode === "deny") {

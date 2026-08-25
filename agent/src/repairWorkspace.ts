@@ -18,7 +18,7 @@ import {
   type RepairSession
 } from "@ai-test-officer/contracts";
 import { AttemptClock, commitCapturedFile } from "@ai-test-officer/playwright-runtime";
-import { buildOciInvocation, runAllowlistedCommand } from "@ai-test-officer/execution-worker";
+import { buildOciInvocation, runAllowlistedCommand, runAllowlistedInvocation } from "@ai-test-officer/execution-worker";
 import type { ArtifactIntegrityReport, LayeredJudgeReport, ProjectConfig, RunBundle, VisualRunResult } from "./types.js";
 import { appendSystemRunEvent, runEventStore } from "./runEventStore.js";
 import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
@@ -28,6 +28,7 @@ import { persistExecutionResult } from "./executionPersistence.js";
 import { prepareSandboxDependencyCache } from "./projectAdapter.js";
 import { prepareOciEgress } from "./ociEgress.js";
 import { getDatabasePool } from "./databaseRuntime.js";
+import { readProjectExecutionEnv } from "./projectExecutionEnv.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const repairsRoot = path.join(rootDir, "reports", "repairs");
@@ -970,9 +971,16 @@ export async function validateRepairSession(
     stderr: string;
   }> = [];
   for (const item of validationCommands) {
-    const egress = await prepareOciEgress(project, { runId: childRunId, attemptId: `${childRunId}_attempt_1` });
+    // Validation runs don't publish browser ports, so deny-mode projects can
+    // use --network none directly. Skip prepareOciEgress (which creates an
+    // isolated Docker bridge) for deny mode — the network creation can hang
+    // in dev mode and validation only needs offline test execution.
+    const egress = project.manifest.network.mode === "deny"
+      ? undefined
+      : await prepareOciEgress(project, { runId: childRunId, attemptId: `${childRunId}_attempt_1` });
     let result;
     try {
+      const executionEnv = await readProjectExecutionEnv(project);
       const invocation = buildOciInvocation({
         engine: project.manifest.execution.engine,
         image: project.manifest.execution.image,
@@ -980,18 +988,21 @@ export async function validateRepairSession(
         repositoryRoot: workspaceDir(id),
         command: item.command,
         prepareCommand: project.installCommandSpec ?? project.manifest.commands.install,
+        environment: executionEnv,
+        preinstalledDependencyRoot: projectSourceRoot(project.projectPath),
+        preinstalledDependencyReadOnly: true,
         dependencyCache,
         networkName: egress?.handle.name,
         proxyUrl: egress?.handle.proxyUrl
       });
-      result = await runAllowlistedCommand({
+      result = await runAllowlistedInvocation({
         command: {
           executable: invocation.executable,
           args: invocation.args,
           timeoutMs: item.command.timeoutMs ?? 600_000
         },
         cwd: rootDir,
-        env: {},
+        env: executionEnv,
         allowedExecutables: [project.manifest.execution.engine],
         maxLogBytes: project.manifest.budget.maxLogBytes
       });

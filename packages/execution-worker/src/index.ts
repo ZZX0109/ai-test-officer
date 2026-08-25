@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import { existsSync, readdirSync } from "node:fs";
 import { commandSpecSchema, defaultResourceBudget, projectManifestSchema, type CommandSpec, type ProjectManifest, type ResourceBudget, type ReadinessReport } from "@ai-test-officer/contracts";
 export { buildRunScopedProxyUrl, createEgressNetworkController, createIsolatedNetworkController, egressNetworkName, isolatedNetworkName, type EgressCommandRunner, type EgressNetworkHandle } from "./egressNetworkController.js";
 
@@ -159,15 +160,21 @@ export class BudgetTracker {
 
 export interface LocalCommandResult { exitCode: number | null; stdout: string; stderr: string; failureReason?: RuntimeFailureReason }
 
-export async function runAllowlistedCommand(input: {
-  command: CommandSpec;
+export type AllowlistedProcessInvocation = {
+  executable: string;
+  args: string[];
+  timeoutMs?: number;
+};
+
+async function runAllowlistedProcess(input: {
+  command: AllowlistedProcessInvocation;
   cwd: string;
   env: Record<string, string>;
   allowedExecutables: string[];
   signal?: AbortSignal;
   maxLogBytes?: number;
 }): Promise<LocalCommandResult> {
-  const command = commandSpecSchema.parse(input.command);
+  const command = input.command;
   if (!input.allowedExecutables.includes(command.executable)) throw new Error(`command_not_allowed:${command.executable}`);
   const maxLogBytes = input.maxLogBytes ?? defaultResourceBudget.maxLogBytes;
   return new Promise((resolve) => {
@@ -188,6 +195,35 @@ export async function runAllowlistedCommand(input: {
   });
 }
 
+/**
+ * Runs a generated host-process invocation after checking its executable.
+ * Project commands use runAllowlistedCommand and remain bounded by
+ * commandSpecSchema; generated wrappers such as `docker` can legitimately
+ * need more than 128 argv entries for mounts, environment, and policy flags.
+ */
+export function runAllowlistedInvocation(input: {
+  command: AllowlistedProcessInvocation;
+  cwd: string;
+  env: Record<string, string>;
+  allowedExecutables: string[];
+  signal?: AbortSignal;
+  maxLogBytes?: number;
+}): Promise<LocalCommandResult> {
+  return runAllowlistedProcess(input);
+}
+
+export function runAllowlistedCommand(input: {
+  command: CommandSpec;
+  cwd: string;
+  env: Record<string, string>;
+  allowedExecutables: string[];
+  signal?: AbortSignal;
+  maxLogBytes?: number;
+}): Promise<LocalCommandResult> {
+  const command = commandSpecSchema.parse(input.command);
+  return runAllowlistedProcess({ ...input, command });
+}
+
 export function buildOciInvocation(input: {
   engine: "docker";
   image: string;
@@ -195,6 +231,16 @@ export function buildOciInvocation(input: {
   repositoryRoot: string;
   command: CommandSpec;
   prepareCommand?: CommandSpec;
+  /** Host variables available to Docker via `--env NAME`; values never enter argv. */
+  environment?: Record<string, string | undefined>;
+  /**
+   * Optional immutable source of pre-installed dependencies. Repair workspaces
+   * intentionally exclude node_modules, so they cannot be the dependency
+   * source when the target project already has a populated dependency tree.
+   */
+  preinstalledDependencyRoot?: string;
+  /** Keep a source dependency tree from being mutated by the sandbox. */
+  preinstalledDependencyReadOnly?: boolean;
   networkName?: string;
   proxyUrl?: string;
   portBindings?: Array<{ hostPort: number; containerPort: number }>;
@@ -259,7 +305,62 @@ export function buildOciInvocation(input: {
   const memoryGiB = Math.min(6, Math.max(1, input.resources?.memoryGiB ?? (parallelRuntime ? 6 : 4)));
   const cpus = Math.min(4, Math.max(1, input.resources?.cpus ?? (parallelRuntime ? 3 : 2)));
   const pidsLimit = Math.min(512, Math.max(64, input.resources?.pidsLimit ?? (parallelRuntime ? 384 : 256)));
-  const environmentArgs = manifest.environmentAllowlist.flatMap((name) => ["--env", name]);
+  const preinstalledDependencies = Boolean(manifest.execution.preinstalledDependencies);
+  const availableEnvironment = input.environment ?? process.env;
+  const environmentArgs = manifest.environmentAllowlist.flatMap((name) => availableEnvironment[name] === undefined ? [] : ["--env", name]);
+  const preinstalledDependencyRoot = path.resolve(input.preinstalledDependencyRoot ?? workspace);
+  // Workspace copies intentionally exclude dependency trees. A monorepo can
+  // still keep package-local node_modules directories (pnpm's layout), so
+  // mount the root plus the first two source levels without traversing the
+  // dependency tree itself.
+  const preinstalledNodeModules = (() => {
+    if (!preinstalledDependencies) return [] as string[];
+    const roots: string[] = [];
+    const visit = (directory: string, depth: number) => {
+      const dependencyDirectory = path.join(directory, "node_modules");
+      if (existsSync(dependencyDirectory)) roots.push(dependencyDirectory);
+      if (depth === 0) return;
+      let entries;
+      try {
+        entries = readdirSync(directory, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+        visit(path.join(directory, entry.name), depth - 1);
+      }
+    };
+    visit(preinstalledDependencyRoot, 2);
+    return [...new Set(roots)];
+  })();
+  const preinstalledNodeModulesMount = preinstalledNodeModules.flatMap((dependencyDirectory, index) => {
+    const relative = path.relative(preinstalledDependencyRoot, dependencyDirectory).replaceAll(path.sep, "/");
+    // The root node_modules mount preserves Node's package-resolution rules
+    // (the directory must literally be named node_modules). Do not mount
+    // package-local trees directly below /workspace/<package>: Docker creates
+    // those parent directories as root before uid 65532 starts, preventing
+    // the source tar stream from creating ordinary project files. The
+    // bootstrap copies those smaller package link trees instead.
+    const destination = relative === "node_modules"
+      ? "/workspace/node_modules"
+      : `/ato-preinstalled-deps/${index}`;
+    return [
+      "--mount",
+      `type=bind,src=${dependencyDirectory},dst=${destination}${input.preinstalledDependencyReadOnly ? ",readonly" : ""}`
+    ];
+  });
+  const preinstalledNodeModulesBootstrap = preinstalledNodeModules.map((dependencyDirectory, index) => {
+    const relative = path.relative(preinstalledDependencyRoot, dependencyDirectory).replaceAll(path.sep, "/");
+    const destination = `/workspace/${relative}`;
+    const parent = path.posix.dirname(destination);
+    if (relative === "node_modules") return "";
+    // Package-local pnpm node_modules entries contain relative links back to
+    // the root .pnpm store. Copy the small package link tree into the writable
+    // workspace so those links resolve through /workspace/node_modules; a
+    // symlink to the flat mount would resolve them relative to that mount.
+    return `mkdir -p '${parent}' && cp -a '/ato-preinstalled-deps/${index}' '${destination}'`;
+  });
   const portArgs = (input.portBindings ?? []).flatMap(({ hostPort, containerPort }) => [
     "--publish", `127.0.0.1:${hostPort}:${containerPort}`
   ]);
@@ -276,6 +377,11 @@ export function buildOciInvocation(input: {
       packageCacheVolume: input.dependencyCache.packageCacheVolume?.replace(/[^a-zA-Z0-9_.-]/g, "_")
     }
     : undefined;
+  const mavenRepository = dependencyCache
+    ? "/sandbox-cache/maven/repository"
+    : preinstalledDependencies
+      ? undefined
+      : "/tmp/maven/repository";
   // Official Node images ship Corepack but do not activate pnpm/yarn shims by
   // default. Keep package-manager downloads in the project-scoped dependency
   // cache so later sandbox launches do not download Corepack or packages again.
@@ -322,7 +428,6 @@ export function buildOciInvocation(input: {
   // node_modules / .venv populated to avoid a cold install that needs registry
   // egress), skip the prepare (install) command entirely — the dependency
   // directories are copied into the workspace below.
-  const preinstalledDependencies = Boolean(manifest.execution.preinstalledDependencies);
   const prepare = (prepareCommand && dependencyCache && !preinstalledDependencies)
     ? [
       `cache_marker=${dependencyCache.storageMode === "volume" ? "/sandbox-meta" : "/sandbox-cache"}/prepared-${dependencyCache.key}`,
@@ -360,6 +465,7 @@ export function buildOciInvocation(input: {
   const bootstrap = [
     "set -eu",
     "mkdir -p /workspace",
+    ...preinstalledNodeModulesBootstrap,
     workspaceBootstrap,
     internalBrowserOnly,
     runtimePathBootstrap,
@@ -388,6 +494,11 @@ export function buildOciInvocation(input: {
       ]),
       ...portArgs,
       "--env", "HOME=/tmp/ato-home",
+      // Some CLI frameworks call os.userInfo() only to infer SHELL. The
+      // hardened numeric uid intentionally has no passwd entry in slim
+      // images, so provide the non-sensitive shell explicitly instead of
+      // weakening the uid or adding a writable /etc/passwd.
+      "--env", "SHELL=/bin/sh",
       // Servers that default to 127.0.0.1 are reachable only from inside the
       // container even when Docker publishes their port. Managed web targets
       // must bind the container interface; the host side remains restricted
@@ -421,7 +532,7 @@ export function buildOciInvocation(input: {
       "--env", `CARGO_HOME=${dependencyCache ? "/sandbox-cache/cargo" : "/tmp/cargo"}`,
       "--env", `CARGO_TARGET_DIR=${dependencyCache ? "/sandbox-cache/cargo-target" : "/tmp/cargo-target"}`,
       "--env", `GRADLE_USER_HOME=${dependencyCache ? "/sandbox-cache/gradle" : "/tmp/gradle"}`,
-      "--env", `MAVEN_OPTS=-Dmaven.repo.local=${dependencyCache ? "/sandbox-cache/maven/repository" : "/tmp/maven/repository"}`,
+      ...(mavenRepository ? ["--env", `MAVEN_OPTS=-Dmaven.repo.local=${mavenRepository}`] : []),
       "--env", `BUNDLE_PATH=${dependencyCache ? "/sandbox-cache/bundle" : "/tmp/bundle"}`,
       "--env", `GEM_HOME=${dependencyCache ? "/sandbox-cache/gems" : "/tmp/gems"}`,
       "--env", `GEM_PATH=${dependencyCache ? "/sandbox-cache/gems" : "/tmp/gems"}`,
@@ -446,12 +557,11 @@ export function buildOciInvocation(input: {
           ]
         : [
             "--tmpfs", "/workspace:rw,exec,nosuid,size=8g,uid=65532,gid=65532",
-            // preinstalledDependencies: bind-mount the host's node_modules
-            // (writable, so vite/esbuild can write .vite/.cache into it) instead
-            // of copying it into the RAM-backed /workspace tmpfs. Copying a
-            // multi-GB node_modules into the tmpfs OOM-kills the sandbox on VMs
-            // with limited RAM; the bind mount keeps node_modules on disk.
-            ...(preinstalledDependencies ? ["--mount", `type=bind,src=${workspace}/node_modules,dst=/workspace/node_modules`] : [])
+            // Preinstalled dependencies stay outside the RAM-backed /workspace
+            // tmpfs. The source may be the original project root (Repair copies
+            // intentionally omit node_modules), and an absent directory must
+            // not make Python-only projects fail before their command starts.
+            ...preinstalledNodeModulesMount
           ]),
       "--workdir", "/workspace",
       "--name", containerName,

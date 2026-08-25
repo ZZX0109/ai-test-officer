@@ -35,6 +35,7 @@ const reviewReports = [
   "reports/browser-concurrency/latest.json",
   "reports/production-slo/latest.json",
   "reports/production-slo/dashboard-validation.json",
+  "reports/production-slo/monitoring-live-latest.json",
   "reports/external-repair/latest.json",
   "reports/external-repair/rollback-report.json",
   "reports/redteam/sandbox-escape-latest.json",
@@ -43,6 +44,7 @@ const reviewReports = [
   "reports/redteam/malicious-oci-latest.md",
   "reports/redteam/provider-isolation-latest.json",
   "reports/redteam/provider-isolation-latest.md",
+  "reports/redteam/oidc-multi-tenant-latest.json",
   "reports/security-adversarial/latest.json"
 ];
 const reportRedactions = new Set(["reports/production-slo/latest.json"]);

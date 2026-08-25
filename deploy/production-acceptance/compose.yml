@@ -132,6 +132,10 @@ services:
       OIDC_JWKS_URL: http://keycloak:8080/realms/ai-test-officer/protocol/openid-connect/certs
       OIDC_ROLE_CLAIM: roles
       OIDC_ORGANIZATION_CLAIM: organization_id
+      # The endpoint only exposes low-cardinality SLO gauges and is explicitly
+      # public for the in-network Prometheus scraper. Run/evidence APIs remain
+      # behind OIDC authentication.
+      METRICS_PUBLIC: "1"
       ARTIFACT_S3_BUCKET: ai-test-officer
       ARTIFACT_S3_ENDPOINT: http://minio:9000
       ARTIFACT_S3_FORCE_PATH_STYLE: "1"
@@ -190,7 +194,33 @@ services:
     tmpfs: ["/tmp"]
     ports: ["127.0.0.1:16174:6174"]
     networks: [control]
-volumes: { postgres-data: {}, redis-data: {}, minio-data: {}, agent-reports: {}, target-db-data: {}, egress-audit: {} }
+  prometheus:
+    image: prom/prometheus:v2.53.4
+    profiles: [observability]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--web.enable-lifecycle"]
+    depends_on:
+      agent-api: { condition: service_healthy }
+    volumes:
+      - prometheus-data:/prometheus
+      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../observability/prometheus-rules.yml:/etc/prometheus/prometheus-rules.yml:ro
+    ports: ["127.0.0.1:19090:9090"]
+    networks: [control]
+  grafana:
+    image: grafana/grafana:11.2.0
+    profiles: [observability]
+    depends_on: { prometheus: { condition: service_started } }
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-acceptance-only}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/ato-slo-dashboard.json:/var/lib/grafana/dashboards/ato-slo-dashboard.json:ro
+    ports: ["127.0.0.1:13000:3000"]
+    networks: [control]
+volumes: { postgres-data: {}, redis-data: {}, minio-data: {}, agent-reports: {}, target-db-data: {}, egress-audit: {}, prometheus-data: {}, grafana-data: {} }
 networks:
   control: { internal: false }
   targets: { internal: true }

@@ -33,8 +33,10 @@
   "env": {
     "SECRET_KEY": "fastapi-capacity-test-secret-key-32bytes-long",
     "PROJECT_NAME": "fastapi-full-stack",
+    "FASTAPI_ENV": "development",
     "DATABASE_URL": "sqlite:////tmp/db.sqlite",
-    "EMAIL_TEST_USER": "test@example.com",
+    "EMAIL_TEST_USER": "normal@example.com",
+    "EMAILS_FROM_EMAIL": "test@example.com",
     "FIRST_SUPERUSER": "test@example.com",
     "FIRST_SUPERUSER_PASSWORD": "[REDACTED]",
     "PYTHONPATH": "/workspace/backend"
@@ -42,7 +44,7 @@
   "cleanupCommand": "",
   "timeoutMs": 35000,
   "createdAt": "2026-07-08T00:00:00.000Z",
-  "updatedAt": "2026-08-25T09:22:01.424Z",
+  "updatedAt": "2026-08-25T16:17:26.565Z",
   "manifest": {
     "schemaVersion": "1.0",
     "projectId": "fastapi-full-stack-template",
@@ -111,8 +113,10 @@
       "BACKEND_PORT",
       "SECRET_KEY",
       "PROJECT_NAME",
+      "FASTAPI_ENV",
       "DATABASE_URL",
       "EMAIL_TEST_USER",
+      "EMAILS_FROM_EMAIL",
       "FIRST_SUPERUSER",
       "FIRST_SUPERUSER_PASSWORD",
       "PYTHONPATH",
@@ -153,13 +157,13 @@
       "maxConcurrency": 2
     }
   },
-  "testCommand": "python -m pytest tests/ --tb=line -q",
+  "testCommand": "python -m pytest backend/tests/ --tb=line -q",
   "testCommandSpec": {
     "executable": "python",
     "args": [
       "-m",
       "pytest",
-      "tests/",
+      "backend/tests/",
       "--tb=line",
       "-q"
     ],

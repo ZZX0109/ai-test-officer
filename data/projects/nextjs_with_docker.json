@@ -37,6 +37,15 @@
   "apiCredentialBindings": [],
   "env": {},
   "timeoutMs": 30000,
+  "testCommand": "npm run build",
+  "testCommandSpec": {
+    "executable": "npm",
+    "args": [
+      "run",
+      "build"
+    ],
+    "timeoutMs": 600000
+  },
   "manifest": {
     "schemaVersion": "1.0",
     "projectId": "nextjs_with_docker",
@@ -121,5 +130,5 @@
     }
   },
   "createdAt": "2026-08-24T15:46:06.038Z",
-  "updatedAt": "2026-08-25T09:22:31.442Z"
+  "updatedAt": "2026-08-25T16:18:01.712Z"
 }

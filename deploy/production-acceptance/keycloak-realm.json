@@ -7,12 +7,14 @@
     "protocolMappers":[
       {"name":"api-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper","config":{"included.custom.audience":"ai-test-officer-api","access.token.claim":"true"}},
       {"name":"roles","protocol":"openid-connect","protocolMapper":"oidc-usermodel-realm-role-mapper","config":{"claim.name":"roles","jsonType.label":"String","multivalued":"true","access.token.claim":"true"}},
-      {"name":"organization","protocol":"openid-connect","protocolMapper":"oidc-hardcoded-claim-mapper","config":{"claim.name":"organization_id","claim.value":"benchmark","jsonType.label":"String","access.token.claim":"true"}}
+      {"name":"organization","protocol":"openid-connect","protocolMapper":"oidc-usermodel-attribute-mapper","config":{"user.attribute":"organization_id","claim.name":"organization_id","jsonType.label":"String","access.token.claim":"true","id.token.claim":"true","userinfo.token.claim":"true"}}
     ]
   }],
   "users":[
-    {"username":"acceptance-admin","enabled":true,"email":"acceptance-admin@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Admin","requiredActions":[],"credentials":[{"type":"password","value":"acceptance-admin-change-me","temporary":false}],"realmRoles":["admin"]},
-    {"username":"acceptance-runner","enabled":true,"email":"acceptance-runner@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Runner","requiredActions":[],"credentials":[{"type":"password","value":"acceptance-runner-change-me","temporary":false}],"realmRoles":["runner"]},
-    {"username":"acceptance-reviewer","enabled":true,"email":"acceptance-reviewer@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Reviewer","requiredActions":[],"credentials":[{"type":"password","value":"acceptance-reviewer-change-me","temporary":false}],"realmRoles":["reviewer"]}
+    {"username":"acceptance-admin","enabled":true,"email":"acceptance-admin@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Admin","requiredActions":[],"attributes":{"organization_id":["benchmark"]},"credentials":[{"type":"password","value":"acceptance-admin-change-me","temporary":false}],"realmRoles":["admin"]},
+    {"username":"acceptance-runner","enabled":true,"email":"acceptance-runner@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Runner","requiredActions":[],"attributes":{"organization_id":["benchmark"]},"credentials":[{"type":"password","value":"acceptance-runner-change-me","temporary":false}],"realmRoles":["runner"]},
+    {"username":"acceptance-reviewer","enabled":true,"email":"acceptance-reviewer@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Reviewer","requiredActions":[],"attributes":{"organization_id":["benchmark"]},"credentials":[{"type":"password","value":"acceptance-reviewer-change-me","temporary":false}],"realmRoles":["reviewer"]},
+    {"username":"acceptance-org-a","enabled":true,"email":"acceptance-org-a@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Org A","requiredActions":[],"attributes":{"organization_id":["org_oidc_a"]},"credentials":[{"type":"password","value":"acceptance-org-a-change-me","temporary":false}],"realmRoles":["runner"]},
+    {"username":"acceptance-org-b","enabled":true,"email":"acceptance-org-b@example.test","emailVerified":true,"firstName":"Acceptance","lastName":"Org B","requiredActions":[],"attributes":{"organization_id":["org_oidc_b"]},"credentials":[{"type":"password","value":"acceptance-org-b-change-me","temporary":false}],"realmRoles":["runner"]}
   ]
 }

@@ -10,12 +10,13 @@ import {
 import {
   buildOciInvocation,
   createEgressNetworkController,
-  runAllowlistedCommand
+  runAllowlistedInvocation
 } from "@ai-test-officer/execution-worker";
 import { claimActionExecutionReceipt, completeActionExecutionReceipt } from "./actionExecutionReceiptStore.js";
 import { getDatabasePool } from "./databaseRuntime.js";
 import { redactText } from "./redaction.js";
 import { testProjectConnection } from "./projectAdapter.js";
+import { readProjectExecutionEnv } from "./projectExecutionEnv.js";
 import type { ProjectConfig, TargetAppRuntime } from "./types.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
@@ -335,7 +336,7 @@ async function executeCommandCheck(input: {
   const policyHash = sha256(JSON.stringify({ mode: input.manifest.network.mode, allowedHosts: [...input.manifest.network.allowedHosts].sort() }));
   const controller = createEgressNetworkController({
     run: async (args) => {
-      const result = await runAllowlistedCommand({
+      const result = await runAllowlistedInvocation({
         command: { executable: "docker", args, timeoutMs: 30_000 },
         cwd: projectRoot,
         env: {},
@@ -361,6 +362,7 @@ async function executeCommandCheck(input: {
     : undefined;
   let result;
   try {
+    const executionEnv = await readProjectExecutionEnv(input.project);
     const invocation = buildOciInvocation({
       engine: input.manifest.execution.engine,
       image: input.manifest.execution.image!,
@@ -368,17 +370,20 @@ async function executeCommandCheck(input: {
       repositoryRoot: projectRoot,
       command,
       prepareCommand: input.manifest.commands.install,
+      environment: executionEnv,
+      preinstalledDependencyRoot: projectRoot,
+      preinstalledDependencyReadOnly: true,
       networkName: network?.name,
       proxyUrl: network?.proxyUrl
     });
-    result = await runAllowlistedCommand({
+    result = await runAllowlistedInvocation({
       command: {
         executable: invocation.executable,
         args: invocation.args,
         timeoutMs: command.timeoutMs ?? input.manifest.budget.stepTimeoutMs
       },
       cwd: projectRoot,
-      env: {},
+      env: executionEnv,
       allowedExecutables: [invocation.executable],
       signal: input.signal,
       maxLogBytes: input.manifest.budget.maxLogBytes

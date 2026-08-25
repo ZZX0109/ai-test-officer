@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: AI Test Officer
+    orgId: 1
+    folder: AI Test Officer
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
