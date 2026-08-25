@@ -26,13 +26,14 @@ const STEPS = [
   { id: "git-diff-check", command: "git diff --check 2>&1 || echo CLEAN" },
   { id: "size-guard", command: "THRESHOLD=2000 NEW_FILE_THRESHOLD=800 node scripts/file-size-guard.mjs 2>&1 | tail -3" },
   { id: "quality-contracts", command: "npm run quality:contracts 2>&1 | tail -5" },
-  { id: "typecheck", command: "npm run typecheck 2>&1 | tail -5" },
-  { id: "build", command: "npm run build 2>&1 | tail -5" },
-  { id: "test", command: "npm test 2>&1 | tail -10" }
+  { id: "typecheck", command: "npm run typecheck 2>&1 | tail -8" },
+  { id: "build", command: "npm run build 2>&1 | tail -8" },
+  { id: "test", command: "npm test 2>&1 | tail -15" }
 ];
 
+// Use set -o pipefail so `cmd | tail` propagates the real exit code
 const stepScripts = STEPS.map((s) =>
-  `echo "===STEP:${s.id}===" && (${s.command}) && echo "STEP_RESULT:${s.id}:0" || echo "STEP_RESULT:${s.id}:$?"`
+  `echo "===STEP:${s.id}===" && set -o pipefail && (${s.command}) && echo "STEP_RESULT:${s.id}:0" || echo "STEP_RESULT:${s.id}:$?"`
 ).join(" && ");
 
 const initScript =

@@ -93,7 +93,8 @@ export const experienceMemoryEntrySchema = z.object({
   failureCount: z.number().int().nonnegative().default(0),
   lastTestedAt: z.string().datetime().optional(),
 
-  // Embedding 检索
+  // Optional provider vector. The current deterministic fallback is explicitly
+  // labelled below and must not be presented as semantic generalization.
   embeddingVector: z.array(z.number()).optional(),
   embeddingModel: z.string().optional(),
   embeddingText: z.string().max(2_000).optional(),
@@ -115,7 +116,8 @@ export const experienceMemoryQuerySchema = z.object({
   tags: z.array(z.string()).optional(),
   severity: z.array(experienceMemoryEntrySchema.shape.severity).optional(),
 
-  // Embedding 语义检索
+  // Compatibility query field. The response exposes whether retrieval used a
+  // real embedding provider or the deterministic fallback.
   semanticQuery: z.string().max(500).optional(),
   semanticLimit: z.number().int().min(1).max(20).default(10),
   semanticThreshold: z.number().min(0).max(1).default(0.6),
@@ -141,6 +143,7 @@ export const memoryStatisticsSchema = z.object({
     successRate: z.number(),
     sampleSize: z.number()
   })).max(10),
+  retrievalMode: z.enum(["deterministic-hash-v0", "embedding-provider"]).default("deterministic-hash-v0"),
   generatedAt: z.string().datetime()
 });
 export type MemoryStatistics = z.infer<typeof memoryStatisticsSchema>;

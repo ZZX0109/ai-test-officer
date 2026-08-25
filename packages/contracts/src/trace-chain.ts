@@ -53,6 +53,16 @@ export const traceSpanStatusSchema = z.enum([
 ]);
 export type TraceSpanStatus = z.infer<typeof traceSpanStatusSchema>;
 
+export const traceTelemetrySchema = z.object({
+  model: z.string().min(1).max(200).optional(),
+  promptVersion: z.string().min(1).max(200).optional(),
+  codeCommit: z.string().regex(/^[a-f0-9]{7,64}$/).optional(),
+  tokenCount: z.number().int().nonnegative().optional(),
+  costUsd: z.number().nonnegative().optional(),
+  latencyMs: z.number().int().nonnegative().optional()
+});
+export type TraceTelemetry = z.infer<typeof traceTelemetrySchema>;
+
 // ─── Span 定义 ───────────────────────────────────────────────────
 
 export const traceSpanSchema = z.object({
@@ -102,6 +112,10 @@ export const traceSpanSchema = z.object({
     evidenceType: z.string().optional(),
     integritySha256: z.string().optional()
   }).optional(),
+
+  // Provider and release metadata is structured so SLO/benchmark exports do
+  // not need to parse free-form span attributes.
+  telemetry: traceTelemetrySchema.optional(),
 
   // 错误信息
   error: z.object({
