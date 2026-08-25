@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, readdir, rename, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 
@@ -25,15 +25,27 @@ const reviewReports = [
   "reports/baseline-verification/latest.json",
   "reports/baseline-verification/latest.md",
   "reports/baseline-verification/linux-latest.json",
+  "reports/baseline-verification/linux-report.md",
   "reports/fault-injection/latest.json",
   "reports/fault-injection/latest.md",
   "reports/capacity-control-plane/latest.json",
+  "reports/capacity/latest.json",
+  "reports/capacity/latest.md",
   "reports/worker-load-slo/latest.json",
   "reports/browser-concurrency/latest.json",
   "reports/production-slo/latest.json",
   "reports/production-slo/dashboard-validation.json",
+  "reports/external-repair/latest.json",
+  "reports/external-repair/rollback-report.json",
+  "reports/redteam/sandbox-escape-latest.json",
+  "reports/redteam/sandbox-escape-latest.md",
+  "reports/redteam/malicious-oci-latest.json",
+  "reports/redteam/malicious-oci-latest.md",
+  "reports/redteam/provider-isolation-latest.json",
+  "reports/redteam/provider-isolation-latest.md",
   "reports/security-adversarial/latest.json"
 ];
+const reportRedactions = new Set(["reports/production-slo/latest.json"]);
 const requirementsSource = process.env.REVIEW_REQUIREMENTS_SOURCE?.trim();
 
 const excludedDirectories = new Set([
@@ -90,6 +102,30 @@ async function sourceFiles(directory = rootDir, relative = ".") {
   return files;
 }
 
+function sanitizedReviewReport(relative, raw) {
+  if (relative !== "reports/production-slo/latest.json") return raw;
+  const report = JSON.parse(raw);
+  const generatedSecretsCount = Array.isArray(report.generatedSecrets) ? report.generatedSecrets.length : 0;
+  delete report.generatedSecrets;
+  report.reviewPackageRedactions = ["generatedSecrets"];
+  report.limitations = [
+    ...(Array.isArray(report.limitations) ? report.limitations : []),
+    `Review package redacted ${generatedSecretsCount} generated stack secrets; the unredacted runtime report remains local only.`
+  ];
+  return JSON.stringify(report, null, 2);
+}
+
+async function stageRedactedReports() {
+  const staging = await mkdtemp(path.join(tmpdir(), "ai-test-officer-review-"));
+  for (const relative of reportRedactions) {
+    const destination = path.join(staging, relative);
+    await mkdir(path.dirname(destination), { recursive: true });
+    const raw = await readFile(path.join(rootDir, relative), "utf8");
+    await writeFile(destination, sanitizedReviewReport(relative, raw));
+  }
+  return staging;
+}
+
 async function main() {
   await Promise.all(reviewReports.map((report) => access(path.join(rootDir, report))));
   if (requirementsSource) await access(requirementsSource);
@@ -102,16 +138,19 @@ async function main() {
     if (error instanceof Error && !/^ENOENT$/.test((error).code ?? "")) throw error;
   }
   const files = await sourceFiles();
-  files.push(...reviewReports.map((report) => `./${report}`));
+  const rawReviewReports = reviewReports.filter((report) => !reportRedactions.has(report));
+  files.push(...rawReviewReports.map((report) => `./${report}`));
   const normalized = [...new Set(files)].sort();
   if (normalized.some((item) => item.includes("/node_modules/") || item.includes("/dist/") || /\/\._[^/]+$/.test(item))) {
     throw new Error("review_package_manifest_contains_excluded_content");
   }
   await mkdir(path.dirname(outputFile), { recursive: true });
+  const redactionStaging = await stageRedactedReports();
   const temporary = `${outputFile}.partial-${process.pid}`;
   await rm(temporary, { force: true });
   try {
     const tarArgs = ["-czf", temporary, "-C", rootDir, ...normalized];
+    if (reportRedactions.size) tarArgs.push("-C", redactionStaging, ...[...reportRedactions].map((report) => `./${report}`));
     // The delivery requirements often arrive as an attachment outside the
     // repository. Include that exact user-provided source when supplied so an
     // external reviewer can judge the implementation against the same text.
@@ -119,6 +158,7 @@ async function main() {
     await run("tar", tarArgs);
     const { stdout } = await run("tar", ["-tzf", temporary]);
     const archived = stdout.split("\n").filter(Boolean);
+    const productionSlo = JSON.parse((await run("tar", ["-xOf", temporary, "./reports/production-slo/latest.json"])).stdout);
     if (!reviewReports.every((report) => archived.includes(`./${report}`))
       || (requirementsSource && !archived.includes(`./${path.basename(requirementsSource)}`))
       || archived.some((item) => /(^|\/)\._[^/]+$/.test(item)
@@ -128,13 +168,16 @@ async function main() {
         || /(^|\/)config\/(local-secrets|project-login-secrets)/.test(item)
         || item.endsWith("/.DS_Store")
         || item.endsWith("/blind.json")
-        || item.endsWith("/blind-cases.json"))) {
+        || item.endsWith("/blind-cases.json")
+        || Object.prototype.hasOwnProperty.call(productionSlo, "generatedSecrets"))) {
       throw new Error("review_package_validation_failed");
     }
     await rename(temporary, outputFile);
   } catch (error) {
     await rm(temporary, { force: true });
     throw error;
+  } finally {
+    await rm(redactionStaging, { recursive: true, force: true });
   }
   console.log(JSON.stringify({ outputFile, fileCount: normalized.length, reviewReports, requirementsSource: requirementsSource ? path.basename(requirementsSource) : undefined }, null, 2));
 }
