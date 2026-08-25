@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -12,6 +12,11 @@ const requestedOutput = outputIndex >= 0 ? process.argv[outputIndex + 1] : proce
 if (outputIndex >= 0 && !requestedOutput) throw new Error("review_package_output_required");
 const outputFile = path.resolve(requestedOutput ?? defaultOutput);
 const requiredReport = "reports/production-acceptance/latest.json";
+const acceptanceLock = JSON.parse(await readFile(path.join(rootDir, "acceptance-projects.lock.json"), "utf8"));
+const externalEvaluatorRoot = (process.env.REVIEW_EXTERNAL_EVALUATOR_ROOT ?? process.env.EXTERNAL_ACCEPTANCE_EVALUATOR_REPORTS_ROOT)?.trim();
+const externalEvaluatorArchiveReports = externalEvaluatorRoot
+  ? acceptanceLock.projects.map((project) => `./external-evaluator/${project.id}.json`)
+  : [];
 const reviewReports = [
   requiredReport,
   "reports/shadow-graph/latest.json",
@@ -129,8 +134,28 @@ async function stageRedactedReports() {
   return staging;
 }
 
+async function stageExternalEvaluatorReports() {
+  if (!externalEvaluatorRoot) return undefined;
+  const resolved = path.resolve(externalEvaluatorRoot);
+  const relative = path.relative(rootDir, resolved);
+  if (!(relative.startsWith("..") && !path.isAbsolute(relative))) {
+    throw new Error("review_package_external_evaluator_root_must_be_outside_repository");
+  }
+  const staging = await mkdtemp(path.join(tmpdir(), "ai-test-officer-evaluator-"));
+  const destination = path.join(staging, "external-evaluator");
+  await mkdir(destination, { recursive: true });
+  for (const relativeReport of externalEvaluatorArchiveReports) {
+    const filename = path.basename(relativeReport);
+    await copyFile(path.join(resolved, filename), path.join(destination, filename));
+  }
+  return staging;
+}
+
 async function main() {
   await Promise.all(reviewReports.map((report) => access(path.join(rootDir, report))));
+  if (externalEvaluatorRoot) {
+    await Promise.all(externalEvaluatorArchiveReports.map((report) => access(path.join(path.resolve(externalEvaluatorRoot), path.basename(report)))));
+  }
   if (requirementsSource) await access(requirementsSource);
   try {
     await access(outputFile);
@@ -149,11 +174,13 @@ async function main() {
   }
   await mkdir(path.dirname(outputFile), { recursive: true });
   const redactionStaging = await stageRedactedReports();
+  const evaluatorStaging = await stageExternalEvaluatorReports();
   const temporary = `${outputFile}.partial-${process.pid}`;
   await rm(temporary, { force: true });
   try {
     const tarArgs = ["-czf", temporary, "-C", rootDir, ...normalized];
     if (reportRedactions.size) tarArgs.push("-C", redactionStaging, ...[...reportRedactions].map((report) => `./${report}`));
+    if (evaluatorStaging) tarArgs.push("-C", evaluatorStaging, ...externalEvaluatorArchiveReports);
     // The delivery requirements often arrive as an attachment outside the
     // repository. Include that exact user-provided source when supplied so an
     // external reviewer can judge the implementation against the same text.
@@ -163,6 +190,7 @@ async function main() {
     const archived = stdout.split("\n").filter(Boolean);
     const productionSlo = JSON.parse((await run("tar", ["-xOf", temporary, "./reports/production-slo/latest.json"])).stdout);
     if (!reviewReports.every((report) => archived.includes(`./${report}`))
+      || !externalEvaluatorArchiveReports.every((report) => archived.includes(report))
       || (requirementsSource && !archived.includes(`./${path.basename(requirementsSource)}`))
       || archived.some((item) => /(^|\/)\._[^/]+$/.test(item)
         || /(^|\/)(node_modules|dist|\.build)(\/|$)/.test(item)
@@ -172,6 +200,7 @@ async function main() {
         || item.endsWith("/.DS_Store")
         || item.endsWith("/blind.json")
         || item.endsWith("/blind-cases.json")
+        || item.startsWith("./external-evaluator/") && (item.endsWith(".label-manifest.json") || item.includes("/unseal-keys/"))
         || Object.prototype.hasOwnProperty.call(productionSlo, "generatedSecrets"))) {
       throw new Error("review_package_validation_failed");
     }
@@ -181,8 +210,9 @@ async function main() {
     throw error;
   } finally {
     await rm(redactionStaging, { recursive: true, force: true });
+    if (evaluatorStaging) await rm(evaluatorStaging, { recursive: true, force: true });
   }
-  console.log(JSON.stringify({ outputFile, fileCount: normalized.length, reviewReports, requirementsSource: requirementsSource ? path.basename(requirementsSource) : undefined }, null, 2));
+  console.log(JSON.stringify({ outputFile, fileCount: normalized.length, reviewReports, externalEvaluatorReports: externalEvaluatorArchiveReports.length, requirementsSource: requirementsSource ? path.basename(requirementsSource) : undefined }, null, 2));
 }
 
 await main();
