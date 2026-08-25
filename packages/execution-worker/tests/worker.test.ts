@@ -209,7 +209,7 @@ const parallelInvocation = buildOciInvocation({
     { hostPort: 3000, containerPort: 3000 }
   ]
 });
-assert.match(parallelInvocation.args.join(" "), /--cpus 3 --memory 8g --memory-swap 8g --pids-limit 384/);
+assert.match(parallelInvocation.args.join(" "), /--cpus 3 --memory 6g --memory-swap 6g --pids-limit 384/);
 assert.throws(() => buildOciInvocation({
   engine: "docker",
   image: "node:22",
@@ -296,6 +296,7 @@ const imageInvocation = buildOciInvocation({
 const imageArgs = imageInvocation.args.join(" ");
 assert.doesNotMatch(imageArgs, new RegExp(`src=${sourceDependencyRoot.replaceAll("/", "\\/")}\/node_modules`), "image-baked deps must not bind-mount host node_modules");
 assert.match(imageArgs, /test -d '\/opt\/andflow'\/node_modules/, "image-baked deps must verify the image dependency root");
+assert.match(imageArgs, /rm -rf \/workspace\/node_modules && ln -s '\/opt\/andflow'\/node_modules \/workspace\/node_modules/, "image-baked deps must link the immutable image dependency tree");
 assert.match(imageArgs, /root="\$1"; shift/, "image dependency bootstrap must not treat the root argument as a package directory");
 // Contrast: the default (no preinstalled) still excludes node_modules + runs install.
 assert.match(invocation.args.join(" "), /--exclude=node_modules/, "default mode excludes node_modules (forces workspace install)");
