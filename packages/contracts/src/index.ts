@@ -330,12 +330,18 @@ export const projectManifestSchema = z.object({
     /**
      * The source project already carries installed dependencies (e.g. host
      * `node_modules` / `.venv` pre-populated to avoid a sandbox cold install
-     * that would need registry egress the deny/isolated network policy blocks).
-     * When true the execution worker copies dependency directories into the
-     * writable workspace (instead of excluding them) and skips the prepare
-     * (install) command, so the project starts without any network access.
+    * that would need registry egress the deny/isolated network policy blocks).
+    * When true the execution worker copies dependency directories into the
+    * writable workspace (instead of excluding them) and skips the prepare
+    * (install) command, so the project starts without any network access.
+    */
+    preinstalledDependencies: z.boolean().optional(),
+    /**
+     * Optional path inside the OCI image that contains a Linux-native project
+     * dependency tree. This is used for external projects whose host
+     * node_modules were installed on another operating system or architecture.
      */
-    preinstalledDependencies: z.boolean().optional()
+    preinstalledDependencyImageRoot: z.string().min(1).optional()
   }).default({}),
   budget: resourceBudgetSchema.default({})
 }).superRefine((manifest, context) => {

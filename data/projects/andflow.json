@@ -176,9 +176,10 @@
     },
     "execution": {
       "mode": "oci",
-      "image": "andflow-pnpm-cache:latest",
+      "image": "andflow-linux-deps:latest",
       "engine": "docker",
-      "preinstalledDependencies": true
+      "preinstalledDependencies": true,
+      "preinstalledDependencyImageRoot": "/opt/andflow"
     },
     "budget": {
       "runTimeoutMs": 1200000,

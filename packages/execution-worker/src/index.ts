@@ -306,6 +306,8 @@ export function buildOciInvocation(input: {
   const cpus = Math.min(4, Math.max(1, input.resources?.cpus ?? (parallelRuntime ? 3 : 2)));
   const pidsLimit = Math.min(512, Math.max(64, input.resources?.pidsLimit ?? (parallelRuntime ? 384 : 256)));
   const preinstalledDependencies = Boolean(manifest.execution.preinstalledDependencies);
+  const preinstalledDependencyImageRoot = manifest.execution.preinstalledDependencyImageRoot;
+  const useImagePreinstalledDependencies = preinstalledDependencies && Boolean(preinstalledDependencyImageRoot);
   const availableEnvironment = input.environment ?? process.env;
   const environmentArgs = manifest.environmentAllowlist.flatMap((name) => availableEnvironment[name] === undefined ? [] : ["--env", name]);
   const preinstalledDependencyRoot = path.resolve(input.preinstalledDependencyRoot ?? workspace);
@@ -314,7 +316,7 @@ export function buildOciInvocation(input: {
   // mount the root plus the first two source levels without traversing the
   // dependency tree itself.
   const preinstalledNodeModules = (() => {
-    if (!preinstalledDependencies) return [] as string[];
+    if (!preinstalledDependencies || useImagePreinstalledDependencies) return [] as string[];
     const roots: string[] = [];
     const visit = (directory: string, depth: number) => {
       const dependencyDirectory = path.join(directory, "node_modules");
@@ -365,6 +367,16 @@ export function buildOciInvocation(input: {
     "--publish", `127.0.0.1:${hostPort}:${containerPort}`
   ]);
   const shellQuote = (value: string) => `'${value.replaceAll("'", "'\"'\"'")}'`;
+  const imagePreinstalledDependenciesBootstrap = useImagePreinstalledDependencies
+    ? [
+      `test -d ${shellQuote(preinstalledDependencyImageRoot ?? "")}/node_modules`,
+      `mkdir -p /workspace/node_modules && cp -a ${shellQuote(preinstalledDependencyImageRoot ?? "")}/node_modules/. /workspace/node_modules/`,
+      // pnpm keeps package-local link trees under workspace packages. Copy
+      // those trees from the image too; their links resolve through the root
+      // /workspace/node_modules store copied above.
+      `find ${shellQuote(preinstalledDependencyImageRoot ?? "")} -mindepth 2 -maxdepth 3 -type d -name node_modules -exec sh -c 'for directory do relative="\${directory#"\$1"/}"; parent="\${relative%/node_modules}"; mkdir -p "/workspace/\$parent"; cp -a "\$directory" "/workspace/\$parent/"; done' sh ${shellQuote(preinstalledDependencyImageRoot ?? "")} {} +`
+    ]
+    : [];
   const dependencyCache = input.dependencyCache
     ? {
       key: input.dependencyCache.key.replace(/[^a-zA-Z0-9_.-]/g, "_"),
@@ -467,6 +479,7 @@ export function buildOciInvocation(input: {
     "mkdir -p /workspace",
     ...preinstalledNodeModulesBootstrap,
     workspaceBootstrap,
+    ...imagePreinstalledDependenciesBootstrap,
     internalBrowserOnly,
     runtimePathBootstrap,
     sandboxEnvBootstrap,
