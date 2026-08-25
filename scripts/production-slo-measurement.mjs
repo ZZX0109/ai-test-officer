@@ -143,10 +143,20 @@ async function createRun(idx) {
       method: "POST",
       headers: await authHeaders(),
       body: JSON.stringify({
-        projectId: "customer-portal-lite",
-        organizationId: "local",
+        organizationId: "benchmark",
+        actor: "acceptance-runner",
         idempotencyKey,
-        input: { plannerMode: "deterministic", judgeMode: "deterministic", experimentId: `slo-measure`, repetition: (idx % 10) + 1, cachePolicy: "bypass", executionProfile: "benchmark", promptVersion: "plan-v1" }
+        input: {
+          appUrl: "http://customer-portal-lite:7103",
+          requirement: "验证客户门户表格的排序、筛选和分页功能",
+          diff: "客户门户列表筛选与分页逻辑变更",
+          scenarioId: "generic_table_sort_filter_pagination",
+          plannerMode: "deterministic",
+          judgeMode: "deterministic",
+          executionMode: "oci",
+          capabilities: ["browser"],
+          permissionProfile: { observe: true, browserControl: true, workspaceControl: false, ideTerminalControl: false, systemControl: false }
+        }
       })
     });
     const json = await res.json();
