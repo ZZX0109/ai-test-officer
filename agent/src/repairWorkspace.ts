@@ -337,10 +337,10 @@ export async function findReusableProjectCodeSession(projectId: string) {
     }
   }
   for (const session of candidates.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
-    // Skip sessions that are final (exported) or not reusable. An exported
-    // session is a completed repair artifact; a fresh session should be
-    // created for new repair work instead of mutating the exported one.
-    if (["cancelled", "failed", "exported"].includes(session.status)) continue;
+    // Only reuse sessions that are in an editable state. Sessions in
+    // "validating", "exported", "blocked", etc. are not reusable — a fresh
+    // session should be created for new repair work.
+    if (session.status !== "editing") continue;
     try {
       const [source, workspace] = await Promise.all([lstat(sourceSnapshotDir(session.id)), lstat(workspaceDir(session.id))]);
       if (source.isDirectory() && !source.isSymbolicLink() && workspace.isDirectory() && !workspace.isSymbolicLink()) return session;
@@ -589,7 +589,7 @@ async function createValidationRun(session: RepairSession, project: ProjectConfi
   let created = await runEventStore.create({
     runId: requestedRunId,
     actor: "repair-validator",
-    idempotencyKey: `${session.id}:validation:${session.iteration + 1}:create`,
+    idempotencyKey: `${session.id}:validation:${session.iteration + 1}:create:${requestedRunId}`,
     payload
   });
   if (["completed", "failed", "blocked", "cancelled"].includes(created.state)) {

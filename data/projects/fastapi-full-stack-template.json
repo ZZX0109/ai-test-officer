@@ -42,7 +42,7 @@
   "cleanupCommand": "",
   "timeoutMs": 35000,
   "createdAt": "2026-07-08T00:00:00.000Z",
-  "updatedAt": "2026-08-25T08:39:47.444Z",
+  "updatedAt": "2026-08-25T09:22:01.424Z",
   "manifest": {
     "schemaVersion": "1.0",
     "projectId": "fastapi-full-stack-template",

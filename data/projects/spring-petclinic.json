@@ -97,7 +97,7 @@
   "testCommand": "mvn test -q",
   "timeoutMs": 600000,
   "createdAt": "2026-08-25T03:09:16.638Z",
-  "updatedAt": "2026-08-25T08:40:38.811Z",
+  "updatedAt": "2026-08-25T09:22:52.721Z",
   "installCommand": "",
   "startCommand": "",
   "frontendUrl": "http://127.0.0.1:8080",
