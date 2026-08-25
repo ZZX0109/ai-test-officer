@@ -1,9 +1,11 @@
 // Browser concurrency test (#2 真实容量测试 — browser concurrency + BrowserContext).
-// Launches N concurrent Playwright browser contexts, navigates each to a local
-// page, and measures P50/P95/P99 latency + memory + context lifecycle.
+// Launches N concurrent Playwright browser contexts, navigates each to a target
+// page (local HTTP or real project URL), and measures P50/P95/P99 latency +
+// memory + context lifecycle.
 //
-// Usage: node scripts/browser-concurrency-test.mjs [--concurrency 5] [--rounds 10] [--headless]
+// Usage: node scripts/browser-concurrency-test.mjs [--concurrency 5] [--rounds 10] [--headless] [--url http://...]
 import { writeFile, mkdir } from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
 import { chromium } from "playwright";
 
@@ -11,12 +13,13 @@ const OUT = path.join(process.cwd(), "reports", "browser-concurrency");
 await mkdir(OUT, { recursive: true });
 
 function parseArgs() {
-  const a = { concurrency: 5, rounds: 10, headless: true };
+  const a = { concurrency: 5, rounds: 10, headless: true, url: null };
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--concurrency") a.concurrency = parseInt(argv[++i], 10);
     if (argv[i] === "--rounds") a.rounds = parseInt(argv[++i], 10);
     if (argv[i] === "--headed") a.headless = false;
+    if (argv[i] === "--url") a.url = argv[++i];
   }
   return a;
 }
@@ -34,19 +37,23 @@ function rssMb() {
 const args = parseArgs();
 console.log(`browser concurrency test: concurrency=${args.concurrency} rounds=${args.rounds} headless=${args.headless}`);
 
-// A tiny local page to navigate (no network dependency)
-const TARGET_HTML = `<!DOCTYPE html><html><head><title>ATO Browser Test</title></head><body><h1>OK</h1><p id="ts">${Date.now()}</p></body></html>`;
+// Target URL: use --url for a real project page, or fall back to local page
+let url = args.url;
+let server = null;
+if (!url) {
+  // A tiny local page to navigate (no network dependency)
+  const TARGET_HTML = `<!DOCTYPE html><html><head><title>ATO Browser Test</title></head><body><h1>OK</h1><p id="ts">${Date.now()}</p></body></html>`;
 
-// Start a trivial HTTP server to serve the page
-import http from "node:http";
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/html" });
-  res.end(TARGET_HTML);
-});
-await new Promise((r) => server.listen(0, "127.0.0.1", r));
-const port = server.address().port;
-const url = `http://127.0.0.1:${port}/`;
-console.log(`local page: ${url}`);
+  // Start a trivial HTTP server to serve the page
+  server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(TARGET_HTML);
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  url = `http://127.0.0.1:${port}/`;
+}
+console.log(`target page: ${url}${args.url ? " (real project URL)" : " (local HTTP)"}`);
 
 const rssBefore = rssMb();
 console.log(`RSS before: ${rssBefore} MB`);
@@ -125,8 +132,11 @@ const report = {
   },
   rounds: roundResults,
   gaps: [],
+  targetPage: args.url ? "real-project-url" : "local-http",
   limitations: [
-    "Test uses a local HTTP page (no network dependency) to isolate browser/context lifecycle cost from network latency.",
+    args.url
+      ? `Test uses a real project URL (${args.url}) to exercise real DOM/CSS/JS rendering + network.`
+      : "Test uses a local HTTP page (no network dependency) to isolate browser/context lifecycle cost from network latency. Use --url to test a real project page.",
     "One shared browser instance; each context is isolated (cookies, storage).",
     "RSS measured at the Node.js process level (includes Playwright driver), not per-context memory.",
     "Headless mode; headed mode may have different performance characteristics.",
