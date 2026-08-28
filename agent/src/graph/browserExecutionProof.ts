@@ -1,6 +1,7 @@
 import {
   runOutcomeSummaryV2Schema,
   type JudgeRecommendation,
+  type LlmCall,
   type MachineGate
 } from "@ai-test-officer/contracts";
 import type { EvidenceGateSubgraphInput } from "@ai-test-officer/agent-orchestration";
@@ -29,6 +30,7 @@ import {
 import { persistDynamicBrowserResult } from "../browser-agent/resultBundle.js";
 import { runEventStore } from "../runEventStore.js";
 import { artifactKindToIntegrityKind } from "../artifactIntegrity.js";
+import { listLlmCalls } from "../llmProvider.js";
 
 export type InteractiveCoverageInventoryItem = {
   id: string;
@@ -91,6 +93,31 @@ export function browserActionCompletesBusinessPath(result: {
   return result.oracleResults.every((oracle) => oracle.passed);
 }
 
+/**
+ * The model-demo gate intentionally measures the model action call, not an
+ * unrelated planning/judging call. This pure check is shared by the proof
+ * builder and its acceptance test so the displayed demo cannot pass because
+ * a caller merely claimed it was model-driven.
+ */
+export function modelExecutionEvidenceSatisfied(input: {
+  required: boolean;
+  calls: LlmCall[];
+  completedBrowserActionCount: number;
+  requiredArtifactKindsPresent: boolean;
+}) {
+  const successfulBrowserActionCallCount = input.calls.filter((call) =>
+    call.purpose === "browser-action" && call.status === "passed"
+  ).length;
+  return {
+    satisfied: !input.required || (
+      successfulBrowserActionCallCount > 0
+      && input.completedBrowserActionCount > 0
+      && input.requiredArtifactKindsPresent
+    ),
+    successfulBrowserActionCallCount
+  };
+}
+
 export async function finalizeBrowserExecutionProof(input: {
   state: EvidenceGateSubgraphInput;
   coverageScope: "all" | "browser";
@@ -104,6 +131,9 @@ export async function finalizeBrowserExecutionProof(input: {
     readEvidence(input.state.runId),
     readBrowserArtifacts(input.state.runId)
   ]);
+  const run = await runEventStore.get(input.state.runId);
+  const requireModelExecution = run?.input.requireModelExecution === true;
+  const llmCalls = requireModelExecution ? await listLlmCalls(input.state.runId) : [];
   const coverage = input.coverageScope === "browser"
     ? allCoverage.filter((item) => item.surface === "page")
     : allCoverage;
@@ -121,6 +151,16 @@ export async function finalizeBrowserExecutionProof(input: {
   const artifactKinds = new Set(artifacts.map((artifact) => artifact.kind));
   const requiredKinds = ["screenshot", "dom", "trace", "operation-log"] as const;
   const missingKinds = requiredKinds.filter((kind) => !artifactKinds.has(kind));
+  // A passed planner/judge call is not proof that the model drove the browser.
+  // Model-driven runs specifically require a successful bounded browser-action
+  // decision; the deterministic broker and proof checks still own the verdict.
+  const modelExecution = modelExecutionEvidenceSatisfied({
+    required: requireModelExecution,
+    calls: llmCalls,
+    completedBrowserActionCount: executedResults.length,
+    requiredArtifactKindsPresent: missingKinds.length === 0
+  });
+  const modelExecutionSatisfied = modelExecution.satisfied;
   const evidenceByArtifact = new Map<string, string>();
   for (const item of evidence) for (const artifactId of item.artifactIds ?? []) evidenceByArtifact.set(artifactId, item.id);
   const artifactIntegrity = {
@@ -140,7 +180,7 @@ export async function finalizeBrowserExecutionProof(input: {
       sha256: artifact.integrity.sha256
     }))
   };
-  const status: MachineGate["status"] = !coverageComplete || !executionSucceeded || missingKinds.length > 0
+  const status: MachineGate["status"] = !coverageComplete || !executionSucceeded || missingKinds.length > 0 || !modelExecutionSatisfied
     ? "blocked"
     : failedOracles.length > 0 || failedCoverage.length > 0 ? "fail"
       : blockedCoverage.length > 0 || excludedCoverage.length > 0 ? "blocked" : "pass";
@@ -156,6 +196,7 @@ export async function finalizeBrowserExecutionProof(input: {
     ...blockedCoverage.map((item) => `${prefix}coverage_blocked:${item.flowId}`),
     ...excludedCoverage.map((item) => `${prefix}coverage_excluded:${item.flowId}`),
     ...(!executionSucceeded ? ["browser_action_execution_incomplete"] : []),
+    ...(!modelExecutionSatisfied ? ["model_browser_action_call_missing"] : []),
     ...missingKinds.map((kind) => `required_artifact_missing:${kind}`),
     ...failedOracles.map((oracle) => `oracle_failed:${oracle.oracleId}`)
   ];
@@ -169,6 +210,36 @@ export async function finalizeBrowserExecutionProof(input: {
     })).filter((item) => item.evidenceRefs.length > 0),
     assertionFailures: failedOracles.map((oracle) => oracle.oracleId)
   };
+  // The proof validator rejects a passing bundle with no grounded claim. The
+  // dynamic browser path used to mint its first gate before constructing the
+  // result bundle's oracle/risk projections, so real screenshots and DOM
+  // evidence were present but the validator could only see an empty claim set
+  // and downgraded the run to blocked. Build the same claim projections here
+  // and pass them into the first proof mint; the later result bundle reuses the
+  // identical observations and remains the presentation projection.
+  const oracleDefinitions = Array.from(new Map(decisions.flatMap((decision) => decision.oracles).map((oracle) => [oracle.id, oracle])).values()).map((oracle) => ({
+    id: oracle.id,
+    pathId: results.find((result) => result.oracleResults.some((item) => item.oracleId === oracle.id))?.coverageItemId ?? coverage[0]?.id ?? "dynamic-browser",
+    assertionName: `Dynamic oracle ${oracle.id}`,
+    expectedFrom: "llm_inferred" as const,
+    preconditions: ["The bound browser observation is current and the control belongs to this attempt."],
+    action: oracle.type,
+    postconditions: [oracle.description],
+    requiresHumanConfirmation: false,
+    evidenceRefs: results.flatMap((result) => result.oracleResults.filter((item) => item.oracleId === oracle.id).flatMap((item) => item.evidenceRefs))
+  }));
+  const riskCoverageMatrix = coverage.map((item) => {
+    const pathResults = results.filter((result) => result.coverageItemId === item.id);
+    return {
+      riskId: item.flowId,
+      riskTitle: item.module,
+      covered: item.disposition === "executed",
+      passed: item.disposition === "executed" && pathResults.length > 0 && pathResults.every((result) => result.status === "completed" && result.oracleResults.length > 0 && result.oracleResults.every((oracle) => oracle.passed)),
+      pathIds: [item.id],
+      evidenceRefs: pathResults.flatMap((result) => result.evidenceRefs),
+      notes: item.dispositionReason ?? item.disposition
+    };
+  });
   const finalized = finalizeProofBundle({
     draft,
     runId: input.state.runId,
@@ -178,6 +249,8 @@ export async function finalizeBrowserExecutionProof(input: {
     artifactsV2: artifacts,
     artifactIntegrity,
     requiredArtifactKinds: [...requiredKinds],
+    oracles: oracleDefinitions,
+    riskCoverageMatrix,
     machineGate: draft,
     gateEligibleFacts: { executionSucceeded, requirementCovered }
   });
@@ -203,7 +276,14 @@ export async function finalizeBrowserExecutionProof(input: {
     artifactIntegrity,
     finalized,
     outcomeSummary,
-    executionSucceeded
+    executionSucceeded,
+    modelExecution: {
+      required: requireModelExecution,
+      totalCallCount: llmCalls.length,
+      successfulBrowserActionCallCount: modelExecution.successfulBrowserActionCallCount,
+      completedBrowserActionCount: executedResults.length,
+      requiredArtifactKindsPresent: missingKinds.length === 0
+    }
   };
 }
 
@@ -221,7 +301,7 @@ export async function persistBrowserPhaseForAggregate(state: EvidenceGateSubgrap
       payload: { browserAgent: true, mixedParentPhase: true }
     });
   }
-  const { coverage: browserCoverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary, executionSucceeded } = await finalizeBrowserExecutionProof({
+  const { coverage: browserCoverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary, executionSucceeded, modelExecution } = await finalizeBrowserExecutionProof({
     state,
     coverageScope: "browser",
     integrityId: `${state.runId}_browser_phase_artifact_integrity`,
@@ -249,7 +329,14 @@ export async function persistBrowserPhaseForAggregate(state: EvidenceGateSubgrap
     artifactIntegrity,
     machineGate: finalized.machineGate,
     outcomeSummary,
-    proof: finalized
+    proof: finalized,
+    modelExecution: {
+      required: modelExecution.required,
+      totalCallCount: modelExecution.totalCallCount,
+      successfulBrowserActionCallCount: modelExecution.successfulBrowserActionCallCount,
+      completedBrowserActionCount: modelExecution.completedBrowserActionCount,
+      requiredArtifactKindsPresent: modelExecution.requiredArtifactKindsPresent
+    }
   });
   const proof = await readProofArtifacts(state.runId);
   return {

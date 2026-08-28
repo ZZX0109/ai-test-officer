@@ -2,6 +2,7 @@ import type { RunResult } from "../types";
 
 interface JudgePanelProps {
   result?: RunResult | null;
+  modelCallsPresent?: boolean;
 }
 
 function changeRefLabel(ref: NonNullable<RunResult["failureAttributions"][number]["changeRefs"]>[number]) {
@@ -15,7 +16,7 @@ function changeRefLabel(ref: NonNullable<RunResult["failureAttributions"][number
   return `${ref.file}${lineRange}${ref.hunk ? ` ${ref.hunk}` : ""}${signals}${diagnosticSignals}`;
 }
 
-export function JudgePanel({ result }: JudgePanelProps) {
+export function JudgePanel({ result, modelCallsPresent = false }: JudgePanelProps) {
   return (
     <section>
       <h3>LLM-as-Judge</h3>
@@ -28,10 +29,12 @@ export function JudgePanel({ result }: JudgePanelProps) {
                 ? "已使用 Credential Center 中的模型进行三层复核。"
                 : result.judgeReport.executionMode === "fallback_baseline"
                   ? "模型调用或结构化校验失败，当前使用确定性基线并保留失败原因。"
-                  : "未配置可用模型，当前使用确定性 Judge。"}
+                  : modelCallsPresent
+                    ? "模型已参与浏览器执行；本次最终结论由确定性 Oracle 和机器门禁裁决。"
+                    : "本次未启用 Judge 模型，当前使用确定性 Judge。"}
             </p>
             <code>
-              mode={result.judgeReport.executionMode} · llm={result.judgeReport.llmStatus} · policy=
+              mode={result.judgeReport.executionMode} · judge_llm={result.judgeReport.llmStatus} · model_execution={modelCallsPresent ? "passed" : "not_run"} · policy=
               {result.judgeReport.policyVersion}
             </code>
             {result.judgeReport.llmError && <p>Error: {result.judgeReport.llmError}</p>}

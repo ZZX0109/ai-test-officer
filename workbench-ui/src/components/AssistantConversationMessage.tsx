@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Bot, ChevronDown, Clock3, UserRound } from "lucide-react";
+import { AlertTriangle, Bot, ChevronDown, Clock3, LoaderCircle, UserRound } from "lucide-react";
 import type {
   AssistantSuggestedAction,
   PlanningMessage,
@@ -22,9 +22,9 @@ function conciseLabelledReply(content: string) {
   return selected.length === labels.length ? selected.join("\n") : undefined;
 }
 
-function assistantPresentation(content: string) {
+function assistantPresentation(content: string, preserveSourceDisclosure = false) {
   const normalized = content.trim();
-  const labelledReply = conciseLabelledReply(normalized);
+  const labelledReply = preserveSourceDisclosure ? undefined : conciseLabelledReply(normalized);
   const technical = (
     /(?:Validation failed|provider_[a-z_]+|action_binding_failure|page\.[a-z]+:|Call log:|\{"error")/i.test(normalized)
       ? normalized
@@ -97,13 +97,24 @@ export function AssistantConversationMessage({
   onOpenRepairEvidence?: (evidenceId: string, plan: RepairPlanData) => void;
   repairPlanActionStatus?: RepairPlanActionStatus;
 }) {
-  const presentation = assistantPresentation(message.content);
   const assistant = message.role === "assistant";
   const progress = message.id.startsWith("progress:");
-  const streaming = message.id.includes("pending") || Boolean(message.streaming);
+  // A message id is durable history, not UI state.  Several actions update an
+  // `*_pending_*` message in place, so deriving loading from its id left a
+  // completed answer permanently labelled “正在回复”.
+  const streaming = Boolean(message.streaming);
+  const localFallback = Boolean(
+    message.llmTrace?.fallbackApplied
+    || message.llmTrace?.status === "failed"
+    || message.llmTrace?.callId.startsWith("assistant_fallback_")
+  );
+  const presentation = assistantPresentation(message.content, localFallback);
 
   return (
-    <article className={`${message.role} assistant-conversation-message${streaming ? " pending" : ""}${progress ? " is-progress" : ""}`}>
+    <article
+      className={`${message.role} assistant-conversation-message${streaming ? " pending" : ""}${progress ? " is-progress" : ""}`}
+      aria-busy={streaming || undefined}
+    >
       <header className="assistant-message-header">
         <span className="assistant-message-avatar" aria-hidden="true">
           {assistant ? <Bot size={14} /> : <UserRound size={14} />}
@@ -116,22 +127,30 @@ export function AssistantConversationMessage({
           <p key={index}>{paragraph}</p>
         ))}
       </div>
+      {assistant && !streaming && localFallback ? (
+        <div className="assistant-fallback-banner" role="status">
+          <AlertTriangle size={13} aria-hidden />
+          <span><strong>本地兜底</strong> · 本次没有获得合格的模型回答</span>
+        </div>
+      ) : null}
       {streaming ? (
-        <span className="assistant-typing" aria-label="AI 正在思考并执行">
-          <b>{message.streaming ? "正在思考" : "正在回复"}</b><i /><i /><i />
+        <span className="assistant-typing" role="status" aria-live="polite" aria-label="AI 正在思考并执行">
+          <LoaderCircle className="assistant-typing-loader" size={14} aria-hidden="true" />
+          <b>AI 正在思考</b>
+          <span className="assistant-typing-dots" aria-hidden="true"><i /><i /><i /></span>
         </span>
       ) : null}
       {assistant && !streaming && message.llmTrace ? (
         <details className="assistant-call-details">
           <summary>
             <Clock3 size={12} />
-            {message.llmTrace.fallbackApplied ? "回复来源" : "模型调用详情"}
+            {localFallback ? "回复来源" : "模型调用详情"}
             <ChevronDown size={12} />
           </summary>
           <div>
-            {message.llmTrace.fallbackApplied ? (
+            {localFallback ? (
               <span className="assistant-source-note">
-                模型本次没有返回合格的结构化答复；系统依据已保存的测试事实生成了这段说明。
+                这不是模型生成的回答；系统仅依据已保存的测试事实提供本地兜底说明。
               </span>
             ) : null}
             <span>{message.llmTrace.model ?? "当前模型"}</span>

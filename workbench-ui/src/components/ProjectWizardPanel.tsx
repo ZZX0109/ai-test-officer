@@ -64,6 +64,7 @@ interface ProjectWizardPanelProps {
   projectPath: string;
   detection?: ProjectDetectionResult | null;
   onSelectProject: (id: string) => void;
+  onStartDemo?: (project: ProjectConfig) => void;
   onProjectPathChange: (value: string) => void;
   onDetect: (selection: {
     rootName: string;
@@ -80,6 +81,7 @@ export function ProjectWizardPanel({
   projectPath,
   detection,
   onSelectProject,
+  onStartDemo,
   onProjectPathChange,
   onDetect,
   detectMessage,
@@ -105,7 +107,8 @@ export function ProjectWizardPanel({
     "order_portal_lite",
     "todo_lite"
   ]);
-  const systemProjects = projects.filter((project) => systemProjectIds.has(project.id));
+  const officialDemoProject = projects.find((project) => project.demoProfile?.enabled);
+  const systemProjects = projects.filter((project) => systemProjectIds.has(project.id) && project.id !== officialDemoProject?.id);
   const recentProjects = projects.filter((project) => !systemProjectIds.has(project.id));
 
   function nativeEntries(rootName: string, entries: Awaited<ReturnType<typeof listProjectDirectory>>["entries"]): FileTreeNode[] {
@@ -299,24 +302,50 @@ export function ProjectWizardPanel({
         </select>
         {projectListNotice ? <small role="status">{projectListNotice}</small> : null}
       </label>
+      {officialDemoProject ? (
+        <article className="official-demo-card" data-testid="official-demo-card">
+          <div>
+            <span className="official-demo-card__eyebrow">官方演示项目</span>
+            <strong>{officialDemoProject.name}</strong>
+            <p>{officialDemoProject.demoProfile?.description}</p>
+            <small>模型会真实点击“已完成”筛选；需要已配置的 API Key，并可查看调用与测试证据。</small>
+          </div>
+          <div className="official-demo-card__actions">
+            <button type="button" onClick={() => onSelectProject(officialDemoProject.id)}>
+              选择项目
+            </button>
+            <button
+              className="primary"
+              type="button"
+              data-testid="official-demo-start"
+              onClick={() => onStartDemo?.(officialDemoProject)}
+              disabled={!onStartDemo}
+            >
+              开始官方演示
+            </button>
+          </div>
+        </article>
+      ) : null}
       {systemProjects.length ? (
         <section className="system-project-picker" aria-label="系统示例项目">
-          <strong>系统示例项目</strong>
-          <p>可直接选择内置 Fixture 以验证 Workbench、Benchmark 和回归流程。</p>
-          <div className="system-project-list">
-            {systemProjects.map((project) => (
-              <button
-                key={project.id}
-                type="button"
-                data-project-id={project.id}
-                aria-pressed={selectedProjectId === project.id}
-                onClick={() => onSelectProject(project.id)}
-              >
-                <strong>{project.name}</strong>
-                <span>{project.projectPath}</span>
-              </button>
-            ))}
-          </div>
+          <details className="system-projects-details">
+            <summary>其他内置示例项目</summary>
+            <p>用于验证 Workbench、Benchmark 和回归流程，演示时通常不需要选择它们。</p>
+            <div className="system-project-list">
+              {systemProjects.map((project) => (
+                <button
+                  key={project.id}
+                  type="button"
+                  data-project-id={project.id}
+                  aria-pressed={selectedProjectId === project.id}
+                  onClick={() => onSelectProject(project.id)}
+                >
+                  <strong>{project.name}</strong>
+                  <span>{project.projectPath}</span>
+                </button>
+              ))}
+            </div>
+          </details>
         </section>
       ) : null}
       <input

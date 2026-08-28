@@ -4,8 +4,10 @@ export default defineConfig({
     environment: "jsdom",
     include: [
       "tests/interaction.test.tsx",
+      "tests/reliabilityAssets.test.tsx",
       "tests/workspaceReducer.test.ts",
-      "tests/progressiveDetailsList.test.tsx"
+      "tests/progressiveDetailsList.test.tsx",
+      "tests/planningTrajectoryRegression.test.tsx"
     ]
   }
 });

@@ -24,9 +24,30 @@ function key(observation: RuntimePathObservation) {
   return `${(observation.method ?? "GET").toUpperCase()}:${route(observation.url)}`;
 }
 
+/**
+ * Browser/network capture also includes the dev server, bundled modules and
+ * static resources. They are useful to the runtime diagnostician, but they
+ * are not customer-facing capabilities and must never become a "business
+ * function" in the planning UI.
+ */
+function isRuntimeInfrastructureObservation(observation: RuntimePathObservation) {
+  const path = route(observation.url);
+  return path.startsWith("/@fs/")
+    || path.startsWith("/@vite/")
+    || path.startsWith("/@react-refresh")
+    || path.startsWith("/@id/")
+    || path.startsWith("/__vite_")
+    || path.includes("/node_modules/")
+    || path.startsWith("/assets/")
+    || /\.(?:avif|bmp|css|eot|gif|ico|jpe?g|js|map|mjs|otf|png|svg|ttf|webp|woff2?)$/i.test(path);
+}
+
 export function mergeRuntimeBusinessPaths(paths: BusinessPath[], observations: RuntimePathObservation[]): MergedBusinessPath[] {
   const byKey = new Map<string, RuntimePathObservation[]>();
-  for (const observation of observations) byKey.set(key(observation), [...(byKey.get(key(observation)) ?? []), observation]);
+  for (const observation of observations) {
+    if (isRuntimeInfrastructureObservation(observation)) continue;
+    byKey.set(key(observation), [...(byKey.get(key(observation)) ?? []), observation]);
+  }
   const consumed = new Set<string>();
   const merged = paths.map((path) => {
     const candidates = [...byKey.entries()].filter(([candidate]) => path.summary.toLowerCase().includes(candidate.split(":")[1]) || path.title.toLowerCase().includes(candidate.split(":")[1]));

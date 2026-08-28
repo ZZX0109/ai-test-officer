@@ -31,6 +31,7 @@ class ArtifactV2(BaseModel):
     origin: Literal["runtime-captured", "fixture", "simulated", "user-uploaded", "agent-generated", "legacy-unverified"] = Field(...)
     storageUri: str = Field(...)
     replicaUris: Optional[list[str]] = Field(default=[])
+    objectStoreState: Optional[Literal["committed", "missing", "uncommitted"]] = Field(default=None)
     sequence: int = Field(...)
     monotonicOffsetMs: float = Field(...)
     integrity: dict[str, Any] = Field(...)
@@ -42,7 +43,7 @@ class RunEvent(BaseModel):
     schemaVersion: Literal["1.0"] = Field(...)
     id: str = Field(...)
     runId: str = Field(...)
-    type: Literal["run_created", "plan_generated", "plan_approved", "permission_granted", "run_queued", "run_preparing", "run_started", "run_retrying", "run_paused", "run_resumed", "evidence_collecting", "run_judging", "human_review_requested", "decision_overridden", "repair_decision_recorded", "run_completed", "run_failed", "run_blocked", "run_cancelled"] = Field(...)
+    type: Literal["run_created", "plan_generated", "plan_approved", "permission_granted", "run_queued", "run_preparing", "run_started", "run_retrying", "run_paused", "run_resumed", "evidence_collecting", "run_judging", "human_review_requested", "decision_overridden", "repair_decision_recorded", "parent_aggregate_completed", "parent_aggregate_blocked", "run_completed", "run_failed", "run_blocked", "run_cancelled"] = Field(...)
     version: int = Field(...)
     createdAt: str = Field(...)
     actor: str = Field(...)
@@ -142,6 +143,7 @@ class CoverageItem(BaseModel):
     oracleIds: Optional[list[str]] = Field(default=[])
     requiredEvidenceKinds: Optional[list[Literal["screenshot", "dom", "network", "console", "trace", "video", "download", "operation-log", "report", "attachment", "source-patch", "changed-files-archive", "repair-validation-log"]]] = Field(default=[])
     binding: Optional[dict[str, Any]] = Field(default=None)
+    budget: Optional[dict[str, Any]] = Field(default=None)
     structuredPlan: Optional[dict[str, Any]] = Field(default=None)
     disposition: Literal["pending", "binding", "executing", "executed", "failed", "blocked", "excluded"] = Field(...)
     dispositionReason: Optional[str] = Field(default=None)
@@ -405,6 +407,106 @@ class BrowserActionResult(BaseModel):
     startedAt: str = Field(...)
     completedAt: str = Field(...)
 
+class DifferentialRunV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    schemaVersion: Literal["1.0"] = Field(...)
+    id: str = Field(...)
+    organizationId: str = Field(...)
+    projectId: str = Field(...)
+    status: Literal["queued", "running", "completed", "blocked", "failed"] = Field(...)
+    idempotencyKey: str = Field(...)
+    base: dict[str, Any] = Field(...)
+    head: dict[str, Any] = Field(...)
+    pairManifest: dict[str, Any] = Field(...)
+    createdAt: str = Field(...)
+    updatedAt: str = Field(...)
+
+class DifferentialRunRequestV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    schemaVersion: Optional[Literal["1.0"]] = Field(default="1.0")
+    id: Optional[str] = Field(default=None)
+    organizationId: Optional[str] = Field(default="local")
+    projectId: str = Field(...)
+    baseRevision: str = Field(...)
+    headRevision: str = Field(...)
+    planHash: Optional[str] = Field(default=None)
+    plan: Optional[Any] = Field(default=None)
+    dataContractId: str = Field(...)
+    dataContract: Optional[dict[str, Any]] = Field(default=None)
+    oracleSpecIds: list[str] = Field(...)
+    oracleSpecs: Optional[list[dict[str, Any]]] = Field(default=[])
+    environmentHash: str = Field(...)
+    ociImage: Optional[str] = Field(default=None)
+    browserVersion: Optional[str] = Field(default=None)
+    randomSeed: int = Field(...)
+    testTime: str = Field(...)
+    idempotencyKey: str = Field(...)
+
+class ReliabilityAssetContextV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    schemaVersion: Literal["1.0"] = Field(...)
+    projectId: str = Field(...)
+    sourceRunId: Optional[str] = Field(default=None)
+    repositoryRoot: str = Field(...)
+    repositorySha256: str = Field(...)
+    sourceRun: Optional[dict[str, Any]] = Field(default=None)
+    dataContracts: list[dict[str, Any]] = Field(...)
+    oracleSpecs: list[dict[str, Any]] = Field(...)
+    coverageItems: list[dict[str, Any]] = Field(...)
+    evidenceRefs: list[dict[str, Any]] = Field(...)
+    environmentDefaults: dict[str, Any] = Field(...)
+
+class TestAssetV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    schemaVersion: Literal["1.0"] = Field(...)
+    id: str = Field(...)
+    projectId: str = Field(...)
+    sourceRunId: str = Field(...)
+    coverageItemIds: list[str] = Field(...)
+    oracleSpecIds: list[str] = Field(...)
+    evidenceRefs: list[str] = Field(...)
+    files: list[dict[str, Any]] = Field(...)
+    status: Literal["candidate", "validating", "ready-for-review", "applying", "applied", "rejected", "blocked", "failed"] = Field(...)
+    validation: Optional[dict[str, Any]] = Field(default=None)
+    sourceRepositoryRoot: str = Field(...)
+    sourceRepositorySha256: str = Field(...)
+    targetBranch: Optional[str] = Field(default=None)
+    patchSha256: Optional[str] = Field(default=None)
+    createdAt: str = Field(...)
+    updatedAt: str = Field(...)
+
+class CreateTestAssetRequestV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    schemaVersion: Optional[Literal["1.0"]] = Field(default="1.0")
+    projectId: str = Field(...)
+    sourceRunId: str = Field(...)
+    coverageItemIds: list[str] = Field(...)
+    oracleSpecIds: list[str] = Field(...)
+    oracleSpecs: Optional[list[dict[str, Any]]] = Field(default=[])
+    evidenceRefs: list[str] = Field(...)
+    files: Optional[list[dict[str, Any]]] = Field(default=[])
+    format: Optional[Literal["playwright-ts", "api-ts"]] = Field(default="playwright-ts")
+    repositoryRoot: str = Field(...)
+    repositorySha256: str = Field(...)
+
+class ValidateTestAssetRequestV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    schemaVersion: Optional[Literal["1.0"]] = Field(default="1.0")
+    repetitions: Optional[Literal[3]] = Field(default=3)
+    mutationTotal: Optional[int] = Field(default=0)
+    mutationKilled: Optional[int] = Field(default=0)
+    securityPassed: Optional[bool] = Field(default=False)
+    mutationIds: Optional[list[int]] = Field(default=[0])
+    runIds: Optional[list[str]] = Field(default=[])
+    evidenceRefs: Optional[list[str]] = Field(default=[])
+
+class ApplyTestAssetRequestV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    schemaVersion: Optional[Literal["1.0"]] = Field(default="1.0")
+    capabilityGrantId: str = Field(...)
+    confirmedBy: str = Field(...)
+    expectedRepositorySha256: str = Field(...)
+
 for _model in [
     Run,
     ApiError,
@@ -428,6 +530,13 @@ for _model in [
     BrowserObservation,
     BrowserActionDecision,
     BrowserActionResult,
+    DifferentialRunV1,
+    DifferentialRunRequestV1,
+    ReliabilityAssetContextV1,
+    TestAssetV1,
+    CreateTestAssetRequestV1,
+    ValidateTestAssetRequestV1,
+    ApplyTestAssetRequestV1,
 ]:
     _model.model_rebuild()
 

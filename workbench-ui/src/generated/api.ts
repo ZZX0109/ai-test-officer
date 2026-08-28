@@ -365,6 +365,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/reliability-assets/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query: {
+                    projectId: string;
+                    sourceRunId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Project-scoped reliability asset context */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            context: components["schemas"]["ReliabilityAssetContextV1"];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/runs/{id}/browser-viewport": {
         parameters: {
             query?: never;
@@ -1275,6 +1315,8 @@ export interface paths {
                                 storageUri: string;
                                 /** @default [] */
                                 replicaUris: string[];
+                                /** @enum {string} */
+                                objectStoreState?: "committed" | "missing" | "uncommitted";
                                 sequence: number;
                                 monotonicOffsetMs: number;
                                 integrity: {
@@ -1388,6 +1430,281 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/differential-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["DifferentialRunRequestV1"];
+                };
+            };
+            responses: {
+                /** @description Queued Base/Head differential run */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            differentialRun: components["schemas"]["DifferentialRunV1"];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ApiError"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/differential-runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Differential run with Pair Manifest, parent Run, and both sides */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            differentialRun: components["schemas"]["DifferentialRunV1"];
+                            parentRun?: {
+                                [key: string]: unknown;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/runs/{runId}/test-assets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    runId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["CreateTestAssetRequestV1"];
+                };
+            };
+            responses: {
+                /** @description Generated TypeScript test asset candidate */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            asset: components["schemas"]["TestAssetV1"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/test-assets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Test asset, Oracle sources, and safe Patch preview */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            asset: components["schemas"]["TestAssetV1"];
+                            oracleSpecs: {
+                                [key: string]: unknown;
+                            }[];
+                            target: {
+                                clean: boolean;
+                                status: string;
+                                repositorySha256: string;
+                                patch: string;
+                                patchSha256: string;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/test-assets/{id}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["ValidateTestAssetRequestV1"];
+                };
+            };
+            responses: {
+                /** @description Three-repeat and Mutation validation result */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            asset: components["schemas"]["TestAssetV1"];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/test-assets/{id}/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["ApplyTestAssetRequestV1"];
+                };
+            };
+            responses: {
+                /** @description Applied on a new local Git branch without commit or push */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Dirty worktree or source changed */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ApiError"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1422,6 +1739,8 @@ export interface components {
             storageUri: string;
             /** @default [] */
             replicaUris: string[];
+            /** @enum {string} */
+            objectStoreState?: "committed" | "missing" | "uncommitted";
             sequence: number;
             monotonicOffsetMs: number;
             integrity: {
@@ -1483,7 +1802,7 @@ export interface components {
             id: string;
             runId: string;
             /** @enum {string} */
-            type: "run_created" | "plan_generated" | "plan_approved" | "permission_granted" | "run_queued" | "run_preparing" | "run_started" | "run_retrying" | "run_paused" | "run_resumed" | "evidence_collecting" | "run_judging" | "human_review_requested" | "decision_overridden" | "repair_decision_recorded" | "run_completed" | "run_failed" | "run_blocked" | "run_cancelled";
+            type: "run_created" | "plan_generated" | "plan_approved" | "permission_granted" | "run_queued" | "run_preparing" | "run_started" | "run_retrying" | "run_paused" | "run_resumed" | "evidence_collecting" | "run_judging" | "human_review_requested" | "decision_overridden" | "repair_decision_recorded" | "parent_aggregate_completed" | "parent_aggregate_blocked" | "run_completed" | "run_failed" | "run_blocked" | "run_cancelled";
             version: number;
             /** Format: date-time */
             createdAt: string;
@@ -2134,6 +2453,8 @@ export interface components {
                 /** @default false */
                 dynamicBrowser: boolean;
                 /** @default false */
+                requireModelExecution: boolean;
+                /** @default false */
                 confirmedExecution: boolean;
                 /**
                  * @default interactive
@@ -2271,6 +2592,12 @@ export interface components {
                 reason?: string;
                 /** Format: date-time */
                 boundAt?: string;
+            };
+            budget?: {
+                maxBrowserActionCalls: number;
+                maxTotalTokens: number;
+                totalTimeoutMs: number;
+                maxAttempts: number;
             };
             structuredPlan?: {
                 scenarioId: string;
@@ -3200,6 +3527,493 @@ export interface components {
             startedAt: string;
             /** Format: date-time */
             completedAt: string;
+        };
+        DifferentialRunV1: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            id: string;
+            organizationId: string;
+            projectId: string;
+            /** @enum {string} */
+            status: "queued" | "running" | "completed" | "blocked" | "failed";
+            idempotencyKey: string;
+            base: {
+                revision: string;
+                runId: string;
+                state: string;
+                gateStatus?: string;
+                environmentHash?: string;
+                failureSignature?: string;
+                repetitionsStable?: boolean;
+                visualDifferenceOnly?: boolean;
+                /** @default [] */
+                oracleDecisions: {
+                    /** @enum {string} */
+                    schemaVersion: "2.0";
+                    oracleId: string;
+                    /** @enum {string} */
+                    status: "pass" | "fail" | "blocked" | "needs-human-review";
+                    releaseEligible: boolean;
+                    differentialEligible: boolean;
+                    /** @default [] */
+                    reasons: string[];
+                    actual?: unknown;
+                    expected?: unknown;
+                    /** @default [] */
+                    evidenceRefs: string[];
+                    /** Format: date-time */
+                    evaluatedAt: string;
+                }[];
+                /** @default [] */
+                artifactIds: string[];
+                /** @default [] */
+                evidenceRefs: string[];
+            };
+            head: {
+                revision: string;
+                runId: string;
+                state: string;
+                gateStatus?: string;
+                environmentHash?: string;
+                failureSignature?: string;
+                repetitionsStable?: boolean;
+                visualDifferenceOnly?: boolean;
+                /** @default [] */
+                oracleDecisions: {
+                    /** @enum {string} */
+                    schemaVersion: "2.0";
+                    oracleId: string;
+                    /** @enum {string} */
+                    status: "pass" | "fail" | "blocked" | "needs-human-review";
+                    releaseEligible: boolean;
+                    differentialEligible: boolean;
+                    /** @default [] */
+                    reasons: string[];
+                    actual?: unknown;
+                    expected?: unknown;
+                    /** @default [] */
+                    evidenceRefs: string[];
+                    /** Format: date-time */
+                    evaluatedAt: string;
+                }[];
+                /** @default [] */
+                artifactIds: string[];
+                /** @default [] */
+                evidenceRefs: string[];
+            };
+            pairManifest: {
+                /** @enum {string} */
+                schemaVersion: "1.0";
+                id: string;
+                projectId: string;
+                baseRevision: string;
+                headRevision: string;
+                baseRunId: string;
+                headRunId: string;
+                dataContractId: string;
+                environmentHash: string;
+                planHash: string;
+                dataHash: string;
+                ociImage?: string;
+                browserVersion?: string;
+                randomSeed: number;
+                /** Format: date-time */
+                testTime: string;
+                oracleSpecIds: string[];
+                /** @enum {string} */
+                classification?: "introduced-regression" | "pre-existing-defect" | "fixed-by-change" | "expected-change" | "flaky" | "environment-difference" | "inconclusive";
+                /** @default [] */
+                classificationReasons: string[];
+                /** @default [] */
+                evidenceRefs: string[];
+                /** Format: date-time */
+                createdAt: string;
+            };
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        DifferentialRunRequestV1: {
+            /**
+             * @default 1.0
+             * @enum {string}
+             */
+            schemaVersion: "1.0";
+            id?: string;
+            /** @default local */
+            organizationId: string;
+            projectId: string;
+            baseRevision: string;
+            headRevision: string;
+            planHash?: string;
+            plan?: unknown;
+            dataContractId: string;
+            dataContract?: {
+                /** @enum {string} */
+                schemaVersion: "1.0";
+                id: string;
+                projectId: string;
+                coverageItemIds: string[];
+                dataSources: {
+                    id: string;
+                    /** @enum {string} */
+                    kind: "postgres" | "sqlite" | "http-snapshot";
+                    credentialRef?: string;
+                    /** @default false */
+                    readOnly: boolean;
+                }[];
+                /** @default [] */
+                credentialRefs: string[];
+                namespace: {
+                    /** @enum {string} */
+                    strategy: "run-child-seed";
+                    /** @default ato */
+                    prefix: string;
+                };
+                randomSeed: number;
+                /** Format: date-time */
+                testTime: string;
+                /** @default [] */
+                roles: {
+                    id: string;
+                    credentialRef?: string;
+                    /** @default [] */
+                    permissions: string[];
+                }[];
+                stages: {
+                    /** @enum {string} */
+                    stage: "prepare" | "namespace" | "migrate" | "seed" | "snapshot" | "execute" | "cleanup" | "rollback" | "verify-clean";
+                    commandRef?: string;
+                    /** @default true */
+                    required: boolean;
+                }[];
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                updatedAt: string;
+            };
+            oracleSpecIds: string[];
+            /** @default [] */
+            oracleSpecs: {
+                /** @enum {string} */
+                schemaVersion: "2.0";
+                id: string;
+                projectId: string;
+                coverageItemId: string;
+                /** @enum {string} */
+                type: "dom" | "url" | "network" | "api-schema" | "database" | "background-task" | "visual" | "custom";
+                description: string;
+                /** @default [] */
+                preconditions: string[];
+                observationWindow: {
+                    /** @enum {string} */
+                    start: "before-action" | "after-action" | "polling";
+                    /** @default 20000 */
+                    timeoutMs: number;
+                    /** @default 500 */
+                    pollIntervalMs: number;
+                };
+                comparison: {
+                    /** @enum {string} */
+                    operator: "equals" | "not-equals" | "contains" | "all-contains" | "status-in" | "json-schema" | "snapshot-equals" | "changed";
+                    expected?: unknown;
+                    actualPath?: string;
+                };
+                source: {
+                    /** @enum {string} */
+                    kind: "user-confirmed-acceptance" | "formal-contract" | "base-behavior" | "runtime-observation" | "historical-behavior" | "llm-inference" | "legacy";
+                    id: string;
+                    version: string;
+                    sha256: string;
+                };
+                /** @enum {string} */
+                decisionUse: "release" | "advisory" | "review-only";
+                /** @default [] */
+                conflictRefs: string[];
+                humanConfirmation: {
+                    /** @enum {string} */
+                    status: "not-required" | "pending" | "confirmed" | "rejected";
+                    actor?: string;
+                    /** Format: date-time */
+                    confirmedAt?: string;
+                    note?: string;
+                };
+                lifecycle: {
+                    /** @enum {string} */
+                    status: "active" | "expired" | "reconfirmation-required" | "superseded";
+                    /** Format: date-time */
+                    expiresAt?: string;
+                    supersededBy?: string;
+                };
+                runEvidence: {
+                    runId: string;
+                    attemptId?: string;
+                    /** @default [] */
+                    evidenceRefs: string[];
+                    /** @default [] */
+                    artifactIds: string[];
+                };
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                updatedAt: string;
+            }[];
+            environmentHash: string;
+            ociImage?: string;
+            browserVersion?: string;
+            randomSeed: number;
+            /** Format: date-time */
+            testTime: string;
+            idempotencyKey: string;
+        };
+        ReliabilityAssetContextV1: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            projectId: string;
+            sourceRunId?: string;
+            repositoryRoot: string;
+            repositorySha256: string;
+            sourceRun?: {
+                id: string;
+                state: string;
+                gateStatus?: string;
+            };
+            dataContracts: {
+                id: string;
+                projectId: string;
+                coverageItemIds: string[];
+                dataSourceKinds: ("postgres" | "sqlite" | "http-snapshot")[];
+                randomSeed: number;
+                /** Format: date-time */
+                testTime: string;
+            }[];
+            oracleSpecs: {
+                id: string;
+                coverageItemId: string;
+                /** @enum {string} */
+                type: "dom" | "url" | "network" | "api-schema" | "database" | "background-task" | "visual" | "custom";
+                description: string;
+                source: {
+                    /** @enum {string} */
+                    kind: "user-confirmed-acceptance" | "formal-contract" | "base-behavior" | "runtime-observation" | "historical-behavior" | "llm-inference" | "legacy";
+                    id: string;
+                    version: string;
+                    sha256: string;
+                };
+                /** @enum {string} */
+                decisionUse: "release" | "advisory" | "review-only";
+                /** @enum {string} */
+                lifecycleStatus: "active" | "expired" | "reconfirmation-required" | "superseded";
+            }[];
+            coverageItems: {
+                id: string;
+                runId: string;
+                flowId: string;
+                module: string;
+                /** @enum {string} */
+                surface: "page" | "api" | "data" | "background-task";
+                /** @enum {string} */
+                risk: "low" | "medium" | "high" | "critical";
+                disposition: string;
+            }[];
+            evidenceRefs: {
+                id: string;
+                type: string;
+                title: string;
+                /** Format: date-time */
+                timestamp: string;
+                /** @default [] */
+                artifactIds: string[];
+            }[];
+            environmentDefaults: {
+                environmentHash: string;
+                randomSeed: number;
+                /** Format: date-time */
+                testTime: string;
+                ociImage?: string;
+                browserVersion?: string;
+            };
+        };
+        TestAssetV1: {
+            /** @enum {string} */
+            schemaVersion: "1.0";
+            id: string;
+            projectId: string;
+            sourceRunId: string;
+            coverageItemIds: string[];
+            oracleSpecIds: string[];
+            evidenceRefs: string[];
+            files: {
+                path: string;
+                content: string;
+                sha256: string;
+                /** @enum {string} */
+                language: "playwright-ts" | "api-ts";
+            }[];
+            /** @enum {string} */
+            status: "candidate" | "validating" | "ready-for-review" | "applying" | "applied" | "rejected" | "blocked" | "failed";
+            validation?: {
+                /** @enum {string} */
+                schemaVersion: "1.0";
+                id: string;
+                assetId: string;
+                /** @enum {string} */
+                status: "queued" | "running" | "passed" | "failed" | "blocked";
+                repetitions: number;
+                passedRepetitions: number;
+                mutationTotal: number;
+                mutationKilled: number;
+                securityPassed: boolean;
+                /** @enum {string} */
+                failureClass?: "product-bug" | "generated-test" | "environment" | "infrastructure" | "unknown";
+                /** @default [] */
+                runIds: string[];
+                /** @default [] */
+                evidenceRefs: string[];
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                finishedAt?: string;
+            };
+            sourceRepositoryRoot: string;
+            sourceRepositorySha256: string;
+            targetBranch?: string;
+            patchSha256?: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        CreateTestAssetRequestV1: {
+            /**
+             * @default 1.0
+             * @enum {string}
+             */
+            schemaVersion: "1.0";
+            projectId: string;
+            sourceRunId: string;
+            coverageItemIds: string[];
+            oracleSpecIds: string[];
+            /** @default [] */
+            oracleSpecs: {
+                /** @enum {string} */
+                schemaVersion: "2.0";
+                id: string;
+                projectId: string;
+                coverageItemId: string;
+                /** @enum {string} */
+                type: "dom" | "url" | "network" | "api-schema" | "database" | "background-task" | "visual" | "custom";
+                description: string;
+                /** @default [] */
+                preconditions: string[];
+                observationWindow: {
+                    /** @enum {string} */
+                    start: "before-action" | "after-action" | "polling";
+                    /** @default 20000 */
+                    timeoutMs: number;
+                    /** @default 500 */
+                    pollIntervalMs: number;
+                };
+                comparison: {
+                    /** @enum {string} */
+                    operator: "equals" | "not-equals" | "contains" | "all-contains" | "status-in" | "json-schema" | "snapshot-equals" | "changed";
+                    expected?: unknown;
+                    actualPath?: string;
+                };
+                source: {
+                    /** @enum {string} */
+                    kind: "user-confirmed-acceptance" | "formal-contract" | "base-behavior" | "runtime-observation" | "historical-behavior" | "llm-inference" | "legacy";
+                    id: string;
+                    version: string;
+                    sha256: string;
+                };
+                /** @enum {string} */
+                decisionUse: "release" | "advisory" | "review-only";
+                /** @default [] */
+                conflictRefs: string[];
+                humanConfirmation: {
+                    /** @enum {string} */
+                    status: "not-required" | "pending" | "confirmed" | "rejected";
+                    actor?: string;
+                    /** Format: date-time */
+                    confirmedAt?: string;
+                    note?: string;
+                };
+                lifecycle: {
+                    /** @enum {string} */
+                    status: "active" | "expired" | "reconfirmation-required" | "superseded";
+                    /** Format: date-time */
+                    expiresAt?: string;
+                    supersededBy?: string;
+                };
+                runEvidence: {
+                    runId: string;
+                    attemptId?: string;
+                    /** @default [] */
+                    evidenceRefs: string[];
+                    /** @default [] */
+                    artifactIds: string[];
+                };
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                updatedAt: string;
+            }[];
+            evidenceRefs: string[];
+            /** @default [] */
+            files: {
+                path: string;
+                content: string;
+                sha256: string;
+                /** @enum {string} */
+                language: "playwright-ts" | "api-ts";
+            }[];
+            /**
+             * @default playwright-ts
+             * @enum {string}
+             */
+            format: "playwright-ts" | "api-ts";
+            repositoryRoot: string;
+            repositorySha256: string;
+        };
+        ValidateTestAssetRequestV1: {
+            /**
+             * @default 1.0
+             * @enum {string}
+             */
+            schemaVersion: "1.0";
+            /**
+             * @default 3
+             * @enum {number}
+             */
+            repetitions: 3;
+            /** @default 0 */
+            mutationTotal: number;
+            /** @default 0 */
+            mutationKilled: number;
+            /** @default false */
+            securityPassed: boolean;
+            /**
+             * @default [
+             *       0
+             *     ]
+             */
+            mutationIds: number[];
+            /** @default [] */
+            runIds: string[];
+            /** @default [] */
+            evidenceRefs: string[];
+        };
+        ApplyTestAssetRequestV1: {
+            /**
+             * @default 1.0
+             * @enum {string}
+             */
+            schemaVersion: "1.0";
+            capabilityGrantId: string;
+            confirmedBy: string;
+            expectedRepositorySha256: string;
         };
     };
     responses: never;

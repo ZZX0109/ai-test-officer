@@ -205,7 +205,10 @@ async function executeRepairProposal(input: RepairProposalInput) {
     maxTokens: reservation.maxOutputTokens,
     timeoutMs: input.budget?.requestTimeoutMs ?? 30_000,
     totalTimeoutMs: Math.max(30_000, input.budget?.requestTimeoutMs ?? 30_000),
-    transportPreference: "non-stream-retry",
+    // Stream by default so ordinary Chat Completions are visible token by
+    // token; llmProvider retains the non-stream fallback for providers that
+    // reject or truncate SSE.
+    transportPreference: "auto",
     knowledgeContext,
     parseOutput: (text) => responseSchema.parse(JSON.parse(text))
   });

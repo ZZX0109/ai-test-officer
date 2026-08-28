@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { emitTrajectory } from "../trajectoryEmitter.js";
 
 export interface KnowledgeLifecycleEvent {
   runId?: string;
@@ -22,7 +23,12 @@ const emitter = new EventEmitter();
 emitter.setMaxListeners(200);
 
 export function publishKnowledgeLifecycle(event: Omit<KnowledgeLifecycleEvent, "createdAt">) {
-  emitter.emit("event", { ...event, createdAt: new Date().toISOString() } satisfies KnowledgeLifecycleEvent);
+  const complete = { ...event, createdAt: new Date().toISOString() } satisfies KnowledgeLifecycleEvent;
+  emitter.emit("event", complete);
+  if (complete.runId && !complete.type.startsWith("knowledge.tool.")) {
+    const type = "run.state.changed" as const;
+    void emitTrajectory({ runId: complete.runId, type, actor: "knowledge-broker", idempotencyKey: `knowledge:${complete.type}:${complete.createdAt}:${JSON.stringify(complete.payload)}`, payload: complete.payload });
+  }
 }
 
 export function subscribeKnowledgeLifecycle(listener: (event: KnowledgeLifecycleEvent) => void) {

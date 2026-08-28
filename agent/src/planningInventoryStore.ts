@@ -78,6 +78,14 @@ async function loadPlanningInventory(id: string) {
   return value;
 }
 
+/**
+ * Authorizes secondary projections (such as the planning trajectory) without
+ * exposing a planning inventory from a different project.
+ */
+export async function getPlanningInventoryProjectId(inventoryId: string) {
+  return (await loadPlanningInventory(inventoryId))?.projectId;
+}
+
 export async function getPlanningFlowPage(input: { inventoryId: string; projectId: string; cursor?: string; limit?: number }): Promise<PlanningFlowPage | undefined> {
   const inventory = await loadPlanningInventory(input.inventoryId);
   if (!inventory || inventory.projectId !== input.projectId) return undefined;

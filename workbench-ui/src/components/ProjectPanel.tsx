@@ -77,7 +77,8 @@ export function ProjectPanel({
     "order_portal_lite",
     "todo_lite"
   ]);
-  const systemProjects = projects.filter((project) => systemProjectIds.has(project.id));
+  const isOfficialDemo = draft.demoProfile?.enabled === true;
+  const systemProjects = projects.filter((project) => systemProjectIds.has(project.id) && project.id !== draft.id);
   const login = draft.login ?? { method: "none" as const };
   const runtimeFailureMessages: Record<string, string> = {
     config_missing: "项目运行配置不存在，请重新识别并保存项目。",
@@ -141,8 +142,16 @@ export function ProjectPanel({
 
   return (
     <section className="project-box">
-      <h3>Target Project</h3>
-      <p className="project-panel-hint">自动识别结果保持只读；下方推荐运行设置可以按项目实际情况调整。</p>
+      <h3>{isOfficialDemo ? "官方演示项目" : "Target Project"}</h3>
+      <p className="project-panel-hint">{isOfficialDemo
+        ? "这个项目用于展示模型如何在内置浏览器中真实操作页面，并留下可查看的模型调用、操作和测试证据。"
+        : "自动识别结果保持只读；下方推荐运行设置可以按项目实际情况调整。"}</p>
+      {isOfficialDemo ? (
+        <aside className="official-demo-summary" data-testid="official-demo-summary">
+          <strong>{draft.demoProfile?.description}</strong>
+          <p>本次演示目标：{draft.demoProfile?.defaultGoal}</p>
+        </aside>
+      ) : null}
 
       <section className="detected-project-summary" aria-label="自动识别结果">
         <header>
@@ -152,7 +161,9 @@ export function ProjectPanel({
           </div>
           <span className="detected-project-summary__status">{detection?.executionReady === false ? "等待运行路径" : "已识别"}</span>
         </header>
-        <dl>
+        <details className="wizard-details project-detection-details" open={!isOfficialDemo}>
+          <summary>{isOfficialDemo ? "查看项目技术信息" : "项目技术信息"}</summary>
+          <dl>
           <div>
             <dt>项目路径</dt>
             <dd title={draft.projectPath}>{draft.projectPath}</dd>
@@ -177,7 +188,8 @@ export function ProjectPanel({
             <dt>运行隔离</dt>
             <dd>{sandboxMode === "oci" ? "安全沙盒（Docker）" : "直接在本机运行"}</dd>
           </div>
-        </dl>
+          </dl>
+        </details>
       </section>
 
       {systemProjects.length ? (
@@ -195,11 +207,10 @@ export function ProjectPanel({
         </details>
       ) : null}
 
-      <div className="project-settings-heading">
-        <strong>推荐运行设置</strong>
-        <span>只显示适用于当前项目的设置；这些建议可以修改</span>
-      </div>
-      <div className="connector-grid">
+      <details className="wizard-details project-technical-settings" open={!isOfficialDemo}>
+        <summary>{isOfficialDemo ? "查看或调整运行设置" : "推荐运行设置"}</summary>
+        <p className="project-panel-hint">只显示适用于当前项目的设置；这些建议可以修改。</p>
+        <div className="connector-grid">
         {draft.manifest || draft.allowExternalProjectPath ? (
           <label>
             运行方式
@@ -249,18 +260,19 @@ export function ProjectPanel({
           />
           <span className="field-help">启动项目后最多等待多久。30000 表示 30 秒，不是测试执行时长。</span>
         </label>
-      </div>
-      {draft.processes?.length ? (
-        <div className="detected-run-command">
-          <strong>启动方式</strong>
-          {draft.processes.map((process) => (
-            <div key={process.name}>
-              <code>{process.command}</code>
-              {process.healthCheckUrl ? <span>启动后检查 {process.healthCheckUrl}</span> : null}
-            </div>
-          ))}
         </div>
-      ) : null}
+        {draft.processes?.length ? (
+          <div className="detected-run-command">
+            <strong>启动方式</strong>
+            {draft.processes.map((process) => (
+              <div key={process.name}>
+                <code>{process.command}</code>
+                {process.healthCheckUrl ? <span>启动后检查 {process.healthCheckUrl}</span> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </details>
       {showLoginSettings ? <details
         id="project-login-settings"
         className="project-login-settings"
@@ -294,7 +306,7 @@ export function ProjectPanel({
           }
         }} disabled={isPreparing} aria-busy={isPreparing}>
           {isPreparing ? <LoaderCircle className="spin" size={15} /> : <Stethoscope size={15} />}
-          {isPreparing ? "正在启动…" : "诊断并运行"}
+          {isPreparing ? (isOfficialDemo ? "正在准备演示页面…" : "正在启动…") : isOfficialDemo ? "准备演示页面" : "诊断并运行"}
         </button>
       </div>
       {showRunResult ? (

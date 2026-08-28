@@ -1,39 +1,33 @@
 import React, { useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { initializeOidc } from "./auth";
 import {
-  Activity,
   ArrowLeft,
   CalendarClock,
   CheckCircle2,
-  FileSearch,
-  KeyRound,
-  Play,
-  RefreshCw,
   Save,
   Star,
   Square,
   Timer,
   Trash2,
-  X,
   XCircle
 } from "lucide-react";
 import { BotDeliveryPanel } from "./components/BotDeliveryPanel";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { DiscoveryPanel } from "./components/DiscoveryPanel";
 import { EvidencePanel } from "./components/EvidencePanel";
+import { ReliabilityAssetsPanel } from "./components/ReliabilityAssetsPanel";
+import { RunPreparationModal } from "./components/RunPreparationModal";
+import { WorkbenchTopbar } from "./components/WorkbenchTopbar";
+import { ContextDrawer } from "./components/ContextDrawer";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { PatrolPanel } from "./components/PatrolPanel";
-import { ProjectPanel } from "./components/ProjectPanel";
-import { ProjectWizardPanel } from "./components/ProjectWizardPanel";
 import { LiveWorkspacePanel } from "./components/LiveWorkspacePanel";
 import { ProgressiveDetailsList } from "./components/ProgressiveDetailsList";
-import { ContextSupplementPanel } from "./components/ContextSupplementPanel";
 import { StoragePanel } from "./components/StoragePanel";
 import { AdvancedCapabilitiesSection } from "./components/AdvancedCapabilitiesSection";
 import { AssistantPlanningSidebar } from "./components/AssistantPlanningSidebar";
 import { ApiSettingsDialog } from "./components/ApiSettingsDialog";
-import { PlanningConversationPanel } from "./components/PlanningConversationPanel";
-import { ReadinessPanel } from "./components/ReadinessPanel"; import { CredentialSetupWizard } from "./components/CredentialSetupWizard";
+import { CredentialSetupWizard } from "./components/CredentialSetupWizard";
 import { ExecutionTimelinePanel } from "./components/ExecutionTimelinePanel";
 import { AuthenticatedArtifactLink } from "./components/AuthenticatedArtifact";
 import {
@@ -67,6 +61,17 @@ import {
 } from "./state/workspaceReducer";
 import { readProjectHistoryCache, writeProjectHistoryCache } from "./projectHistoryCache";
 import { planRequiresLoginCredentials } from "./loginPlan";
+import {
+  auditStoreClass,
+  auditStoreSummary,
+  boundedAssistantText,
+  hasBlockingPlanningQuestions,
+  isPlanningAutomationBusy,
+  userFacingAssistantError,
+  userFacingAutomationError,
+  userFacingCoverageText,
+  userFacingPlanningText
+} from "./appPresentation";
 import {
   commandFallbackAction,
   describeRunActivity,
@@ -176,6 +181,7 @@ import type {
   RepairFileContent,
   RepairPlanActionStatus,
   AgentGraphProjection,
+  BrowserActionOverlay,
   BrowserSession,
   RepairDecisionValue,
   RepairPlanData,
@@ -192,97 +198,11 @@ import type {
 } from "./types";
 import "./styles.css";
 
-function auditStoreClass(auditStore: AuditStoreStatus | null) {
-  if (!auditStore) return "warning";
-  if (auditStore.schemaVersionMatches === false || auditStore.migrationComplete === false || auditStore.integrityOk === false) {
-    return "failed";
-  }
-  return "passed";
-}
-
-function hasBlockingPlanningQuestions(result: PlanningConversationResult) {
-  return result.clarificationQuestions.some((question) =>
-    /可能修改数据|沙盒测试数据|哪些操作禁止|暂未识别到页面|最重要的入口页面/.test(question)
-  );
-}
-
-function isPlanningAutomationBusy(phase: "idle" | "preparing-project" | "discovering" | "binding" | "starting-run" | "running" | "ready" | "needs-permission" | "needs-credentials" | "blocked") {
-  return ["preparing-project", "discovering", "binding", "starting-run", "running"].includes(phase);
-}
-
-function userFacingAutomationError(raw: string) {
-  if (/Scenario draft probe failed|fix missingInfo|probe\.page_|selectorProbeStatus/i.test(raw)) {
-    return "真实页面路径暂未通过可执行性校验。缺少的入口、控件或预期结果已交给左侧 AI 测试助手处理。";
-  }
-  if (/compiled_plan_missing|plan(?:ning)?[_ -](?:contract|schema|validation)|action[_ -]?dsl|invalid[_ -]?(?:plan|dsl)|zod/i.test(raw)) {
-    return "测试运行没有成功创建：计划数据未通过契约校验。系统不会把它误报为浏览器安全拦截，请重新生成计划后继续。";
-  }
-  let detail = raw;
-  if (/^\s*[\[{]/.test(raw)) {
-    try {
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      const candidate = [parsed.message, parsed.detail, parsed.reason, parsed.error]
-        .find((value): value is string => typeof value === "string" && value.trim().length > 0);
-      detail = candidate ?? "自动化执行未完成；系统已保留当前阶段和证据，请查看处理依据。";
-    } catch {
-      detail = "自动化执行未完成；后端返回了无法解析的错误信息，系统已保留原始诊断。";
-    }
-  }
-  return detail.length > 260 ? `${detail.slice(0, 257)}…` : detail;
-}
-
-function boundedAssistantText(value: unknown, limit: number) {
-  const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
-  const compact = text
-    .replace(/(\bBearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
-    .replace(/((?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]")
-    .replace(/\b(?:sk|afk|AIza)[-_A-Za-z0-9]{16,}\b/g, "[REDACTED]")
-    .replace(/\s+/g, " ")
-    .trim();
-  return compact.length > limit ? `${compact.slice(0, Math.max(0, limit - 1))}…` : compact;
-}
-
-function userFacingPlanningText(value: string) {
-  return value
-    .replace(/\boracle\b/gi, "验证条件")
-    .replace(/页面绑定/g, "页面确认");
-}
-
-function userFacingAssistantError(error: unknown) {
-  const detail = error instanceof Error ? error.message : "模型调用失败";
-  if (/Validation failed|fieldErrors|provider_http_400/i.test(detail)) {
-    return "模型解释请求没有通过格式校验。系统已压缩上下文，你可以直接重新发送问题；机器结论和证据不受影响。";
-  }
-  if (/output_truncated|assistant_output_truncated/i.test(detail)) {
-    return "模型已经返回回答，但结构化内容在结尾被截断。系统会保留当前诊断并使用更大的输出预算重试，不会清除机器结论或证据。";
-  }
-  if (/401|403|credential|api[_ ]?key|model_not_configured/i.test(detail)) {
-    return "当前模型凭据不可用。请在右上角 API Key 配置中检查凭据后重新发送；现有测试不会被放行或清除。";
-  }
-  if (/timeout|incomplete|network|fetch/i.test(detail)) {
-    return "模型服务本次没有在时限内完成回答。可以直接重试，机器结论和已保存证据不会变化。";
-  }
-  return "AI 测试官本次没有返回有效回答。系统已保留运行状态和证据，你可以重新发送问题或查看技术详情。";
-}
-
-function auditStoreSummary(auditStore: AuditStoreStatus | null) {
-  if (!auditStore) return "—";
-  const version = auditStore.userVersion !== undefined
-    ? `schema ${auditStore.schemaVersion}/user ${auditStore.userVersion}`
-    : `schema ${auditStore.schemaVersion}`;
-  const health = [
-    auditStore.schemaVersionMatches === false ? "version mismatch" : undefined,
-    auditStore.migrationComplete === false ? `missing migrations ${(auditStore.missingMigrations ?? []).join(",") || "unknown"}` : undefined,
-    auditStore.integrityOk === false ? `integrity ${auditStore.integrityCheck ?? "failed"}` : undefined
-  ].filter(Boolean);
-  return `${auditStore.journalMode} · ${version} · ${health.length ? health.join(" · ") : "healthy"} · runs ${auditStore.runs}`;
-}
-
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
 
 export function App() {
   const [workspaceState, dispatchWorkspace] = useReducer(workspaceReducer, initialWorkspaceState);
-  const [runViewMode, setRunViewMode] = useState<"dialogue" | "trajectory" | "report">("dialogue");
+  const [runViewMode, setRunViewMode] = useState<"dialogue" | "report">("dialogue");
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [plan, setPlan] = useState<GrayPlan | null>(null);
   const [result, setResult] = useState<RunResult | null>(null);
@@ -345,6 +265,7 @@ export function App() {
   const requirementComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const [planningInput, setPlanningInput] = useState("");
   const [planningResult, setPlanningResult] = useState<PlanningConversationResult | null>(null);
+  const [planningTrajectoryId, setPlanningTrajectoryId] = useState<string | null>(null);
   const [planningFlowPageLoading, setPlanningFlowPageLoading] = useState(false);
   const [planningFunctionPageLoading, setPlanningFunctionPageLoading] = useState(false);
   const [planningBusy, setPlanningBusy] = useState(false);
@@ -406,10 +327,10 @@ export function App() {
     setRepairVerifiedScenarioIds(new Set());
   }, [activeRun?.id]);
   const [repairWorkspaceOpen, setRepairWorkspaceOpen] = useState(false);
-  // The centre surface has two explicit modes. Preview never grants source
-  // write access; code mode is always a sandbox workspace and only becomes
-  // editable after the operator explicitly asks to create a repair session.
-  const [centreSurface, setCentreSurface] = useState<"preview" | "code">("preview");
+  // Preview never grants source write access; the trajectory is read-only and
+  // code mode remains a sandbox workspace that only becomes editable after an
+  // explicit operator request.
+  const [centreSurface, setCentreSurface] = useState<"preview" | "trajectory" | "code">("preview");
   const [repairBusy, setRepairBusy] = useState(false);
   const [reviewReason, setReviewReason] = useState("");
   const [runPreviewModalOpen, setRunPreviewModalOpen] = useState(false);
@@ -444,6 +365,7 @@ export function App() {
   // an interrupted run is indistinguishable from a stalled one.
   const [agentProjection, setAgentProjection] = useState<AgentGraphProjection | null>(null);
   const [browserSession, setBrowserSession] = useState<BrowserSession | null>(null);
+  const [browserActionOverlay, setBrowserActionOverlay] = useState<BrowserActionOverlay | null>(null);
   const [, setBrowserFrameRevision] = useState(0);
   const [browserControlBusy, setBrowserControlBusy] = useState(false);
   const [browserManualInput, setBrowserManualInput] = useState("");
@@ -511,6 +433,10 @@ export function App() {
   });
   const activeExecutablePlan = commitCheck?.executablePlan ?? requirementAcceptance?.executablePlan;
   const selectedProjectName = projectDraft?.name ?? projects.find((project) => project.id === selectedProjectId)?.name ?? "未选择项目";
+  const selectedProjectConfig = projectDraft ?? projects.find((project) => project.id === selectedProjectId);
+  const selectedDemoProfile = selectedProjectConfig?.demoProfile?.enabled
+    ? selectedProjectConfig.demoProfile
+    : undefined;
   const selectedProjectExecutionMode = projectDraft?.allowExternalProjectPath
     ? "oci"
     : projectDraft?.manifest?.execution.mode
@@ -559,6 +485,34 @@ export function App() {
       : projectConnection?.ok || projectRuntime?.status === "running"
   ));
   const evidenceCount = result?.evidence?.length ?? 0;
+  const presentedResultSummary = userFacingCoverageText(result?.summary);
+  const plannedFunctions = planningResult?.businessFunctions ?? [];
+  const resultCoverageItems = result?.coverageItems ?? [];
+  const coverageByFlowId = new Map(resultCoverageItems.map((item) => [item.flowId, item]));
+  const functionCoverageStates = plannedFunctions.map((feature) => {
+    const paths = feature.pathIds.map((pathId) => coverageByFlowId.get(pathId));
+    if (!paths.length || paths.some((item) => !item || ["pending", "binding", "executing"].includes(item.disposition))) return "pending" as const;
+    if (paths.some((item) => item?.disposition === "failed")) return "failed" as const;
+    if (paths.some((item) => item?.disposition === "blocked" || item?.disposition === "excluded")) return "blocked" as const;
+    return paths.every((item) => item?.disposition === "executed") ? "passed" as const : "pending" as const;
+  });
+  const fallbackCoverageStates = !plannedFunctions.length ? resultCoverageItems.map((item) => item.disposition === "executed" ? "passed" as const
+    : item.disposition === "failed" ? "failed" as const
+      : item.disposition === "blocked" || item.disposition === "excluded" ? "blocked" as const : "pending" as const) : [];
+  const coverageStates = functionCoverageStates.length ? functionCoverageStates : fallbackCoverageStates;
+  const coverageProgress = coverageStates.length ? {
+    total: coverageStates.length,
+    passed: coverageStates.filter((state) => state === "passed").length,
+    failed: coverageStates.filter((state) => state === "failed").length,
+    blocked: coverageStates.filter((state) => state === "blocked").length,
+    pending: coverageStates.filter((state) => state === "pending").length
+  } : undefined;
+  const plannedPathIds = new Set(plannedFunctions.flatMap((feature) => feature.pathIds));
+  const unmatchedExecutedCoverage = resultCoverageItems.filter((item) =>
+    (item.disposition === "executed" || item.disposition === "failed")
+    && plannedPathIds.size > 0
+    && !plannedPathIds.has(item.flowId)
+  ).length;
   const planStepCount = activeExecutablePlan?.steps.length
     ?? planningResult?.plan.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0)
     ?? plan?.levels.reduce((total, level) => total + level.paths.reduce((pathTotal, path) => pathTotal + path.steps.length, 0), 0)
@@ -575,6 +529,13 @@ export function App() {
     ?? requirementAcceptance?.run?.finalStatus
     ?? requirementAcceptance?.run?.gateStatus
     ?? "未运行";
+  const coverageIncomplete = Boolean(
+    result
+    && latestDecision === "pass"
+    && coverageProgress
+    && coverageProgress.passed < coverageProgress.total
+  );
+  const effectiveDecision = coverageIncomplete ? "needs-human-review" : latestDecision;
   // A run paused on a human decision (credential authorization, dangerous
   // operation, …) is NOT "queued" — the verdict panel must surface the exact
   // action the operator owes, otherwise they stare at "queued" with no idea
@@ -584,7 +545,14 @@ export function App() {
     : undefined;
   const verdictDisplay = pendingInterruptForVerdict
     ? (pendingInterruptForVerdict.kind === "credential" ? "等待你授权使用测试账号" : "等待你的操作")
-    : latestDecision;
+    : coverageIncomplete ? "覆盖不完整"
+      : effectiveDecision === "pass" ? "通过"
+        : effectiveDecision === "fail" ? "失败"
+          : effectiveDecision === "blocked" ? "阻塞"
+            : effectiveDecision === "needs-human-review" ? "需要补充验证" : effectiveDecision;
+  const verdictSummary = coverageIncomplete && coverageProgress
+    ? `计划识别 ${coverageProgress.total} 个业务功能，实际通过 ${coverageProgress.passed} 个；仍有 ${coverageProgress.failed + coverageProgress.blocked + coverageProgress.pending} 个未通过完整验证，不能判定整体通过。${unmatchedExecutedCoverage ? `另有 ${unmatchedExecutedCoverage} 条计划外演示路径已执行，但不计入业务功能覆盖。` : ""}`
+    : presentedResultSummary;
   const executionStatus = activeRun?.executionStatus ?? result?.executionStatus;
   const executionFinished = executionStatus
     ? ["completed", "completed-with-gaps", "cancelled", "infrastructure-failed"].includes(executionStatus)
@@ -660,7 +628,7 @@ export function App() {
     .filter((item) => item.status === "blocked")
     .map((item) => item.message) ?? [];
   if (!hasSelectedProject) readinessBlockers.push("上传或选择一个项目");
-  if (!readinessReport && !credentials.length) readinessBlockers.push("配置模型凭据（OpenAI-compatible key，用于功能识别与规划）");
+  if (!readinessReport && !credentials.length && !selectedDemoProfile) readinessBlockers.push("配置模型凭据（OpenAI-compatible key，用于功能识别与规划）");
   if (!readinessReport && dockerReadiness && !dockerReadiness.available) readinessBlockers.push(`启动 ${dockerReadiness.engine}（容器运行时不可用）`);
   const readinessReady = readinessBlockers.length === 0;
   const loginServiceUnavailable = runIsBlocked &&
@@ -774,6 +742,38 @@ export function App() {
     setActiveRun,
     setAnalysis
   });
+
+  const demoPrefillProjectRef = useRef("");
+  useEffect(() => {
+    if (!selectedProjectId) {
+      demoPrefillProjectRef.current = "";
+      return;
+    }
+    if (!selectedDemoProfile || demoPrefillProjectRef.current === selectedProjectId) return;
+    demoPrefillProjectRef.current = selectedProjectId;
+    setRequirementText(selectedDemoProfile.defaultGoal);
+    setPlanningInput(selectedDemoProfile.defaultGoal);
+    // The profile scenario remains a human-readable fixture reference. The
+    // official demo itself must start from the live page, not execute it as a
+    // pre-bound deterministic scenario.
+    setScenarioId("");
+    setCentreSurface("preview");
+  }, [selectedDemoProfile, selectedProjectId]);
+
+  function startOfficialDemo(project: ProjectConfig) {
+    const profile = project.demoProfile;
+    if (!profile?.enabled) return;
+    selectProject(project.id);
+    setRequirementText(profile.defaultGoal);
+    setPlanningInput(profile.defaultGoal);
+    setScenarioId("");
+    setCentreSurface("preview");
+    setTopbarUtilityOpen(false);
+    setRightDrawerOpen(false);
+    setLeftDrawerOpen(true);
+    setMessage("已载入官方演示：模型会在真实页面中观察、点击并采集证据。请先确认测试计划和浏览器权限；未配置模型时演示会被阻塞，不会降级成规则通过。");
+  }
+
   const { refresh, refreshInputContext } = useContextRefresh({
     credentials,
     plan,
@@ -879,6 +879,7 @@ export function App() {
     setPlanningInput,
     setPlanningMessages,
     setPlanningBusy,
+    setPlanningTrajectoryId,
     setPlanningConfirmed,
     setPlanningResult,
     setPlanningAutomation,
@@ -1026,7 +1027,7 @@ export function App() {
     : loginServiceUnavailable
       ? "页面已经打开，但登录解析依赖的后端接口没有响应。这属于运行服务问题，不是账号配置问题；请重新检查并继续，系统会同时恢复前后端服务。"
     : runIsBlocked
-      ? (concreteRunFailureMessage || planningAutomation.detail || nextSuggestion || "本次测试遇到阻塞。你可以补充入口、运行条件或预期结果，我会据此修订计划。")
+      ? userFacingCoverageText(concreteRunFailureMessage || planningAutomation.detail || nextSuggestion || "本次测试遇到阻塞。你可以补充入口、运行条件或预期结果，我会据此修订计划。")
       : (latestPlanningAssistantMessage ?? "可以随时补充测试目标、页面入口或预期结果。");
   const runActivity = describeRunActivity({
     runId: activeRunId,
@@ -1124,7 +1125,8 @@ export function App() {
       id: pendingId,
       role: "assistant",
       content: `正在分析 ${automationFailures.length || "当前"} 条失败链路，重新读取入口、控件和验证条件。此步骤不会修改被测项目源码。`,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      streaming: true
     }]);
     const repaired = await continueTestPlanning(
       [
@@ -1158,6 +1160,7 @@ export function App() {
         .filter((title): title is string => Boolean(title));
       setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
         ...item,
+        streaming: false,
         content: [
           modelTrace,
           `重新规划结果：${repaired.coverage.executable} 条可直接执行，${repaired.coverage.autoBindable} 条等待实际页面确认，${repaired.coverage.gaps} 条保留为覆盖缺口。`,
@@ -1176,6 +1179,7 @@ export function App() {
       }));
       setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
         ...item,
+        streaming: false,
         content: "模型或规划服务没有生成可验证的新路径。系统没有修改源码，也没有把失败路径伪装成通过；可以继续追问具体失败原因。"
       } : item));
     }
@@ -1404,6 +1408,7 @@ export function App() {
     }]);
     setPlanningInput("");
     setPlanningResult(null);
+    setPlanningTrajectoryId(null);
     setPlanningConfirmed(false);
     setPlanningAutomation({ phase: "idle", detail: "" });
     setAutomationFailures([]);
@@ -1457,6 +1462,7 @@ export function App() {
     setProjectDiagnosis,
     setPlanningMessages,
     setBrowserSession,
+    setBrowserActionOverlay,
     setBrowserFrameRevision,
     setAgentProjection,
     setInterruptError,
@@ -1639,7 +1645,10 @@ export function App() {
       ?.content.trim() || "全面扫描";
   }
 
-  async function executeAssistantSuggestedAction(actionOverride?: Exclude<AssistantSuggestedAction, "none">) {
+  async function executeAssistantSuggestedAction(
+    actionOverride?: Exclude<AssistantSuggestedAction, "none">,
+    options?: { autoValidateRepair?: boolean }
+  ) {
     const action = actionOverride ?? assistantSuggestedAction?.action;
     if (!action) return;
     try {
@@ -1697,7 +1706,7 @@ export function App() {
         setMessage("当前没有可关联的失败运行或启动诊断，因此不能生成自动修复。请先运行诊断。");
         return;
       }
-      await openCodeRepairWorkspace();
+      await openCodeRepairWorkspace(undefined, options?.autoValidateRepair);
       return;
     }
     if (action === "retry-failed-path") {
@@ -1892,6 +1901,47 @@ export function App() {
     return action;
   }
 
+  /**
+   * A verb such as "修复项目并重新测试" is an instruction, not a question for
+   * the chat model to paraphrase.  Execute it from the deterministic command
+   * route so a slow or off-topic assistant reply can never delay or replace
+   * the requested repair workflow.
+   */
+  async function executeExplicitAssistantCommand(
+    content: string,
+    requestedAction: Exclude<AssistantSuggestedAction, "none">
+  ) {
+    const projectId = selectedProjectId || projectDraft?.id;
+    if (!projectId) {
+      setMessage("请先接入并识别项目。");
+      return;
+    }
+    const effectiveAction = resolveRecoverableAssistantAction(requestedAction);
+    const userMessage: PlanningMessage = {
+      id: `assistant_user_${Date.now()}`,
+      role: "user",
+      content,
+      createdAt: new Date().toISOString()
+    };
+    const acknowledgement: PlanningMessage = {
+      id: `assistant_command_${Date.now()}`,
+      role: "assistant",
+      content: effectiveAction === "create-repair"
+        ? "已识别为“修复项目并重新测试”。现在开始在隔离沙盒中生成补丁；补丁生成后会自动执行受控验证。原项目不会被直接写入。"
+        : effectiveAction
+          ? `已识别为执行命令：${assistantActionLabel(effectiveAction) ?? effectiveAction}。正在继续。`
+          : "当前没有可关联的失败运行或启动诊断，因此不能创建修复。请先运行诊断或选择一条失败运行。",
+      createdAt: new Date().toISOString()
+    };
+    setPlanningMessages((current) => [...current, userMessage, acknowledgement]);
+    setPlanningInput("");
+    setAssistantSuggestedAction(null);
+    if (!effectiveAction) return;
+    await executeAssistantSuggestedAction(effectiveAction, {
+      autoValidateRepair: requestedAction === "create-repair"
+    });
+  }
+
   async function chatWithAssistant(content: string) {
     const projectId = selectedProjectId || projectDraft?.id;
     if (!projectId) {
@@ -1909,7 +1959,8 @@ export function App() {
       id: pendingId,
       role: "assistant",
       content: "正在读取当前计划、运行状态和最新证据…",
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      streaming: true
     }]);
     setPlanningInput("");
     setAssistantChatBusy(true);
@@ -1922,14 +1973,20 @@ export function App() {
           message: content,
           credentialId: defaultCredential?.id
         });
-        const effectiveAction = resolveRecoverableAssistantAction(response.assistant.suggestedAction !== "none"
+        const fallbackAction = commandFallbackAction(content, activeRun?.state);
+        const explicitCommandAction = isExplicitAssistantActionConfirmation(content, fallbackAction) ? fallbackAction : undefined;
+        const effectiveAction = resolveRecoverableAssistantAction(explicitCommandAction ?? (response.assistant.suggestedAction !== "none"
           ? response.assistant.suggestedAction
-          : commandFallbackAction(content, activeRun?.state));
+          : fallbackAction));
+        const assistantReply = explicitCommandAction === "create-repair"
+          ? "已识别为代码修复请求。正在读取当前失败证据并创建隔离沙盒修复；生成补丁后会打开 Diff，验证通过前不会写回原项目。"
+          : userFacingCoverageText(response.assistant.reply);
         setPlanningMessages((current) => current.map((item) =>
           item.id === pendingId
             ? {
               ...item,
-              content: response.assistant.reply,
+              streaming: false,
+              content: assistantReply,
               repairPlan: response.assistant.repairPlan,
               reasoningSummary: response.assistant.reasoningSummary,
               knowledge: response.assistant.knowledge,
@@ -1960,7 +2017,7 @@ export function App() {
         }
         if (isExplicitAssistantActionConfirmation(content, effectiveAction)) {
           setAssistantSuggestedAction(null);
-          await executeAssistantSuggestedAction(effectiveAction);
+          await executeAssistantSuggestedAction(effectiveAction, { autoValidateRepair: explicitCommandAction === "create-repair" });
         }
         return;
       }
@@ -1973,6 +2030,7 @@ export function App() {
             content: boundedAssistantText(item.content, 1_500)
           })),
         context: {
+          runId: activeRunId ?? (result?.id?.startsWith("run_") ? result.id : undefined),
           runState: activeRun?.state ?? (isRunning ? "running" : "idle"),
           finalStatus: result?.finalStatus ?? result?.gateStatus,
           summary: boundedAssistantText(result?.summary ?? planningAutomation.detail, 1_200),
@@ -2001,14 +2059,20 @@ export function App() {
           } : undefined
         }
       });
-      const effectiveAction = resolveRecoverableAssistantAction(response.assistant.suggestedAction !== "none"
+      const fallbackAction = commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle"));
+      const explicitCommandAction = isExplicitAssistantActionConfirmation(content, fallbackAction) ? fallbackAction : undefined;
+      const effectiveAction = resolveRecoverableAssistantAction(explicitCommandAction ?? (response.assistant.suggestedAction !== "none"
         ? response.assistant.suggestedAction
-        : commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle")));
+        : fallbackAction));
+      const assistantReply = explicitCommandAction === "create-repair"
+        ? "已识别为代码修复请求。正在读取当前失败证据并创建隔离沙盒修复；生成补丁后会打开 Diff，验证通过前不会写回原项目。"
+        : userFacingCoverageText(response.assistant.reply);
       setPlanningMessages((current) => current.map((item) =>
         item.id === pendingId
           ? {
             ...item,
-            content: response.assistant.reply,
+            streaming: false,
+            content: assistantReply,
             repairPlan: response.assistant.repairPlan,
             reasoningSummary: response.assistant.reasoningSummary,
             knowledge: response.assistant.knowledge,
@@ -2039,7 +2103,7 @@ export function App() {
       }
       if (isExplicitAssistantActionConfirmation(content, effectiveAction)) {
         setAssistantSuggestedAction(null);
-        await executeAssistantSuggestedAction(effectiveAction);
+        await executeAssistantSuggestedAction(effectiveAction, { autoValidateRepair: explicitCommandAction === "create-repair" });
       }
     } catch (error) {
       const fallbackAction = resolveRecoverableAssistantAction(commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle")));
@@ -2047,6 +2111,7 @@ export function App() {
         item.id === pendingId
           ? {
             ...item,
+            streaming: false,
             content: userFacingAssistantError(error),
             suggestedAction: fallbackAction ?? "none",
             requiresConfirmation: Boolean(fallbackAction),
@@ -2069,7 +2134,7 @@ export function App() {
       }
       if (isExplicitAssistantActionConfirmation(content, fallbackAction)) {
         setAssistantSuggestedAction(null);
-        await executeAssistantSuggestedAction(fallbackAction);
+        await executeAssistantSuggestedAction(fallbackAction, { autoValidateRepair: fallbackAction === "create-repair" });
       }
     } finally {
       setAssistantChatBusy(false);
@@ -2084,7 +2149,16 @@ export function App() {
     const questionLike = /[？?]$|^(现在|目前|为什么|为何|怎么|如何|什么|是否|有没有|能不能|测试情况|进度|结果|状态)|失败.*原因|情况.*如何/i.test(content);
     const planChange = /修改|调整|增加|添加|删除|去掉|重点测试|测试范围|重新规划|重做计划/i.test(content);
     const explicitTestGoal = /^(请|帮我|我要|我想)?(对|针对)?[^？?]*(测试|验证|检查|扫描)/i.test(content);
-    if (fullInventoryCommand || (!questionLike && (planChange || explicitTestGoal) && !planningAutomationBusy)) {
+    const officialDemoGoal = selectedDemoProfile?.defaultGoal === content;
+    const commandAction = commandFallbackAction(content, activeRun?.state ?? (isRunning ? "running" : "idle"));
+    if (commandAction && isExplicitAssistantActionConfirmation(content, commandAction)) {
+      await executeExplicitAssistantCommand(content, commandAction);
+      return;
+    }
+    if (officialDemoGoal || fullInventoryCommand || (!questionLike && (planChange || explicitTestGoal) && !planningAutomationBusy)) {
+      // The official demo uses the same model-assisted planning path as any
+      // other project. Its special profile only supplies the human-readable
+      // goal; it must never turn a fixed scenario into a rules-only success.
       await continueTestPlanning(content, "llm-guided");
       return;
     }
@@ -2166,7 +2240,8 @@ export function App() {
   async function confirmPlanningResult(candidate: PlanningConversationResult) {
     // The first planning response deliberately contains one page. Execution
     // is the only point where Workbench requests the complete inventory.
-    const completeCandidate = await fetchPlanningFlows(candidate, true);
+    const functionCompleteCandidate = await fetchPlanningFunctions(candidate, true);
+    const completeCandidate = await fetchPlanningFlows(functionCompleteCandidate, true);
     candidate = completeCandidate;
     if (hasBlockingPlanningQuestions(candidate)) {
       setMessage("请先回答规划中的澄清问题。");
@@ -2196,9 +2271,15 @@ export function App() {
     // Registry scenarios are fixture-specific. Uploaded/OCI projects must
     // first bind a path to their live DOM instead of executing a similarly
     // named scenario from another project.
-    if (candidate.recommendedScenarioId && selectedProjectExecutionMode !== "oci") {
-      setScenarioId(candidate.recommendedScenarioId);
-      await executeConfirmedScenarioAutomatically(candidate.recommendedScenarioId);
+    if (selectedDemoProfile) {
+      setScenarioId("");
+      await continueAutomaticPlanning(permissionProfile, undefined, candidate);
+      return;
+    }
+    const executableScenarioId = candidate.recommendedScenarioId;
+    if (executableScenarioId && selectedProjectExecutionMode !== "oci") {
+      setScenarioId(executableScenarioId);
+      await executeConfirmedScenarioAutomatically(executableScenarioId);
     } else {
       setScenarioId("");
       await continueAutomaticPlanning(permissionProfile, undefined, candidate);
@@ -2539,180 +2620,6 @@ export function App() {
 
   /* ===== Drawer content renderers ===== */
 
-  function renderContextDrawer() {
-    return (
-      <>
-        <div className="drawer-header">
-          <h2>输入上下文</h2>
-          <div className="drawer-toggles">
-            <button
-              className="icon-button"
-              onClick={() => void refreshInputContext()}
-              type="button"
-              title={isRefreshingContext ? "正在刷新" : "重新扫描当前项目并刷新上下文"}
-              disabled={isRefreshingContext}
-              aria-label={isRefreshingContext ? "正在刷新项目上下文" : "刷新项目上下文"}
-            >
-              <RefreshCw className={isRefreshingContext ? "spin" : undefined} size={16} />
-            </button>
-            <button className="icon-button" onClick={closeDrawers} type="button" title="关闭">
-              <X size={16} />
-            </button>
-          </div>
-        </div>
-        {contextRefreshStatus ? <p className="drawer-refresh-status" role="status">{contextRefreshStatus}</p> : null}
-        <div className="drawer-body">
-          <section className="workflow-guide" aria-label="测试流程">
-            <strong>按这个顺序完成测试</strong>
-            {(() => {
-              const flowStep = currentFlowStep;
-              const steps = [
-                "1. 上传项目",
-                "2. 沙盒运行",
-                "3. 内置浏览器",
-                "4. 描述测试目标",
-                "5. 识别功能列表",
-                "6. 逐条测试",
-                "7. 修复失败（可选）",
-                "8. 测试报告"
-              ];
-              return (
-                <>
-                  <ol className="workflow-guide__steps">
-                    {steps.map((label, idx) => {
-                      const n = idx + 1;
-                      const stateCls = n === flowStep ? "is-current" : n < flowStep ? "is-done" : "";
-                      return <li key={label} className={stateCls}>{label}</li>;
-                    })}
-                  </ol>
-                  {selectedProjectId ? (
-                    <ReadinessPanel
-                      report={readinessReport}
-                      loading={readinessLoading}
-                      bootstrapping={bootstrapBusy}
-                      onRefresh={refreshReadiness}
-                      onBootstrap={runBootstrap}
-                    />
-                  ) : null}
-                  {currentFlowStep <= 2 && !readinessReady ? (
-                    <div className="readiness-gate" role="alert">
-                      <strong>进入第 2 步前需先就绪：</strong>
-                      <ul>
-                        {readinessBlockers.map((item) => <li key={item}>{item}</li>)}
-                      </ul>
-                      {dockerReadiness === null ? <p className="readiness-gate__pending">正在检查容器运行时…</p> : null}
-                    </div>
-                  ) : null}
-                </>
-              );
-            })()}
-          </section>
-
-          <ProjectWizardPanel
-            projects={projects}
-            selectedProjectId={selectedProjectId}
-            projectPath={projectPathInput}
-            detection={projectDetection}
-            onSelectProject={selectProject}
-            onProjectPathChange={setProjectPathInput}
-            onDetect={detectCurrentProjectPath}
-            detectMessage={projectDetectMessage}
-            projectListNotice={projectListNotice}
-          />
-
-          <ProjectPanel
-            projects={projects}
-            selectedProjectId={selectedProjectId}
-            draft={projectDraft}
-            detection={projectDetection}
-            diagnosis={projectDiagnosis}
-            status={projectRuntime}
-            connection={projectConnection}
-            launchPhase={projectLaunchPhase}
-            recoveryAdvice={runtimeRecoveryAdvice}
-            revealLoginSettings={revealProjectLoginSettings}
-            onSelect={selectProject}
-            onDraftChange={setProjectDraft}
-            onRunDiagnosis={diagnoseAndRunCurrentProject}
-            onStop={stopCurrentProject}
-            onApplyRecoveryCandidate={applyAiRecoveryCandidate}
-          />
-
-          <PlanningConversationPanel
-            hasSelectedProject={hasSelectedProject}
-            planningResult={planningResult}
-            planningMessages={planningMessages}
-            planningBusy={planningBusy}
-            planningConfirmed={planningConfirmed}
-            planningAutomation={planningAutomation}
-            planningAutomationBusy={planningAutomationBusy}
-            planningHasBlockingQuestions={planningHasBlockingQuestions}
-            planningFunctionPageLoading={planningFunctionPageLoading}
-            planningInput={planningInput}
-            currentFlowStep={currentFlowStep}
-            isRunning={isRunning}
-            composerRef={requirementComposerRef}
-            activeRun={activeRun}
-            result={result}
-            repairVerifiedScenarioIds={repairVerifiedScenarioIds}
-            credentials={credentials}
-            defaultCredential={defaultCredential}
-            missingProjectApiCredentials={missingProjectApiCredentials}
-            apiCredentialFeedbackRequired={apiCredentialFeedbackRequired}
-            onQuickScan={() => void continueTestPlanning("请对当前项目进行全面灰度扫描，只盘点流程和覆盖缺口，不调用 AI。", "scan-only")}
-            onExcludeFlow={excludePlanningFlow}
-            onEditFlowTitle={editPlanningFlowTitle}
-            onAddFlow={addPlanningFlow}
-            onLoadFunctions={(candidate) => void fetchPlanningFunctions(candidate)}
-            onConfirmPlan={() => void confirmPlanningDraft()}
-            onGrantBrowserPermission={grantBrowserPermissionAndContinue}
-            onBindProjectCredentials={(credentialId, source) => void bindMissingProjectApiCredentials(credentialId, source)}
-            onOpenCredentialSettings={openCredentialSettings}
-            onContinuePlanning={() => void continueAutomaticPlanning()}
-            onModifyPlan={() => {
-              setPlanningConfirmed(false);
-              setPlanningAutomation({ phase: "idle", detail: "" });
-            }}
-            onOpenRepairWorkspace={(runId) => void openCodeRepairWorkspace(runId)}
-            onPlanningInputChange={setPlanningInput}
-            onQuestionSelect={(question) => setPlanningInput(`关于“${question}”，我的回答是：`)}
-            onSubmit={() => void continueTestPlanning()}
-          />
-
-          <ContextSupplementPanel
-            diffText={diffText}
-            bugTicketText={bugTicketText}
-            prUrl={prUrl}
-            requirementPath={requirementPath}
-            requirementUrl={requirementUrl}
-            bugTicketPath={bugTicketPath}
-            bugTicketUrl={bugTicketUrl}
-            prDiffUrl={prDiffUrl}
-            openApiPath={openApiPath}
-            openApiUrl={openApiUrl}
-            strictInput={strictInput}
-            hasRemoteConnectorInput={hasRemoteConnectorInput()}
-            analysis={analysis}
-            onDiffTextChange={setDiffText}
-            onBugTicketTextChange={setBugTicketText}
-            onPrUrlChange={setPrUrl}
-            onRequirementPathChange={setRequirementPath}
-            onRequirementUrlChange={setRequirementUrl}
-            onBugTicketPathChange={setBugTicketPath}
-            onBugTicketUrlChange={setBugTicketUrl}
-            onPrDiffUrlChange={setPrDiffUrl}
-            onOpenApiPathChange={setOpenApiPath}
-            onOpenApiUrlChange={setOpenApiUrl}
-            onStrictInputChange={setStrictInput}
-            onLoadContext={() => void loadConnectedContext()}
-            onSelectScenario={setScenarioId}
-          />
-
-        </div>
-      </>
-    );
-  }
-
   function renderEvidenceDrawer() {
     return (
       <EvidencePanel
@@ -2735,56 +2642,30 @@ export function App() {
 
   return (
     <main className="app-shell minimal-shell">
-      <header className="topbar minimal-topbar">
-        <div className="topbar-brand">
-          <p className="eyebrow">AI Test Officer</p>
-          <h1>测试官工作台</h1>
-        </div>
-        <div className="topbar-run-summary" aria-label="当前测试任务">
-          <span>AI 测试任务</span>
-          <strong>{selectedProjectName}</strong>
-          <small>{planStepCount ? `${planStepCount} 步` : "等待生成计划"}</small>
-        </div>
-        <div className="topbar-run-actions">
-          <button className="primary" disabled={!canStartRun} onClick={runPlan} type="button">
-            {isRunning ? <Activity size={15} /> : <Play size={15} />}
-            {isRunning ? "执行中" : "开始测试"}
-          </button>
-          {activeRunId ? (
-            <>
-              {activeRun?.state === "awaiting-plan-approval" ? <button onClick={() => void approveActivePlan()} type="button">审批计划</button> : null}
-              {activeRun?.state === "awaiting-permission" ? <button disabled={!permissionProfile.browserControl} onClick={() => void grantActivePermissions()} type="button">确认权限并执行</button> : null}
-              <button disabled={!activeRun || !["queued", "preparing", "running", "collecting", "judging"].includes(activeRun.state)} onClick={() => void controlActiveRun("pause")} type="button">暂停</button>
-              {activeRun?.state === "paused" ? <button onClick={() => void controlActiveRun("resume")} type="button">恢复</button> : null}
-              <button disabled={!activeRun || ["completed", "failed", "blocked", "cancelled"].includes(activeRun.state)} onClick={() => void controlActiveRun("cancel")} type="button">取消</button>
-            </>
-          ) : null}
-        </div>
-        <div className="minimal-topbar-actions">
-          <div className="topbar-utility-menu">
-            <button className={`ghost-button ${leftDrawerOpen || rightDrawerOpen ? "active" : ""}`} onClick={() => setTopbarUtilityOpen((open) => !open)} type="button" aria-expanded={topbarUtilityOpen}>
-              <FileSearch size={15} />
-              配置与证据
-            </button>
-            {topbarUtilityOpen ? (
-              <div className="topbar-utility-popover">
-                <button type="button" onClick={() => { setLeftDrawerOpen(true); setRightDrawerOpen(false); setTopbarUtilityOpen(false); }}>项目与运行配置</button>
-                <button type="button" onClick={() => { setRightDrawerOpen(true); setLeftDrawerOpen(false); setTopbarUtilityOpen(false); }}>证据与运行记录</button>
-              </div>
-            ) : null}
-          </div>
-          <button
-            className="status-pill"
-            type="button"
-            onClick={openCredentialSettings}
-            aria-label={defaultCredential ? `打开 API Key 配置：${defaultCredential.name}` : "打开 API Key 配置"}
-            title="打开 API Key 配置"
-          >
-            <KeyRound size={16} />
-            {defaultCredential ? `${defaultCredential.name} · ${defaultCredential.model}` : "未配置 API Key"}
-          </button>
-        </div>
-      </header>
+      <WorkbenchTopbar
+        selectedProjectName={selectedProjectName}
+        isOfficialDemo={Boolean(selectedDemoProfile)}
+        planStepCount={planStepCount}
+        canStartRun={canStartRun}
+        isRunning={isRunning}
+        activeRunId={activeRunId}
+        activeRun={activeRun}
+        permissionProfile={permissionProfile}
+        leftDrawerOpen={leftDrawerOpen}
+        rightDrawerOpen={rightDrawerOpen}
+        topbarUtilityOpen={topbarUtilityOpen}
+        defaultCredential={defaultCredential}
+        onStartRun={() => void runPlan()}
+        onApprovePlan={() => void approveActivePlan()}
+        onGrantPermissions={() => void grantActivePermissions()}
+        onPause={() => void controlActiveRun("pause")}
+        onResume={() => void controlActiveRun("resume")}
+        onCancel={() => void controlActiveRun("cancel")}
+        onToggleUtility={() => setTopbarUtilityOpen((open) => !open)}
+        onOpenLeftDrawer={() => { setLeftDrawerOpen(true); setRightDrawerOpen(false); setTopbarUtilityOpen(false); }}
+        onOpenRightDrawer={() => { setRightDrawerOpen(true); setLeftDrawerOpen(false); setTopbarUtilityOpen(false); }}
+        onOpenCredentials={openCredentialSettings}
+      />
       <ApiSettingsDialog
         open={apiSettingsOpen}
         credentialFormOpen={credentialFormOpen}
@@ -2816,116 +2697,34 @@ export function App() {
           usernameEnv: projectDraft?.login?.usernameEnv ?? projectDetection?.loginCapability?.usernameEnv ?? "E2E_USERNAME",
           passwordEnv: projectDraft?.login?.passwordEnv ?? projectDetection?.loginCapability?.passwordEnv ?? "E2E_PASSWORD"
         }).then(() => undefined)}
-        onTestCredential={(credentialId) => void testCredential(credentialId).then((response) => setMessage(response.message))}
+        onTestCredential={(credentialId) => testCredential(credentialId)}
         onEditCredential={editCredential}
         onMakeDefault={(credentialId) => void updateCredential(credentialId, { isDefault: true }).then(() => refresh())}
         onDeleteCredential={(credentialId) => void deleteCredential(credentialId).then(() => refresh())}
       />
 
       {runPreviewModalOpen ? (
-        <div className="run-preview-overlay" role="dialog" aria-modal="true" aria-label="AI 测试准备与授权">
-          <section className="run-preview-dialog showing-preparation">
-            <header>
-                  <div>
-                    <span className="section-kicker">
-                  {planningAutomation.phase === "needs-credentials" ? "需要测试账号"
-                    : planningAutomation.phase === "needs-permission" ? "需要你的确认"
-                    : planningAutomation.phase === "blocked" ? "准备遇到问题"
-                      : "正在准备测试"}
-                </span>
-                <strong>{planningAutomation.detail || "正在检查隔离环境与测试条件"}</strong>
-              </div>
-              <button type="button" onClick={() => setRunPreviewModalOpen(false)}>最小化</button>
-            </header>
-            <div className="run-preparation-panel" aria-live="polite">
-              <ol className="run-preparation-steps">
-                <li className={planningAutomation.phase === "needs-permission" || planningAutomation.phase === "needs-credentials"
-                  ? "active"
-                  : ["preparing-project", "discovering", "binding", "starting-run", "running", "ready"].includes(planningAutomation.phase) ? "complete" : ""}>
-                  <span>1</span>
-                  <div><strong>确认操作授权</strong><small>授权仅对本次运行生效，可随时取消</small></div>
-                </li>
-                <li className={planningAutomation.phase === "preparing-project"
-                  ? "active"
-                  : ["discovering", "binding", "starting-run", "running", "ready"].includes(planningAutomation.phase) ? "complete" : ""}>
-                  <span>2</span>
-                  <div><strong>准备隔离环境</strong><small>检查项目服务、沙盒和运行地址</small></div>
-                </li>
-                <li className={planningAutomation.phase === "discovering"
-                  ? "active"
-                  : ["binding", "starting-run", "running", "ready"].includes(planningAutomation.phase) ? "complete" : ""}>
-                  <span>3</span>
-                  <div><strong>扫描真实页面</strong><small>识别控件、接口和可验证结果</small></div>
-                </li>
-                <li className={planningAutomation.phase === "binding"
-                  ? "active"
-                  : ["starting-run", "running", "ready"].includes(planningAutomation.phase) ? "complete" : ""}>
-                  <span>4</span>
-                  <div><strong>生成可执行路径</strong><small>绑定动作、断言与证据要求</small></div>
-                </li>
-              </ol>
-              {planningAutomation.phase === "needs-credentials" ? (
-                <section className="run-permission-request run-credentials-request">
-                  <strong>本次测试需要登录账号</strong>
-                  <p>测试计划包含登录步骤。账号会加密保存，只在本次项目的隔离沙盒中使用，不会写入对话或项目源码。</p>
-                  <div className="connector-grid">
-                    <label>
-                      测试账号
-                      <input
-                        autoComplete="off"
-                        value={preparationLoginUsername}
-                        onChange={(event) => setPreparationLoginUsername(event.target.value)}
-                        placeholder="邮箱或用户名"
-                      />
-                    </label>
-                    <label>
-                      测试密码
-                      <input
-                        type="password"
-                        autoComplete="new-password"
-                        value={preparationLoginPassword}
-                        onChange={(event) => setPreparationLoginPassword(event.target.value)}
-                        placeholder="输入测试密码"
-                      />
-                    </label>
-                  </div>
-                  {preparationLoginError ? <p className="project-login-save-message" role="alert">{preparationLoginError}</p> : null}
-                  <div>
-                    <button type="button" onClick={() => {
-                      setRunPreviewModalOpen(false);
-                      setPlanningConfirmed(false);
-                      setPlanningAutomation({ phase: "idle", detail: "" });
-                      setMessage("本次测试尚未开始；确认包含登录步骤的计划前，需要先配置测试账号。");
-                    }}>暂不配置</button>
-                    <button className="primary" type="button" disabled={preparationLoginSaving} onClick={() => void savePreparationLoginAndContinue()}>
-                      {preparationLoginSaving ? "正在保存…" : "保存账号并继续"}
-                    </button>
-                  </div>
-                </section>
-              ) : planningAutomation.phase === "needs-permission" ? (
-                <section className="run-permission-request">
-                  <strong>允许 AI 操作本次沙盒浏览器？</strong>
-                  <p>将执行点击、输入、页面跳转和证据采集；不会控制你的桌面或其他应用。</p>
-                  <div>
-                    <button type="button" onClick={() => setRunPreviewModalOpen(false)}>暂不授权</button>
-                    <button className="primary" type="button" onClick={grantBrowserPermissionAndContinue}>允许并继续</button>
-                  </div>
-                </section>
-              ) : planningAutomation.phase === "blocked" ? (
-                <section className="run-preparation-error">
-                  <strong>自动准备暂时无法继续</strong>
-                  <p>{planningAutomation.detail}</p>
-                    <button type="button" onClick={returnBlockedPreparationToAssistant}>返回 AI 测试助手处理</button>
-                </section>
-              ) : (
-                <div className="run-preparation-waiting">
-                  <Activity size={18} />
-                  <span>{planningAutomation.detail || "正在准备，请稍候…"}</span>
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
+        <RunPreparationModal
+          phase={planningAutomation.phase}
+          detail={planningAutomation.detail}
+          loginUsername={preparationLoginUsername}
+          loginPassword={preparationLoginPassword}
+          loginError={preparationLoginError}
+          loginSaving={preparationLoginSaving}
+          onClose={() => setRunPreviewModalOpen(false)}
+          onLoginUsernameChange={setPreparationLoginUsername}
+          onLoginPasswordChange={setPreparationLoginPassword}
+          onSkipCredentials={() => {
+            setRunPreviewModalOpen(false);
+            setPlanningConfirmed(false);
+            setPlanningAutomation({ phase: "idle", detail: "" });
+            setMessage("本次测试尚未开始；确认包含登录步骤的计划前，需要先配置测试账号。");
+          }}
+          onSaveCredentials={() => void savePreparationLoginAndContinue()}
+          onCancelPermission={() => setRunPreviewModalOpen(false)}
+          onGrantPermission={grantBrowserPermissionAndContinue}
+          onReturnBlocked={returnBlockedPreparationToAssistant}
+        />
       ) : null}
 
       <section
@@ -2939,7 +2738,120 @@ export function App() {
         />
 
         <aside className={`drawer drawer-left ${leftDrawerOpen ? "open" : ""}`}>
-          {renderContextDrawer()}
+          <ContextDrawer
+            isRefreshingContext={isRefreshingContext}
+            contextRefreshStatus={contextRefreshStatus}
+            currentFlowStep={currentFlowStep}
+            selectedProjectId={selectedProjectId}
+            readinessReport={readinessReport}
+            readinessLoading={readinessLoading}
+            bootstrapBusy={bootstrapBusy}
+            readinessBlockers={readinessBlockers}
+            readinessReady={readinessReady}
+            dockerReadiness={dockerReadiness}
+            onRefreshContext={() => void refreshInputContext()}
+            onClose={closeDrawers}
+            onRefreshReadiness={refreshReadiness}
+            onBootstrap={runBootstrap}
+            projectWizard={{
+              projects,
+              selectedProjectId,
+              projectPath: projectPathInput,
+              detection: projectDetection,
+              onSelectProject: selectProject,
+              onStartDemo: startOfficialDemo,
+              onProjectPathChange: setProjectPathInput,
+              onDetect: detectCurrentProjectPath,
+              detectMessage: projectDetectMessage,
+              projectListNotice
+            }}
+            project={{
+              projects,
+              selectedProjectId,
+              draft: projectDraft,
+              detection: projectDetection,
+              diagnosis: projectDiagnosis,
+              status: projectRuntime,
+              connection: projectConnection,
+              launchPhase: projectLaunchPhase,
+              recoveryAdvice: runtimeRecoveryAdvice,
+              revealLoginSettings: revealProjectLoginSettings,
+              onSelect: selectProject,
+              onDraftChange: setProjectDraft,
+              onRunDiagnosis: diagnoseAndRunCurrentProject,
+              onStop: stopCurrentProject,
+              onApplyRecoveryCandidate: applyAiRecoveryCandidate
+            }}
+            planning={{
+              hasSelectedProject,
+              planningResult,
+              planningMessages,
+              planningBusy,
+              planningConfirmed,
+              planningAutomation,
+              planningAutomationBusy,
+              planningHasBlockingQuestions,
+              planningFunctionPageLoading,
+              planningInput,
+              currentFlowStep,
+              isRunning,
+              composerRef: requirementComposerRef,
+              activeRun,
+              result,
+              repairVerifiedScenarioIds,
+              credentials,
+              defaultCredential,
+              missingProjectApiCredentials,
+              apiCredentialFeedbackRequired,
+              onQuickScan: () => void continueTestPlanning("请对当前项目进行全面灰度扫描，只盘点流程和覆盖缺口，不调用 AI。", "scan-only"),
+              onExcludeFlow: excludePlanningFlow,
+              onEditFlowTitle: editPlanningFlowTitle,
+              onAddFlow: addPlanningFlow,
+              onLoadFunctions: (candidate) => void fetchPlanningFunctions(candidate),
+              onConfirmPlan: () => void confirmPlanningDraft(),
+              onGrantBrowserPermission: grantBrowserPermissionAndContinue,
+              onBindProjectCredentials: (credentialId, source) => void bindMissingProjectApiCredentials(credentialId, source),
+              onOpenCredentialSettings: openCredentialSettings,
+              onContinuePlanning: () => void continueAutomaticPlanning(),
+              onModifyPlan: () => {
+                setPlanningConfirmed(false);
+                setPlanningAutomation({ phase: "idle", detail: "" });
+              },
+              onOpenRepairWorkspace: (runId) => void openCodeRepairWorkspace(runId),
+              onOpenTrajectory: () => setCentreSurface("trajectory"),
+              onPlanningInputChange: setPlanningInput,
+              onQuestionSelect: (question) => setPlanningInput(`关于“${question}”，我的回答是：`),
+              onSubmit: () => void continueTestPlanning()
+            }}
+            contextSupplement={{
+              diffText,
+              bugTicketText,
+              prUrl,
+              requirementPath,
+              requirementUrl,
+              bugTicketPath,
+              bugTicketUrl,
+              prDiffUrl,
+              openApiPath,
+              openApiUrl,
+              strictInput,
+              hasRemoteConnectorInput: hasRemoteConnectorInput(),
+              analysis,
+              onDiffTextChange: setDiffText,
+              onBugTicketTextChange: setBugTicketText,
+              onPrUrlChange: setPrUrl,
+              onRequirementPathChange: setRequirementPath,
+              onRequirementUrlChange: setRequirementUrl,
+              onBugTicketPathChange: setBugTicketPath,
+              onBugTicketUrlChange: setBugTicketUrl,
+              onPrDiffUrlChange: setPrDiffUrl,
+              onOpenApiPathChange: setOpenApiPath,
+              onOpenApiUrlChange: setOpenApiUrl,
+              onStrictInputChange: setStrictInput,
+              onLoadContext: () => void loadConnectedContext(),
+              onSelectScenario: setScenarioId
+            }}
+          />
         </aside>
 
         <aside className={`drawer drawer-right ${rightDrawerOpen ? "open" : ""}`}>
@@ -3054,12 +2966,18 @@ export function App() {
             projectPreviewReady={projectPreviewReady}
             hasSelectedProject={hasSelectedProject}
             activeRunId={activeRunId}
+            planningTrajectoryId={planningTrajectoryId ?? planningResult?.id}
+            planningProjectId={selectedProjectId || projectDraft?.id}
+            planningBusy={planningBusy}
+            coverageProgress={coverageProgress}
             browserSession={browserSession}
+            browserActionOverlay={browserActionOverlay}
             browserManualInput={browserManualInput}
             browserControlBusy={browserControlBusy}
             previewUrl={previewUrl}
             previewRevision={previewRevision}
             agentProjection={agentProjection}
+            displayedLoopEvents={displayedLoopEvents}
             repairWorkspaceOpen={repairWorkspaceOpen}
             repairSession={repairSession}
             repairBusy={repairBusy}
@@ -3087,6 +3005,26 @@ export function App() {
             onApplyRepair={applyCurrentRepair}
           />
 
+          {finalVerdictReady ? (
+            <aside
+              className={`final-verdict-float ${String(effectiveDecision).toLowerCase()}`}
+              aria-live="polite"
+              aria-label="测试结论"
+            >
+              <div className="final-verdict-heading">
+                <p className="eyebrow">测试结论</p>
+                <strong>{verdictDisplay}</strong>
+              </div>
+              <p>{verdictSummary}</p>
+              <div className="final-verdict-metrics">
+                {coverageProgress ? <span>业务功能：通过 {coverageProgress.passed}/{coverageProgress.total} · 失败 {coverageProgress.failed} · 阻塞 {coverageProgress.blocked} · 待处理 {coverageProgress.pending}</span> : null}
+                <span>证据 {evidenceCount}</span>
+                <span>{nextSuggestion}</span>
+              </div>
+              <button onClick={() => setRightDrawerOpen(true)} type="button">查看完整证据</button>
+            </aside>
+          ) : null}
+
           <ExecutionTimelinePanel
             workspaceState={workspaceState}
             canGenerate={workspaceSelectors.canGenerate(workspaceState)}
@@ -3101,6 +3039,7 @@ export function App() {
             displayedLoopEvents={displayedLoopEvents}
             onGenerateOrCancel={workspaceState.phase === "generating" ? cancelPlanGeneration : regeneratePlan}
             onOpenRepairWorkspace={() => void openCodeRepairWorkspace()}
+            onOpenTrajectory={() => setCentreSurface("trajectory")}
             onRunViewModeChange={setRunViewMode}
           />
 
@@ -3148,24 +3087,24 @@ export function App() {
             onSetGapStatus={setGapStatus}
             plan={plan}
           />
+
+          <details className="advanced-section reliability-assets-details">
+            <summary>
+              <span>
+                <strong>可信验收与测试资产</strong>
+                <small>差分运行、Evidence、Mutation 和安全写入</small>
+              </span>
+            </summary>
+            <div className="advanced-stack">
+              <ReliabilityAssetsPanel
+                projectId={selectedProjectId || projectDraft?.id}
+                sourceRunId={activeRunId}
+                repositoryRoot={projectDraft?.projectPath}
+              />
+            </div>
+          </details>
         </section>
 
-        {finalVerdictReady ? (
-          <aside
-            className={`final-verdict-float ${String(result?.finalStatus ?? result?.gateStatus ?? latestDecision).toLowerCase()}`}
-            aria-live="polite"
-            aria-label="测试结论"
-          >
-            <p className="eyebrow">测试结论</p>
-            <strong>{verdictDisplay}</strong>
-            <p>{result?.summary}</p>
-            <div className="final-verdict-metrics">
-              <span>证据 {evidenceCount}</span>
-              <span>{nextSuggestion}</span>
-            </div>
-            <button onClick={() => setRightDrawerOpen(true)} type="button">查看完整证据</button>
-          </aside>
-        ) : null}
       </section>
     </main>
   );

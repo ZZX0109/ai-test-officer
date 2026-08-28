@@ -86,8 +86,14 @@ export function defaultProjectConfig(): ProjectConfig {
   const timestamp = now();
   return {
     id: "local_demo_app",
-    name: "Local Demo App Under Test",
+    name: "官方演示：任务管理系统",
     projectPath: "app-under-test",
+    demoProfile: {
+      enabled: true,
+      description: "展示模型在真实内置浏览器中观察、点击任务筛选并采集证据。",
+      defaultGoal: "在内置浏览器打开任务管理系统，点击“已完成”筛选，确认列表只显示已完成任务，并保留页面、网络和操作证据。",
+      scenarioId: "task-filter-completed"
+    },
     allowExternalProjectPath: false,
     installCommand: "",
     installCommandSpec: undefined,

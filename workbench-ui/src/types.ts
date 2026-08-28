@@ -289,6 +289,13 @@ export interface RunResult {
     verdict: string;
     reason: string;
   };
+  modelExecution?: {
+    required: boolean;
+    totalCallCount: number;
+    successfulBrowserActionCallCount: number;
+    completedBrowserActionCount: number;
+    requiredArtifactKindsPresent: boolean;
+  };
   reflectionNote: string;
   conflictPacket: {
     status: string;
@@ -856,6 +863,12 @@ export interface ProjectConfig {
   id: string;
   name: string;
   projectPath: string;
+  demoProfile?: {
+    enabled: boolean;
+    description: string;
+    defaultGoal: string;
+    scenarioId: string;
+  };
   allowExternalProjectPath?: boolean;
   installCommand?: string;
   installCommandSpec?: {
@@ -1673,6 +1686,23 @@ export interface BrowserSession {
   updatedAt: string;
 }
 
+/**
+ * Ephemeral presentation data from a browser-agent lifecycle event. It is not
+ * a browser command: the durable action record remains server-side. Keeping
+ * the target box lets the shared frame show where the agent is operating.
+ */
+export interface BrowserActionOverlay {
+  actionId: string;
+  action: string;
+  purpose?: string;
+  status: "running" | "completed" | "failed";
+  target?: {
+    label?: string;
+    boundingBox: { x: number; y: number; width: number; height: number };
+    viewport: { width: number; height: number };
+  };
+}
+
 export interface BrowserObservation {
   observationId: string;
   runId: string;
@@ -1785,3 +1815,5 @@ export interface SecuritySummary {
   credentialRotation?: string;
   [key: string]: unknown;
 }
+
+export type { DifferentialRunView, TestAssetView } from "./reliabilityTypes";

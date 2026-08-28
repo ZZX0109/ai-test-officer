@@ -91,6 +91,17 @@ function run(command) {
   });
 }
 
+function parseStartupPayload(output) {
+  const start = output.indexOf("{");
+  const end = output.lastIndexOf("}");
+  if (start < 0 || end <= start) return undefined;
+  try {
+    return JSON.parse(output.slice(start, end + 1));
+  } catch {
+    return undefined;
+  }
+}
+
 function selectedCommands() {
   const only = process.env.BASELINE_ONLY?.split(",").map((value) => value.trim()).filter(Boolean);
   if (!only?.length) return commands;
@@ -129,11 +140,11 @@ try {
     results.push(result);
     if (command.id === "start-dev-services" && result.exitCode === 0) {
       try {
-        // npm prefixes a script's JSON payload with its own command banner.
-        // The launcher emits one JSON object as its final line, so parse that
-        // line instead of treating the complete npm output as JSON.
-        const startupLine = result.output.trim().split("\n").findLast((line) => line.trim().startsWith("{"));
-        const startup = JSON.parse(startupLine ?? "");
+        // npm prefixes a script's multi-line JSON payload with its own
+        // command banner. Parse the object itself rather than assuming it is
+        // contained on one line; otherwise this runner can leak the services
+        // it started and leave ports occupied after a failed check.
+        const startup = parseStartupPayload(result.output);
         ownsDevServices = startup && typeof startup === "object" && startup.alreadyRunning === false;
       } catch {
         // A malformed launcher response is not evidence of ownership. Leave

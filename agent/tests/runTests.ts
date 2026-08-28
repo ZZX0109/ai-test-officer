@@ -68,7 +68,7 @@ import { testUntrustedInputDefense } from "./untrustedInput.test.js";
 import { testRedactionPreservesUsageTelemetry } from "./redaction.test.js";
 import { testCompiledPlanExecution } from "./compiledPlanExecution.test.js";
 import { testBenchmarkSummary } from "./benchmarkSummary.test.js";
-import { testLlmProviderResponsesTransport } from "./llmProvider.test.js";
+import { testLlmProviderResponsesTransport, testLlmProviderChatAndAnthropicStreaming } from "./llmProvider.test.js";
 import { testPlanningConversation } from "./planningConversation.test.js";
 import { testProjectFolderBrowser } from "./projectFolderBrowser.test.js";
 import { testRepairWorkspace } from "./repairWorkspace.test.js";
@@ -98,9 +98,18 @@ import { testArtifactObjectReconciliationApply, testArtifactObjectReconciliation
 import { testOperationalSloAlerts } from "./operationalSlo.test.js";
 import { testCapacityMatrix } from "./capacityMatrix.test.js";
 import { testSecurityAdversarialMatrix } from "./securityAdversarialMatrix.test.js";
+import { testReliabilityAssets } from "./reliabilityAssets.test.js";
+import { testModelDrivenDemoAcceptance } from "./modelDrivenDemoAcceptance.test.js";
+import { testTrajectoryEventStore } from "./trajectory.test.js";
+import { testToolGatewayUnifiedContracts, testNativeToolCallingLoop } from "./toolGateway.test.js";
 
 async function main() {
   await testBrowserAgentLoop();
+  testModelDrivenDemoAcceptance();
+  await testTrajectoryEventStore();
+  await testToolGatewayUnifiedContracts();
+  await testNativeToolCallingLoop();
+  await testLlmProviderChatAndAnthropicStreaming();
   await testBusinessCapabilityGraph();
   await testPlanningInventoryStore();
   testBusinessFunctionCompiler();
@@ -114,6 +123,7 @@ async function main() {
   testOperationalSloAlerts();
   await testCapacityMatrix();
   await testSecurityAdversarialMatrix();
+  await testReliabilityAssets();
   await testDurableSustainabilityRestart();
   testProofBundleIntegrity();
   await testConnectorEnvelope();
@@ -204,6 +214,12 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error);
+  // Node 24 can throw while inspecting certain assertion/error objects. Keep
+  // the original test failure visible so a regression is never masked by the
+  // test runner's own formatter.
+  const message = error instanceof Error
+    ? `${error.name}: ${error.message}\n${error.stack ?? ""}`
+    : String(error);
+  console.error(message);
   process.exitCode = 1;
 });

@@ -339,7 +339,26 @@ export async function executeBrowserAgentAction(input: {
     return appendBrowserActionResult(result);
   }
   publishBrowserAgentLifecycle({ runId: action.runId, type: "browser.action.authorized", payload: { actionId: action.actionId } });
-  publishBrowserAgentLifecycle({ runId: action.runId, type: "browser.action.started", payload: { actionId: action.actionId, action: action.action } });
+  // The Workbench receives the same semantic control binding used for the
+  // action.  This is presentation-only metadata: it makes the live browser
+  // explain *where* the agent is about to act without granting the client a
+  // coordinate-based automation channel.
+  const viewport = managed.runtime.page.viewportSize() ?? { width: 1920, height: 1080 };
+  const target = control?.boundingBox ? {
+    label: control.accessibleName ?? control.label ?? control.testId ?? control.role,
+    boundingBox: control.boundingBox,
+    viewport
+  } : undefined;
+  publishBrowserAgentLifecycle({
+    runId: action.runId,
+    type: "browser.action.started",
+    payload: {
+      actionId: action.actionId,
+      action: action.action,
+      purpose: action.purpose,
+      ...(target ? { target } : {})
+    }
+  });
   const beforeDom = await observationEvidence(source, action.actionId, "before");
   const beforeScreenshot = await screenshotEvidence(action.runId, action.attemptId, action.actionId, "before").catch(() => undefined);
   try {

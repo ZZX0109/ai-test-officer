@@ -3,6 +3,7 @@ import {
   assistantReplyNeedsNormalization,
   buildDeterministicAssistantFallback,
   deterministicAssistantCall,
+  discloseDeterministicAssistantFallback,
   requestedAssistantAction
 } from "../src/assistantFallback.js";
 
@@ -12,6 +13,23 @@ export function testAssistantFallback() {
   assert.equal(requestedAssistantAction("重试失败链路"), undefined);
   assert.equal(requestedAssistantAction("开始测试"), "start-run");
   assert.equal(requestedAssistantAction("查看本次证据"), "open-evidence");
+  const budgetFailure = deterministicAssistantCall(new Error("llm_budget_exceeded:total_tokens"), {});
+  assert.equal(budgetFailure.errorCode, "assistant_budget_exceeded");
+  const unrelatedFallback = discloseDeterministicAssistantFallback({
+    userMessage: "1+2=几",
+    fallbackReply: "遇到的问题：运行阻塞。",
+    errorCode: budgetFailure.errorCode
+  });
+  assert.match(unrelatedFallback, /没有获得大模型回答/);
+  assert.match(unrelatedFallback, /没有用固定的测试状态模板/);
+  assert.doesNotMatch(unrelatedFallback, /运行阻塞/);
+  const runFallback = discloseDeterministicAssistantFallback({
+    userMessage: "阻塞的原因是什么",
+    fallbackReply: "遇到的问题：三条路径缺少可执行入口。",
+    errorCode: budgetFailure.errorCode
+  });
+  assert.match(runFallback, /不是模型回复/);
+  assert.match(runFallback, /三条路径缺少可执行入口/);
   const binding = buildDeterministicAssistantFallback({
     userMessage: "重试失败链路",
     projectName: "PsyExpGen",
@@ -177,6 +195,15 @@ export function testAssistantFallback() {
   assert.doesNotMatch(proofLink.reasoningSummary.observations.join(" "), /proof_bundle|operation_/);
   assert.equal(proofLink.suggestedAction, "none");
   assert.equal(proofLink.requiresConfirmation, false);
+
+  const plainCoverageBlocker = buildDeterministicAssistantFallback({
+    userMessage: "用简单的话解释失败原因",
+    finalStatus: "blocked",
+    summary: "coverage_blocked:business_path_runtime_task_filter"
+  });
+  assert.match(plainCoverageBlocker.reply, /简单说：1 条路径没有找到可执行入口、操作条件或验证结果/);
+  assert.match(plainCoverageBlocker.reply, /不等于已经确认产品有 Bug/);
+  assert.doesNotMatch(plainCoverageBlocker.reply, /coverage_blocked|business_path_runtime/);
 
   const recoveryQuestion = buildDeterministicAssistantFallback({
     userMessage: "系统能否自动恢复，我需要做什么？",

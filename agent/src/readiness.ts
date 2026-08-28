@@ -97,12 +97,15 @@ export function createReadinessService(context: ReadinessContext) {
     }, generatedAt));
 
     const credentials = await context.listCredentials();
+    const modelDrivenDemo = project.demoProfile?.enabled === true;
     addCheck(check({
       id: "credentials.model",
       status: statusFor(credentials.length > 0, false),
       severity: credentials.length > 0 ? "info" : "error",
-      message: credentials.length > 0 ? `已配置 ${credentials.length} 个模型凭据。` : "未配置模型凭据。",
-      evidence: credentials.map((item) => `${item.provider}:${item.model}`),
+      message: credentials.length > 0
+        ? `已配置 ${credentials.length} 个模型凭据。`
+        : modelDrivenDemo ? "官方演示需要模型凭据；未配置时演示会被安全阻塞。" : "未配置模型凭据。",
+      evidence: credentials.length > 0 ? credentials.map((item) => `${item.provider}:${item.model}`) : ["model:missing"],
       remediation: credentials.length > 0 ? undefined : "通过凭据配置向导添加模型凭据。",
       requiredBy: ["planning", "judge"]
     }, generatedAt));

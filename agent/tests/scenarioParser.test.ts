@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { getScenario, listScenarios, matchScenariosForContext } from "../src/scenarios.js";
+import { canonicalScenarioId, getScenario, hasScenario, listScenarios, matchScenariosForContext } from "../src/scenarios.js";
 
 export function testScenarioParser() {
   const scenarios = listScenarios();
@@ -13,7 +13,10 @@ export function testScenarioParser() {
   ]) {
     assert.equal(getScenario(id).id, id);
   }
-  assert.equal(getScenario("visual_regression_basic").corePath.oracles.some((oracle) => oracle.type === "console_no_error"), true);
+assert.equal(getScenario("visual_regression_basic").corePath.oracles.some((oracle) => oracle.type === "console_no_error"), true);
+assert.equal(canonicalScenarioId("task-filter-completed"), "task_filter_completed");
+assert.equal(hasScenario("task-filter-completed"), true);
+assert.equal(getScenario("task-filter-completed").id, "task_filter_completed");
   for (const id of ["order_approval_transition", "task_api_failure", "task_search_keyword", "task_state_transition"]) {
     const scenario = getScenario(id);
     assert.ok(scenario.compiledPlanContract, `${id} should receive a deterministic compiled plan contract`);

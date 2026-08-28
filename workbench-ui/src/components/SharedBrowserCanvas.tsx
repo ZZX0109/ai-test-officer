@@ -1,11 +1,29 @@
 import { useEffect, useRef, useState } from "react";
-import type { BrowserSession } from "../types";
+import type { BrowserActionOverlay, BrowserSession } from "../types";
 import { streamRunBrowserFrames } from "../api";
 import { pointInSharedBrowser, type DrawState, type PagePoint } from "../sharedBrowserGeometry";
+
+function browserActionVerb(action: string, status: BrowserActionOverlay["status"]) {
+  const subject = status === "running" ? "AI 正在" : status === "completed" ? "AI 已完成" : "AI 未能完成";
+  const verb: Record<string, string> = {
+    "click-control": "点击",
+    "fill-control": "输入",
+    "select-control": "选择",
+    "check-control": "勾选",
+    "press-key": "按键",
+    "scroll-to-control": "滚动定位",
+    "wait-for-control": "等待控件",
+    "navigate-route": "打开页面",
+    "submit-form": "提交表单",
+    "evaluate-oracle": "验证页面结果"
+  };
+  return `${subject}${verb[action] ?? "执行页面操作"}`;
+}
 
 export function SharedBrowserCanvas({
   runId,
   session,
+  actionOverlay,
   fallbackUrl,
   refreshRevision = 0,
   onInteract,
@@ -16,6 +34,7 @@ export function SharedBrowserCanvas({
 }: {
   runId?: string;
   session?: BrowserSession | null;
+  actionOverlay?: BrowserActionOverlay | null;
   fallbackUrl?: string;
   refreshRevision?: number;
   onInteract: (point: PagePoint) => Promise<void> | void;
@@ -30,6 +49,7 @@ export function SharedBrowserCanvas({
   const drawRef = useRef<DrawState | null>(null);
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "ended" | "failed">("idle");
   const [hasFrame, setHasFrame] = useState(false);
+  const [targetVisible, setTargetVisible] = useState(Boolean(actionOverlay?.target));
   // Once a managed Playwright session exists it is the only test surface. The
   // preview iframe is intentionally limited to the pre-run state; rendering
   // it behind a live stream caused context/scale swaps and made the page look
@@ -92,6 +112,23 @@ export function SharedBrowserCanvas({
     sessionStatusRef.current = session?.status;
   }, [session?.status]);
 
+  // Leave the completed click marker on screen long enough to be perceived,
+  // then keep only the textual last-action badge. A target rectangle on a
+  // changed page would otherwise look like a live cursor in the wrong place.
+  useEffect(() => {
+    if (!actionOverlay?.target) {
+      setTargetVisible(false);
+      return;
+    }
+    if (actionOverlay.status === "running") {
+      setTargetVisible(true);
+      return;
+    }
+    setTargetVisible(true);
+    const timer = window.setTimeout(() => setTargetVisible(false), 1_400);
+    return () => window.clearTimeout(timer);
+  }, [actionOverlay?.actionId, actionOverlay?.status, actionOverlay?.target]);
+
   const drawLatest = () => {
     const host = hostRef.current;
     const canvas = canvasRef.current;
@@ -113,7 +150,12 @@ export function SharedBrowserCanvas({
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
     context.fillStyle = "#eef2f6";
     context.fillRect(0, 0, cssWidth, cssHeight);
-    const scale = Math.min(cssWidth / bitmap.width, cssHeight / bitmap.height);
+    // Match the pre-run iframe's width immediately. The first managed frame
+    // can still carry the server's old desktop viewport for a few hundred
+    // milliseconds; `contain` made that whole frame shrink dramatically.
+    // Width-fit preserves the user's reading scale while the debounced
+    // viewport sync catches up, clipping only temporary off-screen height.
+    const scale = cssWidth / bitmap.width;
     const width = bitmap.width * scale;
     const height = bitmap.height * scale;
     const left = (cssWidth - width) / 2;
@@ -209,6 +251,15 @@ export function SharedBrowserCanvas({
   // performs a full cleanup through these stable identity dependencies.
   }, [runId, session?.sessionId]);
 
+  const target = actionOverlay?.target;
+  const targetBox = target?.boundingBox;
+  const targetCenter = targetBox ? {
+    x: targetBox.x + targetBox.width / 2,
+    y: targetBox.y + targetBox.height / 2
+  } : undefined;
+  const actionLabel = actionOverlay ? browserActionVerb(actionOverlay.action, actionOverlay.status) : undefined;
+  const actionDetail = target?.label || actionOverlay?.purpose;
+
   return (
     <div ref={hostRef} className={`shared-browser-canvas-host is-${streamState}`}>
       {showPreviewFallback ? (
@@ -251,6 +302,36 @@ export function SharedBrowserCanvas({
           }
         }}
       />
+      {actionOverlay ? (
+        <div className={`shared-browser-action-layer is-${actionOverlay.status}`} aria-live="polite" aria-atomic="true">
+          {targetVisible && target && targetBox && targetCenter ? (
+            <svg
+              className="shared-browser-action-target"
+              viewBox={`0 0 ${target.viewport.width} ${target.viewport.height}`}
+              style={{ aspectRatio: `${target.viewport.width} / ${target.viewport.height}` }}
+              aria-hidden="true"
+            >
+              <rect
+                className="shared-browser-action-target-box"
+                x={Math.max(0, targetBox.x - 4)}
+                y={Math.max(0, targetBox.y - 4)}
+                width={targetBox.width + 8}
+                height={targetBox.height + 8}
+                rx="5"
+              />
+              <circle className="shared-browser-action-click-ring" cx={targetCenter.x} cy={targetCenter.y} r="13" />
+              <g className="shared-browser-action-cursor" transform={`translate(${targetCenter.x} ${targetCenter.y})`}>
+                <path d="M0 0v26l7-7 8 15 5-3-8-15h10z" />
+              </g>
+            </svg>
+          ) : null}
+          <span className="shared-browser-action-status" role="status" title={actionDetail}>
+            <i aria-hidden="true" />
+            <strong>{actionLabel}</strong>
+            {actionDetail ? <span>{actionDetail}</span> : null}
+          </span>
+        </div>
+      ) : null}
       {!hasFrame && !showPreviewFallback && streamState !== "ended" ? (
         streamState === "failed" ? (
           <span className="shared-browser-stream-status is-error">实时连接中断，正在恢复…</span>

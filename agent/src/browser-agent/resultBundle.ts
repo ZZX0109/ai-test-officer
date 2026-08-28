@@ -23,6 +23,7 @@ function deterministicJudge(input: {
   status: MachineGate["status"];
   summary: string;
   evidenceRefs: string[];
+  modelExecution?: VisualRunResult["modelExecution"];
 }): LayeredJudgeReport {
   const verdict: "pass" | "fail" | "needs_review" = input.status === "pass" ? "pass" : input.status === "fail" ? "fail" : "needs_review";
   const finding = input.status === "pass" ? [] : [{
@@ -42,7 +43,9 @@ function deterministicJudge(input: {
   return {
     source: "deterministic_judge",
     executionMode: "deterministic",
-    llmStatus: "not_configured",
+    llmStatus: input.modelExecution?.totalCallCount
+      ? input.modelExecution.successfulBrowserActionCallCount > 0 ? "passed" : "failed"
+      : "not_configured",
     policyVersion: "dynamic-browser-proof-v1",
     createdAt: new Date().toISOString(),
     planJudge: layer("plan"),
@@ -102,6 +105,7 @@ export async function persistDynamicBrowserResult(input: {
   machineGate: MachineGate;
   outcomeSummary: RunOutcomeSummaryV2;
   proof: Pick<FinalizeProofBundleResult, "verdict" | "gateEligible">;
+  modelExecution?: VisualRunResult["modelExecution"];
 }) {
   const oracleById = new Map(input.decisions.flatMap((decision) => decision.oracles).map((oracle) => [oracle.id, oracle]));
   const assertionRows = input.actionResults.flatMap((result) => result.oracleResults.map((oracle) => ({ result, oracle })));
@@ -147,7 +151,7 @@ export async function persistDynamicBrowserResult(input: {
   const summary = input.machineGate.status === "pass"
     ? `已执行 ${input.coverage.length} 条动态浏览器路径，确定性 Oracle 与证据校验通过。`
     : `动态浏览器测试结束，机器门禁为 ${input.machineGate.status}：${input.machineGate.reasons.join("；") || "证据或覆盖不完整"}`;
-  const judgeReport = deterministicJudge({ status: input.machineGate.status, summary, evidenceRefs });
+  const judgeReport = deterministicJudge({ status: input.machineGate.status, summary, evidenceRefs, modelExecution: input.modelExecution });
   const result: VisualRunResult = {
     id: input.runId,
     startedAt: input.startedAt,
@@ -214,6 +218,7 @@ export async function persistDynamicBrowserResult(input: {
     machineGate: input.machineGate,
     finalStatus: input.machineGate.status,
     outcomeSummary: input.outcomeSummary,
+    modelExecution: input.modelExecution,
     judgeReport,
     judgeRouting: { route: "deterministic", reason: "Dynamic actions are advisory; deterministic proof controls the verdict.", signals: ["browser-agent"] },
     reportFile: `/artifacts/runs/${input.runId}/run_bundle.json`,

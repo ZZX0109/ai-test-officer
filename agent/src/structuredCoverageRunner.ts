@@ -19,9 +19,14 @@ import { mirrorArtifactsToConfiguredStore } from "./artifactObjectStore.js";
 import {
   getProject,
   resolveProjectTarget,
+  safeProjectPath,
   startProject,
-  testProjectConnection
+  testProjectConnection,
+  executeProjectCommand
 } from "./projectAdapter.js";
+import { getReliabilityAssetStore } from "./reliabilityAssetStore.js";
+import { executeTestDataLifecycle } from "./testDataContract.js";
+import { testDataPhaseReceiptV1Schema } from "@ai-test-officer/contracts";
 import { runStructuredReActLoop, type StructuredReActLoopResult } from "./react/structuredLoop.js";
 import type { StructuredAction } from "./structuredActionExecutors.js";
 import type {
@@ -74,7 +79,7 @@ function classifyExecutionError(message: string): {
   gate: "blocked" | "needs-human-review";
   failureClass: "environment_issue" | "test_script_issue";
 } {
-  if (/credential|connection|runtime|timeout|network|oci|command|unavailable|aborted/i.test(message)) {
+  if (/credential|connection|runtime|timeout|network|oci|command|unavailable|aborted|test_data|orphan/i.test(message)) {
     return { gate: "blocked", failureClass: "environment_issue" };
   }
   return { gate: "needs-human-review", failureClass: "test_script_issue" };
@@ -86,6 +91,7 @@ export async function runStructuredCoveragePath(input: {
   projectId: string;
   coverageItem: CoverageItem;
   requirement?: string;
+  dataContractId?: string;
   signal?: AbortSignal;
 }): Promise<VisualRunResult> {
   const project = await getProject(input.projectId);
@@ -110,7 +116,7 @@ export async function runStructuredCoveragePath(input: {
   if (actions.some((candidate) => candidate.action === "api-request" || candidate.action === "wait-job")) {
     const health = await testProjectConnection(project);
     if (!health.ok) {
-      const runtime = await startProject(project.id, { runId: input.runId, attemptId });
+      const runtime = await startProject(project.id, { runId: input.runId, attemptId, skipLifecycle: Boolean(input.dataContractId) });
       if (runtime.status !== "running") {
         throw new Error(`runtime_unavailable:${runtime.failureReason}:${runtime.message}`);
       }
@@ -120,20 +126,105 @@ export async function runStructuredCoveragePath(input: {
 
   let react: StructuredReActLoopResult;
   let executionError: string | undefined;
-  try {
-    react = await runStructuredReActLoop({
-      steps: plan.steps,
-      manifest: project.manifest,
-      project,
-      target,
-      signal: input.signal,
+  if (input.dataContractId) {
+    const dataContract = await getReliabilityAssetStore().getDataContract(input.dataContractId);
+    if (!dataContract) throw new Error("test_data_contract_not_found");
+    if (dataContract.projectId !== project.id) throw new Error("test_data_contract_project_mismatch");
+    let lifecycleReact: StructuredReActLoopResult | undefined;
+    const lifecycle = await executeTestDataLifecycle({
+      contract: dataContract,
       runId: input.runId,
-      attemptId
+      childRunId: input.runId,
+      signal: input.signal,
+      adapter: {
+        async runStage(stage, context) {
+          if (stage.stage === "execute") {
+            try {
+              lifecycleReact = await runStructuredReActLoop({
+                steps: plan.steps,
+                manifest: project.manifest!,
+                project,
+                target,
+                signal: input.signal,
+                runId: input.runId,
+                attemptId
+              });
+              return {
+                status: lifecycleReact.error ? "failed" : lifecycleReact.completed && lifecycleReact.passed ? "passed" : "failed",
+                ...(lifecycleReact.error ? { error: lifecycleReact.error } : {})
+              };
+            } catch (error: unknown) {
+              return { status: "failed" as const, error: error instanceof Error ? error.message : String(error) };
+            }
+          }
+          if (!stage.commandRef) return { status: "skipped" as const };
+          const command = stage.commandRef === "migrate"
+            ? project.manifest!.commands.migrate
+            : stage.commandRef === "seed"
+              ? project.manifest!.commands.seed
+              : stage.commandRef === "cleanup"
+                ? project.manifest!.commands.cleanup
+                : undefined;
+          if (!command) return { status: "blocked" as const, error: `test_data_command_missing:${stage.commandRef}` };
+          const allowedStageEnv = new Set(project.manifest!.environmentAllowlist);
+          const extraEnv = Object.fromEntries(Object.entries({
+            ATO_TEST_DATA_NAMESPACE: context.namespace,
+            ATO_TEST_DATA_RANDOM_SEED: String(context.randomSeed),
+            ATO_TEST_DATA_TIME: context.testTime,
+            ATO_TEST_DATA_RUN_ID: context.runId,
+            ATO_TEST_DATA_CHILD_RUN_ID: context.childRunId
+          }).filter(([name]) => allowedStageEnv.has(name)));
+          const result = await executeProjectCommand({
+            projectId: project.id,
+            project,
+            command,
+            cwd: safeProjectPath(project),
+            timeoutMs: command.timeoutMs ?? project.timeoutMs ?? 20_000,
+            extraEnv
+          });
+          return result.ok
+            ? { status: "passed" as const }
+            : { status: "failed" as const, error: `${stage.commandRef}:${result.failureReason}` };
+        }
+      }
     });
-    executionError = react.error;
-  } catch (error) {
-    executionError = error instanceof Error ? error.message : String(error);
-    react = { turns: [], completed: false, passed: false, error: executionError };
+    const receipts = await Promise.all(lifecycle.receipts.map(async (receipt) => {
+      const evidence = await appendEvidence(input.runId, {
+        type: "operation",
+        title: `Test data ${receipt.stage} ${receipt.status}`,
+        payload: {
+          contractId: receipt.contractId,
+          namespace: receipt.namespace,
+          stage: receipt.stage,
+          status: receipt.status,
+          credentialRefs: receipt.credentialRefs,
+          error: receipt.error
+        }
+      });
+      return testDataPhaseReceiptV1Schema.parse({ ...receipt, evidenceRefs: [evidence.id] });
+    }));
+    await getReliabilityAssetStore().appendDataReceipts(receipts);
+    react = lifecycleReact ?? { turns: [], completed: false, passed: false, error: lifecycle.reason ?? "test_data_lifecycle_failed" };
+    executionError = lifecycleReact?.error
+      ?? (lifecycleReact && lifecycle.reason === "test_data_stage_failed:execute"
+        ? undefined
+        : lifecycle.status === "passed" ? undefined : lifecycle.reason ?? "test_data_lifecycle_failed");
+  } else {
+    try {
+      react = await runStructuredReActLoop({
+        steps: plan.steps,
+        manifest: project.manifest,
+        project,
+        target,
+        signal: input.signal,
+        runId: input.runId,
+        attemptId
+      });
+      executionError = react.error;
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : String(error);
+      react = { turns: [], completed: false, passed: false, error: executionError };
+    }
   }
   const executions = react.turns;
   const execution = executions.at(-1)?.result;

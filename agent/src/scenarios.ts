@@ -478,6 +478,18 @@ const defaultScenario =
   initialScenarioList[0] ??
   fallbackTaskFilterScenario;
 
+// Project-facing configuration uses readable kebab-case IDs, while the
+// existing scenario registry and evidence history use the original stable
+// snake_case IDs. Keep the public demo contract readable without creating a
+// second scenario or a second source of truth for its executable plan.
+const scenarioAliases: Record<string, string> = {
+  "task-filter-completed": "task_filter_completed"
+};
+
+export function canonicalScenarioId(id: string) {
+  return scenarioAliases[id] ?? id;
+}
+
 export function getDefaultScenarioId() {
   return defaultScenario.id;
 }
@@ -486,7 +498,7 @@ export function getScenario(id = defaultScenario.id) {
   const scenarios: Record<string, ExecutableScenario> = Object.fromEntries(
     currentScenarioList().map((scenario) => [scenario.id, scenario])
   );
-  const scenario = scenarios[id];
+  const scenario = scenarios[canonicalScenarioId(id)];
   if (!scenario) {
     throw new Error(`Unknown scenarioId: ${id}. Register it in data/scenarios/*.json before execution.`);
   }
@@ -494,7 +506,7 @@ export function getScenario(id = defaultScenario.id) {
 }
 
 export function hasScenario(id: string | undefined) {
-  return Boolean(id && currentScenarioList().some((scenario) => scenario.id === id));
+  return Boolean(id && currentScenarioList().some((scenario) => scenario.id === canonicalScenarioId(id)));
 }
 
 export function listScenarios() {

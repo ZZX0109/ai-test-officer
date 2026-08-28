@@ -50,6 +50,8 @@ import {
   closeBrowserAgentSession
 } from "./browser-agent/sessionManager.js";
 import { persistDynamicBrowserResult } from "./browser-agent/resultBundle.js";
+import { readBrowserActionResults, readBrowserArtifacts } from "./browser-agent/store.js";
+import { listLlmCalls } from "./llmProvider.js";
 import {
   browserActionCompletesBusinessPath,
   browserPathResultsAreGrounded,
@@ -488,7 +490,7 @@ async function buildService() {
               payload: { browserAgent: true }
             });
           }
-          const { coverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary } = await finalizeBrowserExecutionProof({
+          const { coverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary, modelExecution } = await finalizeBrowserExecutionProof({
             state,
             coverageScope: "all",
             integrityId: `${state.runId}_dynamic_artifact_integrity`
@@ -516,7 +518,14 @@ async function buildService() {
             artifactIntegrity,
             machineGate: finalized.machineGate,
             outcomeSummary,
-            proof: finalized
+            proof: finalized,
+            modelExecution: {
+              required: modelExecution.required,
+              totalCallCount: modelExecution.totalCallCount,
+              successfulBrowserActionCallCount: modelExecution.successfulBrowserActionCallCount,
+              completedBrowserActionCount: modelExecution.completedBrowserActionCount,
+              requiredArtifactKindsPresent: modelExecution.requiredArtifactKindsPresent
+            }
           });
           let run = await runEventStore.get(state.runId);
           if (run?.state === "queued") run = await appendSystemRunEvent(state.runId, "run_preparing", { browserAgent: true });
@@ -555,14 +564,34 @@ async function buildService() {
           const childRunIds = state.execution.childRunIds.filter((item): item is string => typeof item === "string");
           const children = (await Promise.all(childRunIds.map((id) => runEventStore.get(id))))
             .filter((item): item is RunProjection => Boolean(item));
-          const childProof = await Promise.all(children.map(async (child) => ({
-            child,
-            proof: await readProofArtifacts(child.resultRunId ?? child.id)
-          })));
+          const childProof = await Promise.all(children.map(async (child) => {
+            const resultRunId = child.resultRunId ?? child.id;
+            const [proof, llmCalls, browserActions, browserArtifacts] = await Promise.all([
+              readProofArtifacts(resultRunId),
+              listLlmCalls(resultRunId),
+              readBrowserActionResults(resultRunId),
+              readBrowserArtifacts(resultRunId)
+            ]);
+            return { child, proof, llmCalls, browserActions, browserArtifacts };
+          }));
           const browserPhase = state.browserAgentRequired && state.execution?.dynamicBrowserChildren !== true
             ? await persistBrowserPhaseForAggregate(state)
             : undefined;
           const coverage = await readCoverageItems(state.runId);
+          const parentRun = await runEventStore.get(state.runId);
+          const requireModelExecution = parentRun?.input.requireModelExecution === true;
+          const modelCalls = childProof.flatMap((item) => item.llmCalls);
+          const successfulBrowserActionCalls = modelCalls.filter((call) => call.purpose === "browser-action" && call.status === "passed");
+          const completedBrowserActions = childProof
+            .flatMap((item) => item.browserActions)
+            .filter((action) => action.status === "completed");
+          const browserArtifactKinds = new Set(childProof.flatMap((item) => item.browserArtifacts.map((artifact) => artifact.kind)));
+          const modelExecutionComplete = !requireModelExecution || (
+            successfulBrowserActionCalls.length > 0
+            && completedBrowserActions.length > 0
+            && browserArtifactKinds.has("screenshot")
+            && browserArtifactKinds.has("operation-log")
+          );
           const coverageComplete = coverage.length > 0 && coverage.every(isCoverageTerminal);
           const blockedCoverage = coverage.filter((item) => item.disposition === "blocked");
           const failedCoverage = coverage.filter((item) => item.disposition === "failed");
@@ -577,13 +606,14 @@ async function buildService() {
             ...children.map((child) => child.gateStatus ?? "needs-human-review"),
             ...(browserPhase ? [browserPhase.finalStatus as MachineGate["status"]] : [])
           ];
-          const status: MachineGate["status"] = !coverageComplete ? "blocked"
+          const status: MachineGate["status"] = !coverageComplete || !modelExecutionComplete ? "blocked"
             : failedCoverage.length > 0 || statuses.includes("fail") ? "fail"
               : blockedCoverage.length > 0 || excludedCoverage.length > 0 || statuses.includes("blocked") ? "blocked"
               : statuses.includes("needs-human-review") ? "needs-human-review"
                 : evidenceComplete ? "pass" : "needs-human-review";
           const reasons = [
             ...(!coverageComplete ? ["coverage_disposition_incomplete"] : []),
+            ...(!modelExecutionComplete ? ["model_execution_evidence_incomplete"] : []),
             ...failedCoverage.map((item) => `coverage_failed:${item.flowId}:${item.dispositionReason ?? "oracle_failed"}`),
             ...blockedCoverage.map((item) => `coverage_blocked:${item.flowId}:${item.dispositionReason ?? "unspecified"}`),
             ...excludedCoverage.map((item) => `coverage_excluded:${item.flowId}:${item.dispositionReason ?? "not_applicable"}`),
@@ -616,20 +646,32 @@ async function buildService() {
               requirement: state.requirement,
               coverage,
               children: [
-                ...childProof.map(({ child, proof }) => ({
+                ...childProof.map(({ child, proof, llmCalls: childLlmCalls, browserActions, browserArtifacts }) => ({
                   id: child.id,
                   state: child.state,
                   finalStatus: child.gateStatus,
                   evidenceSetRoot: proof.manifest?.evidenceSetRoot,
                   artifactIntegrityVerified: child.outcomeSummary?.artifactIntegrityVerified === true,
                   evidenceGrounded: child.outcomeSummary?.evidenceGrounded === true,
-                  machineGate: child.machineGate
+                  machineGate: child.machineGate,
+                  modelCallCount: childLlmCalls.length,
+                  successfulBrowserActionCallCount: childLlmCalls.filter((call) => call.purpose === "browser-action" && call.status === "passed").length,
+                  completedBrowserActionCount: browserActions.filter((action) => action.status === "completed").length,
+                  browserArtifactKinds: Array.from(new Set(browserArtifacts.map((artifact) => artifact.kind)))
                 })),
                 ...(browserPhase ? [browserPhase] : [])
               ],
               machineGateDraft: aggregateDraft,
               gateEligibleFacts: { executionSucceeded, requirementCovered: coverage.every(isCoverageExercised) },
-              judgeRecommendation
+              judgeRecommendation,
+              modelExecution: {
+                required: requireModelExecution,
+                totalCallCount: modelCalls.length,
+                successfulBrowserActionCallCount: successfulBrowserActionCalls.length,
+                completedBrowserActionCount: completedBrowserActions.length,
+                requiredArtifactsPresent: browserArtifactKinds.has("screenshot") && browserArtifactKinds.has("operation-log"),
+                calls: modelCalls
+              }
             });
           } catch (error) {
             // A parent aggregate is also required to publish its own Artifact
@@ -1042,15 +1084,41 @@ async function buildService() {
             finalStatus,
             executionStatus,
             outcomeSummary,
+            ...(run.runKind === "parent" && (state.execution?.aggregate === true || Array.isArray(state.execution?.childRunIds)) ? {
+              parentRunId: state.runId,
+              baseRunId: typeof state.execution?.baseRunId === "string" ? state.execution.baseRunId : undefined,
+              headRunId: typeof state.execution?.headRunId === "string" ? state.execution.headRunId : undefined,
+              pairManifestId: typeof state.execution?.pairManifestId === "string" ? state.execution.pairManifestId : undefined,
+              childRunIds: Array.isArray(state.execution?.childRunIds) ? state.execution.childRunIds : [],
+              artifactIds: Array.isArray(state.execution?.artifactIds) ? state.execution.artifactIds : [],
+              evidenceRefs: Array.from(new Set([
+                ...(machineGate?.reasonDetails?.flatMap((detail) => detail.evidenceRefs) ?? []),
+                ...(Array.isArray(state.execution?.evidenceRefs) ? state.execution.evidenceRefs : [])
+              ].filter((ref): ref is string => typeof ref === "string"))),
+              classification: typeof state.execution?.classification === "string"
+                ? state.execution.classification
+                : typeof run.input.differentialClassification === "string"
+                  ? run.input.differentialClassification
+                  : "inconclusive",
+              blockReason: finalStatus === "blocked" || finalStatus === "needs-human-review"
+                ? (machineGate?.reasons?.join("; ") || "parent_aggregate_requires_review")
+                : undefined
+            } : {}),
             ...(discovery ? { discovery } : {})
           };
-          run = finalStatus === "pass"
-            ? await appendSystemRunEvent(state.runId, "run_completed", payload)
-            : finalStatus === "fail"
-              ? await appendSystemRunEvent(state.runId, "run_failed", payload)
-              : finalStatus === "blocked"
-                ? await appendSystemRunEvent(state.runId, "run_blocked", payload)
-                : await appendSystemRunEvent(state.runId, "human_review_requested", payload);
+          const isParentAggregate = run.runKind === "parent"
+            && (state.execution?.aggregate === true || Array.isArray(state.execution?.childRunIds));
+          run = isParentAggregate
+            ? finalStatus === "pass" || finalStatus === "fail"
+              ? await appendSystemRunEvent(state.runId, "parent_aggregate_completed", payload)
+              : await appendSystemRunEvent(state.runId, "parent_aggregate_blocked", payload)
+            : finalStatus === "pass"
+              ? await appendSystemRunEvent(state.runId, "run_completed", payload)
+              : finalStatus === "fail"
+                ? await appendSystemRunEvent(state.runId, "run_failed", payload)
+                : finalStatus === "blocked"
+                  ? await appendSystemRunEvent(state.runId, "run_blocked", payload)
+                  : await appendSystemRunEvent(state.runId, "human_review_requested", payload);
         }
         if (state.browserAgentRequired) await closeBrowserAgentSession(state.runId).catch(() => undefined);
         return {

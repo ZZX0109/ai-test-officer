@@ -25,7 +25,7 @@ import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
 import { buildProofGraph, writeProofArtifacts } from "./proofGraph.js";
 import { finalizeProofBundle, proofCredibility, type MachineGateDraft } from "./proof/proofBundleService.js";
 import { persistExecutionResult } from "./executionPersistence.js";
-import { prepareSandboxDependencyCache } from "./projectAdapter.js";
+import { prepareSandboxDependencyCache } from "./sandboxDependencyCache.js";
 import { prepareOciEgress } from "./ociEgress.js";
 import { getDatabasePool } from "./databaseRuntime.js";
 import { readProjectExecutionEnv } from "./projectExecutionEnv.js";

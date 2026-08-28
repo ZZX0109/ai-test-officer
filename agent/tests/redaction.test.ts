@@ -19,4 +19,5 @@ export function testRedactionPreservesUsageTelemetry() {
   assert.equal(record.estimatedCostUsd, 0.0123);
   assert.equal(record.credentialId, "cred_public_identifier");
   assert.equal(redactText("access_token=leak promptTokens=123"), "access_token=[REDACTED] promptTokens=123");
+  assert.equal(redactText("Authorization Bearer secret sk-live-abcdefghijklmnop"), "Authorization Bearer [REDACTED] [REDACTED_API_KEY]");
 }

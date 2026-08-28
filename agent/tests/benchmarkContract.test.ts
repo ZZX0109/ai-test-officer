@@ -185,4 +185,9 @@ export async function testBenchmarkContract() {
   assert.ok(challengeCases.length >= 6, "complex investment challenge must cover more than one happy path");
   assert.equal(challengeCases.every((item) => item.projectId === "investment_agent_workflow_external"), true);
   assert.equal(challengeCases.every((item) => item.evaluationScope === "challenge_only"), true);
+  const reliabilityCases = JSON.parse(await readFile(path.join(rootDir, "data", "benchmark", "reliability-cases.json"), "utf8")) as Array<{ category: string; oracleProfile: string; harnessStatus: string; evaluationScope: string }>;
+  assert.ok(reliabilityCases.length >= 7, "reliability benchmark must include governance, hidden-state, backend-data, differential and asset-validity samples");
+  assert.equal(reliabilityCases.every((item) => item.evaluationScope === "reliability" && item.harnessStatus === "required"), true);
+  assert.ok(new Set(reliabilityCases.map((item) => item.category)).size >= 4);
+  assert.ok(reliabilityCases.some((item) => item.oracleProfile === "different-failure-signatures"));
 }

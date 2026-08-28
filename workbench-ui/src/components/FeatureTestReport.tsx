@@ -7,7 +7,7 @@
 // trajectory tabs, so a reader can cross from a feature's verdict to the full
 // evidence trail in the trajectory panel.
 
-import type { Conclusion, PlannedBusinessFlow } from "../types";
+import type { Conclusion, CoverageItem, PlannedBusinessFlow } from "../types";
 
 export type ReportVerdict = "pass" | "fail" | "blocked" | "untested";
 
@@ -27,11 +27,12 @@ const VERDICT_LABEL: Record<ReportVerdict, string> = {
 export function FeatureTestReport(props: {
   flows: PlannedBusinessFlow[];
   conclusions: Conclusion[];
+  coverageItems?: CoverageItem[];
   /** Switch the run view to the trajectory tab so the reader can follow a
    * feature's verdict into its full evidence trail. */
   onViewTrajectory?: () => void;
 }) {
-  const { flows, conclusions, onViewTrajectory } = props;
+  const { flows, conclusions, coverageItems = [], onViewTrajectory } = props;
   if (!flows.length) {
     return (
       <section className="feature-test-report" aria-label="按功能组织的测试报告">
@@ -45,11 +46,16 @@ export function FeatureTestReport(props: {
   for (const conclusion of conclusions) {
     latestByScenario.set(conclusion.scenarioId, conclusion);
   }
+  const coverageByFlow = new Map(coverageItems.map((item) => [item.flowId, item]));
 
   const rows = flows.map((flow) => {
     const conclusion = latestByScenario.get(flow.scenarioId ?? "");
-    const verdict: ReportVerdict = conclusion ? verdictFromConclusion(conclusion) : "untested";
-    return { flow, verdict, conclusion };
+    const coverage = coverageByFlow.get(flow.id);
+    const verdict: ReportVerdict = coverage?.disposition === "executed" ? "pass"
+      : coverage?.disposition === "failed" ? "fail"
+        : coverage?.disposition === "blocked" || coverage?.disposition === "excluded" ? "blocked"
+          : conclusion ? verdictFromConclusion(conclusion) : "untested";
+    return { flow, verdict, conclusion, coverage };
   });
 
   const counts: Record<ReportVerdict, number> = { pass: 0, fail: 0, blocked: 0, untested: 0 };
@@ -74,7 +80,7 @@ export function FeatureTestReport(props: {
           <tr><th scope="col">功能</th><th scope="col">结论</th><th scope="col">证据</th></tr>
         </thead>
         <tbody>
-          {rows.map(({ flow, verdict, conclusion }) => (
+          {rows.map(({ flow, verdict, conclusion, coverage }) => (
             <tr key={flow.id} className={`verdict-${verdict}`}>
               <td className="feature-test-report__title">{flow.title}</td>
               <td className="feature-test-report__verdict">
@@ -86,9 +92,7 @@ export function FeatureTestReport(props: {
                   <ul>
                     {conclusion.evidenceRefs.map((ref) => <li key={ref}>{ref}</li>)}
                   </ul>
-                ) : (
-                  <span className="muted">—</span>
-                )}
+                ) : <span className="muted">{coverage?.dispositionReason ?? "—"}</span>}
               </td>
             </tr>
           ))}

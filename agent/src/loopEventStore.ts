@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { LoopEvent } from "./types.js";
+import { emitTrajectory } from "./trajectoryEmitter.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const reportsDir = path.join(rootDir, "reports");
@@ -37,6 +38,15 @@ export async function appendLoopEvent(
       current.push(item);
       await writeFile(loopFile(runId), JSON.stringify(current, null, 2));
       await writeFile(path.join(reportsDir, "runs", "latest-loop-events.json"), JSON.stringify(current, null, 2));
+      const type = item.loopType === "plan_loop" ? "planning.updated" : item.loopType === "report_loop" || item.loopType === "human_verdict_loop" ? "run.state.changed" : item.loopType === "gray_execution_loop" ? "browser.action.started" : item.loopType === "failure_recovery_loop" ? "recovery.started" : "run.state.changed";
+      void emitTrajectory({
+        runId,
+        type,
+        actor: "agent-loop",
+        idempotencyKey: `loop-event:${item.id}`,
+        payload: { ...item },
+        evidenceRefs: item.evidenceRefs ?? []
+      });
       return item;
     });
   writeQueues.set(runId, next);

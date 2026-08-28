@@ -29,6 +29,12 @@ const projectSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   projectPath: z.string().min(1),
+  demoProfile: z.object({
+    enabled: z.boolean(),
+    description: z.string().min(1).max(500),
+    defaultGoal: z.string().min(1).max(2_000),
+    scenarioId: z.string().min(1)
+  }).optional(),
   allowExternalProjectPath: z.boolean().optional(),
   installCommand: z.string().optional(),
   installCommandSpec: commandSpecSchema.optional(),

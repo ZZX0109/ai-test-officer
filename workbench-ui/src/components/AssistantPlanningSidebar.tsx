@@ -185,13 +185,7 @@ export function AssistantPlanningSidebar(props: AssistantPlanningSidebarProps) {
                               ? <span>{props.planningResult.businessFunctions?.filter((feature) => feature.status !== "ready").length} 个功能需补充条件</span>
                               : null}
                           </div>
-                          {props.planningResult.businessFunctions?.length ? <BusinessFunctionList
-                            functions={props.planningResult.businessFunctions}
-                            total={props.planningResult.businessFunctionCount}
-                            nextCursor={props.planningResult.businessFunctionPage?.nextCursor}
-                            loading={props.planningFunctionPageLoading}
-                            onLoadMore={props.onLoadPlanningFunctions}
-                          /> : null}
+                          {props.planningResult.businessFunctions?.length ? <span className="assistant-plan-list-hint">完整功能清单已在下方显示，可随时展开查看。</span> : null}
                           <button className="assistant-suggested-action" type="button" disabled={props.assistantChatBusy || props.isRunning || props.planningHasBlockingQuestions} onClick={() => void props.onExecuteSuggestedAction(attachedSuggestedAction)}>
                             {props.planningHasBlockingQuestions ? "请先补充必要信息" : "确认并开始测试"}
                           </button>
@@ -224,7 +218,7 @@ export function AssistantPlanningSidebar(props: AssistantPlanningSidebarProps) {
               </WorkbenchSectionBoundary>
             );
           })}
-          {props.planningBusy ? <AssistantConversationMessage message={{ id: "planning_pending", role: "assistant", content: "正在分析项目和可执行路径…", createdAt: new Date().toISOString() }} /> : null}
+          {props.planningBusy ? <AssistantConversationMessage message={{ id: "planning_pending", role: "assistant", content: "正在分析项目和可执行路径…", createdAt: new Date().toISOString(), streaming: true }} /> : null}
           {props.pendingInterruptActionable && props.agentProjection?.pendingInterrupt ? (
             <InterruptDecisionPanel
               interrupt={props.agentProjection.pendingInterrupt}
@@ -249,7 +243,7 @@ export function AssistantPlanningSidebar(props: AssistantPlanningSidebarProps) {
             </button>
             {!props.planningSummaryCollapsed ? (
               <>
-                {props.planningResult.businessFunctions?.length ? <BusinessFunctionList functions={props.planningResult.businessFunctions} total={props.planningResult.businessFunctionCount} nextCursor={props.planningResult.businessFunctionPage?.nextCursor} loading={props.planningFunctionPageLoading} onLoadMore={props.onLoadPlanningFunctions} /> : <p className="business-function-empty">业务功能摘要尚未生成，请重新扫描。</p>}
+                {props.planningResult.businessFunctions?.length ? <BusinessFunctionList functions={props.planningResult.businessFunctions} total={props.planningResult.businessFunctionCount} nextCursor={props.planningResult.businessFunctionPage?.nextCursor} loading={props.planningFunctionPageLoading} onLoadMore={props.onLoadPlanningFunctions} compact /> : <p className="business-function-empty">业务功能摘要尚未生成，请重新扫描。</p>}
                 <button className="primary execute-plan-button" type="button" disabled={props.planningHasBlockingQuestions || props.planningAutomationBusy || props.isRunning} onClick={() => void props.onConfirmPlanningDraft()}>
                   {props.planningAutomationBusy || props.isRunning ? "自动测试进行中" : props.planningHasBlockingQuestions ? "请先补充信息" : props.planningConfirmed && props.planningAutomationPhase === "blocked" ? "继续自动测试" : props.planningConfirmed ? "重新执行计划" : "确认并执行"}
                 </button>

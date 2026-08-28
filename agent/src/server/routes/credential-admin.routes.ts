@@ -55,8 +55,11 @@ async function structuredCredentialPreflight(
     let nonStreamParsed: unknown;
     try { streamParsed = JSON.parse(streamResult.text); } catch { streamParsed = undefined; }
     try { nonStreamParsed = JSON.parse(nonStreamResult.text); } catch { nonStreamParsed = undefined; }
-    const streamStructured = streamParsed && typeof streamParsed === "object" && (streamParsed as { ok?: unknown }).ok === true;
-    const nonStreamStructured = nonStreamParsed && typeof nonStreamParsed === "object" && (nonStreamParsed as { ok?: unknown }).ok === true;
+    // This probe verifies response shape, not the truth value of an arbitrary
+    // model-generated field. An OpenAI-compatible model may validly choose
+    // `{"ok": false}` even when it followed the JSON-object contract.
+    const streamStructured = Boolean(streamParsed && typeof streamParsed === "object" && typeof (streamParsed as { ok?: unknown }).ok === "boolean");
+    const nonStreamStructured = Boolean(nonStreamParsed && typeof nonStreamParsed === "object" && typeof (nonStreamParsed as { ok?: unknown }).ok === "boolean");
     return { ...connection, structuredOutput: streamStructured && nonStreamStructured, streamStructuredOutput: streamStructured, nonStreamStructuredOutput: nonStreamStructured, call: nonStreamResult.call, preflightCalls: [streamResult.call, nonStreamResult.call] };
   } catch (error) {
     const call = (error as { llmCall?: unknown }).llmCall;

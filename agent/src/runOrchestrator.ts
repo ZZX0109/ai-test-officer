@@ -16,6 +16,8 @@ import { runStructuredCoveragePath } from "./structuredCoverageRunner.js";
 import { llmBudgetSchema, pathExecutionResultSchema, type CoverageItem, type LlmBudget } from "@ai-test-officer/contracts";
 import { publishPendingOutbox, recordOutboxJob, type OutboxJob } from "./outboxStore.js";
 import { reconcileConfiguredArtifactStore } from "./artifactObjectReconciliation.js";
+import { appendEvidence } from "./evidenceStore.js";
+import { rankCoverageItems } from "./adaptivePathStrategy.js";
 
 const queueName = process.env.RUN_QUEUE_NAME ?? "ai-test-officer-runs";
 const activeControllers = new Map<string, AbortController>();
@@ -125,6 +127,7 @@ export function buildQueuedRunRequest(projection: RunProjection, signal: AbortSi
     projectId: typeof input.projectId === "string" ? input.projectId : undefined,
     executionProfile: input.executionProfile === "benchmark" ? "benchmark" : "interactive",
     scenarioId: projection.selectedScenarioId ?? (typeof input.scenarioId === "string" ? input.scenarioId : undefined),
+    dataContractId: typeof input.dataContractId === "string" ? input.dataContractId : undefined,
     requirement: typeof input.requirement === "string" ? input.requirement : undefined,
     diff: typeof input.diff === "string" ? input.diff : undefined,
     plan: projection.plan,
@@ -369,7 +372,22 @@ async function beginEvidenceCollection(
 }
 
 async function dispatchParentCoverageRun(projection: RunProjection) {
-  const items = await readCoverageItems(projection.id);
+  const discoveredItems = await readCoverageItems(projection.id);
+  const ranking = projection.input.judgeMode === "adaptive"
+    ? rankCoverageItems({ items: discoveredItems })
+    : { items: discoveredItems, decisions: [] };
+  const items = ranking.items;
+  if (ranking.decisions.length > 0) {
+    await appendEvidence(projection.id, {
+      type: "operation",
+      title: "Adaptive coverage priority computed",
+      payload: {
+        formula: "risk × uncertainty × expectedInformationGain ÷ cost",
+        decisions: ranking.decisions,
+        coverageItemIds: items.map((item) => item.id)
+      }
+    });
+  }
   const dynamicParent = projection.planProvenance?.source === "dynamic-browser-agent";
   const dispatch = classifyParentCoverageDispatch({ items, dynamicParent });
   if (dispatch.undispatchable.length) {
@@ -407,6 +425,7 @@ async function dispatchParentCoverageRun(projection: RunProjection) {
         ...projection.input,
         runKind: "path",
         parentRunId: projection.id,
+        rootRunId: typeof projection.input.rootRunId === "string" ? projection.input.rootRunId : projection.id,
         coverageItemId: item.id,
         ...(scenarioId ? { scenarioId } : {}),
         coverageScenarioIds: [],
@@ -690,6 +709,7 @@ export async function executeQueuedRun(runId: string, options?: { expectedVersio
           projectId,
           coverageItem: item,
           requirement: typeof projection.input.requirement === "string" ? projection.input.requirement : undefined,
+          dataContractId: typeof projection.input.dataContractId === "string" ? projection.input.dataContractId : undefined,
           signal: controller.signal
         });
         if (!await beginEvidenceCollection(runId, { resultRunId: result.id }, lease.attemptId)) return runEventStore.get(runId);
@@ -803,9 +823,17 @@ export async function executeQueuedRun(runId: string, options?: { expectedVersio
   }
 }
 
-async function processJob(job: Job<{ runId: string; version?: number }>) {
-  if (job.name === "aggregate-parent") return aggregateParentCoverageRun(job.data.runId, job.data.version);
-  return executeQueuedRun(job.data.runId, { expectedVersion: job.data.version });
+async function processJob(job: Job<{ runId: string; version?: number } | Record<string, unknown>>) {
+  if (job.name === "reliability-asset-event") {
+    // Reliability events are already durably applied to the Asset/Evidence
+    // transaction. Consuming this job acknowledges delivery without creating
+    // a second state store; external subscribers can use the same topic.
+    return;
+  }
+  if (typeof job.data.runId !== "string") throw new Error("outbox_run_id_missing");
+  const runPayload = job.data as { runId: string; version?: number };
+  if (job.name === "aggregate-parent") return aggregateParentCoverageRun(runPayload.runId, runPayload.version);
+  return executeQueuedRun(runPayload.runId, { expectedVersion: runPayload.version });
 }
 
 async function publishOutboxToQueue() {
@@ -816,14 +844,24 @@ async function publishOutboxToQueue() {
     publish: async (job: OutboxJob) => {
       if (job.topic === "run.execute") {
         await queue!.add("execute", job.payload, {
-          jobId: job.payload.jobId,
+          jobId: (job.payload as { jobId: string }).jobId,
           removeOnComplete: 500,
           removeOnFail: 500
         });
         return;
       }
+      if (job.topic === "reliability.asset") {
+        const payload = job.payload as { eventId: string };
+        await queue!.add("reliability-asset-event", job.payload, {
+          jobId: payload.eventId,
+          removeOnComplete: 500,
+          removeOnFail: 500
+        });
+        return;
+      }
+      const payload = job.payload as { jobId: string };
       await queue!.add("aggregate-parent", job.payload, {
-        jobId: job.payload.jobId,
+        jobId: payload.jobId,
         delay: 500,
         // A parent may legitimately own long-running job paths. Keep the
         // aggregation watchdog aligned with the default 20 minute run budget.

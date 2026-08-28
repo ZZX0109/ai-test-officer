@@ -12,13 +12,23 @@ type ProofView = {
   steps: RunResult["steps"];
 };
 
+export interface ModelExecutionSummary {
+  total: number;
+  successful: number;
+  failed: number;
+}
+
 function costLabel(call: LlmInvocation) {
   return typeof call.usage.estimatedCostUsd === "number"
     ? `${call.usage.currency ?? "USD"} ${call.usage.estimatedCostUsd.toFixed(6)}`
     : "unknown";
 }
 
-export function TrustTracePanel({ runId }: { runId?: string }) {
+export function TrustTracePanel({ runId, refreshKey, onModelExecution }: {
+  runId?: string;
+  refreshKey?: string | number;
+  onModelExecution?: (summary: ModelExecutionSummary) => void;
+}) {
   const [calls, setCalls] = useState<LlmInvocation[]>([]);
   const [budget, setBudget] = useState<Awaited<ReturnType<typeof getRunLlmCalls>>["budgetLedger"] | null>(null);
   const [conclusions, setConclusions] = useState<Conclusion[]>([]);
@@ -36,6 +46,11 @@ export function TrustTracePanel({ runId }: { runId?: string }) {
     if (!runId) return;
     void Promise.all([getRunLlmCalls(runId), getRunConclusions(runId)])
       .then(([llm, graph]) => {
+        onModelExecution?.({
+          total: llm.calls.length,
+          successful: llm.calls.filter((call) => call.status === "passed").length,
+          failed: llm.calls.filter((call) => call.status !== "passed").length
+        });
         setCalls(llm.calls);
         setBudget(llm.budgetLedger);
         setConclusions(graph.conclusions);
@@ -43,7 +58,7 @@ export function TrustTracePanel({ runId }: { runId?: string }) {
         if (!graph.integrity.valid) setError(graph.integrity.errors.join(", "));
       })
       .catch((cause) => setError(cause instanceof Error ? cause.message : "无法读取可信度数据"));
-  }, [runId]);
+  }, [runId, refreshKey]);
 
   async function openProof(conclusion: Conclusion) {
     if (!runId) return;

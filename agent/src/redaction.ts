@@ -9,12 +9,14 @@ function isSensitiveKey(key: string) {
   return !safeTelemetryKeys.has(key.replace(/[-_]/g, "").toLowerCase()) && sensitiveKeyPattern.test(key);
 }
 const bearerPattern = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
+const apiKeyPattern = /\b(?:sk|rk|pk)-[A-Za-z0-9._~+/=-]{12,}/gi;
 const webhookUrlPattern = /\bhttps?:\/\/[^\s"'<>)]*(?:webhook|hooks?)[^\s"'<>)]*/gi;
 const keyValuePattern = /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|passwd|secret|authorization|cookie|session|webhook[_-]?key|key)=([^&\s]+)/gi;
 
 export function redactText(value: string) {
   return value
     .replaceAll(webhookUrlPattern, "[REDACTED_WEBHOOK_URL]")
+    .replaceAll(apiKeyPattern, "[REDACTED_API_KEY]")
     .replaceAll(bearerPattern, "Bearer [REDACTED]")
     .replaceAll(keyValuePattern, "$1=[REDACTED]");
 }

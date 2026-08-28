@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from "react";
-import { acquireRunBrowserControl, releaseRunBrowserControl, sendRunBrowserInput } from "../api";
+import { acquireRunBrowserControl, releaseRunBrowserControl, resizeRunBrowserViewport, sendRunBrowserInput } from "../api";
 import type { BrowserSession } from "../types";
 import type { PagePoint } from "../sharedBrowserGeometry";
 
@@ -93,9 +93,20 @@ export function useSharedBrowserInteractions({
     }
   }
 
-  // The workbench canvas deliberately uses a fixed Playwright viewport. Its
-  // CSS size is a presentation detail and must not reflow the target project.
-  async function syncSharedBrowserViewport(_viewport: { width: number; height: number }) {}
+  // Keep the managed Playwright viewport aligned with the pre-run iframe.
+  // Otherwise a fixed 1440×900 frame is fitted into the much wider Workbench
+  // surface and the target visibly shrinks the moment execution begins.
+  async function syncSharedBrowserViewport(viewport: { width: number; height: number }) {
+    if (!activeRunId || !browserSession || ["closed", "failed"].includes(browserSession.status)) return;
+    try {
+      const response = await resizeRunBrowserViewport(activeRunId, viewport);
+      setBrowserSession((current) => current?.sessionId === response.session.sessionId ? response.session : current);
+    } catch (error) {
+      // A resize is presentation recovery, not a test failure. Surface it
+      // without discarding the last readable frame or changing run state.
+      setMessage(error instanceof Error ? `实时页面尺寸同步失败：${error.message}` : "实时页面尺寸同步失败，已保留上一帧。");
+    }
+  }
 
   return {
     toggleBrowserControl,

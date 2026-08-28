@@ -16,6 +16,7 @@ import {
   publicKnowledgeContext
 } from "./knowledgeBoundary.js";
 import { executeKnowledgeBoundedLlm } from "./knowledge-boundary/executeKnowledgeBoundedLlm.js";
+import { listNativeToolDefinitions } from "./llmToolCalling.js";
 
 const judgePolicyVersion = "judge-policy-v3-temporal-grounding";
 
@@ -336,7 +337,9 @@ export async function buildLlmJudgeReport(input: LlmJudgeInput) {
       maxTokens: firstReservation.maxOutputTokens,
       timeoutMs: Math.min(budget.requestTimeoutMs, 20_000),
       totalTimeoutMs: Math.min(budget.totalTimeoutMs, 45_000),
-      transportPreference: "non-stream-retry" as const,
+      // Structured Judge output still validates after assembly, while the
+      // transport emits live chunks and falls back to JSON when needed.
+      transportPreference: "auto" as const,
       jsonSchema: { name: "judge_supplement", schema: llmJudgeSupplementJsonSchema },
       system,
       context: {
@@ -353,10 +356,12 @@ export async function buildLlmJudgeReport(input: LlmJudgeInput) {
         cachePolicy: "bypass" as const
       }
     };
+    const nativeTools = listNativeToolDefinitions(["get_evidence"]);
     const first = await executeKnowledgeBoundedLlm({
       ...callInput,
       prompt,
       knowledgeContext: promptBundle.knowledgeContext,
+      nativeTools,
       parseOutput: (text) => llmJudgeSupplementSchema.parse(extractJson(text))
     });
     for (const call of first.calls) if (!calls.some((item) => item.id === call.id)) calls.push(call);
@@ -384,6 +389,7 @@ export async function buildLlmJudgeReport(input: LlmJudgeInput) {
         totalTimeoutMs: remainingJudgeMs,
         prompt: repairPrompt,
         knowledgeContext: promptBundle.knowledgeContext,
+        nativeTools,
         parseOutput: (text) => llmJudgeSupplementSchema.parse(extractJson(text))
       });
       for (const call of repair.calls) if (!calls.some((item) => item.id === call.id)) calls.push(call);

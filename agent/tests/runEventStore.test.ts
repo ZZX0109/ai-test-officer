@@ -109,6 +109,62 @@ export async function testRunEventStore() {
   assert.equal(legacyCompleted.gateStatus, "needs-human-review", "legacy completion without an explicit final status must not replay as pass");
   assert.equal(legacyCompleted.executionStatus, "completed");
 
+  const aggregateId = `parent_aggregate_${suffix}`;
+  let aggregate = await runEventStore.create({
+    runId: aggregateId,
+    actor: "tester",
+    idempotencyKey: `aggregate-create-${suffix}`,
+    payload: { runKind: "parent", requirement: "aggregate child browser runs" }
+  });
+  for (const type of ["plan_generated", "plan_approved", "permission_granted", "run_preparing", "run_started", "evidence_collecting", "run_judging"] as const) {
+    aggregate = await runEventStore.append({
+      runId: aggregateId,
+      type,
+      expectedVersion: aggregate.version,
+      actor: "worker",
+      idempotencyKey: `aggregate-${type}-${suffix}`,
+      payload: type === "run_started" ? { workerAttemptId: `aggregate-attempt-${suffix}`, executionGeneration: 1 } : {}
+    });
+  }
+  aggregate = await runEventStore.append({
+    runId: aggregateId,
+    type: "parent_aggregate_completed",
+    expectedVersion: aggregate.version,
+    actor: "execution-worker",
+    idempotencyKey: `aggregate-complete-${suffix}`,
+    payload: {
+      baseRunId: `${aggregateId}_base`,
+      headRunId: `${aggregateId}_head`,
+      pairManifestId: `${aggregateId}_pair`,
+      artifactIds: [`${aggregateId}_artifact`],
+      evidenceRefs: [`${aggregateId}_evidence`],
+      classification: "expected-change",
+      finalStatus: "pass",
+      gateStatus: "pass"
+    }
+  });
+  assert.equal(aggregate.state, "completed");
+  assert.equal(aggregate.gateStatus, "pass");
+  assert.equal(aggregate.executionStatus, "completed");
+
+  const blockedAggregateId = `parent_aggregate_blocked_${suffix}`;
+  let blockedAggregate = await runEventStore.create({
+    runId: blockedAggregateId,
+    actor: "tester",
+    idempotencyKey: `aggregate-blocked-create-${suffix}`,
+    payload: { runKind: "parent" }
+  });
+  blockedAggregate = await runEventStore.append({
+    runId: blockedAggregateId,
+    type: "parent_aggregate_blocked",
+    expectedVersion: blockedAggregate.version,
+    actor: "execution-worker",
+    idempotencyKey: `aggregate-blocked-${suffix}`,
+    payload: { classification: "inconclusive", finalStatus: "blocked", blockReason: "child_run_failed" }
+  });
+  assert.equal(blockedAggregate.state, "blocked");
+  assert.equal(blockedAggregate.gateStatus, "blocked");
+
   const queuedPauseId = `queued_pause_${suffix}`;
   let queuedPause = await runEventStore.create({ runId: queuedPauseId, actor: "tester", idempotencyKey: `queued-create-${suffix}` });
   queuedPause = await runEventStore.append({ runId: queuedPauseId, type: "plan_generated", expectedVersion: queuedPause.version, actor: "planner", idempotencyKey: `queued-plan-${suffix}` });

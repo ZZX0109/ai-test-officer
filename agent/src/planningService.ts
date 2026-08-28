@@ -12,6 +12,7 @@ import { toTargetProjectConfig } from "./projectAdapter.js";
 import { compileBusinessFunctions } from "./businessFunctionCompiler.js";
 import type { BusinessFunctionCompilation } from "./businessFunctionCompiler.js";
 import type { BusinessPath } from "./businessPathCompiler.js";
+import { emitTrajectory } from "./trajectoryEmitter.js";
 
 export interface PlanningConversationRequest {
   message: string;
@@ -19,6 +20,7 @@ export interface PlanningConversationRequest {
   bugTicket?: string;
   planningMode: "llm-guided" | "scan-only";
   credentialId?: string;
+  planningId?: string;
   history: PlanningMessage[];
 }
 
@@ -174,6 +176,7 @@ export async function createPlanningConversation(input: {
     : undefined;
   if (discovery?.orchestration) discoveryReadiness = discovery.orchestration;
   const planning = buildPlanningConversation({
+    id: request.planningId,
     project,
     message: request.message,
     history: request.history,
@@ -186,6 +189,30 @@ export async function createPlanningConversation(input: {
       { url: discovery.observation.finalUrl, source: "browser" as const, evidenceRefs: discovery.observation.screenshot ? [discovery.observation.screenshot.storageUri] : [] }
     ] : []
   });
+  // Planning has model work before a test Run exists.  Its deterministic
+  // planning id is therefore a first-class, append-only trajectory session
+  // rather than a fake execution Run.  The UI switches to a real Run stream
+  // once the operator confirms execution.
+  const trajectoryId = planning.id;
+  // Register the planning session before the LLM request starts. This lets the
+  // Workbench authorize and poll the trajectory while the request is still
+  // in flight; the completed inventory overwrites this empty placeholder.
+  await savePlanningInventory({
+    id: planning.id,
+    projectId: project.id,
+    snapshotHash: planning.businessGraph?.projectSnapshotHash,
+    flows: [],
+    functions: [],
+    createdAt: new Date().toISOString()
+  });
+  await emitTrajectory({
+    runId: trajectoryId,
+    type: "planning.started",
+    actor: "planning-service",
+    status: "running",
+    idempotencyKey: `${trajectoryId}:planning.started`,
+    payload: { summary: "开始分析测试目标、代码上下文和业务功能候选。", projectId: project.id }
+  });
   injectLoginGateFlow(planning, discovery, project);
   if (request.planningMode === "llm-guided") {
     const advice = await createLlmPlanningAdvice({
@@ -194,9 +221,24 @@ export async function createPlanningConversation(input: {
       flows: planning.businessFlows,
       credentialId: request.credentialId,
       pageObservation: discovery?.observation,
+      runId: trajectoryId,
       sourceSlices: await readBusinessSourceSlices({ repositoryRoot: targetRoot, locations: planning.businessFlows.flatMap((flow) => flow.sourceLocations ?? []), maxFiles: 12, maxChars: 18_000 })
     });
     planning.llmPlanning = advice;
+    await emitTrajectory({
+      runId: trajectoryId,
+      type: "planning.updated",
+      actor: "planning-service",
+      status: advice.status === "passed" ? "success" : advice.status === "failed" ? "error" : "blocked",
+      idempotencyKey: `${trajectoryId}:planning.llm-advice`,
+      payload: {
+        summary: advice.status === "passed" ? "模型已返回业务路径优先级建议。" : "模型规划建议不可用，保留确定性规划结果。",
+        llmStatus: advice.status,
+        model: advice.model,
+        callId: advice.callId,
+        errorCode: advice.errorCode
+      }
+    });
     if (advice.status === "passed") {
       const priority = new Map(advice.prioritizedFlowIds.map((id, index) => [id, index]));
       planning.businessFlows = [...planning.businessFlows].sort((left, right) => (priority.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (priority.get(right.id) ?? Number.MAX_SAFE_INTEGER));
@@ -259,5 +301,18 @@ export async function createPlanningConversation(input: {
     planning.businessFlowPage = firstPage.page;
     planning.plan = { ...planning.plan, levels: planning.plan.levels.map((level) => ({ ...level, paths: level.paths.filter((entry) => visibleIds.has(entry.id)) })) };
   }
+  await emitTrajectory({
+    runId: trajectoryId,
+    type: "planning.completed",
+    actor: "planning-service",
+    status: "success",
+    idempotencyKey: `${trajectoryId}:planning.completed`,
+    payload: {
+      summary: `已识别 ${planning.businessFunctionCount ?? planning.businessFunctions?.length ?? 0} 个业务功能。`,
+      businessFunctionCount: planning.businessFunctionCount ?? planning.businessFunctions?.length ?? 0,
+      technicalPathCount: planning.technicalPathCount ?? planning.businessFlows.length,
+      llmStatus: planning.llmPlanning?.status ?? "not-requested"
+    }
+  });
   return { planning, ...(discovery ? { discovery } : {}) };
 }

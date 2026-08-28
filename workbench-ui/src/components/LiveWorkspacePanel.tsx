@@ -1,31 +1,38 @@
 import React from "react";
-import { Activity, Code2, RefreshCw } from "lucide-react";
+import { Activity, Code2, GitBranch, RefreshCw } from "lucide-react";
 import { SharedBrowserCanvas } from "./SharedBrowserCanvas";
+import { TrajectoryPanel } from "./TrajectoryPanel";
 import { WorkbenchSectionBoundary } from "./WorkbenchSectionBoundary";
 import { isUserActionableInterrupt } from "../workbenchLogic";
-import type { AgentGraphProjection, BrowserSession, RepairFileContent, RepairSession, RepairWorkspaceFile } from "../types";
+import type { AgentGraphProjection, BrowserActionOverlay, BrowserSession, RepairFileContent, RepairSession, RepairWorkspaceFile, RunResult } from "../types";
 import type { PagePoint } from "../sharedBrowserGeometry";
 
 const RepairWorkspace = React.lazy(() => import("./MonacoRepairWorkspace")
   .then((module) => ({ default: module.RepairWorkspace })));
 
 interface LiveWorkspacePanelProps {
-  centreSurface: "preview" | "code";
+  centreSurface: "preview" | "trajectory" | "code";
   selectedProjectName: string;
   projectPreviewReady: boolean;
   hasSelectedProject: boolean;
   activeRunId: string | null;
+  planningTrajectoryId?: string | null;
+  planningProjectId?: string | null;
+  planningBusy?: boolean;
+  coverageProgress?: { total: number; passed: number; failed: number; blocked: number; pending: number };
   browserSession: BrowserSession | null;
+  browserActionOverlay?: BrowserActionOverlay | null;
   browserManualInput: string;
   browserControlBusy: boolean;
   previewUrl: string;
   previewRevision: number;
   agentProjection: AgentGraphProjection | null;
+  displayedLoopEvents?: RunResult["loopEvents"];
   repairWorkspaceOpen: boolean;
   repairSession: RepairSession | null;
   repairBusy: boolean;
   canApplyRepair: boolean;
-  onCentreSurfaceChange: (surface: "preview" | "code") => void;
+  onCentreSurfaceChange: (surface: "preview" | "trajectory" | "code") => void;
   onOpenCodeWorkspace: () => void;
   onRefreshPreview: () => void;
   onBrowserManualInputChange: (value: string) => void;
@@ -47,9 +54,9 @@ interface LiveWorkspacePanelProps {
 
 /** Central preview/code surface. Durable state and all privileged work stay in App callbacks. */
 export function LiveWorkspacePanel({
-  centreSurface, selectedProjectName, projectPreviewReady, hasSelectedProject, activeRunId,
-  browserSession, browserManualInput, browserControlBusy, previewUrl, previewRevision,
-  agentProjection, repairWorkspaceOpen, repairSession, repairBusy, canApplyRepair,
+  centreSurface, selectedProjectName, projectPreviewReady, hasSelectedProject, activeRunId, planningTrajectoryId, planningProjectId, planningBusy, coverageProgress,
+  browserSession, browserActionOverlay, browserManualInput, browserControlBusy, previewUrl, previewRevision,
+  agentProjection, displayedLoopEvents, repairWorkspaceOpen, repairSession, repairBusy, canApplyRepair,
   onCentreSurfaceChange, onOpenCodeWorkspace, onRefreshPreview,
   onBrowserManualInputChange, onTypeManualInput, onToggleBrowserControl, onLoadIssue,
   onInteract, onPressKey, onTypeText, onViewportChange, onOpenProjectConfig, onListFiles,
@@ -72,11 +79,16 @@ export function LiveWorkspacePanel({
     <header className="live-view-toolbar">
       <div className="live-view-window-dots" aria-hidden="true"><span /><span /><span /></div>
       <div className="centre-surface-switch" role="tablist" aria-label="中央工作区模式">
-        <button type="button" role="tab" aria-selected={centreSurface === "preview"} className={centreSurface === "preview" ? "active" : ""} onClick={() => onCentreSurfaceChange("preview")}>预览</button>
-        <button type="button" role="tab" aria-selected={centreSurface === "code"} className={centreSurface === "code" ? "active" : ""} onClick={onOpenCodeWorkspace}><Code2 size={14} />代码</button>
+        <button type="button" role="tab" aria-selected={centreSurface === "preview"} className={centreSurface === "preview" ? "active" : ""} onClick={() => onCentreSurfaceChange("preview")}>现场</button>
+        <button type="button" role="tab" aria-selected={centreSurface === "trajectory"} className={centreSurface === "trajectory" ? "active" : ""} onClick={() => onCentreSurfaceChange("trajectory")}><GitBranch size={14} aria-hidden />轨迹</button>
+        <button type="button" role="tab" aria-selected={centreSurface === "code"} className={centreSurface === "code" ? "active" : ""} onClick={onOpenCodeWorkspace}><Code2 size={14} aria-hidden />代码</button>
       </div>
-      <span className="live-view-mode">{centreSurface === "code" ? "项目代码（沙盒副本）" : projectPreviewReady || activeRunId ? "项目浏览器现场" : "沙盒测试现场"}</span>
-      {centreSurface === "preview" ? <code title={browserSession?.currentUrl ?? previewUrl}>{(browserSession?.currentUrl ?? previewUrl) || "尚未启动项目"}</code> : <code>{selectedProjectName || "未选择项目"}</code>}
+      <span className="live-view-mode">{centreSurface === "code" ? "项目代码（沙盒副本）" : centreSurface === "trajectory" ? activeRunId ? "测试运行轨迹" : planningTrajectoryId ? "规划模型轨迹" : "轨迹" : projectPreviewReady || activeRunId ? "项目浏览器现场" : "沙盒测试现场"}</span>
+      <span className="live-view-step" role="status" aria-live="polite">
+        <span className="live-view-step__dot" aria-hidden="true" />
+        {captureStatus()}
+      </span>
+      {centreSurface === "preview" ? <code title={browserSession?.currentUrl ?? previewUrl}>{(browserSession?.currentUrl ?? previewUrl) || "尚未启动项目"}</code> : centreSurface === "trajectory" ? <code>{activeRunId ?? planningTrajectoryId ?? "尚未开始规划"}</code> : <code>{selectedProjectName || "未选择项目"}</code>}
       {centreSurface === "preview" && !browserSession && projectPreviewReady && (
         <button type="button" onClick={onRefreshPreview} aria-label="刷新项目预览"><RefreshCw size={14} />刷新</button>
       )}
@@ -93,7 +105,20 @@ export function LiveWorkspacePanel({
         </div>
       ) : null}
     </header>
-    {centreSurface === "code" ? (
+    {activeRunId && coverageProgress ? <div className="live-run-coverage" role="status" aria-live="polite">
+      <strong>业务功能覆盖</strong>
+      <progress max={coverageProgress.total} value={coverageProgress.passed + coverageProgress.failed}>{coverageProgress.passed + coverageProgress.failed}/{coverageProgress.total}</progress>
+      <span>已验证 {coverageProgress.passed + coverageProgress.failed}/{coverageProgress.total}</span>
+      <span className="live-run-coverage__passed">通过 {coverageProgress.passed}</span>
+      {coverageProgress.failed ? <span className="live-run-coverage__failed">失败 {coverageProgress.failed}</span> : null}
+      {coverageProgress.blocked ? <span className="live-run-coverage__blocked">阻塞 {coverageProgress.blocked}</span> : null}
+      {coverageProgress.pending ? <span>待处理 {coverageProgress.pending}</span> : null}
+    </div> : null}
+    {centreSurface === "trajectory" ? (
+      <div className="live-view-content trajectory-workspace-view">
+        <TrajectoryPanel runId={activeRunId} planningId={activeRunId ? undefined : planningTrajectoryId} projectId={planningProjectId} pollPlanning={!activeRunId && Boolean(planningBusy)} loopEvents={displayedLoopEvents ?? []} />
+      </div>
+    ) : centreSurface === "code" ? (
       repairWorkspaceOpen && repairSession ? (
         <React.Suspense fallback={<div className="live-view-placeholder code-workspace-loading" role="status" aria-live="polite"><div className="live-view-dots"><span /><span /><span /></div><p>正在按需载入代码编辑器…</p></div>}>
           <RepairWorkspace
@@ -116,6 +141,7 @@ export function LiveWorkspacePanel({
           <SharedBrowserCanvas
             runId={activeRunId ?? undefined}
             session={browserSession}
+            actionOverlay={browserActionOverlay}
             fallbackUrl={projectPreviewReady ? previewUrl : undefined}
             refreshRevision={previewRevision}
             onLoadIssue={onLoadIssue}

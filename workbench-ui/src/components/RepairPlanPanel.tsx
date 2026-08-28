@@ -1,4 +1,5 @@
 import type { AssistantSuggestedAction, RepairPlanActionStatus, RepairPlanData } from "../types";
+import { coverageTechnicalRefs, userFacingCoverageText } from "../appPresentation";
 
 const OWNER_LABELS: Record<string, string> = {
   agent: "Agent（系统自动修复）",
@@ -63,6 +64,9 @@ export function RepairPlanPanel({
   const running = status?.state === "running";
   const resolved = data.status === "resolved" || data.status === "applied";
   const evidenceRefs = data.evidenceRefs ?? [];
+  const problem = userFacingCoverageText(data.problem);
+  const message = userFacingCoverageText(data.message);
+  const technicalRefs = coverageTechnicalRefs(`${data.problem ?? ""}\n${data.message ?? ""}`);
   return (
     <section className="repair-plan-panel" aria-label="修复方案">
       <header className="repair-plan-header">
@@ -74,14 +78,20 @@ export function RepairPlanPanel({
           </span>
         ) : null}
       </header>
-      {data.problem ? (
+      {problem ? (
         <p className="repair-plan-problem">
           <span className="repair-plan-label">问题</span>
-          {data.problem}
+          {problem}
         </p>
       ) : null}
-      {data.message ? (
-        <p className="repair-plan-message">{data.message}</p>
+      {technicalRefs.length ? (
+        <details className="repair-plan-technical">
+          <summary>技术标识（{technicalRefs.length}）</summary>
+          <ul>{technicalRefs.map((ref) => <li key={ref}><code>{ref}</code></li>)}</ul>
+        </details>
+      ) : null}
+      {message ? (
+        <p className="repair-plan-message">{message}</p>
       ) : null}
       {data.steps.length ? (
         <div className="repair-plan-steps">
@@ -105,8 +115,13 @@ export function RepairPlanPanel({
           <ul>
             {evidenceRefs.slice(0, 6).map((evidenceId) => (
               <li key={evidenceId}>
-                <button type="button" onClick={() => onOpenEvidence(evidenceId, data)}>
-                  {evidenceId}
+                <button
+                  type="button"
+                  title={evidenceId}
+                  aria-label={`打开证据 ${evidenceId}`}
+                  onClick={() => onOpenEvidence(evidenceId, data)}
+                >
+                  <span className="repair-plan-evidence-id">{evidenceId}</span>
                 </button>
               </li>
             ))}

@@ -1,15 +1,19 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { reliabilityAssetOutboxPayloadV1Schema, type ReliabilityAssetOutboxPayloadV1 } from "@ai-test-officer/contracts";
 import { getDatabasePool } from "./databaseRuntime.js";
 
-export type OutboxTopic = "run.execute" | "parent.aggregate";
+export type OutboxTopic = "run.execute" | "parent.aggregate" | "reliability.asset";
+
+export type RunOutboxPayload = { runId: string; version?: number; jobId: string };
+export type OutboxPayload = RunOutboxPayload | ReliabilityAssetOutboxPayloadV1;
 
 export interface OutboxJob {
   id: string;
   topic: OutboxTopic;
   aggregateId: string;
   idempotencyKey: string;
-  payload: { runId: string; version?: number; jobId: string };
+  payload: OutboxPayload;
   attempts: number;
 }
 
@@ -56,9 +60,10 @@ export async function insertOutboxInTransaction(
     topic: OutboxTopic;
     aggregateId: string;
     idempotencyKey: string;
-    payload: { runId: string; version?: number; jobId: string };
+    payload: OutboxPayload;
   }
 ) {
+  if (input.topic === "reliability.asset") reliabilityAssetOutboxPayloadV1Schema.parse(input.payload);
   await client.query(
     `INSERT INTO event_outbox_v1
        (id,topic,aggregate_id,idempotency_key,payload)
@@ -72,10 +77,11 @@ export async function recordOutboxJob(input: {
   topic: OutboxTopic;
   aggregateId: string;
   idempotencyKey: string;
-  payload: { runId: string; version?: number; jobId: string };
+  payload: OutboxPayload;
 }) {
   const database = pool();
   if (!database) return undefined;
+  if (input.topic === "reliability.asset") reliabilityAssetOutboxPayloadV1Schema.parse(input.payload);
   await ensureOutboxSchema(database);
   await database.query(
     `INSERT INTO event_outbox_v1

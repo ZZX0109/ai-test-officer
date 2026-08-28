@@ -1,5 +1,5 @@
 import type { Ref } from "react";
-import { Send } from "lucide-react";
+import { GitBranch, Send } from "lucide-react";
 import { BusinessFunctionList } from "./BusinessFunctionList";
 import { FeatureTestProgress } from "./FeatureTestProgress";
 import { KnowledgeBasis } from "./KnowledgeBasis";
@@ -47,6 +47,7 @@ interface PlanningConversationPanelProps {
   onContinuePlanning: () => void;
   onModifyPlan: () => void;
   onOpenRepairWorkspace: (runId?: string) => void;
+  onOpenTrajectory: () => void;
   onPlanningInputChange: (value: string) => void;
   onQuestionSelect: (question: string) => void;
   onSubmit: () => void;
@@ -65,6 +66,7 @@ export function PlanningConversationPanel({
   apiCredentialFeedbackRequired, onQuickScan, onExcludeFlow, onEditFlowTitle, onAddFlow,
   onLoadFunctions, onConfirmPlan, onGrantBrowserPermission, onBindProjectCredentials,
   onOpenCredentialSettings, onContinuePlanning, onModifyPlan, onOpenRepairWorkspace,
+  onOpenTrajectory,
   onPlanningInputChange, onQuestionSelect, onSubmit
 }: PlanningConversationPanelProps) {
   return (
@@ -76,6 +78,7 @@ export function PlanningConversationPanel({
         </div>
         <div className="planning-header-actions">
           {planningResult && <span>{planningResult.llmPlanning?.status === "passed" ? "AI 辅助规划" : planningResult.coverage.scope === "comprehensive" ? "全面灰度" : "定向测试"}</span>}
+          <button className="planning-trajectory-toggle" type="button" onClick={onOpenTrajectory} title="在右侧查看本次运行的统一轨迹"><GitBranch size={14} aria-hidden />轨迹</button>
           <button type="button" disabled={planningBusy || !hasSelectedProject} onClick={onQuickScan}>快速扫描（省 Token）</button>
         </div>
       </header>

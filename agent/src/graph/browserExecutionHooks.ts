@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   browserActionDecisionSchema,
+  browserActionResultSchema,
   llmBudgetSchema,
   type AgentGraphNode,
   type AgentInterrupt,
@@ -27,6 +28,7 @@ import { browserActionPolicy, executeBrowserAgentAction } from "../browser-agent
 import { appendBrowserDecision, readBrowserActionResults } from "../browser-agent/store.js";
 import { getProjectLoginSecret } from "../projectLoginStore.js";
 import { listCredentials } from "../credentialStore.js";
+import { getAgentSustainability } from "../agentSustainability.js";
 import { credentialInterruptDecision } from "../browser-agent/login.js";
 import { credentialInterruptMeta } from "./runtimeRecovery.js";
 import {
@@ -253,24 +255,45 @@ export function createBrowserExecutionHooks(input: { node: WrapNode }) {
         await updateCoverageDisposition({ runId: state.runId, coverageItemId: state.currentCoverageItemId, disposition: "executing", reason: `browser_action:${action.action}` });
       }
       const project = state.projectId ? await getProject(state.projectId) : undefined;
-      const result = await executeBrowserAgentAction({
-        action, oracles: decision.oracles,
-        userAuthorized: state.browserActionAuthorized === true || state.browserCredentialAuthorized === true,
-        resolveValue: async (valueRef) => {
-          if (valueRef.startsWith("testData.")) return `ato-${valueRef.slice("testData.".length).replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
-          if (valueRef.startsWith("credential.")) {
-            const secretId = project?.login?.credentialId;
-            if (!secretId) throw new Error("browser_credential_missing");
-            const secret = await getProjectLoginSecret(secretId);
-            if (!secret) throw new Error("browser_credential_missing");
-            const field = valueRef.slice("credential.".length).toLowerCase();
-            if (/user|email|account/.test(field)) return secret.username;
-            if (/pass/.test(field)) return secret.password;
-            throw new Error("browser_credential_field_not_allowed");
-          }
-          throw new Error("browser_value_ref_not_supported");
-        }
+      const userAuthorized = state.browserActionAuthorized === true || state.browserCredentialAuthorized === true;
+      const gateway = getAgentSustainability().tools;
+      const gatewayResult = await gateway.execute({
+        callId: `browser:${action.actionId}`,
+        capability: "browser.act",
+        runId: state.runId,
+        toolVersion: "1.0.0",
+        approved: true,
+        params: { runId: state.runId, action, oracles: decision.oracles, userAuthorized }
       });
+      let result: import("@ai-test-officer/contracts").BrowserActionResult | undefined;
+      if (gatewayResult.data && typeof gatewayResult.data === "object" && "resultId" in gatewayResult.data) {
+        result = browserActionResultSchema.parse(gatewayResult.data);
+      } else if (gatewayResult.errorCode !== "browser_action_unavailable" && !gatewayResult.success) {
+        throw new Error(gatewayResult.error?.message ?? gatewayResult.errorCode ?? "browser_gateway_failed");
+      }
+      if (!result) {
+        // Unit/CLI graph runners may not load the HTTP composition layer. Keep
+        // the direct executor only as a compatibility adapter in that case;
+        // production requests always take the gateway path above.
+        result = await executeBrowserAgentAction({
+          action, oracles: decision.oracles,
+          userAuthorized,
+          resolveValue: async (valueRef) => {
+            if (valueRef.startsWith("testData.")) return `ato-${valueRef.slice("testData.".length).replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+            if (valueRef.startsWith("credential.")) {
+              const secretId = project?.login?.credentialId;
+              if (!secretId) throw new Error("browser_credential_missing");
+              const secret = await getProjectLoginSecret(secretId);
+              if (!secret) throw new Error("browser_credential_missing");
+              const field = valueRef.slice("credential.".length).toLowerCase();
+              if (/user|email|account/.test(field)) return secret.username;
+              if (/pass/.test(field)) return secret.password;
+              throw new Error("browser_credential_field_not_allowed");
+            }
+            throw new Error("browser_value_ref_not_supported");
+          }
+        });
+      }
       return { browserActionResult: result, browserActionAuthorized: false };
     }),
     verifyBrowserAction: node("verify-browser-action", async (state) => {

@@ -1,12 +1,12 @@
 import { ListChecks, Pencil, X } from "lucide-react";
 import { FeatureTestReport } from "./FeatureTestReport";
+import { FeatureTestProgress } from "./FeatureTestProgress";
 import { ReviewCasePanel } from "./ReviewCasePanel";
 import { RunTimeline } from "./RunTimeline";
-import { TrajectoryPanel } from "./TrajectoryPanel";
 import type { AgentGraphProjection, PlanningConversationResult, ReviewCase, RunResult } from "../types";
 import type { WorkspaceState } from "../state/workspaceReducer";
 
-type RunViewMode = "dialogue" | "trajectory" | "report";
+type RunViewMode = "dialogue" | "report";
 
 interface ExecutionTimelinePanelProps {
   workspaceState: WorkspaceState;
@@ -22,6 +22,7 @@ interface ExecutionTimelinePanelProps {
   displayedLoopEvents: RunResult["loopEvents"] | undefined;
   onGenerateOrCancel: () => void;
   onOpenRepairWorkspace: () => void;
+  onOpenTrajectory: () => void;
   onRunViewModeChange: (mode: RunViewMode) => void;
 }
 
@@ -29,9 +30,19 @@ interface ExecutionTimelinePanelProps {
 export function ExecutionTimelinePanel({
   workspaceState, canGenerate, activeRunId, latestDecision, repairBusy, agentProjection,
   reviewCase, runViewMode, result, planningResult, displayedLoopEvents,
-  onGenerateOrCancel, onOpenRepairWorkspace, onRunViewModeChange
+  onGenerateOrCancel, onOpenRepairWorkspace, onOpenTrajectory, onRunViewModeChange
 }: ExecutionTimelinePanelProps) {
   const generationActive = workspaceState.phase === "generating";
+  const allFlows = planningResult?.businessFlows ?? [];
+  const flowsById = new Map(allFlows.map((flow) => [flow.id, flow]));
+  const functionFlows = (planningResult?.businessFunctions ?? []).flatMap((feature) => feature.pathIds.flatMap((pathId) => {
+    const flow = flowsById.get(pathId);
+    return flow ? [{ ...flow, title: feature.pathIds.length === 1 ? feature.name : `${feature.name} · ${flow.title}` }] : [];
+  }));
+  const presentationFlows = functionFlows.length
+    ? [...new Map(functionFlows.map((flow) => [flow.id, flow])).values()]
+    : allFlows;
+  const runActive = Boolean(activeRunId && !result) || agentProjection?.status === "running";
   return <section className="timeline-stage">
     <div className="section-title-row">
       <div>
@@ -62,16 +73,22 @@ export function ExecutionTimelinePanel({
       {agentProjection.recoveryDecision ? <span>恢复：{agentProjection.recoveryDecision.action}</span> : null}
       {agentProjection.recoveryResult?.userMessage ? <span>{agentProjection.recoveryResult.userMessage}</span> : null}
     </div> : null}
+    {activeRunId && presentationFlows.length ? <FeatureTestProgress
+      flows={presentationFlows}
+      conclusions={result?.conclusions ?? []}
+      coverageItems={result?.coverageItems ?? []}
+      runActive={runActive}
+      onRepair={() => onOpenRepairWorkspace()}
+    /> : null}
     <ReviewCasePanel reviewCase={reviewCase} />
     <div className="run-view-toggle" role="tablist" aria-label="运行视图模式">
-      {(["dialogue", "trajectory", "report"] as const).map((mode) => (
+      {(["dialogue", "report"] as const).map((mode) => (
         <button key={mode} type="button" role="tab" aria-selected={runViewMode === mode} className={`run-view-toggle__btn${runViewMode === mode ? " is-active" : ""}`} onClick={() => onRunViewModeChange(mode)}>
-          {mode === "dialogue" ? "对话" : mode === "trajectory" ? "轨迹" : "报告"}
+          {mode === "dialogue" ? "对话" : "报告"}
         </button>
       ))}
     </div>
     {runViewMode === "dialogue" ? <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
-      : runViewMode === "trajectory" ? <TrajectoryPanel runId={activeRunId} loopEvents={displayedLoopEvents ?? []} />
-        : <FeatureTestReport flows={planningResult?.businessFlows ?? []} conclusions={result?.conclusions ?? []} onViewTrajectory={() => onRunViewModeChange("trajectory")} />}
+      : <FeatureTestReport flows={presentationFlows} conclusions={result?.conclusions ?? []} coverageItems={result?.coverageItems ?? []} onViewTrajectory={onOpenTrajectory} />}
   </section>;
 }

@@ -132,7 +132,7 @@ export async function chooseLlmRecoveryDecision(input: {
       maxTokens: 700,
       timeoutMs: 20_000,
       totalTimeoutMs: 30_000,
-      transportPreference: "non-stream-retry",
+      transportPreference: "auto",
       jsonSchema: { name: "recovery_decision", schema: outputJsonSchema },
       context: { purpose: "triage", runId: input.baseline.runId, projectDigest: input.projectId },
       knowledgeContext,

@@ -28,7 +28,8 @@ import {
   persistKnowledgeContext,
   persistKnowledgeDecision
 } from "./store.js";
-import { executeKnowledgeReadTool } from "./toolBroker.js";
+import { executeKnowledgeToolThroughGateway, getToolGateway, type ToolCapability, type ToolResult } from "../tool-gateway/toolGateway.js";
+import type { LlmConversationMessage, LlmTransportToolDefinition } from "../llmTransport.js";
 import { publishKnowledgeLifecycle } from "./lifecycle.js";
 import {
   applySupersedingClaims,
@@ -51,7 +52,16 @@ type KnowledgeBoundedInput<T> = ExecuteLlmCallInput & {
   parseOutput: (text: string) => T;
   extractKnowledge?: (value: T) => unknown;
   maxToolRounds?: number;
+  toolTimeoutMs?: number;
+  nativeTools?: LlmTransportToolDefinition[];
 };
+
+function nativeToolArguments(value: string) {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch { return undefined; }
+}
 
 function boundaryRepairPrompt(input: {
   originalPrompt: string;
@@ -182,6 +192,7 @@ export async function executeKnowledgeBoundedLlm<T>(
   let semanticRepairUsed = false;
   let toolRound = 0;
   let lastText = "";
+  let nativeMessages: LlmConversationMessage[] = [];
 
   for (;;) {
     let response: Awaited<ReturnType<typeof executeLlmCall>>;
@@ -196,7 +207,8 @@ export async function executeKnowledgeBoundedLlm<T>(
           boundaryPolicyVersion: KNOWLEDGE_BOUNDARY_POLICY_VERSION,
           knowledgeValidationStatus: "pending"
         },
-        countLogicalCall: calls.length === 0 ? input.countLogicalCall : false
+        countLogicalCall: calls.length === 0 ? input.countLogicalCall : false,
+        ...(input.nativeTools?.length ? { tools: input.nativeTools, messages: nativeMessages.length ? nativeMessages : undefined } : {})
       });
     } catch (error) {
       const failedCall = llmCallSchema.safeParse(
@@ -221,6 +233,67 @@ export async function executeKnowledgeBoundedLlm<T>(
     }
     calls.push(response.call);
     lastText = response.text;
+
+    // Native provider tool calls are normalized by llmProvider and are still
+    // executed exclusively through ToolGateway. The following model turn
+    // receives structured tool results, then must produce the normal bounded
+    // JSON envelope before this function can return.
+    if (response.toolCalls?.length && input.nativeTools?.length) {
+      const gateway = getToolGateway();
+      const roundResults: ToolResult[] = [];
+      for (const proposed of response.toolCalls) {
+        const parsed = nativeToolArguments(proposed.arguments);
+        const definition = gateway.getRegistry().getDefinition(proposed.name);
+        const allowed = input.nativeTools.some((tool) => tool.name === proposed.name);
+        if (!parsed || !definition || !allowed) {
+          roundResults.push({
+            callId: proposed.callId,
+            success: false,
+            status: "failed",
+            nextState: "blocked",
+            errorCode: !parsed ? "invalid_tool_arguments" : "native_tool_not_allowed",
+            error: { code: !parsed ? "invalid_tool_arguments" : "native_tool_not_allowed", message: !parsed ? "Native tool arguments must be a JSON object." : `Tool ${proposed.name} is not allowed for this call.` },
+            cacheHit: false,
+            durationMs: 0
+          });
+          continue;
+        }
+        roundResults.push(await gateway.execute({
+          callId: proposed.callId,
+          capability: proposed.name as ToolCapability,
+          params: parsed,
+          runId: context.runId ?? "unassigned",
+          traceId: response.call.id,
+          toolVersion: definition.version,
+          approved: definition.approvalRequired ? false : true,
+          idempotencyKey: `native-tool:${proposed.callId}`,
+          timeoutMs: input.toolTimeoutMs,
+          signal: input.signal
+        }));
+      }
+      const previousMessages = nativeMessages.length ? nativeMessages : [{ role: "user" as const, content: input.prompt }];
+      nativeMessages = [
+        ...previousMessages,
+        { role: "assistant" as const, content: response.text, toolCalls: response.toolCalls },
+        ...roundResults.map((result) => ({ role: "tool" as const, toolCallId: result.callId, content: JSON.stringify(result) }))
+      ];
+      if (roundResults.some((result) => result.status === "needs-confirmation" || !result.success && result.errorCode === "native_tool_not_allowed")) {
+        const decision = await persistKnowledgeDecision({
+          runId: context.runId,
+          contextId: context.id!,
+          invocationId: response.call.id,
+          output: emptyKnowledgeBoundaryOutput(),
+          validationStatus: "rejected",
+          validationErrors: roundResults.filter((result) => !result.success).map((result) => result.errorCode ?? "native_tool_failed"),
+          toolExecutionIds: toolExecutions.map((item) => item.id),
+          policyVersion: KNOWLEDGE_BOUNDARY_POLICY_VERSION
+        });
+        throw Object.assign(new Error("native_tool_execution_blocked"), { llmCall: enrichedCall(response.call, context.id!, decision, decision.toolExecutionIds), llmCalls: calls, knowledgeDecision: decision });
+      }
+      if (toolRound >= maxToolRounds) throw Object.assign(new Error("native_tool_round_limit_exceeded"), { llmCall: response.call, llmCalls: calls });
+      toolRound += 1;
+      continue;
+    }
 
     let value: T;
     let boundary: KnowledgeBoundaryOutput;
@@ -262,7 +335,7 @@ export async function executeKnowledgeBoundedLlm<T>(
     if (boundary.toolRequests.length > 0 && toolRound < maxToolRounds) {
       const results = [];
       for (const request of boundary.toolRequests) {
-        const result = await executeKnowledgeReadTool({ context, request });
+        const result = await executeKnowledgeToolThroughGateway({ context, request, traceId: response.call.id });
         toolExecutions.push(result.execution);
         results.push({
           executionId: result.execution.id,

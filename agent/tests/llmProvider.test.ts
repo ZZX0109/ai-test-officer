@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { executeLlmCall, parseResponsesStream } from "../src/llmProvider.js";
+import { parseLlmStream } from "../src/llmTransport.js";
 import type { CredentialRecord } from "../src/types.js";
 
 function stream(events: unknown[]) {
@@ -119,6 +120,22 @@ export async function testLlmProviderResponsesTransport() {
     assert.deepEqual(direct.call.transportAttempts?.map((item) => item.mode), ["non-stream"]);
     assert.equal(requests, 1);
 
+    // A successful call bound to a Run must stay successful after lifecycle
+    // telemetry is emitted. This catches regressions where a retry-only event
+    // references variables that exist only in the failure branch and turns a
+    // real browser-action call into a false provider failure.
+    requests = 0;
+    globalThis.fetch = (async () => {
+      requests += 1;
+      return jsonResponse({ id: "response-run-bound", model: "gpt-5.1-codex", output_text: '{"status":"act"}', usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } });
+    }) as typeof fetch;
+    const runBound = await executeLlmCall({
+      credential, apiKey: "test-only", prompt: "{}", system: "json", maxTokens: 64, timeoutMs: 2_000, totalTimeoutMs: 8_000,
+      transportPreference: "non-stream", context: { purpose: "browser-action", runId: `run-bound-${Date.now()}`, experimentId: "provider-unit-test" }
+    });
+    assert.equal(runBound.call.status, "passed");
+    assert.equal(requests, 1);
+
     requests = 0;
     globalThis.fetch = (async () => {
       requests += 1;
@@ -210,6 +227,135 @@ export async function testLlmProviderResponsesTransport() {
         throw error;
       }
     }, /provider_responses_invalid_json/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+export async function testLlmProviderChatAndAnthropicStreaming() {
+  const originalFetch = globalThis.fetch;
+  const credential = {
+    id: "credential-chat-stream", name: "chat", provider: "openai", baseUrl: "https://provider.invalid/v1",
+    model: "gpt-test", apiKeyEncrypted: "unused", tags: [], isDefault: false, createdAt: new Date().toISOString()
+  } as CredentialRecord;
+  const events = [
+    { id: "chat-1", choices: [{ delta: { content: "你" }, finish_reason: null }] },
+    { id: "chat-1", choices: [{ delta: { content: "好" }, finish_reason: null }] },
+    { id: "chat-1", choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }
+  ];
+  let requestBody: Record<string, unknown> | undefined;
+  const emitted: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    requestBody = JSON.parse(String(init?.body));
+    return stream([...events, "[DONE]"]);
+  }) as typeof fetch;
+  try {
+    const result = await executeLlmCall({
+      credential, apiKey: "test-only", prompt: "say hi", system: "respond", maxTokens: 64,
+      transportPreference: "stream", onStreamEvent: (event) => { if (event.type === "text_delta") emitted.push(event.text); },
+      context: { purpose: "assistant", experimentId: "chat-stream-test" }
+    });
+    assert.equal(requestBody?.stream, true);
+    assert.deepEqual(requestBody?.stream_options, { include_usage: true });
+    assert.equal(result.text, "你好");
+    assert.deepEqual(emitted, ["你", "好"]);
+    assert.equal(result.call.usage.totalTokens, 5);
+
+    // `auto` is the production default: ordinary Chat Completions must start
+    // as SSE and only fall back when the provider rejects/incompletes it.
+    requestBody = undefined;
+    const defaultStream = await executeLlmCall({
+      credential, apiKey: "test-only", prompt: "say hi", system: "respond", maxTokens: 64,
+      context: { purpose: "assistant", experimentId: "chat-stream-default-test" }
+    });
+    assert.equal(requestBody?.stream, true);
+    assert.equal(defaultStream.text, "你好");
+
+    // Stream and non-stream transports must expose the same normalized final
+    // result, including native tool calls. This is the contract the caller
+    // consumes; provider framing is an implementation detail.
+    const consistencyStream = [
+      { id: "same-result", choices: [{ delta: { content: "ok", tool_calls: [{ index: 0, id: "same-call", function: { name: "assert.evaluate", arguments: '{"actual":' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "true}" } }] } }] },
+      { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 } }
+    ];
+    const consistencyJson = {
+      id: "same-result", model: "gpt-test",
+      choices: [{ message: { content: "ok", tool_calls: [{ id: "same-call", type: "function", function: { name: "assert.evaluate", arguments: '{"actual":true}' } }] } }],
+      usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 }
+    };
+    globalThis.fetch = (async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      return body.stream ? stream([...consistencyStream, "[DONE]"]) : jsonResponse(consistencyJson);
+    }) as typeof fetch;
+    const streamedFinal = await executeLlmCall({
+      credential, apiKey: "test-only", prompt: "call a tool", system: "respond", maxTokens: 64,
+      transportPreference: "stream", tools: [{ name: "assert.evaluate", inputSchema: { type: "object" } }],
+      context: { purpose: "assistant", experimentId: "stream-final-consistency" }
+    });
+    const nonStreamFinal = await executeLlmCall({
+      credential, apiKey: "test-only", prompt: "call a tool", system: "respond", maxTokens: 64,
+      transportPreference: "non-stream", tools: [{ name: "assert.evaluate", inputSchema: { type: "object" } }],
+      context: { purpose: "assistant", experimentId: "non-stream-final-consistency" }
+    });
+    assert.deepEqual(
+      { text: streamedFinal.text, toolCalls: streamedFinal.toolCalls },
+      { text: nonStreamFinal.text, toolCalls: nonStreamFinal.toolCalls }
+    );
+
+    const chatToolEvents = [
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", function: { name: "assert.evaluate", arguments: '{"actual":' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '1,"operator":"truthy"}' } }] } }] }
+    ];
+    const parsedChatTools = await parseLlmStream(stream([...chatToolEvents, "[DONE]"]), "chat-completions");
+    assert.equal(parsedChatTools.toolCalls[0]?.name, "assert.evaluate");
+    assert.equal(parsedChatTools.toolCalls[0]?.arguments, '{"actual":1,"operator":"truthy"}');
+
+    const anthropicEvents = [
+      { type: "message_start", message: { id: "msg-1", model: "claude-test" } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hello" } },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { input_tokens: 2, output_tokens: 1 } },
+      { type: "message_stop" }
+    ];
+    const parsed = await parseLlmStream(stream(anthropicEvents), "anthropic");
+    assert.equal(parsed.text, "hello");
+    assert.equal(parsed.usage?.totalTokens, 3);
+    const parsedAnthropicTool = await parseLlmStream(stream([
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "anthropic-call", name: "assert.evaluate", input: {} } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"actual":true}' } },
+      { type: "message_stop" }
+    ]), "anthropic");
+    assert.equal(parsedAnthropicTool.toolCalls[0]?.callId, "anthropic-call");
+    const parsedResponsesTool = await parseLlmStream(stream([
+      { type: "response.output_item.added", item: { type: "function_call", id: "resp-item", call_id: "resp-call", name: "assert.evaluate", arguments: "" } },
+      { type: "response.function_call_arguments.delta", item_id: "resp-item", delta: '{"actual":true}' },
+      { type: "response.completed", response: { id: "resp-1", model: "gpt-codex", status: "completed" } }
+    ]), "responses");
+    assert.equal(parsedResponsesTool.toolCalls[0]?.callId, "resp-call");
+    assert.equal(parsedResponsesTool.toolCalls[0]?.arguments, '{"actual":true}');
+    const parsedResponsesDoneTool = await parseLlmStream(stream([
+      { type: "response.output_item.done", item: { type: "function_call", id: "resp-done-item", call_id: "resp-done-call", name: "assert.evaluate", arguments: '{"actual":true}' } },
+      { type: "response.completed", response: { id: "resp-done", model: "gpt-codex", status: "completed" } }
+    ]), "responses");
+    assert.equal(parsedResponsesDoneTool.toolCalls[0]?.callId, "resp-done-call");
+    assert.equal(parsedResponsesDoneTool.toolCalls[0]?.arguments, '{"actual":true}');
+
+    const cancellation = new AbortController();
+    let cancellationRequests = 0;
+    globalThis.fetch = (async (_url, init) => {
+      cancellationRequests += 1;
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("AbortError")), { once: true });
+      });
+    }) as typeof fetch;
+    const pendingCancellation = executeLlmCall({
+      credential, apiKey: "test-only", prompt: "cancel", system: "respond", maxTokens: 64,
+      signal: cancellation.signal, context: { purpose: "assistant", experimentId: "llm-cancellation" }
+    });
+    setTimeout(() => cancellation.abort(), 5);
+    await assert.rejects(pendingCancellation, /llm_cancelled/);
+    assert.equal(cancellationRequests, 1, "caller cancellation must not trigger provider retries");
   } finally {
     globalThis.fetch = originalFetch;
   }

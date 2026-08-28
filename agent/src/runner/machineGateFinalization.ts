@@ -31,6 +31,9 @@ export function finalizeMachineGate(input: {
   riskCoverageMatrix: RiskCoverageMatrix;
   network: VisualRunResult["network"];
   judgeReport: JudgeInput;
+  /** V2 Oracle governance is an additional fail-closed gate. */
+  oracleStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
+  oracleReasons?: string[];
 }) {
   const qualityReasons = input.evidenceQuality.assertions
     .filter((item) => item.passed && item.status !== "grounded")
@@ -60,15 +63,19 @@ export function finalizeMachineGate(input: {
       ? "blocked" as const
       : environmentFailures.length > 0
         ? "blocked" as const
-      : input.executionError
-        ? "needs-human-review" as const
-        : input.failed
-          ? "fail" as const
-          : qualityReasons.length || uncoveredRequirementRisks.length
+        : input.oracleStatus === "blocked"
+          ? "blocked" as const
+          : input.executionError
             ? "needs-human-review" as const
-            : input.attempts.length > 1
-              ? "needs-human-review" as const
-              : "pass" as const;
+            : input.oracleStatus === "fail" || input.failed
+              ? "fail" as const
+              : input.oracleStatus === "needs-human-review"
+                ? "needs-human-review" as const
+                : qualityReasons.length || uncoveredRequirementRisks.length
+                  ? "needs-human-review" as const
+                  : input.attempts.length > 1
+                    ? "needs-human-review" as const
+                    : "pass" as const;
   const machineGateEvidenceRefs = input.evidence
     .filter((item) => item.type === "assertion" || item.artifactIds?.some((id) =>
       artifactGate.rejectedArtifactIds.includes(id) || artifactGate.eligibleArtifactIds.includes(id)
@@ -88,14 +95,16 @@ export function finalizeMachineGate(input: {
       ...(input.executionError ? [`execution_error:${input.executionError.code}:${input.executionError.stepId ?? "unknown"}`] : []),
       ...environmentReasons,
       ...qualityReasons,
-      ...uncoveredRequirementRisks
+      ...uncoveredRequirementRisks,
+      ...(input.oracleReasons ?? []).map((reason) => `oracle:${reason}`)
     ],
     reasonDetails: [
       ...artifactGate.reasons,
       ...(input.executionError ? [`execution_error:${input.executionError.code}:${input.executionError.stepId ?? "unknown"}`] : []),
       ...environmentReasons,
       ...qualityReasons,
-      ...uncoveredRequirementRisks
+      ...uncoveredRequirementRisks,
+      ...(input.oracleReasons ?? []).map((reason) => `oracle:${reason}`)
     ].map((reason) => ({
       code: reason.split(":")[0] || "machine_gate_reason",
       summary: reason,

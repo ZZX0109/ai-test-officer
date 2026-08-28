@@ -26,6 +26,7 @@ import { writeProjectHistoryCache } from "../projectHistoryCache";
 import { upsertAssistantProgress } from "../workbenchLogic";
 import type {
   AgentGraphProjection,
+  BrowserActionOverlay,
   BrowserSession,
   LiveRunState,
   PlanningMessage,
@@ -77,6 +78,7 @@ interface WorkbenchLifecycleEffectsInput {
   setProjectDiagnosis: Dispatch<SetStateAction<ProjectDiagnosis | null>>;
   setPlanningMessages: Dispatch<SetStateAction<PlanningMessage[]>>;
   setBrowserSession: Dispatch<SetStateAction<BrowserSession | null>>;
+  setBrowserActionOverlay: Dispatch<SetStateAction<BrowserActionOverlay | null>>;
   setBrowserFrameRevision: Dispatch<SetStateAction<number>>;
   setAgentProjection: Dispatch<SetStateAction<AgentGraphProjection | null>>;
   setInterruptError: Dispatch<SetStateAction<string | null>>;
@@ -87,7 +89,7 @@ interface WorkbenchLifecycleEffectsInput {
   setResult: Dispatch<SetStateAction<RunResult | null>>;
   setAutomationFailures: Dispatch<SetStateAction<AutomationFailure[]>>;
   setPlanningAutomation: Dispatch<SetStateAction<PlanningAutomationPresentation>>;
-  setCentreSurface: Dispatch<SetStateAction<"preview" | "code">>;
+  setCentreSurface: Dispatch<SetStateAction<"preview" | "trajectory" | "code">>;
   setPlanningSummaryCollapsed: Dispatch<SetStateAction<boolean>>;
 }
 
@@ -217,11 +219,63 @@ export function useWorkbenchLifecycleEffects(input: WorkbenchLifecycleEffectsInp
       .catch(() => input.hydratedAgentThreads.current.delete(runId));
   }, [input.activeRunId]);
 
+  // An action marker describes a single Playwright session. Never carry its
+  // coordinates into a different Run, where the same location could point at
+  // an unrelated control.
+  useEffect(() => {
+    input.setBrowserActionOverlay(null);
+  }, [input.activeRunId]);
+
   useEffect(() => {
     if (!input.activeRunId) return;
     const runId = input.activeRunId;
     return subscribeRunEvents(runId, ({ id, type, payload }) => {
       if (type.startsWith("browser.")) {
+        if (type === "browser.action.started") {
+          const event = payload as {
+            actionId?: unknown;
+            action?: unknown;
+            purpose?: unknown;
+            target?: {
+              label?: unknown;
+              boundingBox?: { x?: unknown; y?: unknown; width?: unknown; height?: unknown };
+              viewport?: { width?: unknown; height?: unknown };
+            };
+          };
+          const boundingBox = event.target?.boundingBox;
+          const viewport = event.target?.viewport;
+          const hasTarget = [boundingBox?.x, boundingBox?.y, boundingBox?.width, boundingBox?.height, viewport?.width, viewport?.height]
+            .every((value) => typeof value === "number" && Number.isFinite(value));
+          if (typeof event.actionId === "string" && typeof event.action === "string") {
+            input.setBrowserActionOverlay({
+              actionId: event.actionId,
+              action: event.action,
+              purpose: typeof event.purpose === "string" ? event.purpose : undefined,
+              status: "running",
+              ...(hasTarget && boundingBox && viewport ? {
+                target: {
+                  label: typeof event.target?.label === "string" ? event.target.label : undefined,
+                  boundingBox: {
+                    x: boundingBox.x as number,
+                    y: boundingBox.y as number,
+                    width: boundingBox.width as number,
+                    height: boundingBox.height as number
+                  },
+                  viewport: { width: viewport.width as number, height: viewport.height as number }
+                }
+              } : {})
+            });
+          }
+        }
+        if (type === "browser.action.completed" || type === "browser.action.failed") {
+          const event = payload as { actionId?: unknown };
+          if (typeof event.actionId === "string") {
+            input.setBrowserActionOverlay((current) => {
+              if (!current || current.actionId !== event.actionId) return current;
+              return { ...current, status: type === "browser.action.completed" ? "completed" : "failed" };
+            });
+          }
+        }
         if (type.startsWith("browser.session.") || type === "browser.control.changed") {
           const candidate = payload as unknown as BrowserSession;
           if (candidate?.runId === runId && candidate?.sessionId) input.setBrowserSession(candidate);

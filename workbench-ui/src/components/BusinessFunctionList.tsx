@@ -12,12 +12,14 @@ export function BusinessFunctionList(props: {
   nextCursor?: string;
   loading?: boolean;
   onLoadMore?: () => void;
+  /** The planning sidebar already has its own heading, so it needs denser cards. */
+  compact?: boolean;
 }) {
-  return <section className="business-function-list" aria-label="业务功能清单">
-    <div className="business-function-list__summary">
+  return <section className={`business-function-list${props.compact ? " business-function-list--compact" : ""}`} aria-label="业务功能清单">
+    {!props.compact ? <div className="business-function-list__summary">
       <strong>{props.total ?? props.functions.length} 个业务功能</strong>
       <span>Agent 会在内部为每个功能选择页面、接口和数据测试路径</span>
-    </div>
+    </div> : null}
     {props.functions.map((feature) => <BusinessFunctionCard key={feature.id} feature={feature} />)}
     {props.nextCursor && props.onLoadMore ? <button className="business-function-load-more" type="button" disabled={props.loading} onClick={props.onLoadMore}>
       {props.loading ? "正在加载业务功能…" : `继续查看（还剩 ${Math.max(0, (props.total ?? props.functions.length) - props.functions.length)} 个）`}

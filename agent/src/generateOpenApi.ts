@@ -23,7 +23,16 @@ import {
   proofEdgeSchema,
   repairExportSchema,
   repairSessionSchema,
-  runEventSchema
+  runEventSchema,
+  applyTestAssetRequestV1Schema,
+  createTestAssetRequestV1Schema,
+  differentialRunRequestV1Schema,
+  differentialRunV1Schema,
+  reliabilityAssetContextV1Schema,
+  testAssetV1Schema,
+  validateTestAssetRequestV1Schema,
+  trajectoryEventSchema,
+  trajectoryViewModelSchema
 } from "@ai-test-officer/contracts";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
@@ -51,6 +60,15 @@ const BrowserSession = registry.register("BrowserSession", browserSessionSchema)
 const BrowserObservation = registry.register("BrowserObservation", browserObservationSchema);
 const BrowserActionDecision = registry.register("BrowserActionDecision", browserActionDecisionSchema);
 const BrowserActionResult = registry.register("BrowserActionResult", browserActionResultSchema);
+const DifferentialRun = registry.register("DifferentialRunV1", differentialRunV1Schema);
+const DifferentialRunRequest = registry.register("DifferentialRunRequestV1", differentialRunRequestV1Schema);
+const ReliabilityAssetContext = registry.register("ReliabilityAssetContextV1", reliabilityAssetContextV1Schema);
+const TestAsset = registry.register("TestAssetV1", testAssetV1Schema);
+const CreateTestAssetRequest = registry.register("CreateTestAssetRequestV1", createTestAssetRequestV1Schema);
+const ValidateTestAssetRequest = registry.register("ValidateTestAssetRequestV1", validateTestAssetRequestV1Schema);
+const ApplyTestAssetRequest = registry.register("ApplyTestAssetRequestV1", applyTestAssetRequestV1Schema);
+const TrajectoryEvent = registry.register("TrajectoryEvent", trajectoryEventSchema);
+const TrajectoryView = registry.register("TrajectoryViewModel", trajectoryViewModelSchema);
 registry.registerPath({ method: "post", path: "/v1/runs", request: { body: { content: { "application/json": { schema: CreateRun } } } }, responses: { 201: { description: "Created", content: { "application/json": { schema: z.object({ run: Run }) } } }, 400: { description: "Invalid request", content: { "application/json": { schema: ApiError } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Run", content: { "application/json": { schema: z.object({ run: Run }) } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/agent", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Agent graph projection", content: { "application/json": { schema: z.object({ agent: AgentGraphProjection.nullable() }) } } } } });
@@ -60,6 +78,12 @@ registry.registerPath({ method: "get", path: "/v1/runs/{id}/browser-actions", re
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/browser-live", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Length-prefixed live Playwright compositor stream", content: { "application/x-ai-test-officer-browser-stream": { schema: z.string() } } } } });
 registry.registerPath({ method: "post", path: "/v1/runs/{id}/browser-control/acquire", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Acquire the shared browser for user input", content: { "application/json": { schema: z.object({ session: BrowserSession }) } } } } });
 registry.registerPath({ method: "post", path: "/v1/runs/{id}/browser-control/release", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Return the shared browser to the Agent", content: { "application/json": { schema: z.object({ session: BrowserSession }) } } } } });
+registry.registerPath({
+  method: "get",
+  path: "/v1/reliability-assets/context",
+  request: { query: z.object({ projectId: z.string(), sourceRunId: z.string().optional() }) },
+  responses: { 200: { description: "Project-scoped reliability asset context", content: { "application/json": { schema: z.object({ context: ReliabilityAssetContext }) } } } }
+});
 registry.registerPath({
   method: "post",
   path: "/v1/runs/{id}/browser-viewport",
@@ -90,6 +114,21 @@ registry.registerPath({
 });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/coverage", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Coverage disposition", content: { "application/json": { schema: z.object({ coverage: z.array(CoverageItem), complete: z.boolean() }) } } } } });
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/llm-calls", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Versioned LLM invocations", content: { "application/json": { schema: z.object({ calls: z.array(LlmInvocation) }) } } } } });
+registry.registerPath({
+  method: "get",
+  path: "/v1/runs/{id}/trajectory",
+  request: {
+    params: z.object({ id: z.string() }),
+    query: z.object({ scope: z.enum(["run", "tree"]).optional(), afterSeq: z.number().int().nonnegative().optional(), beforeSeq: z.number().int().positive().optional(), afterRootSeq: z.number().int().nonnegative().optional(), beforeRootSeq: z.number().int().positive().optional(), limit: z.number().int().min(1).max(1_000).optional() })
+  },
+  responses: { 200: { description: "Append-only run trajectory page and projected view", content: { "application/json": { schema: z.object({ runId: z.string(), scope: z.enum(["run", "tree"]), rootRunId: z.string().optional(), view: TrajectoryView, events: z.array(TrajectoryEvent), page: z.record(z.unknown()) }) } } } }
+});
+registry.registerPath({
+  method: "get",
+  path: "/v1/runs/{id}/trajectory/stream",
+  request: { params: z.object({ id: z.string() }), query: z.object({ scope: z.enum(["run", "tree"]).optional(), afterSeq: z.number().int().nonnegative().optional(), afterRootSeq: z.number().int().nonnegative().optional() }) },
+  responses: { 200: { description: "SSE trajectory stream; reconnect with Last-Event-ID or Last-Event-Root-Seq", content: { "text/event-stream": { schema: z.string() } } } }
+});
 registry.registerPath({ method: "get", path: "/v1/runs/{id}/conclusions", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "Verified conclusions", content: { "application/json": { schema: z.object({ conclusions: z.array(Conclusion) }) } } } } });
 registry.registerPath({
   method: "get",
@@ -256,6 +295,53 @@ registry.registerPath({
     body: { content: { "application/json": { schema: z.object({ confirm: z.literal(true), confirmHighRisk: z.boolean().optional() }) } } }
   },
   responses: { 200: { description: "Applied repair", content: { "application/json": { schema: z.object({ repair: RepairSession }) } } } }
+});
+registry.registerPath({
+  method: "post",
+  path: "/v1/differential-runs",
+  request: { body: { content: { "application/json": { schema: DifferentialRunRequest } } } },
+  responses: {
+    202: { description: "Queued Base/Head differential run", content: { "application/json": { schema: z.object({ differentialRun: DifferentialRun }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ApiError } } }
+  }
+});
+registry.registerPath({
+  method: "get",
+  path: "/v1/differential-runs/{id}",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: { description: "Differential run with Pair Manifest, parent Run, and both sides", content: { "application/json": { schema: z.object({ differentialRun: DifferentialRun, parentRun: z.record(z.unknown()).optional() }) } } } }
+});
+registry.registerPath({
+  method: "post",
+  path: "/v1/runs/{runId}/test-assets",
+  request: { params: z.object({ runId: z.string() }), body: { content: { "application/json": { schema: CreateTestAssetRequest } } } },
+  responses: { 201: { description: "Generated TypeScript test asset candidate", content: { "application/json": { schema: z.object({ asset: TestAsset }) } } } }
+});
+registry.registerPath({
+  method: "get",
+  path: "/v1/test-assets/{id}",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    200: {
+      description: "Test asset, Oracle sources, and safe Patch preview",
+      content: { "application/json": { schema: z.object({ asset: TestAsset, oracleSpecs: z.array(z.record(z.unknown())), target: z.object({ clean: z.boolean(), status: z.string(), repositorySha256: z.string(), patch: z.string(), patchSha256: z.string() }) }) } }
+    }
+  }
+});
+registry.registerPath({
+  method: "post",
+  path: "/v1/test-assets/{id}/validate",
+  request: { params: z.object({ id: z.string() }), body: { content: { "application/json": { schema: ValidateTestAssetRequest } } } },
+  responses: { 200: { description: "Three-repeat and Mutation validation result", content: { "application/json": { schema: z.object({ asset: TestAsset }) } } } }
+});
+registry.registerPath({
+  method: "post",
+  path: "/v1/test-assets/{id}/apply",
+  request: { params: z.object({ id: z.string() }), body: { content: { "application/json": { schema: ApplyTestAssetRequest } } } },
+  responses: {
+    200: { description: "Applied on a new local Git branch without commit or push" },
+    409: { description: "Dirty worktree or source changed", content: { "application/json": { schema: ApiError } } }
+  }
 });
 const document = new OpenApiGeneratorV3(registry.definitions).generateDocument({ openapi: "3.0.3", info: { title: "AI Test Officer API", version: "1.0.0" }, servers: [{ url: "/" }] });
 const output = path.join(rootDir, "docs", "openapi.json");

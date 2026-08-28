@@ -8,6 +8,7 @@ import { pauseAfterCommittedRunEvent } from "./faultInjection.js";
 import { insertOutboxInTransaction } from "./outboxStore.js";
 import { runEventSchema, transitionRunState, type CompiledPlan, type ExecutionStatus, type GateStatus, type HumanDecision, type JudgeRecommendation, type LlmCall, type MachineGate, type PlanProvenance, type RunEvent, type RunEventType, type RunKind, type RunOutcomeSummaryV2, type RunState } from "@ai-test-officer/contracts";
 import type { GrayPlan, ImpactAnalysis } from "./types.js";
+import { emitTrajectory } from "./trajectoryEmitter.js";
 
 export interface RunProjection {
   id: string;
@@ -152,6 +153,19 @@ function applyEvent(current: RunProjection, event: RunEvent): RunProjection {
     projection.gateStatus = (event.payload.finalStatus as GateStatus | undefined) ?? "needs-human-review";
     if (typeof event.payload.executionStatus !== "string") projection.executionStatus = "completed";
   }
+  if (event.type === "parent_aggregate_completed") {
+    // A parent aggregate is an orchestration record, not a worker run. Its
+    // completion must therefore never be inferred as a release pass.
+    const finalStatus = event.payload.finalStatus;
+    projection.gateStatus = finalStatus === "pass" || finalStatus === "fail" || finalStatus === "blocked" || finalStatus === "needs-human-review"
+      ? finalStatus
+      : "needs-human-review";
+    projection.executionStatus = "completed";
+  }
+  if (event.type === "parent_aggregate_blocked") {
+    projection.gateStatus = "blocked";
+    projection.executionStatus = "completed-with-gaps";
+  }
   if (event.type === "run_failed") {
     projection.gateStatus = "fail";
     if (typeof event.payload.executionStatus !== "string") projection.executionStatus = "completed";
@@ -273,6 +287,22 @@ export class SqliteRunEventStore implements RunEventStore {
       this.database.exec("ROLLBACK");
       throw error;
     }
+    await emitTrajectory({
+      runId,
+      type: "run.created",
+      actor: event.actor,
+      idempotencyKey: `run-event:${event.id}`,
+      payload: { runEventType: event.type, version: event.version, rootRunId: typeof event.payload.rootRunId === "string" ? event.payload.rootRunId : typeof event.payload.parentRunId === "string" ? event.payload.parentRunId : runId, ...event.payload }
+    });
+    if (typeof event.payload.parentRunId === "string") await emitTrajectory({
+      runId,
+      type: "run.linked",
+      actor: event.actor,
+      parentRunId: event.payload.parentRunId,
+      rootRunId: typeof event.payload.rootRunId === "string" ? event.payload.rootRunId : event.payload.parentRunId,
+      idempotencyKey: `run-event:${event.id}:linked`,
+      payload: { parentRunId: event.payload.parentRunId, childRunId: runId }
+    });
     return projection;
   }
 
@@ -296,6 +326,23 @@ export class SqliteRunEventStore implements RunEventStore {
       this.database.exec("ROLLBACK");
       throw error;
     }
+    void emitTrajectory({
+      runId: event.runId,
+      type: event.type === "run_started" ? "run.started" : event.type === "plan_generated" ? "planning.completed" : event.type === "run_completed" || event.type === "parent_aggregate_completed" ? "run.completed" : event.type === "run_failed" ? "run.failed" : event.type === "run_blocked" || event.type === "parent_aggregate_blocked" ? "run.blocked" : event.type === "human_review_requested" ? "human.review.requested" : "run.state.changed",
+      actor: event.actor,
+      idempotencyKey: `run-event:${event.id}`,
+      payload: { runEventType: event.type, version: event.version, rootRunId: typeof event.payload.rootRunId === "string" ? event.payload.rootRunId : typeof event.payload.parentRunId === "string" ? event.payload.parentRunId : event.runId, ...event.payload },
+      evidenceRefs: Array.isArray(event.payload.evidenceRefs) ? event.payload.evidenceRefs.filter((item): item is string => typeof item === "string") : []
+    });
+    if (typeof event.payload.parentRunId === "string") void emitTrajectory({
+      runId: event.runId,
+      type: "run.linked",
+      actor: event.actor,
+      parentRunId: event.payload.parentRunId,
+      rootRunId: typeof event.payload.rootRunId === "string" ? event.payload.rootRunId : event.payload.parentRunId,
+      idempotencyKey: `run-event:${event.id}:linked`,
+      payload: { parentRunId: event.payload.parentRunId, childRunId: event.runId }
+    });
     return projection;
   }
 
@@ -388,6 +435,22 @@ export class PostgresRunEventStore implements RunEventStore {
       await client.query("INSERT INTO run_events_v1 (id, run_id, payload, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING", [event.id, runId, event, event.createdAt]);
       await this.appendExecutionOutbox(client, event, projection);
       await client.query("COMMIT");
+      await emitTrajectory({
+        runId,
+        type: "run.created",
+        actor: event.actor,
+        idempotencyKey: `run-event:${event.id}`,
+        payload: { runEventType: event.type, version: event.version, rootRunId: typeof event.payload.rootRunId === "string" ? event.payload.rootRunId : typeof event.payload.parentRunId === "string" ? event.payload.parentRunId : runId, ...event.payload }
+      });
+      if (typeof event.payload.parentRunId === "string") await emitTrajectory({
+        runId,
+        type: "run.linked",
+        actor: event.actor,
+        parentRunId: event.payload.parentRunId,
+        rootRunId: typeof event.payload.rootRunId === "string" ? event.payload.rootRunId : event.payload.parentRunId,
+        idempotencyKey: `run-event:${event.id}:linked`,
+        payload: { parentRunId: event.payload.parentRunId, childRunId: runId }
+      });
       return projection;
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   }
@@ -416,6 +479,23 @@ export class PostgresRunEventStore implements RunEventStore {
       await client.query("INSERT INTO run_events_v1 (id, run_id, payload, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING", [event.id, event.runId, event, event.createdAt]);
       await this.appendExecutionOutbox(client, event, projection);
       await client.query("COMMIT");
+      void emitTrajectory({
+        runId: event.runId,
+        type: event.type === "run_started" ? "run.started" : event.type === "plan_generated" ? "planning.completed" : event.type === "run_completed" || event.type === "parent_aggregate_completed" ? "run.completed" : event.type === "run_failed" ? "run.failed" : event.type === "run_blocked" || event.type === "parent_aggregate_blocked" ? "run.blocked" : event.type === "human_review_requested" ? "human.review.requested" : "run.state.changed",
+        actor: event.actor,
+        idempotencyKey: `run-event:${event.id}`,
+        payload: { runEventType: event.type, version: event.version, rootRunId: typeof event.payload.rootRunId === "string" ? event.payload.rootRunId : typeof event.payload.parentRunId === "string" ? event.payload.parentRunId : event.runId, ...event.payload },
+        evidenceRefs: Array.isArray(event.payload.evidenceRefs) ? event.payload.evidenceRefs.filter((item): item is string => typeof item === "string") : []
+      });
+      if (typeof event.payload.parentRunId === "string") void emitTrajectory({
+        runId: event.runId,
+        type: "run.linked",
+        actor: event.actor,
+        parentRunId: event.payload.parentRunId,
+        rootRunId: typeof event.payload.rootRunId === "string" ? event.payload.rootRunId : event.payload.parentRunId,
+        idempotencyKey: `run-event:${event.id}:linked`,
+        payload: { parentRunId: event.payload.parentRunId, childRunId: event.runId }
+      });
       return projection;
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   }

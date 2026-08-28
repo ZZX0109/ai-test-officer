@@ -1,4 +1,5 @@
 import { FileSearch, Pencil, Save, Star, Trash2, X } from "lucide-react";
+import { useState } from "react";
 import { CredentialSetupWizard } from "./CredentialSetupWizard";
 import type { Credential, ProjectConfig, ProjectDetectionResult } from "../types";
 
@@ -33,7 +34,7 @@ interface ApiSettingsDialogProps {
   onLoginUsernameChange: (value: string) => void;
   onLoginPasswordChange: (value: string) => void;
   onSaveProjectLogin: (username: string, password: string) => Promise<void>;
-  onTestCredential: (credentialId: string) => void;
+  onTestCredential: (credentialId: string) => Promise<{ ok: boolean; status: number; message: string }>;
   onEditCredential: (credential: Credential) => void;
   onMakeDefault: (credentialId: string) => void;
   onDeleteCredential: (credentialId: string) => void;
@@ -46,6 +47,27 @@ export function ApiSettingsDialog({
   onLoginUsernameChange, onLoginPasswordChange, onSaveProjectLogin,
   onTestCredential, onEditCredential, onMakeDefault, onDeleteCredential
 }: ApiSettingsDialogProps) {
+  const [testStates, setTestStates] = useState<Record<string, { status: "testing" | "success" | "error"; message: string }>>({});
+
+  async function testSavedCredential(credentialId: string) {
+    setTestStates((current) => ({ ...current, [credentialId]: { status: "testing", message: "正在连接模型…" } }));
+    try {
+      const result = await onTestCredential(credentialId);
+      setTestStates((current) => ({
+        ...current,
+        [credentialId]: { status: result.ok ? "success" : "error", message: result.message }
+      }));
+    } catch (error) {
+      setTestStates((current) => ({
+        ...current,
+        [credentialId]: {
+          status: "error",
+          message: error instanceof Error ? error.message : "连接测试失败，请检查 Agent 服务和 API 配置。"
+        }
+      }));
+    }
+  }
+
   if (!open) return null;
   return (
 
@@ -120,14 +142,34 @@ export function ApiSettingsDialog({
           <section className="saved-credentials" aria-label="已保存的模型配置">
             <h3>已保存的配置</h3>
             {credentials.length ? credentials.map((credential) => (
-              <article key={credential.id}>
-                <div><strong>{credential.name}</strong><span>{credential.provider} · {credential.model}</span><small>{credential.apiKeyMasked}</small></div>
+              <article key={credential.id} className={credential.isDefault ? "is-default" : undefined}>
+                <div>
+                  <div className="credential-title-row">
+                    <strong>{credential.name}</strong>
+                    {credential.isDefault ? <span className="default-model-badge">当前默认</span> : null}
+                  </div>
+                  <span>{credential.provider} · {credential.model}</span>
+                  <small>{credential.apiKeyMasked}</small>
+                </div>
                 <div className="row-actions">
-                  <button type="button" onClick={() => onTestCredential(credential.id)}><FileSearch size={15} />测试</button>
+                  <button type="button" aria-label={`测试 API Key：${credential.name}`} disabled={testStates[credential.id]?.status === "testing"} onClick={() => void testSavedCredential(credential.id)}>
+                    <FileSearch size={15} />{testStates[credential.id]?.status === "testing" ? "测试中…" : "测试"}
+                  </button>
                   <button className="icon-button" type="button" title="编辑" onClick={() => onEditCredential(credential)}><Pencil size={15} /></button>
-                  <button className="icon-button" disabled={credential.isDefault} type="button" title="设为默认" onClick={() => onMakeDefault(credential.id)}><Star size={15} /></button>
+                  <button
+                    className={`icon-button default-model-action${credential.isDefault ? " is-current" : ""}`}
+                    disabled={credential.isDefault}
+                    type="button"
+                    aria-label={credential.isDefault ? `${credential.name} 是当前默认模型` : `设 ${credential.name} 为默认模型`}
+                    aria-pressed={credential.isDefault}
+                    title={credential.isDefault ? "当前默认模型" : "设为默认模型"}
+                    onClick={() => onMakeDefault(credential.id)}
+                  >
+                    <Star size={15} fill={credential.isDefault ? "currentColor" : "none"} />
+                  </button>
                   <button className="icon-button" type="button" title="删除" onClick={() => onDeleteCredential(credential.id)}><Trash2 size={15} /></button>
                 </div>
+                {testStates[credential.id] ? <p className={`credential-test-result ${testStates[credential.id].status}`} role={testStates[credential.id].status === "error" ? "alert" : "status"} aria-live="polite">{testStates[credential.id].message}</p> : null}
               </article>
             )) : <p>还没有配置 API Key。</p>}
           </section>

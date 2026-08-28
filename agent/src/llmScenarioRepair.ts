@@ -171,7 +171,7 @@ export async function createLlmScenarioBindingRepair(input: {
       maxTokens: budget.maxOutputTokens,
       timeoutMs: 20_000,
       totalTimeoutMs: 28_000,
-      transportPreference: "non-stream-retry",
+      transportPreference: "auto",
       jsonSchema: { name: "scenario_binding_repair", schema: jsonSchema },
       context: { purpose: "repairing" },
       knowledgeContext,

@@ -17,6 +17,7 @@ export function commandFallbackAction(message: string, runState?: string): Exclu
   if (/重新扫描|扫描页面|discovery/i.test(normalized)) return "retry-discovery";
   if (/暂停|先停一下|等一下/i.test(normalized)) return "pause-run";
   if (/取消|终止|停止测试/i.test(normalized)) return "cancel-run";
+  if (/直接.*修复|修复.*(?:完成测试|重新(?:进行)?(?:测试|验证|复测)|再次(?:测试|验证|复测)|再(?:测试|验证|复测))|检查.*(?:阻塞|失败).*修复|(?:修改|改).*代码|修好.*(?:复测|测试)|修复项目.*(?:测试|验证|复测)/i.test(normalized)) return "create-repair";
   if (/重试.*失败|重新.*失败|修复.*失败|重新绑定/i.test(normalized)) return "retry-failed-path";
   if (/继续.*(其他|剩余|安全|可执行)|跳过.*继续/i.test(normalized)) return "continue-safe-paths";
   if (/修改.*计划|调整.*计划|修改.*范围|调整.*范围/i.test(normalized)) return "revise-plan";
@@ -76,9 +77,9 @@ export function describeRunActivity(input: {
 }
 
 export function isExplicitAssistantActionConfirmation(message: string, action: Exclude<AssistantSuggestedAction, "none"> | undefined) {
-  if (!action || !["retry-runtime", "retry-discovery", "retry-failed-path", "continue-safe-paths"].includes(action)) return false;
+  if (!action || !["retry-runtime", "retry-discovery", "retry-failed-path", "continue-safe-paths", "create-repair"].includes(action)) return false;
   const normalized = message.replace(/\s+/g, "").toLowerCase();
   if (/(?:为什么|怎么|如何|是什么|能否|是否|可以吗|需要做什么|该怎么办|\?|？)/i.test(normalized)) return false;
   return /^(?:请)?(?:确认|同意|可以|继续|执行|重试|重新|再试|修复|扫描|启动)/i.test(normalized)
-    || /(?:重新尝试即可|继续处理|继续执行|重试失败链路|重新扫描页面|重新绑定路径)/i.test(normalized);
+    || /(?:重新尝试即可|继续处理|继续执行|重试失败链路|重新扫描页面|重新绑定路径|检查.*(?:阻塞|失败).*修复|直接.*修复|修复.*完成测试)/i.test(normalized);
 }

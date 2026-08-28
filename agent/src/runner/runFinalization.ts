@@ -6,7 +6,8 @@ import { BudgetTracker } from "@ai-test-officer/execution-worker";
 import type { EvidenceItem, RunBundle, RunRequest, VisualRunResult } from "../types.js";
 import { finalizeEvidenceArtifactLinks, readEvidence, writeRunBundle } from "../evidenceStore.js";
 import { appendLoopEvent, readLoopEvents } from "../loopEventStore.js";
-import { buildScenarioOracles } from "../oracleBuilder.js";
+import { buildScenarioOracleSpecsV2, buildScenarioOracles } from "../oracleBuilder.js";
+import { evaluateOracleSet } from "../oracleGovernance.js";
 import { buildRiskCoverageMatrix } from "../riskCoverage.js";
 import { buildEvidenceQualityReport } from "../evidenceQuality.js";
 import { appendRunHistory } from "../runHistory.js";
@@ -154,6 +155,21 @@ export async function finalizeVisualRun(input: RunFinalizationInput): Promise<Vi
     verdict: runFailed ? "hold_for_review" : "continue"
   } as Pick<VisualRunResult, "assertions" | "steps" | "verdict">;
   const oracles = buildScenarioOracles(scenario, latestEvidence);
+  const oracleSpecsV2 = buildScenarioOracleSpecsV2({
+    scenario,
+    evidence: latestEvidence,
+    projectId: targetRuntime.projectId ?? configuredProject?.id ?? "ad_hoc_target",
+    runId: id,
+    attemptId: attemptIdentity().attemptId
+  });
+  const oracleEvaluation = evaluateOracleSet(
+    oracleSpecsV2,
+    Object.fromEntries(oracleSpecsV2.map((spec) => [
+      spec.id,
+      assertions.find((assertion) => assertion.name === spec.comparison.actualPath)?.passed
+    ])),
+    { differential: false }
+  );
   const riskCoverageMatrix = buildRiskCoverageMatrix({ assertions }, latestEvidence, scenario);
   const conflictPacket = buildConflictPacket({ assertions, steps }, latestEvidence);
   const runScenarioFingerprint = scenarioFingerprint({
@@ -243,7 +259,9 @@ export async function finalizeVisualRun(input: RunFinalizationInput): Promise<Vi
     evidenceQuality,
     riskCoverageMatrix,
     network,
-    judgeReport: assistedJudgeReport
+    judgeReport: assistedJudgeReport,
+    oracleStatus: oracleEvaluation.status,
+    oracleReasons: oracleEvaluation.decisions.flatMap((decision) => decision.reasons)
   });
   const failureAttributions = buildFailureAttributions({
     assertions,
@@ -307,6 +325,8 @@ export async function finalizeVisualRun(input: RunFinalizationInput): Promise<Vi
     evidence: latestEvidence,
     loopEvents,
     oracles,
+    oracleSpecsV2,
+    oracleDecisionsV2: oracleEvaluation.decisions,
     riskCoverageMatrix,
     aggregatedVerdict,
     reflectionNote,
@@ -386,6 +406,8 @@ export async function finalizeVisualRun(input: RunFinalizationInput): Promise<Vi
     attempts,
     loopEvents,
     oracles,
+    oracleSpecsV2,
+    oracleDecisionsV2: oracleEvaluation.decisions,
     riskCoverageMatrix,
     conflictPacket,
     judgeReport,

@@ -156,7 +156,7 @@ export async function createRuntimeRecoveryAdvice(input: {
       maxTokens: budget.maxOutputTokens,
       timeoutMs: 20_000,
       totalTimeoutMs: 25_000,
-      transportPreference: "non-stream-retry",
+      transportPreference: "auto",
       jsonSchema: {
         name: "runtime_recovery_advice",
         schema: {

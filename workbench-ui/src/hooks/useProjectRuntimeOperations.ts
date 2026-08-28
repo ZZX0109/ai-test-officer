@@ -171,7 +171,8 @@ export function useProjectRuntimeOperations(input: ProjectRuntimeOperationsInput
       id: pendingId,
       role: "assistant",
       content: "正在读取项目启动阶段、健康检查和脱敏日志，整理失败原因与下一步…",
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      streaming: true
     }]);
 
     const firstFailure = failedStages[0];
@@ -218,6 +219,7 @@ export function useProjectRuntimeOperations(input: ProjectRuntimeOperationsInput
       });
       input.setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
         ...item,
+        streaming: false,
         content: response.assistant.reply,
         repairPlan: response.assistant.repairPlan,
         reasoningSummary: response.assistant.reasoningSummary,
@@ -243,6 +245,7 @@ export function useProjectRuntimeOperations(input: ProjectRuntimeOperationsInput
       input.surfacedProjectDiagnostics.current.delete(diagnosticKey);
       input.setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
         ...item,
+        streaming: false,
         content: `模型解读暂时不可用；以下内容来自项目启动器和健康检查的确定性诊断。\n${deterministicReply}`,
         reasoningSummary: {
           phase: "waiting-user",
@@ -353,8 +356,13 @@ export function useProjectRuntimeOperations(input: ProjectRuntimeOperationsInput
       // succeeding the sandbox only to stall at feature identification (LLM).
       const freshDocker = await getReadiness().catch(() => null);
       const startBlockers: string[] = [];
-      if (!input.credentials.length) startBlockers.push("配置模型凭据（OpenAI-compatible key）");
-      if (freshDocker && !freshDocker.docker.available) startBlockers.push(`启动 ${freshDocker.docker.engine}（容器运行时不可用）`);
+      const isConfiguredDemo = saved.project.demoProfile?.enabled === true;
+      const requiresOciRuntime = saved.project.allowExternalProjectPath === true
+        || saved.project.manifest?.execution.mode === "oci";
+      if (!input.credentials.length && !isConfiguredDemo) startBlockers.push("配置模型凭据（OpenAI-compatible key）");
+      if (freshDocker && !freshDocker.docker.available && requiresOciRuntime) {
+        startBlockers.push(`启动 ${freshDocker.docker.engine}（容器运行时不可用）`);
+      }
       if (startBlockers.length) {
         input.setProjectLaunchPhase("");
         input.setMessage(`未进入沙盒运行，请先${startBlockers.join("、")}。`);

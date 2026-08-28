@@ -9,6 +9,7 @@ import {
   runOutcomeSummaryV2Schema,
   type CoverageItem,
   type JudgeRecommendation,
+  type LlmCall,
   type MachineGate
 } from "@ai-test-officer/contracts";
 import { appendEvidence, writeRunBundle } from "./evidenceStore.js";
@@ -57,12 +58,37 @@ function judgeLayer(
   };
 }
 
-function judgeReport(status: MachineGate["status"], evidenceId: string, summary: string): LayeredJudgeReport {
+type ModelExecutionAggregate = {
+  required: boolean;
+  totalCallCount: number;
+  successfulBrowserActionCallCount: number;
+  completedBrowserActionCount: number;
+  requiredArtifactsPresent: boolean;
+  calls: LlmCall[];
+};
+
+function modelExecutionSatisfied(modelExecution: ModelExecutionAggregate | undefined) {
+  return !modelExecution?.required || (
+    modelExecution.successfulBrowserActionCallCount > 0
+    && modelExecution.completedBrowserActionCount > 0
+    && modelExecution.requiredArtifactsPresent
+  );
+}
+
+function judgeReport(
+  status: MachineGate["status"],
+  evidenceId: string,
+  summary: string,
+  modelExecution?: ModelExecutionAggregate
+): LayeredJudgeReport {
+  const calls = modelExecution?.calls ?? [];
+  const successfulCalls = calls.filter((call) => call.status === "passed");
   return {
     source: "deterministic_judge",
-    executionMode: "deterministic",
-    llmStatus: "not_configured",
-    policyVersion: "parent-aggregate-policy-v1",
+    executionMode: successfulCalls.length ? "llm_assisted" : "deterministic",
+    llmStatus: successfulCalls.length ? "passed" : calls.length ? "failed" : "not_configured",
+    ...(calls.length ? { llmCalls: calls } : {}),
+    policyVersion: "parent-aggregate-policy-v2-model-execution",
     createdAt: new Date().toISOString(),
     planJudge: judgeLayer("plan", status, evidenceId, summary),
     evidenceJudge: judgeLayer("evidence", status, evidenceId, summary),
@@ -86,12 +112,17 @@ export async function persistParentAggregateEvidence(input: {
      * child was itself minted by the Proof Bundle Service (proofBundleId
      * present), not self-asserted. */
     machineGate?: MachineGate;
+    modelCallCount?: number;
+    successfulBrowserActionCallCount?: number;
+    completedBrowserActionCount?: number;
+    browserArtifactKinds?: string[];
   }>;
   /** The aggregate draft (status + reasons). Credibility flags are never
    * supplied here; the parent mints them via `finalizeProofBundle`. */
   machineGateDraft: MachineGateDraft;
   gateEligibleFacts: { executionSucceeded: boolean; requirementCovered: boolean };
   judgeRecommendation: JudgeRecommendation;
+  modelExecution?: ModelExecutionAggregate;
 }) {
   const now = new Date().toISOString();
   const scenarioId = "parent-coverage-aggregate";
@@ -110,7 +141,15 @@ export async function persistParentAggregateEvidence(input: {
       childRunId: item.childRunId
     })),
     children: input.children,
-    machineGate: input.machineGateDraft
+    machineGate: input.machineGateDraft,
+    modelExecution: input.modelExecution && {
+      required: input.modelExecution.required,
+      totalCallCount: input.modelExecution.totalCallCount,
+      successfulBrowserActionCallCount: input.modelExecution.successfulBrowserActionCallCount,
+      completedBrowserActionCount: input.modelExecution.completedBrowserActionCount,
+      requiredArtifactsPresent: input.modelExecution.requiredArtifactsPresent,
+      callIds: input.modelExecution.calls.map((call) => call.id)
+    }
   }, null, 2));
   const clock = new AttemptClock();
   const capturedArtifact = await commitCapturedFile({
@@ -143,7 +182,15 @@ export async function persistParentAggregateEvidence(input: {
     payload: {
       childRunIds: input.children.map((item) => item.id),
       childEvidenceRoots: input.children.map((item) => item.evidenceSetRoot).filter(Boolean),
-      coverageDispositionComplete: input.coverage.every(isCoverageTerminal)
+      coverageDispositionComplete: input.coverage.every(isCoverageTerminal),
+      modelExecution: input.modelExecution && {
+        required: input.modelExecution.required,
+        totalCallCount: input.modelExecution.totalCallCount,
+        successfulBrowserActionCallCount: input.modelExecution.successfulBrowserActionCallCount,
+        completedBrowserActionCount: input.modelExecution.completedBrowserActionCount,
+        requiredArtifactsPresent: input.modelExecution.requiredArtifactsPresent,
+        callIds: input.modelExecution.calls.map((call) => call.id)
+      }
     }
   });
   const artifactIntegrity: ArtifactIntegrityReport = {
@@ -190,10 +237,12 @@ export async function persistParentAggregateEvidence(input: {
         return true;
       }
     });
+  const modelSatisfied = modelExecutionSatisfied(input.modelExecution);
   const draft: MachineGateDraft = {
-    status: input.machineGateDraft.status,
+    status: !modelSatisfied ? "blocked" : input.machineGateDraft.status,
     reasons: [
       ...input.machineGateDraft.reasons,
+      ...(!modelSatisfied ? ["model_execution_evidence_incomplete"] : []),
       ...(unverifiedChildren.length ? [`child_gate_unverified:${unverifiedChildren.length}`] : [])
     ],
     reasonDetails: input.machineGateDraft.reasonDetails ?? [],
@@ -239,7 +288,9 @@ export async function persistParentAggregateEvidence(input: {
     judgeRecommendation,
     finalStatus
   });
-  const summary = `Aggregated ${input.children.length} child runs across ${input.coverage.length} coverage items.`;
+  const summary = `Aggregated ${input.children.length} child runs across ${input.coverage.length} coverage items.${input.modelExecution
+    ? ` Model execution: ${input.modelExecution.successfulBrowserActionCallCount} successful browser-action call(s), ${input.modelExecution.completedBrowserActionCount} completed browser action(s).`
+    : ""}`;
   const result: VisualRunResult = {
     id: input.runId,
     startedAt: now,
@@ -276,7 +327,22 @@ export async function persistParentAggregateEvidence(input: {
               ? "product_bug"
               : "insufficient_evidence"
       }
-    }],
+    }, ...(input.modelExecution?.required ? [{
+      name: "Model-driven browser execution is evidenced",
+      passed: modelSatisfied,
+      expected: "At least one successful browser-action model call, a completed browser action, and screenshot/operation-log evidence.",
+      actual: `${input.modelExecution.successfulBrowserActionCallCount} successful browser-action call(s); ${input.modelExecution.completedBrowserActionCount} completed action(s); artifacts=${input.modelExecution.requiredArtifactsPresent ? "complete" : "incomplete"}`,
+      fact: {
+        kind: "state.equals" as const,
+        target: "model_browser_execution",
+        operator: "equals" as const,
+        expected: "evidenced",
+        actual: modelSatisfied ? "evidenced" : "incomplete",
+        severity: "high" as const,
+        evidenceRefs: [evidence.id],
+        failureClass: modelSatisfied ? undefined : "insufficient_evidence" as const
+      }
+    }] : [])],
     evidence: [evidence],
     loopEvents: [],
     oracles: [{
@@ -306,10 +372,14 @@ export async function persistParentAggregateEvidence(input: {
       verdict: finalStatus === "pass" ? "continue" : finalStatus === "fail" ? "stop_and_fix" : "hold_for_review",
       reason: summary
     },
-    reflectionNote: "Parent result is immutable and does not replace any child result.",
+    reflectionNote: input.modelExecution?.required
+      ? "Parent result aggregates the child model calls, bounded browser actions, and verified evidence; it does not replace child results."
+      : "Parent result is immutable and does not replace any child result.",
     conflictPacket: {
       status: "not_triggered",
-      reason: "Parent aggregate uses deterministic child results.",
+      reason: input.modelExecution?.required
+        ? "Parent aggregate uses deterministic proof checks over model-assisted child execution."
+        : "Parent aggregate uses deterministic child results.",
       evidenceRefs: [evidence.id]
     },
     failureAttributions: [],
@@ -330,7 +400,7 @@ export async function persistParentAggregateEvidence(input: {
     judgeRecommendation,
     finalStatus,
     outcomeSummary,
-    judgeReport: judgeReport(machineGate.status, evidence.id, summary),
+    judgeReport: judgeReport(machineGate.status, evidence.id, summary, input.modelExecution),
     judgeRouting: {
       route: "deterministic",
       reason: "parent aggregation never requires semantic inference",

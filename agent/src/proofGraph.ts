@@ -23,6 +23,7 @@ import {
 import type { AssertionResult, EvidenceItem, RunBundle, VisualRunResult } from "./types.js";
 import { readRunBundle, writeRunBundle } from "./evidenceStore.js";
 import { persistExecutionResult } from "./executionPersistence.js";
+import { emitTrajectory } from "./trajectoryEmitter.js";
 
 const POLICY_VERSION = "proof-policy-1.0";
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
@@ -510,6 +511,19 @@ export async function writeProofArtifacts(bundle: RunBundle) {
     writeFile(path.join(directory, "proof_edges.json"), JSON.stringify(bundle.proofEdges ?? [], null, 2)),
     writeFile(path.join(directory, "evidence_manifest.json"), JSON.stringify(manifest, null, 2))
   ]);
+  void emitTrajectory({
+    runId: bundle.runId,
+    type: manifest.integrityStatus === "verified" ? "proof.verified" : "proof.invalid",
+    actor: "proof-graph",
+    idempotencyKey: `proof-manifest:${manifest.evidenceSetRoot}`,
+    payload: {
+      integrityStatus: manifest.integrityStatus,
+      evidenceSetRoot: manifest.evidenceSetRoot,
+      artifactCount: Object.keys(manifest.artifactHashes).length,
+      evidenceCount: Object.keys(manifest.evidenceHashes).length
+    },
+    evidenceRefs: [...Object.keys(manifest.artifactHashes), ...Object.keys(manifest.evidenceHashes)]
+  });
   return manifest;
 }
 

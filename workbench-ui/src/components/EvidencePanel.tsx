@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BotMessageSquare, X } from "lucide-react";
 import type {
   AuditStoreStatus,
@@ -13,7 +13,7 @@ import { ArtifactIntegrityPanel } from "./ArtifactIntegrityPanel";
 import { JudgePanel } from "./JudgePanel";
 import { ReportLinks } from "./ReportLinks";
 import { RunTimeline } from "./RunTimeline";
-import { TrustTracePanel } from "./TrustTracePanel";
+import { TrustTracePanel, type ModelExecutionSummary } from "./TrustTracePanel";
 
 interface EvidencePanelProps {
   result?: RunResult | null;
@@ -68,6 +68,18 @@ export function EvidencePanel({
   onClose
 }: EvidencePanelProps) {
   const drawerBodyRef = useRef<HTMLDivElement>(null);
+  const [modelExecution, setModelExecution] = useState<ModelExecutionSummary | null>(null);
+  const inspectedRunId = result?.id ?? liveRun?.runId;
+  const reportedModelExecution = result?.modelExecution ? {
+    total: result.modelExecution.totalCallCount,
+    successful: result.modelExecution.successfulBrowserActionCallCount,
+    failed: Math.max(0, result.modelExecution.totalCallCount - result.modelExecution.successfulBrowserActionCallCount)
+  } : null;
+  const effectiveModelExecution = modelExecution ?? reportedModelExecution;
+
+  useEffect(() => {
+    setModelExecution(null);
+  }, [inspectedRunId, displayedLoopEvents?.length]);
 
   // When the workbench asks to locate an evidence id (e.g. from a repair plan),
   // scroll the matching element into view and flash a highlight so the user is
@@ -111,9 +123,10 @@ export function EvidencePanel({
               <strong>Judge Mode</strong>
               <span>{result?.judgeReport.executionMode ?? "waiting"}</span>
             </article>
-            <article className={result?.judgeReport.llmStatus === "failed" ? "failed" : "passed"}>
-              <strong>LLM Status</strong>
-              <span>{result?.judgeReport.llmStatus ?? "not_run"}</span>
+            <article className={effectiveModelExecution?.failed && !effectiveModelExecution.successful ? "failed" : effectiveModelExecution?.successful ? "passed" : "warning"}>
+              <strong>模型执行</strong>
+              <span>{effectiveModelExecution?.successful ? "passed" : effectiveModelExecution?.total ? "failed" : result ? "not_run" : "waiting"}</span>
+              {effectiveModelExecution?.total ? <small>{effectiveModelExecution.successful} 次成功调用 · {effectiveModelExecution.failed} 次失败调用</small> : null}
             </article>
             <article className="passed">
               <strong>Evidence Rule</strong>
@@ -128,7 +141,11 @@ export function EvidencePanel({
           {result?.judgeReport.llmError && <p>Fallback reason: {result.judgeReport.llmError}</p>}
         </section>
 
-        <TrustTracePanel runId={result?.id ?? liveRun?.runId} />
+        <TrustTracePanel
+          runId={inspectedRunId}
+          refreshKey={displayedLoopEvents?.length ?? 0}
+          onModelExecution={setModelExecution}
+        />
 
         <RunTimeline result={result} displayedLoopEvents={displayedLoopEvents} />
 
@@ -199,7 +216,7 @@ export function EvidencePanel({
           </div>
         </section>
 
-        <JudgePanel result={result} />
+        <JudgePanel result={result} modelCallsPresent={Boolean(effectiveModelExecution?.total)} />
 
         <section>
           <h3>Network</h3>

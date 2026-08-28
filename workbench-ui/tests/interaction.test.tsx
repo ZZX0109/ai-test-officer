@@ -16,23 +16,173 @@ import { AssistantReasoningSummary } from "../src/components/AssistantReasoningS
 import { AssistantConversationMessage } from "../src/components/AssistantConversationMessage";
 import { DiscoveryPanel } from "../src/components/DiscoveryPanel";
 import { chatWithTestAssistant, createVisualRun, generatePlan, subscribeRunEvents } from "../src/api";
-import { commandFallbackAction, describeRunActivity, isUserActionableInterrupt, upsertAssistantProgress } from "../src/workbenchLogic";
+import { commandFallbackAction, describeRunActivity, isExplicitAssistantActionConfirmation, isUserActionableInterrupt, upsertAssistantProgress } from "../src/workbenchLogic";
+import { userFacingCoverageText } from "../src/appPresentation";
 import { isRestorableProjectRun, rankProjectRunCandidates } from "../src/activeRunCache";
 import type { DiscoveryScanResult } from "../src/types";
 import { pointInSharedBrowser } from "../src/sharedBrowserGeometry";
 
 vi.mock("@monaco-editor/react", () => ({
-  DiffEditor: ({ original, modified }: { original: string; modified: string }) => (
-    <div aria-label="代码差异">
+  DiffEditor: ({ original, modified, options }: { original: string; modified: string; options?: { renderSideBySide?: boolean } }) => (
+    <div aria-label="代码差异" data-side-by-side={String(options?.renderSideBySide)}>
       <pre>{original}</pre>
       <pre>{modified}</pre>
     </div>
   )
 }));
 
+vi.mock("../src/components/SharedBrowserCanvas", () => ({
+  SharedBrowserCanvas: ({ actionOverlay }: { actionOverlay?: { action: string; target?: { label?: string } } | null }) => (
+    <div>{actionOverlay ? `浏览器动作标记：${actionOverlay.action} ${actionOverlay.target?.label ?? ""}` : "共享浏览器画布"}</div>
+  )
+}));
+
+vi.mock("../src/components/TrajectoryPanel", () => ({
+  TrajectoryPanel: ({ runId, planningId }: { runId: string | null | undefined; planningId?: string | null }) => <div>轨迹运行 {runId ?? planningId ?? "none"}</div>
+}));
+
 import { RepairWorkspace } from "../src/components/RepairWorkspace";
+import { LiveWorkspacePanel } from "../src/components/LiveWorkspacePanel";
 
 describe("Workbench interactions", () => {
+  it("places trajectory in the workspace to the right of planning and exposes it as a tab", () => {
+    const onCentreSurfaceChange = vi.fn();
+    render(<LiveWorkspacePanel
+      centreSurface="trajectory"
+      selectedProjectName="示例项目"
+      projectPreviewReady
+      hasSelectedProject
+      activeRunId="run-trajectory"
+      browserSession={null}
+      browserManualInput=""
+      browserControlBusy={false}
+      previewUrl="http://127.0.0.1:6173"
+      previewRevision={0}
+      agentProjection={null}
+      displayedLoopEvents={[]}
+      repairWorkspaceOpen={false}
+      repairSession={null}
+      repairBusy={false}
+      canApplyRepair={false}
+      onCentreSurfaceChange={onCentreSurfaceChange}
+      onOpenCodeWorkspace={() => undefined}
+      onRefreshPreview={() => undefined}
+      onBrowserManualInputChange={() => undefined}
+      onTypeManualInput={() => undefined}
+      onToggleBrowserControl={() => undefined}
+      onLoadIssue={() => undefined}
+      onInteract={() => undefined}
+      onPressKey={() => undefined}
+      onTypeText={() => undefined}
+      onViewportChange={() => undefined}
+      onOpenProjectConfig={() => undefined}
+      onListFiles={async () => []}
+      onLoadFile={async () => ({ path: "", content: "", language: "plaintext", writable: false })}
+      onSaveFile={async () => { throw new Error("not_called"); }}
+      onValidateRepair={async () => { throw new Error("not_called"); }}
+      onExportRepair={async () => ({ downloadUrl: "" })}
+      onApplyRepair={async () => { throw new Error("not_called"); }}
+    />);
+
+    expect(screen.getByRole("tab", { name: "轨迹" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("轨迹运行 run-trajectory")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "现场" }));
+    expect(onCentreSurfaceChange).toHaveBeenCalledWith("preview");
+  });
+
+  it("shows the planning trajectory before an executable Run has been created", () => {
+    render(<LiveWorkspacePanel
+      centreSurface="trajectory"
+      selectedProjectName="示例项目"
+      projectPreviewReady
+      hasSelectedProject
+      activeRunId={null}
+      planningTrajectoryId="planning-current"
+      planningProjectId="project-current"
+      browserSession={null}
+      browserManualInput=""
+      browserControlBusy={false}
+      previewUrl="http://127.0.0.1:6173"
+      previewRevision={0}
+      agentProjection={null}
+      displayedLoopEvents={[]}
+      repairWorkspaceOpen={false}
+      repairSession={null}
+      repairBusy={false}
+      canApplyRepair={false}
+      onCentreSurfaceChange={() => undefined}
+      onOpenCodeWorkspace={() => undefined}
+      onRefreshPreview={() => undefined}
+      onBrowserManualInputChange={() => undefined}
+      onTypeManualInput={() => undefined}
+      onToggleBrowserControl={() => undefined}
+      onLoadIssue={() => undefined}
+      onInteract={() => undefined}
+      onPressKey={() => undefined}
+      onTypeText={() => undefined}
+      onViewportChange={() => undefined}
+      onOpenProjectConfig={() => undefined}
+      onListFiles={async () => []}
+      onLoadFile={async () => ({ path: "", content: "", language: "plaintext", writable: false })}
+      onSaveFile={async () => { throw new Error("not_called"); }}
+      onValidateRepair={async () => { throw new Error("not_called"); }}
+      onExportRepair={async () => ({ downloadUrl: "" })}
+      onApplyRepair={async () => { throw new Error("not_called"); }}
+    />);
+
+    expect(screen.getByText("规划模型轨迹")).toBeTruthy();
+    expect(screen.getByText("轨迹运行 planning-current")).toBeTruthy();
+  });
+
+  it("passes the agent's current control target into the shared browser surface", () => {
+    render(<LiveWorkspacePanel
+      centreSurface="preview"
+      selectedProjectName="示例项目"
+      projectPreviewReady
+      hasSelectedProject
+      activeRunId="run-browser-marker"
+      browserSession={{
+        sessionId: "browser-session-1", runId: "run-browser-marker", attemptId: "attempt-1",
+        status: "ready", owner: "agent", actionCount: 0, decisionCount: 0, rebindCount: 0,
+        updatedAt: "2026-08-27T00:00:00.000Z"
+      }}
+      browserActionOverlay={{
+        actionId: "action-filter", action: "click-control", purpose: "筛选已完成任务", status: "running",
+        target: { label: "已完成", boundingBox: { x: 20, y: 30, width: 80, height: 32 }, viewport: { width: 1280, height: 720 } }
+      }}
+      browserManualInput=""
+      browserControlBusy={false}
+      previewUrl="http://127.0.0.1:6173"
+      previewRevision={0}
+      agentProjection={null}
+      displayedLoopEvents={[]}
+      repairWorkspaceOpen={false}
+      repairSession={null}
+      repairBusy={false}
+      canApplyRepair={false}
+      onCentreSurfaceChange={() => undefined}
+      onOpenCodeWorkspace={() => undefined}
+      onRefreshPreview={() => undefined}
+      onBrowserManualInputChange={() => undefined}
+      onTypeManualInput={() => undefined}
+      onToggleBrowserControl={() => undefined}
+      onLoadIssue={() => undefined}
+      onInteract={() => undefined}
+      onPressKey={() => undefined}
+      onTypeText={() => undefined}
+      onViewportChange={() => undefined}
+      onOpenProjectConfig={() => undefined}
+      onListFiles={async () => []}
+      onLoadFile={async () => ({ path: "", content: "", language: "plaintext", writable: false })}
+      onSaveFile={async () => { throw new Error("not_called"); }}
+      onValidateRepair={async () => { throw new Error("not_called"); }}
+      onExportRepair={async () => ({ downloadUrl: "" })}
+      onApplyRepair={async () => { throw new Error("not_called"); }}
+    />);
+
+    expect(screen.getByText("浏览器动作标记：click-control 已完成")).toBeTruthy();
+  });
+
   it("keeps one visible thinking state until the Graph reaches a real terminal state", () => {
     const activity = describeRunActivity({
       runId: "run-1",
@@ -93,16 +243,30 @@ describe("Workbench interactions", () => {
   });
 
   it("renders a streaming assistant activity as a labelled thinking row", () => {
-    render(<AssistantConversationMessage message={{
+    const view = render(<AssistantConversationMessage message={{
       id: "progress:run:run-1",
       role: "assistant",
       content: "正在思考 · 操作当前页面\n测试尚未结束。",
       createdAt: "2026-08-14T02:00:00.000Z",
       streaming: true
     }} />);
-    expect(screen.getByLabelText("AI 正在思考并执行")).toBeTruthy();
-    expect(screen.getByText("正在思考")).toBeTruthy();
-    expect(screen.getByText("测试尚未结束。")).toBeTruthy();
+    const message = within(view.container);
+    expect(message.getByLabelText("AI 正在思考并执行")).toBeTruthy();
+    expect(message.getByText("AI 正在思考")).toBeTruthy();
+    expect(message.getByText("测试尚未结束。")).toBeTruthy();
+  });
+
+  it("clears the thinking state when an in-place pending assistant message has completed", () => {
+    const view = render(<AssistantConversationMessage message={{
+      id: "assistant_pending_1",
+      role: "assistant",
+      content: "1+1=2。",
+      createdAt: "2026-08-14T02:00:00.000Z",
+      streaming: false
+    }} />);
+    const message = within(view.container);
+    expect(message.getByText("1+1=2。")).toBeTruthy();
+    expect(message.queryByLabelText("AI 正在思考并执行")).toBeNull();
   });
 
   it("updates one browser progress message instead of repeating observations", () => {
@@ -200,9 +364,21 @@ describe("Workbench interactions", () => {
     expect(commandFallbackAction("把测试暂停一下", "running")).toBe("pause-run");
     expect(commandFallbackAction("继续测试", "paused")).toBe("resume-run");
     expect(commandFallbackAction("为什么会失败？", "blocked")).toBeUndefined();
+    const repairCommand = "检查阻塞的原因，直接进行修复完成测试";
+    expect(commandFallbackAction(repairCommand, "blocked")).toBe("create-repair");
+    expect(isExplicitAssistantActionConfirmation(repairCommand, "create-repair")).toBe(true);
+    const repairAndRetest = "修复项目重新进行测试";
+    expect(commandFallbackAction(repairAndRetest, "blocked")).toBe("create-repair");
+    expect(isExplicitAssistantActionConfirmation(repairAndRetest, "create-repair")).toBe(true);
+    expect(userFacingCoverageText("coverage_blocked:business_path_runtime_123; coverage_blocked:business_path_runtime_456"))
+      .toContain("2 条路径缺少可执行入口");
+    const assistantCoverageReply = userFacingCoverageText("遇到的问题：简单说：coverage_blocked:business_path_runtime_123。系统没有把它算作通过。");
+    expect(assistantCoverageReply).toContain("遇到的问题：简单说：");
+    expect(assistantCoverageReply).toContain("1 条路径缺少可执行入口");
+    expect(assistantCoverageReply).not.toContain("coverage_blocked");
   });
 
-  it("normalizes runtime-only coverage before creating a Run", async () => {
+  it("creates a model-driven browser Run with an explicit non-degradation contract", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       run: { id: "run_runtime_login", state: "queued", version: 1 }
     }), { status: 201, headers: { "content-type": "application/json" } }));
@@ -227,11 +403,14 @@ describe("Workbench interactions", () => {
         sourceNodeIds: [],
         sourceCount: 0
       }],
-      dynamicBrowser: true
+      dynamicBrowser: true,
+      requireModelExecution: true
     });
     const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
     const body = JSON.parse(String(request.body));
     expect(body.input.coverageInventory[0].sourceCount).toBe(1);
+    expect(body.input.dynamicBrowser).toBe(true);
+    expect(body.input.requireModelExecution).toBe(true);
   });
 
   it("generates a plan through the real project-scoped API contract", async () => {
@@ -314,6 +493,12 @@ describe("Workbench interactions", () => {
     />);
     expect(await screen.findByLabelText("代码差异")).toBeTruthy();
     expect(screen.getAllByText("src/app.ts").length).toBeGreaterThan(0);
+    expect(screen.getByText("这个文件改了什么")).toBeTruthy();
+    expect(screen.getByText(/− export const value = 1;/)).toBeTruthy();
+    expect(screen.getByText(/\+ export const value = 2;/)).toBeTruthy();
+    expect(screen.getByLabelText("代码差异").getAttribute("data-side-by-side")).toBe("false");
+    await userEvent.click(screen.getByRole("button", { name: "并排对比" }));
+    expect(screen.getByLabelText("代码差异").getAttribute("data-side-by-side")).toBe("true");
     await userEvent.click(screen.getByRole("button", { name: "重新验证" }));
     expect(validate).toHaveBeenCalledTimes(1);
     expect((screen.getByRole("button", { name: "应用到原项目" }) as HTMLButtonElement).disabled).toBe(true);
@@ -523,6 +708,66 @@ describe("Workbench interactions", () => {
     expect(pathChange).toHaveBeenCalledWith("demo-project");
     expect(screen.getByRole("button", { name: "识别项目" })).toBeTruthy();
     expect(selectProject).toHaveBeenCalledWith("");
+  });
+
+  it("presents the configured official demo and starts it without exposing technical setup", async () => {
+    const startDemo = vi.fn();
+    const demoProject = {
+      id: "local_demo_app",
+      name: "官方演示：任务管理系统",
+      projectPath: "app-under-test",
+      frontendUrl: "http://localhost:6173",
+      demoProfile: {
+        enabled: true,
+        description: "展示真实内置浏览器点击、任务筛选和证据采集。",
+        defaultGoal: "在内置浏览器打开任务管理系统，点击“已完成”筛选。",
+        scenarioId: "task-filter-completed"
+      }
+    };
+    render(<ProjectWizardPanel
+      projects={[demoProject]}
+      selectedProjectId=""
+      projectPath=""
+      detection={null}
+      onSelectProject={vi.fn()}
+      onStartDemo={startDemo}
+      onProjectPathChange={vi.fn()}
+      onDetect={vi.fn()}
+    />);
+    expect(screen.getByTestId("official-demo-card").textContent).toContain("官方演示项目");
+    expect(screen.getByText(/展示真实内置浏览器点击/)).toBeTruthy();
+    await userEvent.click(screen.getByTestId("official-demo-start"));
+    expect(startDemo).toHaveBeenCalledWith(demoProject);
+  });
+
+  it("keeps the official demo project details collapsed by default", () => {
+    const demoProject = {
+      id: "local_demo_app",
+      name: "官方演示：任务管理系统",
+      projectPath: "app-under-test",
+      frontendUrl: "http://localhost:6173",
+      demoProfile: {
+        enabled: true,
+        description: "演示浏览器操作。",
+        defaultGoal: "验证筛选。",
+        scenarioId: "task-filter-completed"
+      }
+    };
+    render(<ProjectPanel
+      projects={[demoProject]}
+      selectedProjectId={demoProject.id}
+      draft={demoProject}
+      detection={null}
+      connection={null}
+      onSelect={vi.fn()}
+      onDraftChange={vi.fn()}
+      onRunDiagnosis={vi.fn()}
+      onStop={vi.fn()}
+    />);
+    expect(screen.getByTestId("official-demo-summary")).toBeTruthy();
+    expect((screen.getByText("查看项目技术信息").parentElement as HTMLDetailsElement).open).toBe(false);
+    expect((screen.getByText("查看或调整运行设置").parentElement as HTMLDetailsElement).open).toBe(false);
+    expect(screen.getByRole("button", { name: "准备演示页面" })).toBeTruthy();
   });
 
   it("shows a bounded startup countdown and a differentiated failure", () => {
@@ -919,6 +1164,8 @@ describe("Workbench interactions", () => {
         errorCode: "assistant_output_invalid"
       }
     }} actions={<button type="button">重试失败链路</button>} />);
+    expect(screen.getByText("本地兜底")).toBeTruthy();
+    expect(screen.getByText(/本次没有获得合格的模型回答/)).toBeTruthy();
     expect(screen.getByText(/遇到的问题：实验创建流程/)).toBeTruthy();
     expect(screen.getByText(/系统已经做了什么：页面扫描结果/)).toBeTruthy();
     expect(screen.getByText(/需要你做什么：请确认/)).toBeTruthy();
@@ -926,8 +1173,39 @@ describe("Workbench interactions", () => {
     expect(sourceDetails.open).toBe(false);
     fireEvent.click(screen.getByText("回复来源"));
     expect(sourceDetails.open).toBe(true);
-    expect(screen.getByText(/系统依据已保存的测试事实生成了这段说明/)).toBeTruthy();
+    expect(screen.getByText(/这不是模型生成的回答/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "重试失败链路" })).toBeTruthy();
+  });
+
+  it("keeps long repair evidence identifiers inspectable in a narrow conversation", async () => {
+    const openEvidence = vi.fn();
+    const evidenceId = "run_cb8fd4a9-3f22-4a8c-9ba4-f8be9cf8a268_screenshot_1787812571385";
+    render(<AssistantConversationMessage
+      message={{
+        id: "assistant-repair-plan",
+        role: "assistant",
+        content: "失败链路已形成修复方案。",
+        createdAt: new Date().toISOString(),
+        repairPlan: {
+          planId: "repair-plan-1",
+          owner: "developer",
+          status: "pending",
+          problem: "业务路径缺少可验证入口。",
+          message: "需要确认失败原因。",
+          steps: ["查看失败证据"],
+          validation: "重新运行测试",
+          action: "open-evidence",
+          evidenceRefs: [evidenceId]
+        }
+      } as never}
+      onOpenRepairEvidence={openEvidence}
+    />);
+
+    const evidenceButton = screen.getByRole("button", { name: `打开证据 ${evidenceId}` });
+    expect(evidenceButton.getAttribute("title")).toBe(evidenceId);
+    expect(evidenceButton.querySelector(".repair-plan-evidence-id")?.textContent).toBe(evidenceId);
+    await userEvent.click(evidenceButton);
+    expect(openEvidence).toHaveBeenCalledWith(evidenceId, expect.objectContaining({ planId: "repair-plan-1" }));
   });
 
   it("opens a verified knowledge source through the authenticated Agent API", async () => {

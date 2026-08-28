@@ -16,6 +16,7 @@ import type {
 } from "../types";
 import type { PlanningAutomationPresentation } from "../components/PlanningConversationPanel";
 import type { WorkspaceAction } from "../state/workspaceReducer";
+import { userFacingCoverageText } from "../appPresentation";
 
 export interface AutomationFailure {
   scenarioId: string;
@@ -45,6 +46,12 @@ export interface ScenarioExecutionTarget {
   }>;
   coverageMode?: "targeted" | "full";
   dynamicBrowser?: boolean;
+  requireModelExecution?: boolean;
+  llmBudget?: {
+    maxBrowserActionCalls?: number;
+    maxTotalTokens?: number;
+    totalTimeoutMs?: number;
+  };
 }
 
 interface UseConfirmedScenarioExecutionInput {
@@ -109,6 +116,8 @@ export function useConfirmedScenarioExecution(input: UseConfirmedScenarioExecuti
         coverageInventory: targetOverride?.coverageInventory,
         coverageMode: targetOverride?.coverageMode,
         dynamicBrowser: targetOverride?.dynamicBrowser,
+        requireModelExecution: targetOverride?.requireModelExecution,
+        llmBudget: targetOverride?.llmBudget,
         modelProfileId: input.defaultCredential?.id
       });
       input.setBrowserSession(null);
@@ -121,12 +130,25 @@ export function useConfirmedScenarioExecution(input: UseConfirmedScenarioExecuti
       input.setPlanningAutomation({ phase: "running", detail: "AI 正在操作浏览器并采集截图、DOM、网络和 Trace。", scenarioId: selectedScenarioId });
       input.setMessage("计划已确认，AI 正在自动执行测试。");
       const report = await waitForRunReport(created.run.id);
+      const requiredCoverageIds = new Set((targetOverride?.coverageInventory ?? []).map((item) => item.id));
+      const reportedCoverageIds = new Set((report.coverageItems ?? []).flatMap((item) => [item.id, item.flowId]));
+      const missingCoverageIds = [...requiredCoverageIds].filter((id) => !reportedCoverageIds.has(id));
+      const reportedFinalStatus = report.finalStatus ?? report.gateStatus
+        ?? (report.verdict === "continue" ? "pass" : report.verdict === "stop_and_fix" ? "fail" : "needs-human-review");
+      // Defence in depth: a parent Run may only pass after it accounts for
+      // every path submitted by planning. A partial report remains useful for
+      // inspection, but it must not produce a successful assistant message.
+      const finalStatus = reportedFinalStatus === "pass" && missingCoverageIds.length
+        ? "needs-human-review" as const
+        : reportedFinalStatus;
+      const reportSummary = userFacingCoverageText(report.summary);
+      const outcomeDetail = missingCoverageIds.length
+        ? `${reportSummary} 规划中的 ${missingCoverageIds.length} 条路径未出现在运行覆盖结果中，已阻止“通过”结论。`
+        : reportSummary;
       input.setResult(report);
       input.dispatchWorkspace({ type: "run-completed", requestId: workspaceRequestId, projectId: operationProjectId, report });
-      input.setPlanningAutomation({ phase: "ready", detail: report.summary, scenarioId: selectedScenarioId });
-      input.setMessage(report.summary);
-      const finalStatus = report.finalStatus ?? report.gateStatus
-        ?? (report.verdict === "continue" ? "pass" : report.verdict === "stop_and_fix" ? "fail" : "needs-human-review");
+      input.setPlanningAutomation({ phase: "ready", detail: outcomeDetail, scenarioId: selectedScenarioId });
+      input.setMessage(outcomeDetail);
       input.setAutomationFailures([]);
       input.setPlanningMessages((current) => {
         const withoutSupersededFailure = current.filter((item) => !item.id.startsWith("automation_failure_analysis_") && !item.id.startsWith("progress:run:"));
@@ -135,13 +157,13 @@ export function useConfirmedScenarioExecution(input: UseConfirmedScenarioExecuti
           id: `run_outcome_${created.run.id}`,
           role: "assistant",
           content: finalStatus === "pass"
-            ? `本次测试已经完成。机器结论：通过。${report.summary}`
-            : `本次测试已经结束。机器结论：${finalStatus}。${report.summary}`,
+            ? `本次测试已经完成。机器结论：通过。${outcomeDetail}`
+            : `本次测试已经结束。机器结论：${finalStatus}。${outcomeDetail}`,
           createdAt: new Date().toISOString(),
           reasoningSummary: {
             phase: "completed",
             observations: [`Run ${created.run.id} 已完成`],
-            assessment: report.summary,
+            assessment: outcomeDetail,
             nextStep: finalStatus === "pass" ? "可以查看本次证据和测试报告。" : "继续处理报告中仍未完成的路径。",
             userAction: "无需处理先前的临时阻塞提示。",
             confidence: "high"
@@ -149,7 +171,7 @@ export function useConfirmedScenarioExecution(input: UseConfirmedScenarioExecuti
           requiresConfirmation: false
         }];
       });
-      return { scenarioId: selectedScenarioId, success: finalStatus === "pass", finalStatus, detail: report.summary };
+      return { scenarioId: selectedScenarioId, success: finalStatus === "pass", finalStatus, detail: outcomeDetail };
     } catch (error) {
       const detail = input.userFacingError(error instanceof Error ? error.message : "自动化测试启动失败");
       input.dispatchWorkspace({ type: "operation-failed", requestId: workspaceRequestId, projectId: operationProjectId, error: detail });

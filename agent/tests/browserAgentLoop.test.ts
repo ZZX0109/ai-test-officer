@@ -151,6 +151,23 @@ export async function testBrowserAgentLoop() {
       /browser_llm_unknown_control/,
       "unknown runtime bindings must fail inside the semantic-repair boundary"
     );
+    const providerOracleWithIrrelevantBinding = {
+      ...providerDecision,
+      actions: [],
+      status: "complete",
+      oracles: [{
+        ...providerDecision.oracles[0],
+        // Flat provider schemas can make the model repeat a control binding
+        // even though dom-change Oracles do not use one. The typed adapter
+        // must discard that irrelevant field while keeping strict runtime
+        // binding checks for actions and applicable Oracle variants.
+        controlId: observation.controls[0]?.controlId ?? "observed-control"
+      }]
+    };
+    assert.doesNotThrow(
+      () => parseBrowserDecisionProviderOutput(JSON.stringify(providerOracleWithIrrelevantBinding), observation),
+      "irrelevant flat Oracle fields must not block an otherwise grounded browser decision"
+    );
     assert.equal(
       observation.controls.find((control) => control.accessibleName === "Help")?.kind,
       "link",

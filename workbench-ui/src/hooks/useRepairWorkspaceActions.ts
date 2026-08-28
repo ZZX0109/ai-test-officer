@@ -20,7 +20,7 @@ interface RepairWorkspaceActionOptions {
   projectRuntime: ProjectRuntimeStatus | null;
   repairSession: RepairSession | null;
   result: RunResult | null;
-  setCentreSurface: (surface: "preview" | "code") => void;
+  setCentreSurface: (surface: "preview" | "trajectory" | "code") => void;
   setRepairBusy: Dispatch<SetStateAction<boolean>>;
   setRepairWorkspaceOpen: Dispatch<SetStateAction<boolean>>;
   setRepairSession: Dispatch<SetStateAction<RepairSession | null>>;
@@ -40,7 +40,7 @@ export function useRepairWorkspaceActions({
   setRepairBusy, setRepairWorkspaceOpen, setRepairSession, setMessage,
   setPlanningMessages, setRepairVerifiedScenarioIds
 }: RepairWorkspaceActionOptions) {
-  async function openCodeRepairWorkspace(targetRunId?: string) {
+  async function openCodeRepairWorkspace(targetRunId?: string, autoValidate = false) {
     const repairRunId = targetRunId ?? activeRunId;
     if (!repairRunId) {
       setCentreSurface("code");
@@ -59,7 +59,8 @@ export function useRepairWorkspaceActions({
           id: pendingId,
           role: "assistant",
           content: "遇到的问题：项目经过有限恢复后仍未启动。\n系统正在做什么：正在读取启动日志和允许修改的配置文件，在隔离沙盒中生成最小补丁。\n需要你操作：你已确认本次沙盒分析；原项目不会被修改，联网安装仍会单独询问。",
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          streaming: true
         }]);
       }
       try {
@@ -68,19 +69,32 @@ export function useRepairWorkspaceActions({
           credentialId,
           summary: analyzeStartup ? "根据已保存的项目启动状态和运行日志，分析最小启动配置修复。" : undefined
         });
-        setRepairSession(response.repair);
+        let preparedRepair = response.repair;
+        let validationNote: string | undefined;
+        if (autoValidate && response.repair.files.length) {
+          try {
+            const validated = await validateRepair(response.repair.id, false);
+            preparedRepair = validated.repair;
+            validationNote = `自动验证：${validated.repair.validation?.status ?? "已执行"}。`;
+          } catch (error) {
+            validationNote = `自动验证未完成：${error instanceof Error ? error.message : "验证服务不可用"}。补丁仍保留在沙盒中。`;
+          }
+        }
+        setRepairSession(preparedRepair);
         setRepairWorkspaceOpen(true);
-        const changedFiles = response.repair.files.map((file) => file.path);
-        setMessage(analyzeStartup ? response.repair.summary : "代码沙盒已准备，可以查看和编辑文件。保存只写入沙盒，不会直接修改原项目。");
+        const changedFiles = preparedRepair.files.map((file) => file.path);
+        setMessage(validationNote ?? (analyzeStartup ? preparedRepair.summary : "代码沙盒已准备，可以查看和编辑文件。保存只写入沙盒，不会直接修改原项目。"));
         if (analyzeStartup) {
           setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
             ...item,
+            streaming: false,
             content: [
               `遇到的问题：${projectRecovery?.events.at(-1)?.message ?? projectRuntime?.message ?? "项目启动失败。"}`,
               `系统已经做了什么：${response.repair.summary}`,
               changedFiles.length ? `沙盒变更：${changedFiles.join("、")}。已打开代码 Diff，尚未写回原项目。` : "沙盒变更：模型没有生成满足安全约束的修改，未改动任何文件。",
+              validationNote,
               "需要你操作：查看 Diff；如涉及依赖清单，需先授权联网安装，然后执行重新验证。"
-            ].join("\n")
+            ].filter(Boolean).join("\n")
           } : item));
         }
       } catch (error) {
@@ -89,6 +103,7 @@ export function useRepairWorkspaceActions({
         if (analyzeStartup) {
           setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
             ...item,
+            streaming: false,
             content: `遇到的问题：启动修复没有完成。\n系统已经做了什么：已保留原启动诊断，没有修改原项目。技术原因：${detail}\n需要你操作：检查模型配置，或在已打开的代码沙盒中手动调整启动配置。`
           } : item));
         }
@@ -105,7 +120,8 @@ export function useRepairWorkspaceActions({
       id: pendingId,
       role: "assistant",
       content: "你已授权 AI 在隔离沙盒中分析失败并提出最小补丁。系统会先保留原始证据；原项目保持只读。AI 会说明修改原因、预期效果和复测范围，验证通过前不会应用到原项目。",
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      streaming: true
     }]);
     try {
       const response = await createRunRepair(repairRunId, {
@@ -113,27 +129,46 @@ export function useRepairWorkspaceActions({
         credentialId,
         summary: "根据当前运行的机器门禁、失败断言和证据定位最小修复。"
       });
-      setRepairSession(response.repair);
+      let preparedRepair = response.repair;
+      let validationNote: string | undefined;
+      if (autoValidate && response.repair.files.length) {
+        setMessage("沙盒补丁已生成，正在自动执行受控验证…");
+        try {
+          const validated = await validateRepair(response.repair.id, false);
+          preparedRepair = validated.repair;
+          validationNote = `自动验证：${validated.repair.validation?.status ?? "已执行"}。`;
+          if (validated.repair.validation?.status === "passed") {
+            const scenarioId = result?.conclusions?.find((conclusion) => conclusion.runId === validated.repair.runId)?.scenarioId;
+            if (scenarioId) setRepairVerifiedScenarioIds((current) => new Set([...current, scenarioId]));
+          }
+        } catch (error) {
+          validationNote = `自动验证未完成：${error instanceof Error ? error.message : "验证服务不可用"}。补丁仍保留在沙盒中。`;
+        }
+      }
+      setRepairSession(preparedRepair);
       setRepairWorkspaceOpen(true);
-      setMessage(response.repair.summary);
+      setMessage(validationNote ?? preparedRepair.summary);
       const calls = await getRunLlmCalls(repairRunId).catch(() => null);
       const repairCall = [...(calls?.calls ?? [])].reverse().find((call) => call.purpose === "repairing");
-      const changedFiles = response.repair.files.map((file) => `${file.path}（${file.additions}+/${file.deletions}-，${file.risk}）`);
+      const changedFiles = preparedRepair.files.map((file) => `${file.path}（${file.additions}+/${file.deletions}-，${file.risk}）`);
       setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
         ...item,
+        streaming: false,
         content: [
-          response.repair.summary,
-          `失败归因：${response.repair.failureClass}。`,
+          preparedRepair.summary,
+          `失败归因：${preparedRepair.failureClass}。`,
           changedFiles.length ? `沙盒变更：${changedFiles.join("；")}。` : "模型没有生成可安全应用的文件变更。",
+          validationNote,
           repairCall ? `模型 ${repairCall.model}；调用 ${repairCall.id}；${repairCall.durationMs}ms；${repairCall.usage.totalTokens ?? 0} Token；状态 ${repairCall.status}。` : "本次没有可用的 Repair 模型调用记录。",
           "修复工作区已打开，可逐行查看 Diff；重新验证通过前不会应用到原项目。你可以继续手动编辑沙盒副本。"
-        ].join("\n")
+        ].filter(Boolean).join("\n")
       } : item));
     } catch (error) {
       const detail = error instanceof Error ? error.message : "创建修复工作区失败";
       setMessage(detail);
       setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
         ...item,
+        streaming: false,
         content: `修复会话创建失败：${detail}。原机器结论和证据保持不变，没有修改项目文件。`
       } : item));
     } finally {

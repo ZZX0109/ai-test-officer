@@ -1,0 +1,72 @@
+[
+  {
+    "id": "reliability-wrong-oracle",
+    "projectId": "todo_lite",
+    "category": "oracle-governance",
+    "requirement": "错误的验收 Oracle 不得把失败行为判定为发布通过。",
+    "risk": "critical",
+    "evaluationScope": "reliability",
+    "oracleProfile": "wrong-expected-value",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "reliability-expired-oracle",
+    "projectId": "todo_lite",
+    "category": "oracle-governance",
+    "requirement": "过期 Oracle 必须进入人工复核，不能支撑 release pass。",
+    "risk": "high",
+    "evaluationScope": "reliability",
+    "oracleProfile": "expired-source",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "reliability-hidden-state-change",
+    "projectId": "order_portal_lite",
+    "category": "hidden-state",
+    "requirement": "页面视觉保持不变但后端订单状态发生变化时，结构化状态 Oracle 必须识别变化。",
+    "risk": "high",
+    "evaluationScope": "reliability",
+    "oracleProfile": "backend-state-only",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "reliability-backend-data-error",
+    "projectId": "order_portal_lite",
+    "category": "backend-data",
+    "requirement": "后端返回错误数据时不能仅凭视觉快照判定通过。",
+    "risk": "critical",
+    "evaluationScope": "reliability",
+    "oracleProfile": "structured-data-mismatch",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "reliability-base-head-root-cause",
+    "projectId": "todo_lite",
+    "category": "differential-causality",
+    "requirement": "Base 与 Head 都失败但根因不同，不得误报为 pre-existing-defect。",
+    "risk": "critical",
+    "evaluationScope": "reliability",
+    "oracleProfile": "different-failure-signatures",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "reliability-visual-only-difference",
+    "projectId": "order_portal_lite",
+    "category": "differential-causality",
+    "requirement": "只有视觉差异且缺少结构化 Oracle 时必须输出 inconclusive。",
+    "risk": "medium",
+    "evaluationScope": "reliability",
+    "oracleProfile": "visual-only",
+    "harnessStatus": "required"
+  },
+  {
+    "id": "reliability-generated-test-failure",
+    "projectId": "todo_lite",
+    "category": "test-asset-validity",
+    "requirement": "生成测试自身失败时不得把失败归因于产品回归。",
+    "risk": "high",
+    "evaluationScope": "reliability",
+    "oracleProfile": "generated-test-failure",
+    "harnessStatus": "required"
+  }
+]

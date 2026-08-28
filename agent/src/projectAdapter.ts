@@ -1,12 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, lstat, mkdir, readFile, readdir, readlink, rm, stat } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import path from "node:path";
 import type {
   ProjectConfig,
   ProjectHealthCheckResult,
-  ProjectLoginConfig,
   ProjectProcessConfig,
   ProjectRuntimeFailureReason,
   ProjectRuntimeStatus,
@@ -15,6 +13,8 @@ import type {
 import { redactText } from "./redaction.js";
 import { commandSpecSchema, type CommandSpec } from "@ai-test-officer/contracts";
 import { buildOciInvocation, classifyRuntimeFailure, runAllowlistedCommand } from "@ai-test-officer/execution-worker";
+import { captureProcessOutput } from "./processOutput.js";
+import { needsDependencyInstall, prepareSandboxDependencyCache } from "./sandboxDependencyCache.js";
 import { getProjectLoginSecret } from "./projectLoginStore.js";
 import { decrypt, getCredential } from "./credentialStore.js";
 import { probeIsolatedSandboxHealth } from "./isolatedNetworkHealth.js";
@@ -25,6 +25,7 @@ import { prepareOciEgress, type OciEgressLease } from "./ociEgress.js";
 import { runProjectLifecycleCommands } from "./projectLifecycle.js";
 import { projectWithIsolatedRuntimeUrls } from "./isolatedRuntimeUrls.js";
 import { portFromUrl, projectWithSandboxRuntimeUrls, replaceUrlPort } from "./sandboxRuntimeUrls.js";
+import { checkProjectApiCredentials, checkProjectCredential, checkProjectUrl, projectHealthReason } from "./projectHealth.js";
 import {
   defaultProjectConfig,
   ensureProjectRegistry,
@@ -39,12 +40,11 @@ export {
   ensureProjectRegistry,
   getProject,
   listProjects,
+  safeProjectPath,
   saveProject,
   toTargetProjectConfig
 };
 
-const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
-const sandboxCacheDir = path.join(rootDir, "reports", "sandbox-cache");
 type RunningProcess = { config: ProjectProcessConfig; process: ChildProcess };
 type OciContainerRef = { engine: "docker"; containerName: string };
 type RunningProject = {
@@ -61,9 +61,6 @@ const recoveredSandboxMonitors = new Set<string>();
 const processLogs = new WeakMap<ChildProcess, { stdout: string; stderr: string }>();
 const ociProcesses = new WeakMap<ChildProcess, { engine: "docker"; containerName: string }>();
 const activeRuntimeStatuses = new Set<ProjectRuntimeStatus["status"]>(["installing", "starting", "running"]);
-function now() {
-  return new Date().toISOString();
-}
 
 async function exists(file: string) {
   try {
@@ -74,323 +71,8 @@ async function exists(file: string) {
   }
 }
 
-const sandboxFingerprintIgnoredDirectories = new Set([
-  ".git",
-  ".next",
-  ".nuxt",
-  ".output",
-  ".turbo",
-  ".venv",
-  "__pycache__",
-  "build",
-  "coverage",
-  "dist",
-  "node_modules",
-  "reports",
-  "target",
-  "venv"
-]);
-
-async function collectDependencyDescriptors(cwd: string) {
-  const descriptorNames = new Set([
-    ".npmrc",
-    ".nvmrc",
-    ".python-version",
-    ".yarnrc.yml",
-    "Cargo.lock",
-    "Cargo.toml",
-    "Gemfile",
-    "Gemfile.lock",
-    "Pipfile.lock",
-    "composer.json",
-    "composer.lock",
-    "go.mod",
-    "go.sum",
-    "build.gradle",
-    "build.gradle.kts",
-    "gradle.lockfile",
-    "npm-shrinkwrap.json",
-    "package-lock.json",
-    "package.json",
-    "pnpm-lock.yaml",
-    "pnpm-workspace.yaml",
-    "poetry.lock",
-    "pom.xml",
-    "pyproject.toml",
-    "requirements.txt",
-    "settings.gradle",
-    "settings.gradle.kts",
-    "uv.lock",
-    "yarn.lock"
-  ]);
-  const indexed = await captureProcessOutput(
-    "git",
-    ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard"],
-    10_000,
-    10 * 1024 * 1024
-  );
-  if (indexed.exitCode === 0) {
-    return indexed.stdout
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .filter((relative) => descriptorNames.has(path.basename(relative)))
-      .slice(0, 2_000)
-      .map((relative) => path.resolve(cwd, relative))
-      .filter((absolute) => absolute === cwd || absolute.startsWith(`${cwd}${path.sep}`))
-      .sort((left, right) => left.localeCompare(right));
-  }
-  const result: string[] = [];
-  const pending = [cwd];
-  while (pending.length && result.length < 2_000) {
-    const directory = pending.pop()!;
-    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (result.length >= 2_000) break;
-      const absolute = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (!sandboxFingerprintIgnoredDirectories.has(entry.name)) pending.push(absolute);
-      } else if (entry.isFile() && descriptorNames.has(entry.name)) {
-        result.push(absolute);
-      }
-    }
-  }
-  return result.sort((left, right) => left.localeCompare(right));
-}
-
-async function fingerprintNonGitSource(cwd: string) {
-  const digest = createHash("sha256");
-  const pending = [cwd];
-  let visited = 0;
-  while (pending.length && visited < 100_000) {
-    const directory = pending.pop()!;
-    const entries = (await readdir(directory, { withFileTypes: true }).catch(() => []))
-      .sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
-      if (visited >= 100_000) break;
-      const absolute = path.join(directory, entry.name);
-      const relative = path.relative(cwd, absolute).replaceAll(path.sep, "/");
-      if (entry.isDirectory()) {
-        if (!sandboxFingerprintIgnoredDirectories.has(entry.name)) pending.push(absolute);
-        continue;
-      }
-      visited += 1;
-      try {
-        const metadata = await lstat(absolute);
-        digest.update(relative);
-        digest.update(`:${metadata.size}:${Math.trunc(metadata.mtimeMs)}`);
-        if (metadata.isSymbolicLink()) digest.update(`:${await readlink(absolute)}`);
-      } catch {
-        // Files can legitimately disappear while an editor or build process
-        // updates the selected folder. The next scan will produce a new key.
-      }
-    }
-  }
-  digest.update(`:visited=${visited}:pending=${pending.length}`);
-  return digest.digest("hex").slice(0, 24);
-}
-
-async function directoryHasEntries(directory: string) {
-  return (await readdir(directory).catch(() => [])).length > 0;
-}
-
-async function initializeSandboxVolume(input: {
-  engine: "docker";
-  image: string;
-  name: string;
-  projectId: string;
-}) {
-  const inspected = await captureProcessOutput(input.engine, ["volume", "inspect", input.name], 10_000);
-  const existed = inspected.exitCode === 0;
-  if (inspected.exitCode !== 0) {
-    const created = await captureProcessOutput(input.engine, [
-      "volume", "create",
-      "--label", "ai-test-officer.managed=true",
-      "--label", `ai-test-officer.project-id=${input.projectId}`,
-      input.name
-    ], 20_000);
-    if (created.exitCode !== 0) return { ready: false, existed: false };
-  }
-  // The target application still runs as uid 65532. This one-shot container
-  // only assigns ownership of an empty managed volume; it never mounts or
-  // executes the untrusted project source.
-  const initialized = await captureProcessOutput(input.engine, [
-    "run", "--rm", "--user", "0:0",
-    "--mount", `type=volume,src=${input.name},dst=/cache`,
-    "--entrypoint", "/bin/sh",
-    input.image,
-    "-c", "chown 65532:65532 /cache && chmod 700 /cache"
-  ], 120_000);
-  return { ready: initialized.exitCode === 0, existed };
-}
-
-export async function prepareSandboxDependencyCache(
-  project: ProjectConfig,
-  cwd: string,
-  options?: {
-    /**
-     * Dependency descriptors may come from the immutable source project while
-     * `cwd` points at a writable repair copy. This lets validation reuse the
-     * prepared dependency volume without treating ordinary source edits as a
-     * dependency change.
-     */
-    dependencyDescriptorRoot?: string;
-    /**
-     * Keep the package store shared while assigning a distinct writable
-     * workspace to repair/validation runs. A validation source refresh must
-     * never mutate the volume used by a live target runtime.
-     */
-    workspaceNamespace?: string;
-  }
-) {
-  if (project.manifest?.execution.mode !== "oci") return undefined;
-  // Pre-installed dependencies: the source already carries node_modules/.venv,
-  // so skip the volume-based dependency cache (and its one-shot chown
-  // containers) entirely. The execution worker copies the dependency
-  // directories into the writable /workspace tmpfs and skips the install
-  // command, letting the project start without any registry egress.
-  if (project.manifest.execution.preinstalledDependencies) return undefined;
-  const dependencyDescriptorRoot = options?.dependencyDescriptorRoot ?? cwd;
-  const digest = createHash("sha256");
-  digest.update(project.manifest.execution.image ?? "");
-  digest.update(JSON.stringify(project.installCommandSpec ?? project.manifest.commands.install ?? null));
-  // Include nested workspace descriptors, not just the repository root. A
-  // dependency change in apps/web/package.json must invalidate the prepared
-  // environment even when the root lockfile has not been regenerated yet.
-  for (const file of await collectDependencyDescriptors(dependencyDescriptorRoot)) {
-    const relative = path.relative(dependencyDescriptorRoot, file).replaceAll(path.sep, "/");
-    try {
-      const metadata = await lstat(file);
-      if (!metadata.isFile() || metadata.isSymbolicLink()) continue;
-      digest.update(relative);
-      digest.update(await readFile(file));
-    } catch {
-      // Missing dependency descriptors are represented by the remaining
-      // manifest and command fingerprint.
-    }
-  }
-  const key = digest.digest("hex").slice(0, 24);
-  const sourceDigest = createHash("sha256");
-  const gitHead = await captureProcessOutput("git", ["-C", cwd, "rev-parse", "HEAD"], 5_000);
-  if (gitHead.exitCode === 0) {
-    sourceDigest.update(gitHead.stdout);
-    const gitDiff = await captureProcessOutput("git", ["-C", cwd, "diff", "--binary", "HEAD"], 15_000, 50 * 1024 * 1024);
-    sourceDigest.update(gitDiff.stdout);
-    const untracked = await captureProcessOutput("git", ["-C", cwd, "ls-files", "--others", "--exclude-standard"], 10_000);
-    const untrackedFiles = untracked.stdout.split(/\r?\n/).filter(Boolean).slice(0, 2_000);
-    for (const relative of untrackedFiles) {
-      const candidate = path.resolve(cwd, relative);
-      if (candidate !== cwd && !candidate.startsWith(`${cwd}${path.sep}`)) continue;
-      sourceDigest.update(relative);
-      try {
-        const metadata = await lstat(candidate);
-        if (!metadata.isFile() || metadata.isSymbolicLink()) continue;
-        sourceDigest.update(await readFile(candidate));
-      } catch {
-        // Directories and files that disappear during scanning are ignored.
-      }
-    }
-  } else {
-    // Finder-selected folders often are not Git repositories. Use a stable
-    // metadata fingerprint so unchanged 50k-file projects do not get copied
-    // into the sandbox again on every start.
-    sourceDigest.update(await fingerprintNonGitSource(cwd));
-  }
-  const sourceFingerprint = sourceDigest.digest("hex").slice(0, 24);
-  const safeProjectId = project.id.replace(/[^a-zA-Z0-9_.-]/g, "_");
-  const safeWorkspaceNamespace = options?.workspaceNamespace
-    ?.replace(/[^a-zA-Z0-9_.-]/g, "_")
-    .slice(0, 80);
-  const cacheRoot = path.join(sandboxCacheDir, safeProjectId, key);
-  const workspaceRoot = safeWorkspaceNamespace
-    ? path.join(cacheRoot, "workspaces", safeWorkspaceNamespace)
-    : path.join(cacheRoot, "workspace");
-  const packageCacheRoot = path.join(cacheRoot, "packages");
-  const metadataRoot = path.join(cacheRoot, "metadata");
-  await Promise.all([
-    mkdir(workspaceRoot, { recursive: true }),
-    mkdir(packageCacheRoot, { recursive: true }),
-    mkdir(metadataRoot, { recursive: true })
-  ]);
-  // Docker Desktop preserves host bind permissions. These directories contain
-  // only project-scoped disposable dependency data and must be writable by the
-  // non-root sandbox uid.
-  await Promise.all([
-    chmod(workspaceRoot, 0o777),
-    chmod(packageCacheRoot, 0o777),
-    chmod(metadataRoot, 0o777)
-  ]);
-  // Preserve already-created bind caches so an in-progress preparation is
-  // never discarded. Brand-new caches use engine-native volumes, which avoid
-  // Docker Desktop's very slow macOS bind-mount writes for node_modules.
-  const hasLegacyBindData = await directoryHasEntries(workspaceRoot)
-    || await directoryHasEntries(packageCacheRoot);
-  const packageVolumeKey = createHash("sha256").update(`${safeProjectId}:${key}`).digest("hex").slice(0, 24);
-  const workspaceVolumeKey = createHash("sha256")
-    .update(`${safeProjectId}:${key}:${safeWorkspaceNamespace ?? "runtime"}`)
-    .digest("hex")
-    .slice(0, 24);
-  const workspaceVolume = `ato-workspace-${workspaceVolumeKey}`;
-  const packageCacheVolume = `ato-packages-${packageVolumeKey}`;
-  const engine = project.manifest.execution.engine ?? "docker";
-  const image = project.manifest.execution.image ?? "node:22-bookworm-slim";
-  const [workspaceVolumeState, packageVolumeState] = await Promise.all([
-    initializeSandboxVolume({ engine, image, name: workspaceVolume, projectId: project.id }),
-    initializeSandboxVolume({ engine, image, name: packageCacheVolume, projectId: project.id })
-  ]);
-  const volumeReady = workspaceVolumeState.ready && packageVolumeState.ready;
-  const volumePreparedMarker = await exists(path.join(metadataRoot, `prepared-${key}`));
-  const volumePrepared = volumePreparedMarker
-    && workspaceVolumeState.existed
-    && packageVolumeState.existed;
-  const bindPrepared = await exists(path.join(packageCacheRoot, `prepared-${key}`));
-  // Prefer a previously prepared engine-native volume even when an obsolete
-  // bind cache is still present. The old rule treated any legacy workspace
-  // file as authoritative, so a valid multi-gigabyte volume was ignored and
-  // every launch repeated a cold install until the health check timed out.
-  const storageMode = volumeReady && (volumePrepared || !hasLegacyBindData || !bindPrepared)
-    ? "volume" as const
-    : "bind" as const;
-  const markerRoot = storageMode === "volume" ? metadataRoot : packageCacheRoot;
-  const prepared = storageMode === "volume"
-    ? volumePrepared
-    : bindPrepared;
-  if (!prepared) {
-    // A metadata marker can outlive a deleted/recreated Docker volume. Never
-    // allow that stale marker to make an empty volume look prepared.
-    await rm(path.join(markerRoot, `prepared-${key}`), { force: true });
-    await rm(path.join(markerRoot, `preparing-${key}`), { recursive: true, force: true });
-  }
-  return {
-    key,
-    sourceFingerprint,
-    storageMode,
-    workspaceRoot,
-    packageCacheRoot,
-    metadataRoot,
-    workspaceVolume,
-    packageCacheVolume,
-    prepared
-  };
-}
-
-async function needsDependencyInstall(project: ProjectConfig, cwd: string) {
-  if (project.manifest?.execution.mode === "oci") return true;
-  const command = `${project.installCommandSpec?.executable ?? ""} ${project.installCommandSpec?.args.join(" ") ?? project.installCommand ?? ""}`.trim();
-  if (!/\b(npm|pnpm|yarn)\b/.test(command)) return true;
-  const dependencyDir = path.join(cwd, "node_modules");
-  if (!(await exists(dependencyDir))) return true;
-  const lockCandidates = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
-  const lock = (await Promise.all(lockCandidates.map(async (file) => {
-    const candidate = path.join(cwd, file);
-    return (await exists(candidate)) ? candidate : undefined;
-  }))).find(Boolean);
-  if (!lock) return false;
-  try {
-    const [dependencyStat, lockStat] = await Promise.all([stat(dependencyDir), stat(lock)]);
-    return lockStat.mtimeMs > dependencyStat.mtimeMs;
-  } catch {
-    return true;
-  }
+function now() {
+  return new Date().toISOString();
 }
 
 export function getProjectRuntimeStatus(id: string): ProjectRuntimeStatus {
@@ -557,95 +239,6 @@ function isActiveRuntimeStatus(status: ProjectRuntimeStatus["status"]) {
   return activeRuntimeStatuses.has(status);
 }
 
-async function checkUrl(url: string | undefined, timeoutMs: number) {
-  if (!url) return undefined;
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    return { ok: response.ok, status: response.status, url };
-  } catch (error) {
-    return { ok: false, url, error: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-function healthReason(input: {
-  pathOk: boolean;
-  credentialOk: boolean;
-  frontend?: { ok: boolean };
-  backend?: { ok: boolean };
-  health?: { ok: boolean };
-  processHealth?: Array<{ required: boolean; ok: boolean }>;
-}): ProjectRuntimeFailureReason {
-  if (!input.pathOk) return "project_path_missing";
-  if (!input.credentialOk) return "credential_missing";
-  if (input.processHealth?.some((item) => item.required && !item.ok)) return "health_timeout";
-  if (input.health && !input.health.ok) return "health_timeout";
-  if (input.frontend && !input.frontend.ok) return "frontend_unreachable";
-  if (input.backend && !input.backend.ok) return "backend_unreachable";
-  return "none";
-}
-
-function hasEnvValue(name: string | undefined) {
-  return Boolean(name?.trim() && process.env[name.trim()]?.trim());
-}
-
-function credentialCheck(login: ProjectLoginConfig | undefined, projectSecretResolved = false): ProjectHealthCheckResult["credential"] {
-  if (!login || login.method === "none") {
-    return { ok: true, method: "none", missingEnv: [] };
-  }
-  if (login.credentialId?.trim()) {
-    if (login.credentialId.startsWith("login_") && !projectSecretResolved) {
-      return {
-        ok: false,
-        method: login.method,
-        credentialId: login.credentialId,
-        missingEnv: ["encrypted project login credential"]
-      };
-    }
-    return {
-      ok: true,
-      method: login.method,
-      credentialId: login.credentialId,
-      missingEnv: []
-    };
-  }
-  const requiredEnv = [login.usernameEnv, login.passwordEnv]
-    .map((item) => item?.trim())
-    .filter((item): item is string => Boolean(item));
-  const missingEnv = requiredEnv.filter((name) => !hasEnvValue(name));
-  const missingConfiguredNames = [
-    login.usernameEnv?.trim() ? undefined : "usernameEnv",
-    login.passwordEnv?.trim() ? undefined : "passwordEnv"
-  ].filter((item): item is string => Boolean(item));
-  return {
-    ok: missingEnv.length === 0 && missingConfiguredNames.length === 0,
-    method: login.method,
-    missingEnv: [...missingConfiguredNames, ...missingEnv]
-  };
-}
-
-function apiCredentialCheck(
-  project: ProjectConfig,
-  resolvedCredentialIds: Set<string>
-): ProjectHealthCheckResult["apiCredential"] {
-  const requirements = project.apiCredentialRequirements ?? [];
-  const bindings = new Map((project.apiCredentialBindings ?? []).map((binding) => [binding.envName, binding]));
-  const status = requirements.map((requirement) => {
-    const binding = bindings.get(requirement.envName);
-    return {
-      envName: requirement.envName,
-      configured: Boolean(binding && resolvedCredentialIds.has(binding.credentialId)),
-      credentialId: binding?.credentialId,
-      source: binding?.source,
-      exposure: requirement.exposure
-    };
-  });
-  return {
-    ok: status.every((item) => item.configured),
-    requirements: status,
-    missingEnv: status.filter((item) => !item.configured).map((item) => item.envName)
-  };
-}
-
 async function withProjectSecrets(project: ProjectConfig) {
   const login = project.login;
   let runtimeProject = project;
@@ -698,16 +291,16 @@ export async function testProjectConnection(
   const resolvedPath = safeProjectPath(runtimeProject);
   const timeoutMs = runtimeProject.timeoutMs ?? 20_000;
   const pathOk = await exists(resolvedPath);
-  const credential = credentialCheck(runtimeProject.login, hydrated.loginSecretResolved);
-  const apiCredential = apiCredentialCheck(runtimeProject, hydrated.resolvedCredentialIds);
+  const credential = checkProjectCredential(runtimeProject.login, hydrated.loginSecretResolved);
+  const apiCredential = checkProjectApiCredentials(runtimeProject, hydrated.resolvedCredentialIds);
   const [frontend, backend, health, processHealth] = await Promise.all([
-    checkUrl(runtimeProject.frontendUrl, Math.min(timeoutMs, 5_000)),
-    checkUrl(runtimeProject.backendUrl, Math.min(timeoutMs, 5_000)),
-    checkUrl(runtimeProject.healthCheckUrl, Math.min(timeoutMs, 5_000)),
+    checkProjectUrl(runtimeProject.frontendUrl, Math.min(timeoutMs, 5_000)),
+    checkProjectUrl(runtimeProject.backendUrl, Math.min(timeoutMs, 5_000)),
+    checkProjectUrl(runtimeProject.healthCheckUrl, Math.min(timeoutMs, 5_000)),
     Promise.all((runtimeProject.processes ?? [])
       .filter((processConfig) => Boolean(processConfig.healthCheckUrl))
       .map(async (processConfig) => {
-        const result = await checkUrl(processConfig.healthCheckUrl, Math.min(timeoutMs, 5_000));
+        const result = await checkProjectUrl(processConfig.healthCheckUrl, Math.min(timeoutMs, 5_000));
         return {
           name: processConfig.name,
           required: processConfig.required ?? true,
@@ -718,7 +311,7 @@ export async function testProjectConnection(
         };
       }))
   ]);
-  const reason = healthReason({ pathOk, credentialOk: credential.ok && apiCredential.ok, frontend, backend, health, processHealth });
+  const reason = projectHealthReason({ pathOk, credentialOk: credential.ok && apiCredential.ok, frontend, backend, health, processHealth });
   const ok = reason === "none";
   return {
     projectId: project.id,
@@ -761,28 +354,6 @@ export function projectWithActiveRuntime(project: ProjectConfig): ProjectConfig 
   };
 }
 
-async function captureProcessOutput(executable: string, args: string[], timeoutMs = 5_000, maxBytes = 512 * 1024) {
-  return new Promise<{ exitCode: number | null; stdout: string; stderr: string }>((resolve) => {
-    const child = spawn(executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    const append = (current: string, chunk: unknown) => `${current}${String(chunk)}`.slice(-maxBytes);
-    child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
-    child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      resolve({ exitCode: null, stdout, stderr });
-    }, timeoutMs);
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      resolve({ exitCode: null, stdout, stderr: `${stderr}${error.message}` });
-    });
-    child.once("exit", (exitCode) => {
-      clearTimeout(timer);
-      resolve({ exitCode, stdout, stderr });
-    });
-  });
-}
 
 async function inspectManagedContainerFailure(running: RunningProject | undefined): Promise<ProjectRuntimeFailureReason | undefined> {
   for (const container of running?.ociContainers ?? []) {
@@ -1076,7 +647,7 @@ function monitorRecoveredSandbox(projectId: string, runtimeProject: ProjectConfi
   })();
 }
 
-type ExecutionContext = { runId?: string; attemptId?: string };
+type ExecutionContext = { runId?: string; attemptId?: string; skipLifecycle?: boolean };
 function spawnManagedProcess(input: {
   project: ProjectConfig;
   cwd: string;
@@ -1087,6 +658,7 @@ function spawnManagedProcess(input: {
   dependencyCache?: Awaited<ReturnType<typeof prepareSandboxDependencyCache>>;
   networkName?: string;
   proxyUrl?: string;
+  extraEnv?: Record<string, string>;
 }) {
   const isLegacy = typeof input.command === "string";
   if (isLegacy && process.env.NODE_ENV === "production" && process.env.ALLOW_LEGACY_SHELL_COMMANDS !== "1") {
@@ -1099,7 +671,7 @@ function spawnManagedProcess(input: {
       const execution = input.project.manifest!.execution;
       const hostPort = portFromUrl(input.healthCheckUrl);
       const containerPort = input.containerPort ?? hostPort;
-      const executionEnv = commandEnv(input.project);
+      const executionEnv = { ...commandEnv(input.project), ...(input.extraEnv ?? {}) };
       const invocation = buildOciInvocation({
         engine: execution.engine,
         image: execution.image!,
@@ -1137,7 +709,7 @@ function spawnManagedProcess(input: {
         shell: false,
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...commandEnv(input.project), ...parsed.env }
+        env: { ...commandEnv(input.project), ...parsed.env, ...(input.extraEnv ?? {}) }
       });
     })()
     : (() => {
@@ -1150,7 +722,7 @@ function spawnManagedProcess(input: {
         shell: false,
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
-        env: commandEnv(input.project)
+        env: { ...commandEnv(input.project), ...(input.extraEnv ?? {}) }
       });
     })();
   const logs = { stdout: "", stderr: "" };
@@ -1244,8 +816,16 @@ async function runManagedCommand(input: {
   status?: ProjectRuntimeStatus;
   networkName?: string;
   proxyUrl?: string;
+  extraEnv?: Record<string, string>;
 }) {
-  const child = spawnManagedProcess({ project: input.project, cwd: input.cwd, command: input.commandSpec ?? input.command, networkName: input.networkName, proxyUrl: input.proxyUrl });
+  const child = spawnManagedProcess({
+    project: input.project,
+    cwd: input.cwd,
+    command: input.commandSpec ?? input.command,
+    networkName: input.networkName,
+    proxyUrl: input.proxyUrl,
+    extraEnv: input.extraEnv
+  });
   if (input.status) {
     runningProjects.set(input.projectId, { process: child, status: { ...input.status, pid: child.pid } });
   }
@@ -1281,6 +861,32 @@ async function runManagedCommand(input: {
     stderr: logs?.stderr ?? "",
     stdout: logs?.stdout ?? ""
   };
+}
+
+/** Execute one manifest command through the same allowlist/OCI boundary used
+ * by project startup. Lifecycle callers use this instead of spawning a second
+ * unrestricted command runner. */
+export async function executeProjectCommand(input: {
+  projectId: string;
+  project: ProjectConfig;
+  command: CommandSpec;
+  cwd: string;
+  timeoutMs: number;
+  networkName?: string;
+  proxyUrl?: string;
+  extraEnv?: Record<string, string>;
+}) {
+  return runManagedCommand({
+    projectId: input.projectId,
+    project: input.project,
+    command: "",
+    commandSpec: input.command,
+    cwd: input.cwd,
+    timeoutMs: input.timeoutMs,
+    networkName: input.networkName,
+    proxyUrl: input.proxyUrl,
+    extraEnv: input.extraEnv
+  });
 }
 
 async function terminateProcessTree(child: ChildProcess) {
@@ -1368,8 +974,8 @@ function buildProcessStatuses(processes: RunningProcess[], status: "starting" | 
   }));
 }
 
-async function startProjectOnce(id: string, context: ExecutionContext = {}): Promise<ProjectRuntimeStatus> {
-  const storedProject = await getProject(id);
+async function startProjectOnce(id: string, context: ExecutionContext = {}, projectOverride?: ProjectConfig): Promise<ProjectRuntimeStatus> {
+  const storedProject = projectOverride ?? await getProject(id);
   if (!storedProject) {
     return { projectId: id, status: "failed", failureReason: "config_missing", message: "Project config not found." };
   }
@@ -1429,8 +1035,8 @@ async function startProjectOnce(id: string, context: ExecutionContext = {}): Pro
   if (!(await exists(cwd))) {
     return { projectId: id, status: "failed", failureReason: "project_path_missing", message: `Project path not found: ${project.projectPath}` };
   }
-  const credential = credentialCheck(project.login, hydrated.loginSecretResolved);
-  const apiCredential = apiCredentialCheck(project, hydrated.resolvedCredentialIds);
+  const credential = checkProjectCredential(project.login, hydrated.loginSecretResolved);
+  const apiCredential = checkProjectApiCredentials(project, hydrated.resolvedCredentialIds);
   if (!credential.ok || !apiCredential.ok) {
     return {
       projectId: id,
@@ -1477,7 +1083,14 @@ async function startProjectOnce(id: string, context: ExecutionContext = {}): Pro
       }
     };
   }
-  if (project.allowExternalProjectPath && project.manifest?.execution.mode !== "oci") {
+  // Only the bundled official demo is already owned by the development stack
+  // on ports 6172/6173. Adopt that one healthy local service instead of
+  // spawning a second copy that would race for the same ports. A caller may
+  // reuse the demo profile while constructing a test fixture, so the stable
+  // project id is part of this ownership check; arbitrary projects must still
+  // run their configured install/start commands.
+  const canAdoptHealthyLocal = project.id === "local_demo_app" && project.demoProfile?.enabled === true;
+  if (canAdoptHealthyLocal && project.manifest?.execution.mode !== "oci") {
     const existingHealth = await testProjectConnection(project);
     if (existingHealth.ok) {
       const adopted: ProjectRuntimeStatus = {
@@ -1558,10 +1171,12 @@ async function startProjectOnce(id: string, context: ExecutionContext = {}): Pro
   let egress: RunningProject["egress"]; try { egress = await prepareOciEgress(runtimeProject, context); } catch (error) {
     return { projectId: id, status: "failed", phase: "failed", updatedAt: now(), stoppedAt: now(), failureReason: "egress_policy_not_configured", message: error instanceof Error ? error.message : "egress_policy_not_configured" };
   }
-  const lifecycleResult = await runProjectLifecycleCommands({ manifest: runtimeProject.manifest, projectId: id, runId: context.runId, cwd, networkName: egress?.handle.name, proxyUrl: egress?.handle.proxyUrl,
-    timeoutMs: (_kind, command) => command.timeoutMs ?? runtimeProject.timeoutMs ?? 20_000,
-    run: (command) => runManagedCommand({ projectId: command.projectId, project: runtimeProject, command: "", commandSpec: command.command, cwd: command.cwd, timeoutMs: command.timeoutMs, networkName: command.networkName, proxyUrl: command.proxyUrl }),
-    teardown: async () => { if (egress) await egress.controller.teardown(egress.handle); } });
+  const lifecycleResult = context.skipLifecycle
+    ? { ok: true as const }
+    : await runProjectLifecycleCommands({ manifest: runtimeProject.manifest, projectId: id, runId: context.runId, cwd, networkName: egress?.handle.name, proxyUrl: egress?.handle.proxyUrl,
+      timeoutMs: (_kind, command) => command.timeoutMs ?? runtimeProject.timeoutMs ?? 20_000,
+      run: (command) => runManagedCommand({ projectId: command.projectId, project: runtimeProject, command: "", commandSpec: command.command, cwd: command.cwd, timeoutMs: command.timeoutMs, networkName: command.networkName, proxyUrl: command.proxyUrl }),
+      teardown: async () => { if (egress) await egress.controller.teardown(egress.handle); } });
   if (!lifecycleResult.ok) {
     const output = lifecycleResult.output;
     return { projectId: id, status: "failed", phase: "failed", updatedAt: now(), stoppedAt: now(), failureReason: lifecycleResult.failureReason, message: `Project lifecycle command failed: ${lifecycleResult.failureReason}.${output ? ` output=${output.slice(-2_000)}` : ""}` };
@@ -1684,6 +1299,11 @@ async function startProjectOnce(id: string, context: ExecutionContext = {}): Pro
     .filter(Boolean)
     .join("\n")
     .slice(-2_000);
+  const failureStdout = processes
+    .map((managed) => processLogs.get(managed.process)?.stdout ?? "")
+    .filter(Boolean)
+    .join("\n")
+    .slice(-2_000);
   const healthFailureReason = health.ok
     ? "none"
     : (() => {
@@ -1710,7 +1330,7 @@ async function startProjectOnce(id: string, context: ExecutionContext = {}): Pro
     failureReason: healthFailureReason,
     message: health.ok
       ? health.message
-      : `Project failed to become healthy: ${healthFailureReason}.${failureStderr ? ` stderr=${failureStderr}` : ""}`
+      : `Project failed to become healthy: ${healthFailureReason}.${failureStderr ? ` stderr=${failureStderr}` : failureStdout ? ` output=${failureStdout}` : ""}`
   };
   runningProjects.set(id, {
     process: processes[0]?.process,
@@ -1734,8 +1354,22 @@ export function startProject(id: string, context: ExecutionContext = {}): Promis
   return task;
 }
 
-export async function stopProject(id: string): Promise<ProjectRuntimeStatus> {
-  const project = await getProject(id);
+/** Start an ephemeral revision-specific project without writing it to the
+ * shared project registry. Differential runs use this to execute Base and
+ * Head worktrees concurrently while preserving the existing runtime/OCI
+ * boundary. */
+export function startProjectConfig(project: ProjectConfig, context: ExecutionContext = {}): Promise<ProjectRuntimeStatus> {
+  const current = projectStartPromises.get(project.id);
+  if (current) return current;
+  const task = startProjectOnce(project.id, context, project).finally(() => {
+    if (projectStartPromises.get(project.id) === task) projectStartPromises.delete(project.id);
+  });
+  projectStartPromises.set(project.id, task);
+  return task;
+}
+
+export async function stopProject(id: string, projectOverride?: ProjectConfig): Promise<ProjectRuntimeStatus> {
+  const project = projectOverride ?? await getProject(id);
   let running = runningProjects.get(id);
   // Agent hot reloads and service restarts clear the in-memory map while the
   // managed OCI container intentionally keeps running. Stop must discover and

@@ -373,8 +373,37 @@ function executionFailureReply(input: AssistantFailureContext) {
   };
 }
 
+function asksForPlainFailureExplanation(message: string) {
+  return /(?:简单|白话|通俗|好懂|说人话).{0,24}(?:解释|说明|原因)|(?:解释|说明).{0,24}(?:简单|白话|通俗|好懂|说人话)/i.test(message);
+}
+
+function coverageBlockerReply(rawDetail: string, userMessage: string) {
+  const blocked = rawDetail.match(/coverage_blocked:[^;；\s。.!！?？]+/gi) ?? [];
+  const failed = rawDetail.match(/coverage_failed:[^;；\s。.!！?？]+/gi) ?? [];
+  const excluded = rawDetail.match(/coverage_excluded:[^;；\s。.!！?？]+/gi) ?? [];
+  if (!blocked.length && !failed.length && !excluded.length) return undefined;
+  const facts = [
+    blocked.length ? `${blocked.length} 条路径没有找到可执行入口、操作条件或验证结果` : undefined,
+    failed.length ? `${failed.length} 条路径已经执行，但验证结果没有达到预期` : undefined,
+    excluded.length ? `${excluded.length} 条路径不适用于这次运行` : undefined
+  ].filter(Boolean).join("；");
+  const plain = asksForPlainFailureExplanation(userMessage);
+  return plain
+    ? `简单说：${facts}。测试系统因此不能可靠地证明这些路径通过，所以把本次结果拦住了。这不等于已经确认产品有 Bug。`
+    : `本次测试没有全部验证完成：${facts}。因此系统不会把本次结果算作通过，也不能据此确认产品有缺陷。`;
+}
+
 function blockedReply(input: AssistantFailureContext) {
   const rawDetail = compact(input.summary || input.latestLog, 260);
+  const coverageExplanation = coverageBlockerReply(rawDetail, input.userMessage);
+  if (coverageExplanation) {
+    return {
+      problem: coverageExplanation,
+      systemAction: "系统已保存已执行路径的页面、断言和证据；未验证的路径被明确标为阻塞，没有被计入通过。",
+      userAction: "如果你只是确认原因，无需操作。若要继续测试，请先查看失败路径的证据或重新生成这条路径的入口、操作条件和验证条件。",
+      action: "open-evidence" as const
+    };
+  }
   const proofLinkFailure = /proof_bundle_missing_artifact|proof_invalid|evidence.*(?:missing|invalid)|artifact.*(?:missing|invalid)/i.test(rawDetail);
   if (proofLinkFailure) {
     return {
@@ -434,7 +463,7 @@ export function assistantReplyNeedsNormalization(input: {
     && !input.pageObservation.screenshot
     && claimsSavedScreenshot(text)
   );
-  return /\b(?:proof_bundle_missing_artifact|proof_invalid|operation_[a-z0-9_-]+|conclusion_[a-z0-9_-]+|evidence_[a-z0-9_-]+)\b/i.test(text)
+  return /\b(?:proof_bundle_missing_artifact|proof_invalid|operation_[a-z0-9_-]+|conclusion_[a-z0-9_-]+|evidence_[a-z0-9_-]+|business_path_(?:runtime_)?[a-z0-9_-]+|coverage_(?:blocked|failed|excluded):[^\s；。]+)\b/i.test(text)
     || /上传.*(?:缺失|证明|证据).*(?:附件|文件)/i.test(text)
     || contradictsAuthenticationEvidence
     || inventsScreenshot;
@@ -533,6 +562,8 @@ export function deterministicAssistantCall(error: unknown, input: {
     ? "assistant_model_not_configured"
     : /401|403|credential|api[_ ]?key/i.test(raw)
       ? "assistant_credential_invalid"
+      : /llm_budget_exceeded|budget/i.test(raw)
+        ? "assistant_budget_exceeded"
       : /output_truncated|truncated/i.test(raw)
         ? "assistant_output_truncated"
         : /timeout|incomplete|network|fetch/i.test(raw)
@@ -551,6 +582,38 @@ export function deterministicAssistantCall(error: unknown, input: {
     fallbackApplied: true,
     errorCode
   };
+}
+
+function assistantFailureReason(errorCode: string | undefined) {
+  if (errorCode === "assistant_model_not_configured") return "当前没有可用的模型配置";
+  if (errorCode === "assistant_credential_invalid") return "模型凭据校验失败";
+  if (errorCode === "assistant_budget_exceeded") return "请求在发送前被模型预算检查拦下";
+  if (errorCode === "assistant_output_truncated") return "模型返回内容被截断";
+  if (errorCode === "assistant_provider_timeout") return "模型服务超时或网络不可用";
+  if (errorCode === "assistant_output_invalid" || errorCode === "assistant_output_normalized") return "模型返回内容未通过格式或事实边界校验";
+  return "模型调用没有成功完成";
+}
+
+function asksAboutTestRun(message: string) {
+  return /测试|运行|阻塞|失败|原因|轨迹|证据|页面|路径|功能|计划|状态|结论|修复|重试|继续|暂停|取消|报错|模型|调用|为什么|怎么处理/i.test(message);
+}
+
+/** A deterministic explanation is useful during provider failure, but it
+ * must never be presented as though the model answered the user's question. */
+export function discloseDeterministicAssistantFallback(input: {
+  userMessage: string;
+  fallbackReply: string;
+  errorCode?: string;
+}) {
+  const reason = assistantFailureReason(input.errorCode);
+  if (!asksAboutTestRun(input.userMessage)) {
+    return `这次没有获得大模型回答：${reason}。因此系统没有用固定的测试状态模板回答你的问题；请检查模型配置或稍后重试。`;
+  }
+  return [
+    `这次没有获得大模型回答：${reason}。`,
+    "以下内容由本地规则根据已保存的测试事实生成，不是模型回复：",
+    input.fallbackReply
+  ].join("\n\n");
 }
 
 export function deterministicAssistantCommandCall() {

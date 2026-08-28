@@ -1,4 +1,4 @@
-import type { ArtifactV2, CommandSpec, CompiledPlan, Conclusion, CoverageItem, EvidenceLocator, GateStatus, HumanDecision, JudgeRecommendation, LlmBudget, LlmCall, MachineGate, PlanProvenance, ProjectManifest, ProofEdge, ProofNode, ResourceBudget, RunEvidenceManifest, RunOutcomeSummaryV2 } from "@ai-test-officer/contracts";
+import type { ArtifactV2, CommandSpec, CompiledPlan, Conclusion, CoverageItem, EvidenceLocator, GateStatus, HumanDecision, JudgeRecommendation, LlmBudget, LlmCall, MachineGate, OracleDecisionV2, OracleSpecV2, PlanProvenance, ProjectManifest, ProofEdge, ProofNode, ResourceBudget, RunEvidenceManifest, RunOutcomeSummaryV2 } from "@ai-test-officer/contracts";
 
 export type ProviderKind = "openai-compatible" | "openai" | "anthropic" | "openrouter" | "custom";
 
@@ -145,10 +145,18 @@ export interface ProjectProcessConfig {
   required?: boolean;
 }
 
+export interface ProjectDemoProfile {
+  enabled: boolean;
+  description: string;
+  defaultGoal: string;
+  scenarioId: string;
+}
+
 export interface ProjectConfig {
   id: string;
   name: string;
   projectPath: string;
+  demoProfile?: ProjectDemoProfile;
   allowExternalProjectPath?: boolean;
   installCommand?: string;
   installCommandSpec?: CommandSpec;
@@ -575,6 +583,8 @@ export interface RunRequest {
   logicalProjectId?: string;
   executionProfile?: "interactive" | "benchmark";
   planId?: string;
+  /** Optional persisted TestDataContractV1 used by structured paths. */
+  dataContractId?: string;
   target?: TargetAppRuntime;
   keepProjectRunning?: boolean;
   scenarioId?: string;
@@ -856,6 +866,9 @@ export interface VisualRunResult {
   evidence: EvidenceItem[];
   loopEvents: LoopEvent[];
   oracles: OracleDefinition[];
+  /** Versioned governance projection; `oracles` remains for legacy report consumers. */
+  oracleSpecsV2?: OracleSpecV2[];
+  oracleDecisionsV2?: OracleDecisionV2[];
   riskCoverageMatrix: RiskCoverageItem[];
   aggregatedVerdict: AggregatedVerdict;
   reflectionNote: string;
@@ -869,6 +882,14 @@ export interface VisualRunResult {
   humanDecision?: HumanDecision;
   finalStatus?: GateStatus;
   outcomeSummary?: RunOutcomeSummaryV2;
+  /** Truthful summary of model calls used by the execution path. */
+  modelExecution?: {
+    required: boolean;
+    totalCallCount: number;
+    successfulBrowserActionCallCount: number;
+    completedBrowserActionCount: number;
+    requiredArtifactKindsPresent: boolean;
+  };
   executionError?: {
     code: "action_binding_failure" | "browser_runtime_failure" | "environment_failure" | "execution_failure";
     stepId?: string;
@@ -1166,6 +1187,8 @@ export interface RunBundle {
   attempts?: RunAttempt[];
   loopEvents: LoopEvent[];
   oracles: OracleDefinition[];
+  oracleSpecsV2?: OracleSpecV2[];
+  oracleDecisionsV2?: OracleDecisionV2[];
   riskCoverageMatrix: RiskCoverageItem[];
   conflictPacket: ConflictPacket;
   failureAttributions?: FailureAttribution[];

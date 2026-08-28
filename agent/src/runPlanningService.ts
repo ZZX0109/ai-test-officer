@@ -40,6 +40,8 @@ type PlanningInput = {
   permissionProfile?: { browserControl?: boolean };
   executionProfile?: "interactive" | "benchmark";
   dynamicBrowser?: boolean;
+  /** Model-driven paths must not be replaced by deterministic fallbacks. */
+  requireModelExecution?: boolean;
   coverageInventory?: Array<{
     id: string;
     title: string;
@@ -251,6 +253,25 @@ export async function planRunFromDurableInput(runId: string): Promise<RunProject
         compilationStatus: "rejected",
         fallbackReason: "impact_analysis_missing"
       }
+    });
+  }
+  // Dynamic browser runs can normally preserve a deterministic shell plan
+  // while they wait for a model at the action boundary. The official model
+  // demo is stricter: without an explicitly selected model there is no valid
+  // execution path, and emitting a successful-looking rule plan would be
+  // misleading. Block before any browser work is queued.
+  if (input.requireModelExecution && !input.modelProfileId) {
+    return appendPlanningEvent(runId, "run_blocked", "model-execution-credential-missing", {
+      finalStatus: "blocked",
+      error: "llm_credential_missing",
+      message: "本次为模型测试，但没有可用的模型凭据。请配置并选择 API Key 后重新开始；系统不会降级为规则测试。",
+      provenance: planProvenanceSchema.parse({
+        source: "llm",
+        promptVersion,
+        compilationStatus: "rejected",
+        fallbackReason: "llm_not_configured"
+      }),
+      impactAnalysis
     });
   }
   if (input.dynamicBrowser && input.executionProfile !== "benchmark") {

@@ -41,6 +41,50 @@ export interface RunInspectionRouterDependencies {
   assertProjectAccess: (request: Request, projectId: unknown, scope: ProjectScope) => Promise<unknown>;
 }
 
+/**
+ * A parent coverage Run is a durable aggregate, while browser execution and
+ * model calls happen in its child path Runs. Inspection must therefore use the
+ * same child references as the aggregate proof instead of reporting the
+ * parent's empty local stores as if no model or browser activity occurred.
+ */
+async function executionEvidenceRunIds(run: { id: string; resultRunId?: string }) {
+  const coverage = await readCoverageItems(run.id);
+  const childRuns = await Promise.all(coverage
+    .map((item) => item.childRunId)
+    .filter((id): id is string => Boolean(id))
+    .map((id) => runEventStore.get(id)));
+  return Array.from(new Set([
+    run.resultRunId ?? run.id,
+    ...childRuns.flatMap((child) => child ? [child.resultRunId ?? child.id] : [])
+  ]));
+}
+
+function aggregateBudgetLedgers<T extends {
+  reserved: Record<string, number | null>;
+  consumed: Record<string, number | null>;
+  scopes: Record<string, unknown>;
+  updatedAt: string;
+}>(ledgers: T[]) {
+  const primary = ledgers[0];
+  if (!primary) return undefined;
+  const sum = (field: "reserved" | "consumed") => Object.fromEntries(
+    Object.keys(primary[field]).map((key) => {
+      const values = ledgers.map((ledger) => ledger[field][key]);
+      return [key, values.some((value) => value === null) ? null : values.reduce<number>((total, value) => total + (value ?? 0), 0)];
+    })
+  ) as T[typeof field];
+  return {
+    ...primary,
+    reserved: sum("reserved"),
+    consumed: sum("consumed"),
+    // Child budget scopes are local to each path. Combining them under their
+    // original IDs would imply a shared parent budget, so expose only the
+    // honest aggregate counters here.
+    scopes: {},
+    updatedAt: ledgers.map((ledger) => ledger.updatedAt).sort().at(-1) ?? primary.updatedAt
+  };
+}
+
 export function runInspectionRouter(dependencies: RunInspectionRouterDependencies) {
   const { assertOrganizationAccess, assertProjectAccess } = dependencies;
   const router = Router();
@@ -92,7 +136,11 @@ router.get("/v1/runs/:id/browser-observations", async (req, res, next) => {
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, run.input.projectId, "read_artifacts");
-    res.json({ observations: await readBrowserObservations(run.id) });
+    const runIds = await executionEvidenceRunIds(run);
+    const observations = (await Promise.all(runIds.map((runId) => readBrowserObservations(runId))))
+      .flat()
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    res.json({ observations });
   } catch (error) { next(error); }
 });
 
@@ -102,7 +150,15 @@ router.get("/v1/runs/:id/browser-actions", async (req, res, next) => {
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, run.input.projectId, "read_artifacts");
-    const [decisions, actions] = await Promise.all([readBrowserDecisions(run.id), readBrowserActionResults(run.id)]);
+    const runIds = await executionEvidenceRunIds(run);
+    const records = await Promise.all(runIds.map(async (runId) => {
+      const [decisions, actions] = await Promise.all([readBrowserDecisions(runId), readBrowserActionResults(runId)]);
+      return { decisions, actions };
+    }));
+    const decisions = records.flatMap((record) => record.decisions)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const actions = records.flatMap((record) => record.actions)
+      .sort((left, right) => left.completedAt.localeCompare(right.completedAt));
     res.json({ decisions, actions });
   } catch (error) { next(error); }
 });
@@ -339,8 +395,13 @@ router.get("/v1/runs/:id/llm-calls", async (req, res, next) => {
     if (!run) return void res.status(404).json({ error: "run_not_found" });
     assertOrganizationAccess(req, run.input.organizationId);
     await assertProjectAccess(req, run.input.projectId, "read_artifacts");
-    const calls = await listLlmCalls(run.id);
-    const ledger = await readLlmBudgetLedger(run.id);
+    const runIds = await executionEvidenceRunIds(run);
+    const [callGroups, ledgers] = await Promise.all([
+      Promise.all(runIds.map((runId) => listLlmCalls(runId))),
+      Promise.all(runIds.map((runId) => readLlmBudgetLedger(runId)))
+    ]);
+    const calls = callGroups.flat().sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    const ledger = aggregateBudgetLedgers(ledgers);
     const knownCosts = calls.map((call) => call.usage.estimatedCostUsd).filter((value): value is number => typeof value === "number");
     res.json({
       calls,

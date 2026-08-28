@@ -42,6 +42,8 @@ import type {
   RunHistoryEntry,
   RunProjection,
   RunResult,
+  DifferentialRunView,
+  TestAssetView,
   Conclusion,
   ProofEdge,
   CoverageItem,
@@ -55,6 +57,7 @@ import type {
   ReadinessReport,
   PatrolTrend
 } from "./types";
+import type { ReliabilityAssetContext } from "./reliabilityTypes";
 import { getAccessToken } from "./auth";
 
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
@@ -75,6 +78,48 @@ export function getRunAgent(runId: string) {
   return request<{ agent: AgentGraphProjection | null }>(`/v1/runs/${encodeURIComponent(runId)}/agent`);
 }
 
+export function getDifferentialRun(differentialRunId: string) {
+  return request<{ differentialRun: DifferentialRunView; parentRun?: DifferentialRunView["parentRun"] }>(`/v1/differential-runs/${encodeURIComponent(differentialRunId)}`);
+}
+
+export function getReliabilityAssetContext(projectId: string, sourceRunId?: string) {
+  const params = new URLSearchParams({ projectId });
+  if (sourceRunId) params.set("sourceRunId", sourceRunId);
+  return request<{ context: ReliabilityAssetContext }>(`/v1/reliability-assets/context?${params.toString()}`);
+}
+
+export function createDifferentialRun(payload: Record<string, unknown>) {
+  return request<{ differentialRun: DifferentialRunView }>("/v1/differential-runs", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getTestAsset(assetId: string) {
+  return request<{ asset: TestAssetView; oracleSpecs?: TestAssetView["oracleSpecs"]; target: { clean: boolean; status: string; repositorySha256: string; patch: string; patchSha256: string } }>(`/v1/test-assets/${encodeURIComponent(assetId)}`);
+}
+
+export function createTestAsset(runId: string, payload: Record<string, unknown>) {
+  return request<{ asset: TestAssetView }>(`/v1/runs/${encodeURIComponent(runId)}/test-assets`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function validateTestAsset(assetId: string, payload: Record<string, unknown> = {}) {
+  return request<{ asset: TestAssetView }>(`/v1/test-assets/${encodeURIComponent(assetId)}/validate`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function applyTestAsset(assetId: string, payload: { capabilityGrantId: string; confirmedBy: string; expectedRepositorySha256: string }) {
+  return request<{ asset: TestAssetView; branch: string; changedFiles: string[]; committed: boolean; pushed: boolean }>(`/v1/test-assets/${encodeURIComponent(assetId)}/apply`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function getRunBrowserSession(runId: string) {
   return request<{ session: BrowserSession | null }>(`/v1/runs/${encodeURIComponent(runId)}/browser-session`);
 }
@@ -85,6 +130,132 @@ export function getRunBrowserObservations(runId: string) {
 
 export function getRunBrowserActions(runId: string) {
   return request<{ decisions: BrowserActionDecision[]; actions: BrowserActionResult[] }>(`/v1/runs/${encodeURIComponent(runId)}/browser-actions`);
+}
+
+export interface TrajectoryEvent {
+  id: string;
+  runId: string;
+  parentRunId?: string;
+  rootRunId?: string;
+  seq: number;
+  runSeq?: number;
+  rootSeq?: number;
+  type: string;
+  at: string;
+  actor: string;
+  turnId?: string;
+  stepId?: string;
+  attemptId?: string;
+  traceId?: string;
+  parentEventId?: string;
+  spanId?: string;
+  parentSpanId?: string;
+  status?: "running" | "success" | "error" | "blocked";
+  usage?: Record<string, number>;
+  timing?: { startedAt?: string; firstTokenAt?: string; completedAt?: string };
+  visibility?: "user" | "developer" | "admin";
+  idempotencyKey: string;
+  payload: Record<string, unknown>;
+  evidenceRefs: string[];
+}
+
+export interface TrajectoryViewModel {
+  schemaVersion: "1.0";
+  runId: string;
+  rootRunId?: string;
+  fromSeq: number;
+  toSeq: number;
+  events: TrajectoryEvent[];
+  tools: Array<{
+    callId: string;
+    toolName: string;
+    status: "started" | "completed" | "failed" | "interrupted";
+    parentCallId?: string;
+    depth?: number;
+    startedAt?: string;
+    completedAt?: string;
+    durationMs?: number;
+    evidenceRefs: string[];
+    eventSeqs: number[];
+  }>;
+  eventLocations: Record<string, { turnId?: string; stepId?: string; attemptId?: string }>;
+  requests: Array<{ eventSeq: number; callId?: string; model?: string; systemPrompt?: string; tools?: unknown[] }>;
+  callSchemas: Array<{ eventSeq: number; callId?: string; toolName?: string; schema: unknown }>;
+  partial?: { text: string; reasoning: string; lastSeq: number };
+  runningCalls: TrajectoryViewModel["tools"];
+  warnings: string[];
+  summary: { totalEvents: number; llmCalls: number; toolCalls: number; browserActions: number; observations: number; evidence: number; failures: number; durationMs?: number };
+  replayable: boolean;
+}
+
+export function getRunTrajectory(runId: string, options: { scope?: "run" | "tree"; afterSeq?: number; beforeSeq?: number; afterRootSeq?: number; beforeRootSeq?: number; limit?: number; compact?: boolean } = {}) {
+  const params = new URLSearchParams();
+  if (options.scope) params.set("scope", options.scope);
+  if (options.afterSeq !== undefined) params.set("afterSeq", String(options.afterSeq));
+  if (options.beforeSeq !== undefined) params.set("beforeSeq", String(options.beforeSeq));
+  if (options.afterRootSeq !== undefined) params.set("afterRootSeq", String(options.afterRootSeq));
+  if (options.beforeRootSeq !== undefined) params.set("beforeRootSeq", String(options.beforeRootSeq));
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.compact !== undefined) params.set("compact", String(options.compact));
+  return request<{ runId: string; scope: "run" | "tree"; rootRunId?: string; view: TrajectoryViewModel; events: TrajectoryEvent[]; page: { afterSeq: number; nextAfterSeq: number; afterRootSeq: number; nextAfterRootSeq: number; hasMore: boolean; latestSeq: number; latestRootSeq: number } }>(`/v1/runs/${encodeURIComponent(runId)}/trajectory${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export function subscribeRunTrajectory(
+  runId: string,
+  onView: (view: TrajectoryViewModel) => void,
+  onEvent?: (event: TrajectoryEvent) => void,
+  options: { scope?: "run" | "tree" } = {}
+) {
+  const controller = new AbortController();
+  let lastSeq = 0;
+  let lastRootSeq = 0;
+  let reconnect: ReturnType<typeof setTimeout> | undefined;
+  let attempts = 0;
+  const connect = async () => {
+    try {
+      const headers = new Headers(AGENT_TOKEN ? { "x-agent-token": AGENT_TOKEN } : {});
+      headers.set("last-event-id", String(lastSeq));
+      headers.set("last-event-root-seq", String(lastRootSeq));
+      const params = new URLSearchParams({ afterSeq: String(lastSeq), afterRootSeq: String(lastRootSeq), ...(options.scope ? { scope: options.scope } : {}) });
+      const response = await fetch(`${AGENT_URL}/v1/runs/${encodeURIComponent(runId)}/trajectory/stream?${params.toString()}`, { credentials: "include", headers, signal: controller.signal });
+      if (!response.ok || !response.body) throw new Error(`trajectory_stream_http_${response.status}`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!controller.signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          const eventType = frame.match(/^event: (.+)$/m)?.[1] ?? "message";
+          const id = frame.match(/^id: (.+)$/m)?.[1];
+          const data = frame.match(/^data: (.+)$/m)?.[1];
+          if (id) {
+            const cursor = Number(id) || 0;
+            if (options.scope === "tree") lastRootSeq = Math.max(lastRootSeq, cursor);
+            else lastSeq = Math.max(lastSeq, cursor);
+          }
+          if (!data) continue;
+          const payload = JSON.parse(data) as { view?: TrajectoryViewModel; event?: TrajectoryEvent } & TrajectoryEvent;
+          if (eventType === "trajectory.snapshot" && payload.view) onView(payload.view);
+          if (eventType === "trajectory.event") onEvent?.(payload as TrajectoryEvent);
+          if (payload.rootSeq) lastRootSeq = Math.max(lastRootSeq, payload.rootSeq);
+          if (payload.seq) lastSeq = Math.max(lastSeq, payload.seq);
+          attempts = 0;
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) console.warn("trajectory stream closed", error);
+    }
+    if (!controller.signal.aborted) {
+      const delay = Math.min(5_000, 250 * 2 ** attempts++);
+      reconnect = setTimeout(() => void connect(), delay);
+    }
+  };
+  void connect();
+  return () => { if (reconnect) clearTimeout(reconnect); controller.abort(); };
 }
 
 export function acquireRunBrowserControl(runId: string) {
@@ -682,6 +853,7 @@ export function continuePlanningConversation(payload: {
   history: PlanningMessage[];
   planningMode?: "llm-guided" | "scan-only";
   credentialId?: string;
+  planningId?: string;
 }) {
   return request<{ planning: PlanningConversationResult; discovery?: DiscoveryScanResult }>("/api/planning/conversation", {
     method: "POST",
@@ -717,6 +889,11 @@ export function getPlanningFunctionPage(payload: {
     functions: PlanningConversationResult["businessFunctions"];
     page: NonNullable<PlanningConversationResult["businessFunctionPage"]>;
   }>(`/api/planning/${encodeURIComponent(payload.planningId)}/functions?${query.toString()}`);
+}
+
+export function getPlanningTrajectory(planningId: string, projectId: string) {
+  const query = new URLSearchParams({ projectId });
+  return request<{ view: TrajectoryViewModel }>(`/api/planning/${encodeURIComponent(planningId)}/trajectory?${query.toString()}`);
 }
 
 export function chatWithTestAssistant(payload: {
@@ -918,6 +1095,12 @@ export function createVisualRun(
     }>;
     coverageMode?: "targeted" | "full";
     dynamicBrowser?: boolean;
+    requireModelExecution?: boolean;
+    llmBudget?: {
+      maxBrowserActionCalls?: number;
+      maxTotalTokens?: number;
+      totalTimeoutMs?: number;
+    };
     modelProfileId?: string;
   }
 ) {
@@ -944,6 +1127,8 @@ export function createVisualRun(
           sourceCount: Math.max(1, item.sourceCount || item.sourceNodeIds.length || 1)
         })),
         dynamicBrowser: context.dynamicBrowser ?? false,
+        requireModelExecution: context.requireModelExecution ?? false,
+        llmBudget: context.llmBudget,
         // This API is called only after the operator pressed "确认并执行".
         // Persist that decision atomically with the active Graph run.
         confirmedExecution: true,
@@ -957,7 +1142,7 @@ export function createVisualRun(
         judgeMode: context.modelProfileId ? "adaptive" : "deterministic",
         modelProfileId: context.modelProfileId,
         permissionProfile,
-        executionMode: "oci",
+        executionMode: context.executionMode ?? "oci",
         capabilities: ["browser"]
       }
     })
@@ -1026,7 +1211,7 @@ async function runThroughV1(payload: Record<string, unknown>, onCreated?: (runId
         requirement: payload.requirement,
         diff: payload.diff,
         permissionProfile: payload.permissionProfile,
-        executionMode: "oci",
+        executionMode: payload.executionMode ?? "oci",
         capabilities: ["browser"]
       }
     })

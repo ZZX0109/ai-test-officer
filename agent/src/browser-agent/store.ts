@@ -15,6 +15,7 @@ import {
 } from "@ai-test-officer/contracts";
 import { getReportsDir } from "../evidenceStore.js";
 import { getDatabasePool } from "../databaseRuntime.js";
+import { emitTrajectory } from "../trajectoryEmitter.js";
 
 export type BrowserAgentLifecycleEvent = {
   runId: string;
@@ -83,6 +84,8 @@ function serialize<T>(runId: string, operation: () => Promise<T>) {
 export function publishBrowserAgentLifecycle(event: Omit<BrowserAgentLifecycleEvent, "createdAt">) {
   const complete = { ...event, createdAt: new Date().toISOString() } satisfies BrowserAgentLifecycleEvent;
   events.emit(event.runId, complete);
+  const type = complete.type === "browser.session.started" ? "browser.session.started" : complete.type === "browser.observation.created" ? "browser.observation.created" : complete.type === "browser.action.proposed" ? "browser.action.proposed" : complete.type === "browser.action.authorized" ? "browser.action.authorized" : complete.type === "browser.action.started" ? "browser.action.started" : complete.type === "browser.action.completed" ? "browser.action.completed" : complete.type === "browser.action.failed" ? "browser.action.failed" : complete.type === "browser.oracle.evaluated" ? "assertion.evaluated" : complete.type.startsWith("browser.loop.") ? "run.state.changed" : "run.state.changed";
+  void emitTrajectory({ runId: event.runId, type, actor: "browser-agent", idempotencyKey: `browser:${complete.type}:${JSON.stringify(complete.payload)}`, payload: complete.payload });
   return complete;
 }
 
@@ -200,6 +203,14 @@ export async function appendBrowserArtifact(input: ArtifactV2) {
     const current = await readArray<ArtifactV2>(file);
     if (!current.some((item) => item.id === artifact.id)) current.push(artifact);
     await atomicWrite(file, current);
+  });
+  void emitTrajectory({
+    runId: artifact.runId,
+    type: "artifact.committed",
+    actor: "browser-agent",
+    idempotencyKey: `artifact:${artifact.id}`,
+    payload: { artifactId: artifact.id, kind: artifact.kind, attemptId: artifact.attemptId },
+    evidenceRefs: [artifact.id]
   });
   return artifact;
 }

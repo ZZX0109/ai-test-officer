@@ -4,6 +4,7 @@ import { listPlatformCapabilities } from "../../platformCapabilities.js";
 import { auditStoreStatus } from "../../sqliteAuditStore.js";
 import { readLatestDemoVerification } from "../../demoVerificationStore.js";
 import { listScenarios } from "../../scenarios.js";
+import { LLM_CAPABILITY_MATRIX } from "../../llmCapabilityMatrix.js";
 
 /**
  * Meta / status routes: health probe, static capability/plan descriptors, and
@@ -29,6 +30,11 @@ metaRouter.get("/api/gray-plan", (_req, res) => {
 
 metaRouter.get("/api/platform-capabilities", (_req, res) => {
   res.json({ capabilities: listPlatformCapabilities() });
+});
+
+/** Machine-readable transport/tool capability matrix; intentionally contains no credentials. */
+metaRouter.get("/api/llm-capabilities", (_req, res) => {
+  res.json({ capabilities: LLM_CAPABILITY_MATRIX });
 });
 
 metaRouter.get("/api/audit-store/status", (_req, res) => {

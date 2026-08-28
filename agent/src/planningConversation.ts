@@ -442,6 +442,8 @@ function buildPlan(project: ProjectConfig, flows: PlannedBusinessFlow[], compreh
 }
 
 export function buildPlanningConversation(input: {
+  /** Supplied by the client so the planning trajectory is visible while the request is running. */
+  id?: string;
   project: ProjectConfig;
   message: string;
   history: PlanningMessage[];
@@ -532,7 +534,7 @@ export function buildPlanningConversation(input: {
       ? `测试计划已生成：${sourceCandidates} 个代码候选已归并为 ${flows.length} 条业务路径，${executable} 条可以直接执行，${autoBindable} 条会在确认后交给 LangGraph 页面观测与受控动作循环；只有经过真实页面探测仍无法形成动作与断言的路径才会转为覆盖缺口。当前已有 ${gaps} 条明确缺口。${clarificationQuestions.length ? "仍有可选信息可以补充，但不影响确认计划。" : ""}`
       : `已根据你的测试目标从代码中定位 ${flows.length} 条相关业务路径：${executable} 条可以直接执行，${autoBindable} 条会在确认后交给 LangGraph 页面观测与受控动作循环，${gaps} 条需要补充条件。你可以先查看这组定向计划，再决定是否开始测试。`;
   return {
-    id: `planning_${Date.now()}`,
+    id: input.id ?? `planning_${Date.now()}`,
     phase,
     reply,
     clarificationQuestions,

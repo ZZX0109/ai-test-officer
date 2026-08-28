@@ -43,6 +43,53 @@ const riskLabel = {
   forbidden: "禁止修改"
 } as const;
 
+const changeStatusLabel = {
+  added: "新增文件",
+  modified: "已修改",
+  deleted: "已删除"
+} as const;
+
+type TextChangePreview = {
+  originalStart: number;
+  originalEnd: number;
+  modifiedStart: number;
+  modifiedEnd: number;
+  removed: string[];
+  added: string[];
+};
+
+/**
+ * A concise, local explanation for the first changed block. Monaco remains
+ * the source of truth for the complete diff; this prevents a reviewer from
+ * having to scan two panes merely to learn what file change they are seeing.
+ */
+function previewTextChange(original: string, modified: string): TextChangePreview | undefined {
+  if (original === modified) return undefined;
+  const before = original.split(/\r?\n/);
+  const after = modified.split(/\r?\n/);
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+  let beforeEnd = before.length - 1;
+  let afterEnd = after.length - 1;
+  while (beforeEnd >= prefix && afterEnd >= prefix && before[beforeEnd] === after[afterEnd]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  return {
+    originalStart: prefix + 1,
+    originalEnd: Math.max(prefix + 1, beforeEnd + 1),
+    modifiedStart: prefix + 1,
+    modifiedEnd: Math.max(prefix + 1, afterEnd + 1),
+    removed: before.slice(prefix, beforeEnd + 1),
+    added: after.slice(prefix, afterEnd + 1)
+  };
+}
+
+function shortCodeLine(value: string) {
+  const compact = value.trim().replace(/\s+/g, " ");
+  return compact.length > 112 ? `${compact.slice(0, 109)}…` : compact || "（空行）";
+}
+
 interface FileTreeNode {
   name: string;
   path: string;
@@ -120,6 +167,7 @@ export function RepairWorkspace({
   const [busy, setBusy] = useState<string>();
   const [message, setMessage] = useState("");
   const [networkApprovalRequired, setNetworkApprovalRequired] = useState(false);
+  const [diffView, setDiffView] = useState<"inline" | "split">("inline");
   const activeChange = useMemo(
     () => session.files.find((item) => item.path === activePath),
     [activePath, session.files]
@@ -142,6 +190,12 @@ export function RepairWorkspace({
   const dependencyChange = useMemo(() => session.files.some((item) =>
     /(^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|requirements\.txt|pyproject\.toml|poetry\.lock|uv\.lock)$/i.test(item.path)
   ), [session.files]);
+  const textChangePreview = useMemo(
+    () => file ? previewTextChange(file.original, draft) : undefined,
+    [file?.original, draft]
+  );
+  const displayedAdditions = activeChange?.additions ?? textChangePreview?.added.length ?? 0;
+  const displayedDeletions = activeChange?.deletions ?? textChangePreview?.removed.length ?? 0;
 
   async function requestValidation() {
     if (dependencyChange && !networkApprovalRequired) {
@@ -290,22 +344,42 @@ export function RepairWorkspace({
 
         <main className="repair-diff">
           <div className="repair-diff-toolbar">
-            <strong>{activePath ?? "请选择变更文件"}</strong>
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={!file || draft === file.content || Boolean(busy)}
-              onClick={() => file && act("正在保存", async () => {
-                await onSaveFile(file, draft);
-                const refreshed = await onLoadFile(file.path);
-                setFile(refreshed);
-                setDraft(refreshed.content);
-                setMessage("沙盒文件已保存。");
-              })}
-            >
-              保存沙盒修改
-            </button>
+            <div className="repair-diff-title">
+              <strong title={activePath}>{activePath ?? "请选择变更文件"}</strong>
+              {activeChange ? <span className={`repair-diff-status ${activeChange.status}`}>{changeStatusLabel[activeChange.status]} · <b>+{displayedAdditions}</b> / <b>-{displayedDeletions}</b> · {riskLabel[activeChange.risk]}</span> : null}
+            </div>
+            <div className="repair-diff-toolbar-actions">
+              {!projectBrowseMode ? <div className="repair-diff-view-toggle" role="group" aria-label="对比显示方式">
+                <button type="button" className={diffView === "inline" ? "active" : ""} aria-pressed={diffView === "inline"} onClick={() => setDiffView("inline")}>行内对比</button>
+                <button type="button" className={diffView === "split" ? "active" : ""} aria-pressed={diffView === "split"} onClick={() => setDiffView("split")}>并排对比</button>
+              </div> : null}
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={!file || draft === file.content || Boolean(busy)}
+                onClick={() => file && act("正在保存", async () => {
+                  await onSaveFile(file, draft);
+                  const refreshed = await onLoadFile(file.path);
+                  setFile(refreshed);
+                  setDraft(refreshed.content);
+                  setMessage("沙盒文件已保存。");
+                })}
+              >
+                保存沙盒修改
+              </button>
+            </div>
           </div>
+          {!projectBrowseMode && activeChange ? <section className="repair-change-summary" aria-label="当前文件的改动摘要">
+            <div>
+              <strong>这个文件改了什么</strong>
+              <span>红色删除，绿色新增；默认按行内显示。</span>
+            </div>
+            {textChangePreview ? <div className="repair-change-preview">
+              <span className="repair-change-lines">原第 {textChangePreview.originalStart}–{textChangePreview.originalEnd} 行 → 新第 {textChangePreview.modifiedStart}–{textChangePreview.modifiedEnd} 行</span>
+              {textChangePreview.removed.slice(0, 2).map((line, index) => <code className="removed" key={`removed-${index}`}>− {shortCodeLine(line)}</code>)}
+              {textChangePreview.added.slice(0, 2).map((line, index) => <code className="added" key={`added-${index}`}>+ {shortCodeLine(line)}</code>)}
+            </div> : <p>当前沙盒内容与基线相同；没有可展示的文本差异。</p>}
+          </section> : null}
           {file ? projectBrowseMode ? (
             <Editor
               height="62vh"
@@ -345,7 +419,7 @@ export function RepairWorkspace({
               loading="正在载入变更对比…"
               options={{
                 automaticLayout: true,
-                renderSideBySide: true,
+                renderSideBySide: diffView === "split",
                 readOnly: !file.editable,
                 minimap: { enabled: false },
                 wordWrap: "on",
@@ -379,10 +453,10 @@ export function RepairWorkspace({
             {session.validation?.childRunId ? <code>{session.validation.childRunId}</code> : null}
           </div>
           <div className="repair-rationale">
-            <strong>AI 修改说明</strong>
-            <p><b>为什么修改：</b>{session.summary || "系统正在根据失败证据定位最小修复。"}</p>
-            <p><b>预计效果：</b>只处理本次失败归因相关的路径，避免把未验证的假设当作产品结论。</p>
-            <p><b>为了验证什么：</b>{session.validation?.summary || "将在沙盒中执行定向测试、相关回归和完整回归。"}</p>
+            <strong>修复依据</strong>
+            <p><b>为什么需要改：</b>{session.summary || "系统正在根据失败证据定位最小修复。"}</p>
+            <p><b>本文件的实际改动：</b>{activeChange ? `${changeStatusLabel[activeChange.status]}，${displayedAdditions} 行新增、${displayedDeletions} 行删除；完整内容请看中央行内对比。` : "请先从文件树中选择一项改动。"}</p>
+            <p><b>如何验证：</b>{session.validation?.summary || "将在沙盒中执行定向测试、相关回归和完整回归。"}</p>
             <small>当前改动只在沙盒副本中。只有验证通过且你明确确认后，才可应用到原项目。</small>
           </div>
           {message ? <p className="repair-message">{message}</p> : null}

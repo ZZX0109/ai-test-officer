@@ -56,7 +56,8 @@ export function useProjectRecovery({
       content: mode === "discovery"
         ? "遇到的问题：页面 Discovery 尚未完成。\n系统正在做什么：正在重新扫描页面、控件、网络和可执行路径。\n需要你操作：暂时无需操作。"
         : "遇到的问题：安全沙盒或项目服务尚未就绪。\n系统正在做什么：正在重新启动沙盒、检查 Docker Desktop、项目服务和页面连通性。\n需要你操作：暂时无需操作；若 180 秒后仍不可用，系统会给出明确提示。",
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      streaming: true
     }]);
     setMessage(mode === "discovery" ? "正在重新扫描页面并绑定路径…" : "正在重新启动沙盒并诊断项目…");
     try {
@@ -86,7 +87,7 @@ export function useProjectRecovery({
       const finalText = completed
         ? `遇到的问题：恢复完成。\n系统已经做了什么：${lastEvent?.message ?? "沙盒、页面连通性和 Discovery 已恢复。"}\n需要你操作：无需操作；现在可以继续生成或执行测试计划。`
         : `遇到的问题：${lastEvent?.message ?? recovery.sourceError ?? "恢复未完成。"}\n系统已经做了什么：已执行受限恢复并保留运行状态；没有修改项目源码，也没有覆盖既有证据。${advisorText}\n需要你操作：${recovery.userAction}`;
-      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? { ...item, content: finalText, suggestedAction: completed ? "start-run" : "create-repair", requiresConfirmation: true } : item));
+      setPlanningMessages((current) => current.map((item) => item.id === pendingId ? { ...item, streaming: false, content: finalText, suggestedAction: completed ? "start-run" : "create-repair", requiresConfirmation: true } : item));
       setAssistantSuggestedAction({ action: completed ? "start-run" : "create-repair", label: completed ? getActionLabel("start-run") : "在沙盒中分析启动问题" });
       setMessage(completed ? "项目环境已恢复，可以继续测试。" : recovery.userAction);
       if (completed) {
@@ -100,6 +101,7 @@ export function useProjectRecovery({
       const detail = normalizeError(error instanceof Error ? error.message : "恢复请求失败");
       setPlanningMessages((current) => current.map((item) => item.id === pendingId ? {
         ...item,
+        streaming: false,
         content: `遇到的问题：${detail}\n系统已经做了什么：恢复请求未完成，系统没有启动代码修复或覆盖已有测试证据。\n需要你操作：请稍后重试；如果持续失败，请查看运行详情。`
       } : item));
       setMessage(detail);

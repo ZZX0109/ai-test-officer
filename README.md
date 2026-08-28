@@ -9,10 +9,11 @@
 
 ![AI Test Officer 当前版 Workbench：项目接入、测试规划、沙盒执行与证据裁决](docs/assets/ai-test-officer-workbench-v2.png)
 
-## 当前工程状态（2026-08-24）
+## 当前工程状态（2026-08-26）
 
 当前版本已经完成 LangGraph 编排、多路径执行、Artifact v2、证明图、选择性
-LLM、OCI 沙盒和修复工作区的主体实现，处于 **Active Graph 发布验收阶段**。
+LLM、OCI 沙盒、修复工作区，以及“可信验收 + 测试资产”双主线的主体实现，处于
+**Active Graph 发布验收阶段**。
 这里区分“工程验证通过”和“已经证明模型泛化增益”，不使用一个
 `completed` 状态概括所有结果。
 
@@ -26,11 +27,12 @@ LLM、OCI 沙盒和修复工作区的主体实现，处于 **Active Graph 发布
 | Production `npm audit --omit=dev` | 0 个已知漏洞 |
 | Secret scan 与运行产物隔离 | 通过 |
 | 100 次 Shadow Graph 对照 | Synthetic topology 100/100 通过；不等同真实项目验收 |
-| 5 个异构真实项目 Active Graph 验收 | 待完成 |
-| evaluator 隔离的新密封盲测 | 待完成 |
+| 5 个异构真实项目 Base/Head 双版本验收 | 双侧证据齐全；独立 evaluator 通过；不可归因差异保持 `inconclusive` |
+| evaluator 隔离的新密封盲测 | 五个项目均通过证据完整性检查 |
 
-因此，本仓库当前可以作为可复现的开发与验收基线，但在最后三项完成前，不宣称
-“全场景无人值守发布”或“LLM 泛化增益已经证明”。运行报告保存在被 Git 忽略的
+因此，本仓库当前可以作为可复现的开发与验收基线，但仍不宣称“全场景无人值守发布”
+或“LLM 泛化增益已经证明”：真实模型 benchmark 仍需要有效凭据和独立 evaluator 标签，
+而差分执行对无法归因的结果会保持 `inconclusive`。运行报告保存在被 Git 忽略的
 `reports/` 中，README 只记录可复现的验证口径。
 
 ## 这个项目解决什么问题
@@ -74,6 +76,9 @@ flowchart LR
 ```
 
 Workbench 将“项目接入、测试规划、执行现场、证据复核、Judge 和人工裁决”放在同一页面。被测页面显示在中央内置浏览器区域，项目不会主动打开外部浏览器窗口。
+
+LLM transport、原生 Tool Calling 与父子 Run 全局轨迹的交付约定见
+[LLM 传输与全局轨迹交付说明](docs/llm-trajectory-delivery.md)。规划对话标题栏右侧的“轨迹”按钮会打开统一时间线；普通 Chat Completions、Codex Responses 和 Anthropic Messages 均通过统一适配器输出流式事件。
 
 ### 可持续 Agent 模块
 

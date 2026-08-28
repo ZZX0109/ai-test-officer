@@ -10,6 +10,8 @@ import {
   readLatestRunIdFromAuditStore,
   recordRunBundleInAuditStore
 } from "./sqliteAuditStore.js";
+import { getReliabilityAssetStore } from "./reliabilityAssetStore.js";
+import { emitTrajectory } from "./trajectoryEmitter.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 const defaultReportsDir = path.join(rootDir, "reports");
@@ -67,6 +69,14 @@ export async function appendEvidence(
       current.push(item);
       await writeFile(evidenceFile(runId), JSON.stringify(current, null, 2));
       appendEvidenceToAuditStore(item);
+      void emitTrajectory({
+        runId,
+        type: "evidence.created",
+        actor: "evidence-store",
+        idempotencyKey: `evidence:${item.id}`,
+        payload: { evidenceId: item.id, evidenceType: item.type, title: item.title },
+        evidenceRefs: [item.id]
+      });
       return item;
     });
   writeQueues.set(runId, next);
@@ -75,7 +85,9 @@ export async function appendEvidence(
 
 export async function readEvidence(runId: string): Promise<EvidenceItem[]> {
   const auditEvidence = readEvidenceFromAuditStore(runId);
-  if (auditEvidence.length > 0) return auditEvidence;
+  const reliabilityEvidence = await getReliabilityAssetStore().readReliabilityEvidence(runId).catch(() => []);
+  const merged = [...auditEvidence, ...reliabilityEvidence].filter((item, index, items) => items.findIndex((candidate) => candidate.id === item.id) === index);
+  if (merged.length > 0) return merged.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
   try {
     const raw = await readFile(evidenceFile(runId), "utf8");
     return JSON.parse(raw) as EvidenceItem[];
@@ -109,6 +121,17 @@ export async function writeRunBundle(bundle: RunBundle) {
   await writeFile(path.join(getReportsDir(), "runs", "latest-run-id.txt"), bundle.runId);
   const bundleUri = `/artifacts/runs/${bundle.runId}/run_bundle.json`;
   recordRunBundleInAuditStore(redactedBundle, bundleUri);
+  for (const artifact of redactedBundle.artifactsV2 ?? []) {
+    void emitTrajectory({
+      runId: bundle.runId,
+      type: "artifact.committed",
+      actor: "evidence-store",
+      attemptId: artifact.attemptId,
+      idempotencyKey: `artifact:${artifact.id}`,
+      payload: { artifactId: artifact.id, kind: artifact.kind, storageUri: artifact.storageUri },
+      evidenceRefs: [artifact.id]
+    });
+  }
   return bundleUri;
 }
 

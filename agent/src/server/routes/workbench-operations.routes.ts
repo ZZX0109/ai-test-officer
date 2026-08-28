@@ -12,9 +12,11 @@ import { listScenarios } from "../../scenarios.js";
 import { buildBenchmarkCatalog, trustedBenchmarkRuntimeMetrics } from "../../benchmarkSummary.js";
 import { readConnectorContext } from "../../sourceConnectors.js";
 import { analyzeIntake } from "../../intakeAnalyzer.js";
-import { getPlanningFlowPage, getPlanningFunctionPage } from "../../planningInventoryStore.js";
+import { getPlanningFlowPage, getPlanningFunctionPage, getPlanningInventoryProjectId } from "../../planningInventoryStore.js";
 import { getProject } from "../../projectAdapter.js";
 import { createPlanningConversation } from "../../planningService.js";
+import { trajectoryEventStore } from "../../trajectoryEventStore.js";
+import { projectTrajectoryEvents } from "../../trajectoryProjector.js";
 import { runnableTargetShape, requireRunnableTarget } from "../../runRequestContract.js";
 import { runCommitCheck } from "../../commitCheckOrchestrator.js";
 import { listCommitChecks } from "../../commitCheckStore.js";
@@ -207,6 +209,21 @@ router.get("/api/planning/:planningId/functions", async (req, res, next) => {
   }
 });
 
+router.get("/api/planning/:planningId/trajectory", async (req, res, next) => {
+  try {
+    const query = z.object({ projectId: z.string().min(1) }).parse(req.query);
+    await assertProjectAccess(req, query.projectId, "run_tests");
+    const planningId = String(req.params.planningId);
+    if (await getPlanningInventoryProjectId(planningId) !== query.projectId) {
+      return void res.status(404).json({ error: "planning_inventory_not_found" });
+    }
+    const events = await trajectoryEventStore.read(planningId, { limit: 1_000 });
+    res.json({ view: projectTrajectoryEvents(events, planningId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post("/api/planning/conversation", async (req, res, next) => {
   try {
     const body = z.object({
@@ -216,6 +233,7 @@ router.post("/api/planning/conversation", async (req, res, next) => {
       bugTicket: z.string().max(200_000).optional(),
       planningMode: z.enum(["llm-guided", "scan-only"]).default("llm-guided"),
       credentialId: z.string().optional(),
+      planningId: z.string().regex(/^planning_[A-Za-z0-9_-]+$/).max(160).optional(),
       history: z.array(z.object({
         id: z.string(),
         role: z.enum(["user", "assistant"]),

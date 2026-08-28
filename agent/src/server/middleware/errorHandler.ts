@@ -59,6 +59,16 @@ export function errorHandler(
     || error.message === "repair_validation_required"
     || error.message === "source_changed"
     || error.message.startsWith("repair_version_conflict:")
+    || error.message.startsWith("target_worktree_dirty:")
+    || error.message === "test_asset_validation_required"
+    || error.message === "asset_branch_exists"
+    || error.message === "source_run_not_trusted"
+    || error.message === "test_data_contract_not_found"
+    || error.message === "test_data_contract_project_mismatch"
+    || error.message === "oracle_spec_not_found"
+    || error.message === "oracle_spec_project_mismatch"
+    || error.message.startsWith("repository_source_hash_mismatch")
+    || error.message === "asset_write_not_visible"
   )) {
     res.status(409).json({ error: redactText(error.message) });
     return;
@@ -67,6 +77,10 @@ export function errorHandler(
     error.message === "repair_path_escape"
     || error.message === "repair_path_forbidden"
     || error.message === "repair_contains_forbidden_change"
+    || error.message === "asset_path_forbidden"
+    || error.message === "asset_dependency_forbidden"
+    || error.message === "asset_apply_policy_denied"
+    || error.message === "asset_repository_root_forbidden"
   )) {
     res.status(403).json({ error: redactText(error.message) });
     return;

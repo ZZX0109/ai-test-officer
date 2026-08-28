@@ -17,7 +17,7 @@ interface RunInspectionActionOptions {
   setMessage: (message: string) => void;
   setResult: Dispatch<SetStateAction<RunResult | null>>;
   setActiveRunId: Dispatch<SetStateAction<string | null>>;
-  setCentreSurface: (surface: "preview" | "code") => void;
+  setCentreSurface: (surface: "preview" | "trajectory" | "code") => void;
   setActiveRun: Dispatch<SetStateAction<RunProjection | null>>;
   setBrowserSession: Dispatch<SetStateAction<BrowserSession | null>>;
   setBrowserFrameRevision: Dispatch<SetStateAction<number>>;

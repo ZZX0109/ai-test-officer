@@ -56,6 +56,50 @@ function chooseDiscoveryDraft(requirementText: string, planning: PlanningConvers
 }
 
 /**
+ * Convert the user-facing business-function inventory back into the complete
+ * internal path inventory. The official demo used to replace this with one
+ * hard-coded filter path, so a four-function plan could incorrectly pass
+ * after exercising only one function.
+ */
+export function buildDynamicCoverageInventory(planning: PlanningConversationResult): NonNullable<ScenarioExecutionTarget["coverageInventory"]> {
+  const flowsById = new Map(planning.businessFlows.map((flow) => [flow.id, flow]));
+  const functionPaths = (planning.businessFunctions ?? []).flatMap((feature) => {
+    const pathIds = feature.pathIds.length ? feature.pathIds : [feature.id];
+    return pathIds.map((pathId) => {
+      const flow = flowsById.get(pathId);
+      const status = flow?.status ?? (feature.status === "ready"
+        ? "auto-bindable"
+        : feature.status === "blocked" ? "coverage-gap" : "needs-input");
+      return {
+        id: pathId,
+        title: feature.pathIds.length > 1 && flow ? `${feature.name} · ${flow.title}` : feature.name,
+        status,
+        kind: flow?.kind ?? "page" as const,
+        target: flow?.target ?? feature.name,
+        sourceNodeIds: flow?.sourceNodeIds ?? [],
+        sourceCount: Math.max(1, flow?.sourceCount || flow?.sourceNodeIds?.length || feature.sourceLocations.length || 1),
+        surfaces: flow?.surfaces ?? ["page" as const],
+        requiredEvidenceKinds: flow?.requiredEvidenceKinds,
+        preconditions: flow?.requiredInformation ?? []
+      };
+    });
+  });
+  const rawPaths = functionPaths.length ? functionPaths : planning.businessFlows.map((flow) => ({
+    id: flow.id,
+    title: flow.title,
+    status: flow.status,
+    kind: flow.kind,
+    target: flow.target,
+    sourceNodeIds: flow.sourceNodeIds ?? [],
+    sourceCount: Math.max(1, flow.sourceCount || flow.sourceNodeIds?.length || 1),
+    surfaces: flow.surfaces,
+    requiredEvidenceKinds: flow.requiredEvidenceKinds,
+    preconditions: flow.requiredInformation
+  }));
+  return [...new Map(rawPaths.map((path) => [path.id, path])).values()];
+}
+
+/**
  * Turns an approved planning draft into explicit, evidence-bearing execution
  * paths. It preserves every unbound path as a blocked disposition and never
  * upgrades a discovery or binding failure to a successful Run.
@@ -81,14 +125,18 @@ export function useAutomaticPlanning(input: UseAutomaticPlanningInput) {
     let activeScenarioId: string | undefined;
     try {
       const project = await input.ensureProjectReadyForAutomation(projectOverride);
-      if (project.manifest?.execution.mode === "oci" || input.executionMode === "oci") {
-        const coverageInventory = activePlanning.businessFlows.map((flow) => ({
-          id: flow.id, title: flow.title, status: flow.status, kind: flow.kind, target: flow.target,
-          sourceNodeIds: flow.sourceNodeIds ?? [], sourceCount: Math.max(1, flow.sourceCount || flow.sourceNodeIds?.length || 1),
-          surfaces: flow.surfaces, requiredEvidenceKinds: flow.requiredEvidenceKinds, preconditions: flow.requiredInformation
-        }));
+      // The bundled official demo deliberately uses the same dynamic browser
+      // Agent as an uploaded project. A fixture scenario is useful for unit
+      // tests, but must never make the product demo look model-driven when no
+      // model has observed or acted on the page.
+      const useDynamicBrowserAgent = project.demoProfile?.enabled === true
+        || project.manifest?.execution.mode === "oci"
+        || input.executionMode === "oci";
+      if (useDynamicBrowserAgent) {
+        const isOfficialModelDemo = project.demoProfile?.enabled === true;
+        const coverageInventory = buildDynamicCoverageInventory(activePlanning);
         const runnableCoverageCount = coverageInventory.filter((item) => item.status === "executable" || item.status === "auto-bindable").length;
-        const businessFunctionCount = activePlanning.businessFunctionCount ?? activePlanning.businessFunctions?.length ?? 0;
+        const businessFunctionCount = activePlanning.businessFunctionCount ?? activePlanning.businessFunctions?.length ?? coverageInventory.length;
         const statusCounts = activePlanning.projectOverview?.statusCounts;
         const runnableFunctionCount = statusCounts?.ready ?? runnableCoverageCount;
         const pendingFunctionCount = statusCounts
@@ -102,7 +150,16 @@ export function useAutomaticPlanning(input: UseAutomaticPlanningInput) {
         input.setPlanningAutomation({ phase: "starting-run", detail: "正在创建自主浏览器 Run；首个页面观测或动作产生后会立即显示在测试现场。" });
         const outcome = await input.executeConfirmedScenarioAutomatically(undefined, grantedProfile, {
           appUrl: project.frontendUrl, projectId: project.id, batchMode: true, coverageScenarioIds: [], coverageInventory,
-          coverageMode: comprehensiveRun ? "full" : "targeted", dynamicBrowser: true
+          coverageMode: comprehensiveRun ? "full" : "targeted",
+          dynamicBrowser: true,
+          requireModelExecution: project.demoProfile?.enabled === true,
+          // The official path is intentionally narrow, but a real model may
+          // need more than one observe/act cycle before its deterministic
+          // oracle can be evaluated. Keep the normal page-path budget instead
+          // of letting the default 12k aggregate reserve block the demo.
+          ...(isOfficialModelDemo ? {
+            llmBudget: { maxBrowserActionCalls: 6, maxTotalTokens: 30_000, totalTimeoutMs: 120_000 }
+          } : {})
         });
         if (outcome?.success) {
           input.setAutomationFailures([]);

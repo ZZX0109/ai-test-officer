@@ -1,16 +1,33 @@
 {
   "id": "local_demo_app",
-  "name": "Local Demo App Under Test",
+  "name": "官方演示：任务管理系统",
   "projectPath": "app-under-test",
+  "demoProfile": {
+    "enabled": true,
+    "description": "展示真实内置浏览器点击、任务筛选和证据采集。",
+    "defaultGoal": "在内置浏览器打开任务管理系统，点击“已完成”筛选，确认列表只显示已完成任务，并保留页面、网络和操作证据。",
+    "scenarioId": "task-filter-completed"
+  },
   "allowExternalProjectPath": false,
   "installCommand": "",
   "startCommand": "npm run dev",
-  "startCommandSpec": { "executable": "npm", "args": ["run", "dev"] },
-  "testCommand": "npm test",
-  "testCommandSpec": { "executable": "npm", "args": ["test"] },
+  "startCommandSpec": {
+    "executable": "npm",
+    "args": [
+      "run",
+      "dev"
+    ]
+  },
   "healthCheckUrl": "http://127.0.0.1:6173",
   "frontendUrl": "http://localhost:6173",
   "backendUrl": "http://127.0.0.1:6172/api/health",
+  "testCommand": "npm test",
+  "testCommandSpec": {
+    "executable": "npm",
+    "args": [
+      "test"
+    ]
+  },
   "login": {
     "method": "none"
   },
@@ -21,5 +38,5 @@
   "cleanupCommand": "",
   "timeoutMs": 25000,
   "createdAt": "2026-07-07T00:00:00.000Z",
-  "updatedAt": "2026-07-07T00:00:00.000Z"
+  "updatedAt": "2026-08-27T09:57:01.660Z"
 }

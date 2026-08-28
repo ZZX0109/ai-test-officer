@@ -96,7 +96,7 @@ async function evaluateProject(projectId) {
   }
 
   // Compute the SHA256 of the label manifest
-  const manifestJson = JSON.stringify(labelManifest, Object.keys(labelManifest).sort());
+  const manifestJson = JSON.stringify(Object.fromEntries(Object.entries(labelManifest).sort(([left], [right]) => left.localeCompare(right))));
   const labelManifestSha256 = createHash("sha256").update(manifestJson).digest("hex");
 
   // Write the label manifest to the evaluator directory (the evaluator holds it)

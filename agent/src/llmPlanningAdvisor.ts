@@ -157,6 +157,7 @@ export async function createLlmPlanningAdvice(input: {
   }));
   const knowledgeContext = createKnowledgeContext({
     purpose: "planning",
+    runId: input.runId,
     projectSnapshot: { projectId: input.project.id },
     claims: [
       {
@@ -317,9 +318,9 @@ export async function createLlmPlanningAdvice(input: {
       // slower Responses request at 30s.
       timeoutMs: 30_000,
       totalTimeoutMs: 60_000,
-      transportPreference: "non-stream-retry",
+      transportPreference: "auto",
       jsonSchema: { name: "test_planning_advice", schema: jsonSchema },
-      context: { purpose: "planning", projectDigest: input.project.id },
+      context: { purpose: "planning", runId: input.runId, projectDigest: input.project.id },
       knowledgeContext,
       parseOutput: (text) => responseSchema.parse(normalizePlanningJson(extractJson(text)))
     });
@@ -352,9 +353,9 @@ export async function createLlmPlanningAdvice(input: {
         maxTokens: repairBudget.maxOutputTokens,
         timeoutMs: 15_000,
         totalTimeoutMs: 20_000,
-        transportPreference: "non-stream-retry",
+        transportPreference: "auto",
         jsonSchema: { name: "test_planning_advice_repair", schema: jsonSchema },
-        context: { purpose: "planning", projectDigest: input.project.id },
+        context: { purpose: "planning", runId: input.runId, projectDigest: input.project.id },
         knowledgeContext,
         parseOutput: (text) => responseSchema.parse(normalizePlanningJson(extractJson(text)))
       });

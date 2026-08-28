@@ -110,6 +110,42 @@ function removeNullFields(value: unknown): unknown {
     .map(([key, field]) => [key, removeNullFields(field)]));
 }
 
+/**
+ * The provider-facing Oracle schema is deliberately flat because some
+ * OpenAI-compatible endpoints reject a nested discriminated union. That
+ * means a model may return a non-null field which is meaningful for another
+ * Oracle variant (for example `controlId` on a `dom-change` Oracle). The
+ * field has no runtime meaning for that variant, so normalize it away before
+ * the strict deterministic union validates the selected Oracle type. Unknown
+ * types and missing required fields still fail closed in dynamicOracleSchema.
+ */
+function normalizeProviderOracle(value: unknown): unknown {
+  const normalized = removeNullFields(value);
+  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) return normalized;
+  const record = normalized as Record<string, unknown>;
+  const common = {
+    id: record.id,
+    type: record.type,
+    description: record.description
+  };
+  switch (record.type) {
+    case "element-state":
+    case "input-state":
+      return { ...common, controlId: record.controlId, expected: record.expected };
+    case "text":
+    case "count-change":
+      return { ...common, controlId: record.controlId, operator: record.operator, expected: record.expected };
+    case "url":
+      return { ...common, operator: record.operator, expected: record.expected };
+    case "network":
+      return { ...common, operationId: record.operationId, expectedStatus: record.expectedStatus };
+    case "dom-change":
+      return { ...common, expected: record.expected };
+    default:
+      return normalized;
+  }
+}
+
 /** The provider JSON schema requires nullable placeholders for optional
  * properties. Convert only those nulls back to omitted fields. Historical
  * aliases and misspelled Oracle types are intentionally not repaired here:
@@ -131,7 +167,7 @@ function normalizeProviderOutput(value: unknown) {
  * blocked an otherwise healthy page path. */
 export function parseBrowserDecisionProviderOutput(text: string, observation: BrowserObservation) {
   const parsed = outputSchema.parse(normalizeProviderOutput(JSON.parse(text)));
-  const parsedOracles = parsed.oracles.map((oracle) => dynamicOracleSchema.parse(oracle));
+  const parsedOracles = parsed.oracles.map((oracle) => dynamicOracleSchema.parse(normalizeProviderOracle(oracle)));
   const oracleIds = new Set(parsedOracles.map((oracle) => oracle.id));
   const allowedControlIds = new Set(observation.controls.map((control) => control.controlId));
   for (const proposal of parsed.actions) {
@@ -362,7 +398,7 @@ export async function decideNextBrowserActions(input: {
     maxTokens: 2_400,
     timeoutMs: 25_000,
     totalTimeoutMs: 35_000,
-    transportPreference: "non-stream-retry",
+    transportPreference: "auto",
     jsonSchema: { name: "browser_action_decision", schema: outputJsonSchema },
     context: {
       purpose: "browser-action",

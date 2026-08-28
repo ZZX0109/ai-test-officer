@@ -85,6 +85,14 @@ monaco.editor.defineTheme("ato-vscode-light", {
     "editorWhitespace.foreground": "#D0D7DE",
     "editorGutter.background": "#FFFFFF",
     "editorOverviewRuler.border": "#FFFFFF",
-    "minimap.background": "#FFFFFF"
+    "minimap.background": "#FFFFFF",
+    // A repair review must be legible at a glance. The default subtle hatch
+    // is too easy to miss in a dense Workbench, especially in split mode.
+    "diffEditor.insertedLineBackground": "#e9f9ee",
+    "diffEditor.insertedTextBackground": "#b9ebc7",
+    "diffEditor.removedLineBackground": "#fff0ef",
+    "diffEditor.removedTextBackground": "#ffc9c5",
+    "diffEditorGutter.insertedLineBackground": "#c8f0d4",
+    "diffEditorGutter.removedLineBackground": "#ffd9d6"
   }
 });

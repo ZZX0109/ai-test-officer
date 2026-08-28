@@ -30,6 +30,7 @@ interface UsePlanningConversationRequestInput {
   setPlanningInput: Dispatch<SetStateAction<string>>;
   setPlanningMessages: Dispatch<SetStateAction<PlanningMessage[]>>;
   setPlanningBusy: Dispatch<SetStateAction<boolean>>;
+  setPlanningTrajectoryId: Dispatch<SetStateAction<string | null>>;
   setPlanningConfirmed: Dispatch<SetStateAction<boolean>>;
   setPlanningResult: Dispatch<SetStateAction<PlanningConversationResult | null>>;
   setPlanningAutomation: Dispatch<SetStateAction<PlanningAutomationPresentation>>;
@@ -74,9 +75,11 @@ export function usePlanningConversationRequest(input: UsePlanningConversationReq
       content,
       createdAt: new Date().toISOString()
     };
+    const planningId = `planning_${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
     if (!options.internalInstruction) input.setPlanningMessages((current) => [...current, userMessage]);
     input.setPlanningInput("");
     input.setPlanningBusy(true);
+    input.setPlanningTrajectoryId(planningId);
     input.setPlanningConfirmed(false);
     if (fullInventoryCommand) {
       input.setPlanningResult(null);
@@ -97,7 +100,8 @@ export function usePlanningConversationRequest(input: UsePlanningConversationReq
         bugTicket: input.bugTicketText,
         history: input.planningMessages,
         planningMode: effectivePlanningMode,
-        credentialId: effectivePlanningMode === "llm-guided" ? input.defaultCredential?.id : undefined
+        credentialId: effectivePlanningMode === "llm-guided" ? input.defaultCredential?.id : undefined,
+        planningId
       });
       if (response.discovery) {
         input.setDiscovery(response.discovery);
@@ -133,6 +137,7 @@ export function usePlanningConversationRequest(input: UsePlanningConversationReq
         return null;
       }
       input.resetPlanningFlowEdits();
+      input.setPlanningTrajectoryId(response.planning.id);
       input.setPlanningResult(response.planning);
       input.setMessage(response.planning.llmPlanning?.status === "failed"
         ? "代码扫描已完成，但 AI 规划暂时不可用；已保留可继续编辑的规则计划。"
