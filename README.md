@@ -5,35 +5,49 @@
 [![Node.js](https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Playwright](https://img.shields.io/badge/Playwright-browser%20evidence-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
-[![Docker](https://img.shields.io/badge/Sandbox-Docker%20%2F%20Podman-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Docker](https://img.shields.io/badge/Sandbox-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 
 ![AI Test Officer 当前版 Workbench：项目接入、测试规划、沙盒执行与证据裁决](docs/assets/ai-test-officer-workbench-v2.png)
 
-## 当前工程状态（2026-08-26）
+## 当前工程状态（2026-08-31）
 
-当前版本已经完成 LangGraph 编排、多路径执行、Artifact v2、证明图、选择性
-LLM、OCI 沙盒、修复工作区，以及“可信验收 + 测试资产”双主线的主体实现，处于
-**Active Graph 发布验收阶段**。
-这里区分“工程验证通过”和“已经证明模型泛化增益”，不使用一个
-`completed` 状态概括所有结果。
+本节验证的代码快照为 `470b347`。该快照已包含 LangGraph 编排、多路径执行、Artifact v2、
+证明图、选择性 LLM、Docker 沙盒和修复工作区的主体代码，仍处于
+**Active Graph 发布验收阶段**。下面将“当前提交现场复跑”“仓库内历史验收报告”
+和“尚未证明的能力”分开列出，避免把旧报告、合成测试或局部测试写成当前全量结论。
 
-| 验证项 | 当前结果 |
+### 当前提交现场复跑
+
+以下命令于 2026-08-31 在 macOS 工作区对代码快照 `470b347` 执行；README 文案修改不改变该代码快照：
+
+| 命令 | 结果 |
 | --- | --- |
-| 全 workspace 单元/合同/组件测试 | 通过 |
-| TypeScript typecheck 与生产构建 | 通过 |
-| Todo / Order 浏览器可信度专项 | 各 3 次通过，并验证单路径失败隔离 |
-| compiled-plan smoke 与 Demo 证据链 | 通过 |
-| PostgreSQL / Redis / MinIO / Keycloak / API / worker Compose 验收 | 由 `npm run acceptance:production` 复跑确认 |
-| Production `npm audit --omit=dev` | 0 个已知漏洞 |
-| Secret scan 与运行产物隔离 | 通过 |
-| 100 次 Shadow Graph 对照 | Synthetic topology 100/100 通过；不等同真实项目验收 |
-| 5 个异构真实项目 Base/Head 双版本验收 | 双侧证据齐全；独立 evaluator 通过；不可归因差异保持 `inconclusive` |
-| evaluator 隔离的新密封盲测 | 五个项目均通过证据完整性检查 |
+| `npm run typecheck` | 通过 |
+| `npm test` | 通过；包含 workspace 包、Agent、演示应用和 Workbench 测试 |
+| `npm run build` | 通过；Vite 提示 Monaco 相关 chunk 超过 500 kB，仍需优化拆包 |
+| `npm run size-guard` | 通过 |
+| `npm run quality:contracts` | 通过；检查 369 个源码文件，未发现 `z.any()` 或显式 `any` |
+| `npm audit --omit=dev` | 0 个已知生产依赖漏洞 |
+| `npm run lint` | **未通过**；`trajectory.routes.ts` 中 `readTrajectoryPage` 圈复杂度为 21，规则上限为 12 |
 
-因此，本仓库当前可以作为可复现的开发与验收基线，但仍不宣称“全场景无人值守发布”
-或“LLM 泛化增益已经证明”：真实模型 benchmark 仍需要有效凭据和独立 evaluator 标签，
-而差分执行对无法归因的结果会保持 `inconclusive`。运行报告保存在被 Git 忽略的
-`reports/` 中，README 只记录可复现的验证口径。
+因此，当前提交可以通过类型检查、测试和生产构建，但**不能称为全量质量门禁通过**。
+在 lint 问题修复并重新执行完整 `npm run quality` 前，也不把当前提交描述为发布就绪。
+
+### 仓库内最近验收快照
+
+`reports/` 默认被 Git 忽略，以下是本地工作区已有报告的结果与生成时间，不代表
+2026-08-31 对所有外部服务重新执行：
+
+| 报告 | 已记录结果 | 边界 |
+| --- | --- | --- |
+| `reports/production-acceptance/latest.json` | 2026-08-24，`status=passed`，45 项 Compose 检查 | 本轮未重跑；只证明该次隔离 PostgreSQL/Redis/MinIO/Keycloak/API/Worker 验收 |
+| `reports/external-acceptance/latest.json` | 2026-08-26，5 类项目、5 条规定 lane 的审计结果为 `passed=true` | 依赖 evaluator 报告目录中的当次证据；不等同持续生产泛化能力 |
+| `reports/shadow-graph/latest.json` | 2026-08-24，合成拓扑 100/100 | 只证明编排拓扑可重复完成，不证明真实项目行为或 LLM 增益 |
+| `reports/baseline-verification/latest.json` | 2026-08-26，`passed=false` | 该次只完成开发服务启动/停止，不能作为完整基线通过证据 |
+
+本项目仍不宣称“全场景无人值守发布”或“LLM 泛化增益已经证明”。差分执行无法可靠
+归因时会保持 `inconclusive`；容量报告中的 control-plane 矩阵也不能替代真实浏览器、
+Worker 和外部依赖的端到端负载测试。
 
 ## 这个项目解决什么问题
 
@@ -97,7 +111,7 @@ LLM transport、原生 Tool Calling 与父子 Run 全局轨迹的交付约定见
 
 ### 2. 通用沙盒运行
 
-外部项目默认进入 Docker/Podman OCI 沙盒：
+外部项目默认进入 Docker OCI 沙盒：
 
 - 非 root 用户运行。
 - 源码只读挂载。
@@ -128,7 +142,7 @@ LLM transport、原生 Tool Calling 与父子 Run 全局轨迹的交付约定见
 第一次遇到新的依赖图时，系统必须真实安装依赖；之后不会每次重复安装：
 
 - 按运行镜像、安装命令、lockfile 和嵌套 workspace 依赖清单计算缓存指纹。
-- 使用 Docker/Podman 原生持久卷保存依赖，避免 macOS bind mount 写入大量小文件的性能问题。
+- 使用 Docker 命名卷保存依赖，避免 macOS bind mount 写入大量小文件的性能问题。
 - Git 项目通过 Git 索引快速计算源码状态。
 - 非 Git 项目使用稳定的文件元数据指纹。
 - 源码未变化时跳过目录复制。
@@ -426,7 +440,7 @@ flowchart TB
     API --> STORE["Run Event Store<br/>PostgreSQL"]
     GRAPH --> QUEUE["Execution Queue<br/>Redis + BullMQ"]
     QUEUE --> WORKER["Execution Worker"]
-    WORKER --> OCI["Rootless OCI Sandbox<br/>Docker / Podman"]
+    WORKER --> OCI["Non-root Docker Sandbox"]
     OCI --> TARGET["Target Project"]
     OCI --> REPAIR["可写修复副本<br/>Diff + Validation Child Run"]
     WORKER --> PW["Playwright Runtime"]
@@ -508,7 +522,7 @@ ai-test-officer/
 
 - Node.js 22.5+（Agent 状态存储使用 `node:sqlite`，22.5 起免实验性 flag；推荐 24，见 `.nvmrc`）
 - npm 10+
-- Docker Desktop 或 Podman（外部项目沙盒必需）
+- Docker Desktop 或 Docker Engine（外部项目沙盒必需；当前执行器未声明 Podman 兼容性）
 - Playwright Chromium
 
 ### 安装
