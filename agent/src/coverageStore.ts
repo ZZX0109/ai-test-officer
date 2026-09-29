@@ -112,6 +112,8 @@ export function createCoverageItems(input: {
         ? [step.action.oracleId]
         : []))),
       requiredEvidenceKinds: scenario.compiledPlanContract?.requiredEvidenceKinds ?? [],
+      behaviorDimensions: ["happy-path", "negative", ...(scenario.capabilityKind === "role_permission_matrix" ? ["permission"] : []), ...(scenario.capabilityKind === "approval_flow" ? ["state-transition", "recovery"] : [])],
+      coveredBehaviorDimensions: [],
       binding: manifestBinding({
         surface,
         flowId: scenario.id,
@@ -144,6 +146,7 @@ export function createDynamicBrowserCoverageItems(input: {
     surface?: CoverageItem["surface"];
     preconditions?: string[];
     requiredEvidenceKinds?: CoverageItem["requiredEvidenceKinds"];
+    behaviorDimensions?: CoverageItem["behaviorDimensions"];
   }>;
   now?: string;
 }) {
@@ -174,6 +177,8 @@ export function createDynamicBrowserCoverageItems(input: {
     requiredEvidenceKinds: path.requiredEvidenceKinds?.length
       ? path.requiredEvidenceKinds
       : browserPath ? ["screenshot", "dom", "trace", "operation-log"] : ["operation-log"],
+    behaviorDimensions: path.behaviorDimensions?.length ? path.behaviorDimensions : ["happy-path", "negative"],
+    coveredBehaviorDimensions: [],
     // The complete inventory is created before runtime binding. Non-page
     // candidates remain pending until the manifest executor either binds them
     // or records a concrete blocked reason; their mere presence must not stop
@@ -412,6 +417,7 @@ export async function updateCoverageDisposition(input: {
   reason?: string;
   attemptId?: string;
   childRunId?: string;
+  coveredBehaviorDimensions?: CoverageItem["behaviorDimensions"];
 }) {
   const items = await readCoverageItems(input.runId);
   const now = new Date().toISOString();
@@ -419,8 +425,9 @@ export async function updateCoverageDisposition(input: {
     ...item,
     disposition: input.disposition,
     dispositionReason: input.reason,
-    attemptId: input.attemptId,
+    attemptId: input.attemptId ?? item.attemptId,
     childRunId: input.childRunId ?? item.childRunId,
+    coveredBehaviorDimensions: input.coveredBehaviorDimensions ?? item.coveredBehaviorDimensions,
     updatedAt: now
   }) : item);
   if (!next.some((item) => item.id === input.coverageItemId)) throw new Error("coverage_item_not_found");

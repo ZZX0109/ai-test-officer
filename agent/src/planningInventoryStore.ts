@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { PlannedBusinessFlow } from "./planningConversation.js";
 import type { BusinessFunction } from "./businessFunctionCompiler.js";
+import type { BusinessPath } from "./businessPathCompiler.js";
 import { getDatabasePool } from "./databaseRuntime.js";
 
 const rootDir = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
@@ -23,6 +24,7 @@ interface PlanningInventory {
   snapshotHash?: string;
   flows: PlannedBusinessFlow[];
   functions?: BusinessFunction[];
+  technicalPaths?: BusinessPath[];
   createdAt: string;
 }
 
@@ -45,7 +47,7 @@ function decodeCursor(cursor?: string) {
 }
 
 export async function savePlanningInventory(input: PlanningInventory) {
-  const value = { ...input, flows: [...input.flows], functions: [...(input.functions ?? [])] };
+  const value = { ...input, flows: [...input.flows], functions: [...(input.functions ?? [])], technicalPaths: [...(input.technicalPaths ?? [])] };
   memory.set(value.id, value);
   const db = database();
   if (db) {

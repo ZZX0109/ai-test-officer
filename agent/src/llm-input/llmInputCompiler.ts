@@ -72,21 +72,29 @@ export class LlmInputCompiler {
     const sortedUnknown = source.unknownInformation;
 
     // 截取
-    const selectedFacts = sortedFacts.slice(0, this.config.maxFacts);
-    const selectedEvidence = sortedEvidence.slice(0, this.config.maxEvidence);
-    const selectedKnowledge = sortedKnowledge.slice(0, this.config.maxKnowledge);
-    const selectedUnknown = sortedUnknown.slice(0, this.config.maxUnknown);
-
-    // 估算使用
-    const allText = JSON.stringify([
-      ...selectedFacts,
-      ...selectedEvidence,
-      ...selectedKnowledge,
-      ...selectedUnknown,
-      contextSummary
-    ]);
-    const estimatedTokens = Math.ceil(allText.length / 3.5);
-    const usedTokens = Math.min(estimatedTokens, totalTokenBudget);
+    let selectedFacts = sortedFacts.slice(0, this.config.maxFacts);
+    let selectedEvidence = sortedEvidence.slice(0, this.config.maxEvidence);
+    let selectedKnowledge = sortedKnowledge.slice(0, this.config.maxKnowledge);
+    let selectedUnknown = sortedUnknown.slice(0, this.config.maxUnknown);
+    let boundedSummary = contextSummary.slice(0, 1_000);
+    const estimate = () => Math.ceil(JSON.stringify([...selectedFacts, ...selectedEvidence, ...selectedKnowledge, ...selectedUnknown, boundedSummary]).length / 3.5);
+    // Drop low-priority namespaces first, then compact long details. This is a
+    // real budget enforcement step: the payload handed to the provider is the
+    // same payload measured here, never a larger unbounded prompt.
+    while (estimate() > totalTokenBudget && selectedUnknown.length) selectedUnknown = selectedUnknown.slice(0, -1);
+    while (estimate() > totalTokenBudget && selectedKnowledge.length) selectedKnowledge = selectedKnowledge.slice(0, -1);
+    while (estimate() > totalTokenBudget && selectedEvidence.length) selectedEvidence = selectedEvidence.slice(0, -1);
+    while (estimate() > totalTokenBudget && selectedFacts.length > 1) selectedFacts = selectedFacts.slice(0, -1);
+    if (estimate() > totalTokenBudget) {
+      selectedFacts = selectedFacts.map((fact) => ({ ...fact, statement: fact.statement.slice(0, 120), evidenceRefs: fact.evidenceRefs.slice(0, 2) }));
+      selectedEvidence = selectedEvidence.map((evidence) => ({ ...evidence, summary: evidence.summary.slice(0, 80), detail: evidence.detail.slice(0, 240), artifactRefs: evidence.artifactRefs.slice(0, 2) }));
+      selectedKnowledge = selectedKnowledge.map((knowledge) => ({ ...knowledge, title: knowledge.title.slice(0, 80), content: knowledge.content.slice(0, 240), sourceRefs: knowledge.sourceRefs.slice(0, 2) }));
+      selectedUnknown = selectedUnknown.map((unknown) => ({ ...unknown, question: unknown.question.slice(0, 120), context: unknown.context.slice(0, 160) }));
+    }
+    while (estimate() > totalTokenBudget && boundedSummary.length > 120) boundedSummary = boundedSummary.slice(0, Math.ceil(boundedSummary.length / 2));
+    while (estimate() > totalTokenBudget && boundedSummary.length) boundedSummary = boundedSummary.slice(0, Math.ceil(boundedSummary.length / 2));
+    const estimatedTokens = estimate();
+    const usedTokens = estimatedTokens;
 
     return optimizedLlmInputSchema.parse({
       schemaVersion: "1.0",
@@ -97,7 +105,7 @@ export class LlmInputCompiler {
       observedEvidence: selectedEvidence,
       retrievedKnowledge: selectedKnowledge,
       unknownInformation: selectedUnknown,
-      contextSummary: contextSummary.slice(0, 1_000),
+      contextSummary: boundedSummary,
       exclusions: {
         noRawDatabase: true,
         noFullLogs: true,

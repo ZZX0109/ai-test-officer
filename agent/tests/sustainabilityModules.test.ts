@@ -8,7 +8,7 @@ import { MemoryService } from "../src/memory/memoryService.js";
 import { Tracer } from "../src/tracing/tracer.js";
 import { FeedbackLoop } from "../src/feedback-loop/feedbackLoop.js";
 import { FileWriteSafetyStore, WriteSafetyLayer } from "../src/write-safety/writeSafety.js";
-import { evaluateMemoryRetrieval } from "../src/memory/memoryRetrievalEval.js";
+import { evaluateMemoryRetrieval, evaluateMemoryRetrievalThresholds } from "../src/memory/memoryRetrievalEval.js";
 
 const repositoryRoot = path.basename(process.cwd()) === "agent" ? path.resolve(process.cwd(), "..") : process.cwd();
 
@@ -29,15 +29,29 @@ export async function testSustainabilityModules() {
   const entry = experienceMemoryEntrySchema.parse({ schemaVersion: "1.0", entryId: "e1", projectId: "p1", runId: "r1", failureType: "timeout", rootCauseCategory: "environment", rootCauseDescription: "slow", contributingFactors: [], repairStrategy: "wait_strategy", repairDescription: "wait", validationResult: "passed", successCount: 1, failureCount: 0, tags: ["slow"], severity: "minor", createdAt: now, updatedAt: now });
   await memory.upsertExperienceEntry(entry);
   assert.deepEqual(memory.retrievalDescriptor(), {
-    mode: "deterministic-hash-v0",
-    label: "Deterministic Hash Retrieval Placeholder",
+    mode: "keyword-v1",
+    label: "Keyword Retrieval (embedding provider not configured)",
     semantic: false,
     evaluationRequired: ["Recall@5", "Recall@10", "MRR", "false-recall-rate", "source-traceability"]
   });
   assert.equal((await memory.queryExperienceEntries({ projectId: "p1", includeUnvalidated: true, limit: 10, semanticLimit: 10, semanticThreshold: 0, offset: 0 })).length, 1);
   const memoryStats = await memory.getStatistics("p1");
   assert.equal(memoryStats.overallSuccessRate, 1);
-  assert.equal(memoryStats.retrievalMode, "deterministic-hash-v0");
+  assert.equal(memoryStats.retrievalMode, "keyword-v1");
+  const embeddingMemory = new MemoryService(undefined, "", {
+    model: "fixture-embedding-v1",
+    embed: async (text: string) => [text.includes("timeout") ? 1 : 0, text.includes("environment") ? 1 : 0]
+  });
+  await embeddingMemory.upsertExperienceEntry({ ...entry, entryId: "e2", rootCauseDescription: "environment timeout", embeddingVector: undefined });
+  assert.equal(embeddingMemory.retrievalDescriptor().mode, "hybrid-embedding-v1");
+  assert.equal((await embeddingMemory.queryExperienceEntries({ projectId: "p1", semanticQuery: "environment timeout", semanticThreshold: 0.5, semanticLimit: 5, includeUnvalidated: true, limit: 5, offset: 0 })).some((item) => item.entryId === "e2"), true);
+  const unavailableEmbeddingMemory = new MemoryService(undefined, "", {
+    model: "unavailable-embedding-v1",
+    embed: async () => { throw new Error("provider unavailable"); }
+  });
+  await unavailableEmbeddingMemory.upsertExperienceEntry({ ...entry, entryId: "e3", embeddingVector: undefined });
+  assert.equal(unavailableEmbeddingMemory.retrievalDescriptor().mode, "keyword-v1", "a failed provider must be disclosed as keyword fallback");
+  assert.equal(unavailableEmbeddingMemory.retrievalDescriptor().label, "Keyword Retrieval (embedding provider unavailable)");
   const retrievalEval = evaluateMemoryRetrieval([
     {
       queryId: "q1",
@@ -50,14 +64,24 @@ export async function testSustainabilityModules() {
   assert.equal(retrievalEval.meanReciprocalRank, 1);
   assert.equal(retrievalEval.falseRecallRateAt10, 0.5);
   assert.equal(retrievalEval.sourceTraceabilityRate, 0.5);
+  assert.equal(evaluateMemoryRetrievalThresholds({ ...retrievalEval, recallAt5: 0.9, recallAt10: 0.95, meanReciprocalRank: 0.8, falseRecallRateAt10: 0.1, sourceTraceabilityRate: 1 }).passed, true);
+  assert.equal(evaluateMemoryRetrievalThresholds(retrievalEval).passed, false);
   const memoryDataset = JSON.parse(await readFile(path.join(repositoryRoot, "data", "memory", "retrieval-eval-v1.json"), "utf8")) as {
     status?: string;
     queryCount?: number;
+    thresholds?: { recallAt5Min: number; recallAt10Min: number; meanReciprocalRankMin: number; falseRecallRateAt10Max: number; sourceTraceabilityRateMin: number };
     cases?: Array<{ queryId?: string; relevantEntryIds?: string[]; distractorEntryIds?: string[] }>;
   };
   assert.equal(memoryDataset.status, "labels-ready-provider-run-required");
   assert.equal(memoryDataset.queryCount, 50);
   assert.equal(memoryDataset.cases?.length, 50);
+  assert.deepEqual(memoryDataset.thresholds, {
+    recallAt5Min: 0.8,
+    recallAt10Min: 0.9,
+    meanReciprocalRankMin: 0.75,
+    falseRecallRateAt10Max: 0.2,
+    sourceTraceabilityRateMin: 1
+  });
   assert.equal(new Set(memoryDataset.cases?.map((item) => item.queryId)).size, 50);
   assert.equal(memoryDataset.cases?.every((item) => item.relevantEntryIds?.length && item.distractorEntryIds?.length
     && item.distractorEntryIds.every((id) => !item.relevantEntryIds?.includes(id))), true);

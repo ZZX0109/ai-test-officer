@@ -264,19 +264,23 @@ export async function createPlanningConversation(input: {
     requiredEvidenceKinds: flow.requiredEvidenceKinds ?? [],
     sourceNodeIds: flow.sourceNodeIds ?? [],
     sourceLocations: flow.sourceLocations ?? [],
-    reason: flow.reason
+    reason: flow.reason,
+    kind: flow.businessPathKind,
+    implementationEvidence: flow.businessPathKind === "api"
   }));
   const businessCompilation = compileBusinessFunctions({
     paths: internalPaths,
     sourceCandidateCount: planning.coverage.sourceCandidates,
     snapshotHash: planning.businessGraph?.projectSnapshotHash,
     projectName: project.name,
-    projectDescription: undefined
+    projectDescription: undefined,
+    capabilityHints: project.manifest?.businessCapabilities
   });
   planning.businessFunctions = businessCompilation.functions;
   planning.projectOverview = businessCompilation.overview;
   planning.businessFunctionCount = businessCompilation.overview.businessFunctionCount;
   planning.technicalPathCount = businessCompilation.overview.technicalPathCount;
+  planning.technicalPaths = businessCompilation.technicalPaths;
   planning.businessFunctionSnapshotHash = businessCompilation.overview.snapshotHash;
   planning.businessFunctionConfidence = businessCompilation.overview.confidence;
   planning.reply = buildUserFacingPlanningReply({
@@ -288,7 +292,7 @@ export async function createPlanningConversation(input: {
     total: businessCompilation.functions.length,
     limit: businessCompilation.functions.length
   };
-  await savePlanningInventory({ id: planning.id, projectId: project.id, snapshotHash: planning.businessGraph?.projectSnapshotHash, flows: completeFlows, functions: businessCompilation.functions, createdAt: new Date().toISOString() });
+  await savePlanningInventory({ id: planning.id, projectId: project.id, snapshotHash: planning.businessGraph?.projectSnapshotHash, flows: completeFlows, functions: businessCompilation.functions, technicalPaths: businessCompilation.technicalPaths, createdAt: new Date().toISOString() });
   const firstFunctionPage = await getPlanningFunctionPage({ inventoryId: planning.id, projectId: project.id, limit: 24 });
   if (firstFunctionPage) {
     planning.businessFunctions = firstFunctionPage.functions;

@@ -65,29 +65,47 @@ export const testQualityMetricsSchema = z.object({
   // 准确率指标
   accuracy: z.object({
     totalTests: z.number().int().nonnegative(),
-    falsePositiveRate: z.number().min(0).max(1),
-    falseNegativeRate: z.number().min(0).max(1),
-    precision: z.number().min(0).max(1),
-    recall: z.number().min(0).max(1),
-    f1Score: z.number().min(0).max(1)
+    /** Requires independently labelled positive and negative outcomes. */
+    falsePositiveRate: z.number().min(0).max(1).optional(),
+    falseNegativeRate: z.number().min(0).max(1).optional(),
+    precision: z.number().min(0).max(1).optional(),
+    recall: z.number().min(0).max(1).optional(),
+    f1Score: z.number().min(0).max(1).optional()
   }),
 
   // 成功率指标
   success: z.object({
-    testSuccessRate: z.number().min(0).max(1),
-    flakyTestRate: z.number().min(0).max(1),
-    environmentFailureRate: z.number().min(0).max(1),
-    averageTestDurationMs: z.number().int().nonnegative(),
-    firstAttemptPassRate: z.number().min(0).max(1)
+    testOutcomeSampleCount: z.number().int().nonnegative(),
+    testSuccessRate: z.number().min(0).max(1).optional(),
+    flakySampleCount: z.number().int().nonnegative(),
+    flakyTestRate: z.number().min(0).max(1).optional(),
+    environmentFailureSampleCount: z.number().int().nonnegative(),
+    environmentFailureRate: z.number().min(0).max(1).optional(),
+    durationSampleCount: z.number().int().nonnegative(),
+    averageTestDurationMs: z.number().int().nonnegative().optional(),
+    firstAttemptSampleCount: z.number().int().nonnegative(),
+    firstAttemptPassRate: z.number().min(0).max(1).optional()
   }),
 
   // 覆盖率指标
   coverage: z.object({
-    pathCoverage: z.number().min(0).max(1),
-    riskCoverage: z.number().min(0).max(1),
-    assertionCoverage: z.number().min(0).max(1),
-    evidenceCoverage: z.number().min(0).max(1)
+    pathCoverage: z.number().min(0).max(1).optional(),
+    riskCoverage: z.number().min(0).max(1).optional(),
+    assertionCoverage: z.number().min(0).max(1).optional(),
+    evidenceCoverage: z.number().min(0).max(1).optional()
   }),
+  /** Business-level metrics are omitted until the corresponding plans or labels exist. */
+  business: z.object({
+    functionIdentificationF1: z.number().min(0).max(1).optional(),
+    requirementCoverage: z.number().min(0).max(1).optional(),
+    oracleCoverage: z.number().min(0).max(1).optional(),
+    behaviorCoverage: z.number().min(0).max(1).optional(),
+    defectDiscoveryRate: z.number().min(0).max(1).optional(),
+    falsePositiveRate: z.number().min(0).max(1).optional(),
+    falseNegativeRate: z.number().min(0).max(1).optional(),
+    diagnosisTimeMs: z.number().int().nonnegative().optional(),
+    postRepairRegressionPassRate: z.number().min(0).max(1).optional()
+  }).optional(),
 
   generatedAt: z.string().datetime()
 });

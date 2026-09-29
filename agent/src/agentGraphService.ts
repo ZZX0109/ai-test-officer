@@ -381,7 +381,9 @@ async function buildService() {
                         ? "background-task"
                         : "page",
                 preconditions: inventory.find((item) => item.id === path.id)?.preconditions,
-                requiredEvidenceKinds: inventory.find((item) => item.id === path.id)?.requiredEvidenceKinds
+                requiredEvidenceKinds: inventory.find((item) => item.id === path.id)?.requiredEvidenceKinds,
+                behaviorDimensions: inventory.find((item) => item.id === path.id)?.behaviorDimensions
+                  ?? (["happy-path", "negative", ...(/登录|权限|认证|审批|auth|permission|approval/i.test(path.title) ? ["permission", "recovery"] : [])] as Array<"happy-path" | "negative" | "permission" | "recovery">)
               }))
             });
             // Dynamic browser plans are the execution contract for uploaded
@@ -490,7 +492,7 @@ async function buildService() {
               payload: { browserAgent: true }
             });
           }
-          const { coverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary, modelExecution } = await finalizeBrowserExecutionProof({
+          const { coverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary, modelExecution, qualityMetrics } = await finalizeBrowserExecutionProof({
             state,
             coverageScope: "all",
             integrityId: `${state.runId}_dynamic_artifact_integrity`
@@ -525,7 +527,8 @@ async function buildService() {
               successfulBrowserActionCallCount: modelExecution.successfulBrowserActionCallCount,
               completedBrowserActionCount: modelExecution.completedBrowserActionCount,
               requiredArtifactKindsPresent: modelExecution.requiredArtifactKindsPresent
-            }
+            },
+            qualityMetrics
           });
           let run = await runEventStore.get(state.runId);
           if (run?.state === "queued") run = await appendSystemRunEvent(state.runId, "run_preparing", { browserAgent: true });

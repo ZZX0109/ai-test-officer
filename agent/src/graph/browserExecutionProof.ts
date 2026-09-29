@@ -31,6 +31,8 @@ import { persistDynamicBrowserResult } from "../browser-agent/resultBundle.js";
 import { runEventStore } from "../runEventStore.js";
 import { artifactKindToIntegrityKind } from "../artifactIntegrity.js";
 import { listLlmCalls } from "../llmProvider.js";
+import { evaluateBusinessFunctionPass } from "../businessFunctionCompiler.js";
+import { calculateTestQualityMetrics } from "../qualityMetrics.js";
 
 export type InteractiveCoverageInventoryItem = {
   id: string;
@@ -38,6 +40,7 @@ export type InteractiveCoverageInventoryItem = {
   surfaces?: Array<"page" | "api" | "data" | "background-task">;
   preconditions?: string[];
   requiredEvidenceKinds?: Array<"screenshot" | "dom" | "network" | "console" | "trace" | "video" | "download" | "operation-log" | "report" | "attachment" | "source-patch" | "changed-files-archive" | "repair-validation-log">;
+  behaviorDimensions?: Array<"happy-path" | "negative" | "boundary" | "permission" | "state-transition" | "data-consistency" | "idempotency" | "recovery">;
 };
 
 export function interactiveCoverageInventory(value: unknown): InteractiveCoverageInventoryItem[] {
@@ -55,11 +58,14 @@ export function interactiveCoverageInventory(value: unknown): InteractiveCoverag
     const requiredEvidenceKinds = Array.isArray(candidate.requiredEvidenceKinds)
       ? candidate.requiredEvidenceKinds.filter((kind): kind is NonNullable<InteractiveCoverageInventoryItem["requiredEvidenceKinds"]>[number] => ["screenshot", "dom", "network", "console", "trace", "video", "download", "operation-log", "report", "attachment", "source-patch", "changed-files-archive", "repair-validation-log"].includes(String(kind)))
       : undefined;
+    const behaviorDimensions = Array.isArray(candidate.behaviorDimensions)
+      ? candidate.behaviorDimensions.filter((dimension): dimension is NonNullable<InteractiveCoverageInventoryItem["behaviorDimensions"]>[number] => ["happy-path", "negative", "boundary", "permission", "state-transition", "data-consistency", "idempotency", "recovery"].includes(String(dimension)))
+      : undefined;
     const status = candidate.status === "executable" || candidate.status === "auto-bindable"
       || candidate.status === "needs-input" || candidate.status === "coverage-gap"
       ? candidate.status
       : undefined;
-    return [{ id: candidate.id, status, surfaces, preconditions, requiredEvidenceKinds }];
+    return [{ id: candidate.id, status, surfaces, preconditions, requiredEvidenceKinds, behaviorDimensions }];
   });
 }
 
@@ -161,6 +167,29 @@ export async function finalizeBrowserExecutionProof(input: {
     requiredArtifactKindsPresent: missingKinds.length === 0
   });
   const modelExecutionSatisfied = modelExecution.satisfied;
+  // A coverage item is the executable projection of one business capability.
+  // Keep this gate deterministic and independent from the Judge so a green
+  // model response can never bypass missing actions, oracles or evidence.
+  const businessGateFailures = coverage.flatMap((item) => {
+    const pathResults = results.filter((result) => result.coverageItemId === item.id);
+    const path = {
+      id: item.flowId,
+      status: item.disposition === "executed" || item.disposition === "failed" ? "auto-bindable" as const : "coverage-gap" as const,
+      actionCandidates: item.actionPathIds ?? [],
+      oracleCandidates: item.oracleIds ?? [],
+      requiredEvidenceKinds: item.requiredEvidenceKinds ?? [],
+      risk: item.risk === "critical" ? "high" as const : item.risk
+    };
+    const gate = evaluateBusinessFunctionPass({
+      capability: { id: item.flowId, name: item.module, risk: path.risk, pathIds: [item.flowId], passCriteria: ["executable-entry", "key-action", "expected-result", "executed-oracle", "valid-evidence", "no-unresolved-high-risk"] },
+      paths: [path],
+      coverage: item,
+      results: pathResults,
+      evidenceKinds: artifactKinds
+    });
+    return gate.passed ? [] : gate.reasons.map((reason) => `${reason}:${item.flowId}`);
+  });
+  const businessGateBlockingFailures = businessGateFailures.filter((reason) => !reason.startsWith("business_oracle_not_executed_or_failed:"));
   const evidenceByArtifact = new Map<string, string>();
   for (const item of evidence) for (const artifactId of item.artifactIds ?? []) evidenceByArtifact.set(artifactId, item.id);
   const artifactIntegrity = {
@@ -180,9 +209,9 @@ export async function finalizeBrowserExecutionProof(input: {
       sha256: artifact.integrity.sha256
     }))
   };
-  const status: MachineGate["status"] = !coverageComplete || !executionSucceeded || missingKinds.length > 0 || !modelExecutionSatisfied
+  const status: MachineGate["status"] = !coverageComplete || !executionSucceeded || missingKinds.length > 0 || !modelExecutionSatisfied || businessGateBlockingFailures.length > 0
     ? "blocked"
-    : failedOracles.length > 0 || failedCoverage.length > 0 ? "fail"
+    : failedOracles.length > 0 || failedCoverage.length > 0 || businessGateFailures.length > 0 ? "fail"
       : blockedCoverage.length > 0 || excludedCoverage.length > 0 ? "blocked" : "pass";
   const failedEvidenceRefs = results
     .filter((item) => item.status !== "completed" || item.oracleResults.some((oracle) => !oracle.passed))
@@ -197,6 +226,7 @@ export async function finalizeBrowserExecutionProof(input: {
     ...excludedCoverage.map((item) => `${prefix}coverage_excluded:${item.flowId}`),
     ...(!executionSucceeded ? ["browser_action_execution_incomplete"] : []),
     ...(!modelExecutionSatisfied ? ["model_browser_action_call_missing"] : []),
+    ...businessGateFailures,
     ...missingKinds.map((kind) => `required_artifact_missing:${kind}`),
     ...failedOracles.map((oracle) => `oracle_failed:${oracle.oracleId}`)
   ];
@@ -267,6 +297,15 @@ export async function finalizeBrowserExecutionProof(input: {
     ...proofCredibility(finalized.verdict, finalized.machineGate, finalized.gateEligible),
     finalStatus: finalized.machineGate.status
   });
+  const qualityMetrics = calculateTestQualityMetrics({
+    metricId: `${input.state.runId}:quality`,
+    start: run?.createdAt ?? new Date().toISOString(),
+    end: new Date().toISOString(),
+    projectId: input.state.projectId,
+    functions: [],
+    coverage,
+    results
+  });
   return {
     coverage,
     decisions,
@@ -283,7 +322,8 @@ export async function finalizeBrowserExecutionProof(input: {
       successfulBrowserActionCallCount: modelExecution.successfulBrowserActionCallCount,
       completedBrowserActionCount: executedResults.length,
       requiredArtifactKindsPresent: missingKinds.length === 0
-    }
+    },
+    qualityMetrics
   };
 }
 
@@ -301,7 +341,7 @@ export async function persistBrowserPhaseForAggregate(state: EvidenceGateSubgrap
       payload: { browserAgent: true, mixedParentPhase: true }
     });
   }
-  const { coverage: browserCoverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary, executionSucceeded, modelExecution } = await finalizeBrowserExecutionProof({
+  const { coverage: browserCoverage, decisions, results, evidence, artifacts, artifactIntegrity, finalized, outcomeSummary, executionSucceeded, modelExecution, qualityMetrics } = await finalizeBrowserExecutionProof({
     state,
     coverageScope: "browser",
     integrityId: `${state.runId}_browser_phase_artifact_integrity`,
@@ -336,7 +376,8 @@ export async function persistBrowserPhaseForAggregate(state: EvidenceGateSubgrap
       successfulBrowserActionCallCount: modelExecution.successfulBrowserActionCallCount,
       completedBrowserActionCount: modelExecution.completedBrowserActionCount,
       requiredArtifactKindsPresent: modelExecution.requiredArtifactKindsPresent
-    }
+    },
+    qualityMetrics
   });
   const proof = await readProofArtifacts(state.runId);
   return {

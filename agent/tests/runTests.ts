@@ -20,6 +20,8 @@ import { testJudgeSchema } from "./judgeSchema.test.js";
 import { testLocalConfigInit } from "./localConfigInit.test.js";
 import { testPlanStepSchema } from "./planStepSchema.test.js";
 import { testProjectDetectionWizard, testExternalServiceDependencyDetection } from "./projectDetection.test.js";
+import { testStackCompatibilityMatrix } from "./stackCompatibilityMatrix.test.js";
+import { testOciStaticRuntimeSmoke } from "./ociStaticRuntimeSmoke.test.js";
 import { testProjectAdapter } from "./projectAdapter.test.js";
 import {
   testPrivateDependencyBlockerDetectsNpmPrivateRegistryWithoutToken,
@@ -102,12 +104,14 @@ import { testReliabilityAssets } from "./reliabilityAssets.test.js";
 import { testModelDrivenDemoAcceptance } from "./modelDrivenDemoAcceptance.test.js";
 import { testTrajectoryEventStore } from "./trajectory.test.js";
 import { testToolGatewayUnifiedContracts, testNativeToolCallingLoop } from "./toolGateway.test.js";
+import { testQualityMetrics } from "./qualityMetrics.test.js";
 
 async function main() {
   await testBrowserAgentLoop();
   testModelDrivenDemoAcceptance();
   await testTrajectoryEventStore();
   await testToolGatewayUnifiedContracts();
+  testQualityMetrics();
   await testNativeToolCallingLoop();
   await testLlmProviderChatAndAnthropicStreaming();
   await testBusinessCapabilityGraph();
@@ -128,6 +132,8 @@ async function main() {
   testProofBundleIntegrity();
   await testConnectorEnvelope();
   await testProjectDetectionWizard();
+  await testStackCompatibilityMatrix();
+  await testOciStaticRuntimeSmoke();
   await testExternalServiceDependencyDetection();
   await testProjectFolderBrowser();
   await testRepairWorkspace();

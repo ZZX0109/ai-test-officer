@@ -1,4 +1,4 @@
-import type { ArtifactV2, CommandSpec, CompiledPlan, Conclusion, CoverageItem, EvidenceLocator, GateStatus, HumanDecision, JudgeRecommendation, LlmBudget, LlmCall, MachineGate, OracleDecisionV2, OracleSpecV2, PlanProvenance, ProjectManifest, ProofEdge, ProofNode, ResourceBudget, RunEvidenceManifest, RunOutcomeSummaryV2 } from "@ai-test-officer/contracts";
+import type { ArtifactV2, CommandSpec, CompiledPlan, Conclusion, CoverageItem, EvidenceLocator, GateStatus, HumanDecision, JudgeRecommendation, LlmBudget, LlmCall, MachineGate, OracleDecisionV2, OracleSpecV2, PlanProvenance, ProjectManifest, ProofEdge, ProofNode, ResourceBudget, RunEvidenceManifest, RunOutcomeSummaryV2, TestQualityMetrics } from "@ai-test-officer/contracts";
 
 export type ProviderKind = "openai-compatible" | "openai" | "anthropic" | "openrouter" | "custom";
 
@@ -882,6 +882,7 @@ export interface VisualRunResult {
   humanDecision?: HumanDecision;
   finalStatus?: GateStatus;
   outcomeSummary?: RunOutcomeSummaryV2;
+  qualityMetrics?: TestQualityMetrics;
   /** Truthful summary of model calls used by the execution path. */
   modelExecution?: {
     required: boolean;

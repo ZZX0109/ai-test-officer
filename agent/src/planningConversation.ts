@@ -1,11 +1,12 @@
 import type { CodeImpactGraph, CodeGraphNode } from "./codeImpactGraph.js";
 import type { BusinessCapabilityGraph, BusinessSourceLocation } from "./businessCapabilityGraph.js";
 import { compileBusinessPaths } from "./businessPathCompiler.js";
+import type { BusinessPath, BusinessPathKind } from "./businessPathCompiler.js";
 import type { GrayPlan, IntakeAnalysis, ProjectConfig } from "./types.js";
 import { getScenario, hasScenario } from "./scenarios.js";
 import type { LlmPlanningAdvice } from "./llmPlanningAdvisor.js";
 import type { DiscoveryConnectivityResult } from "./smokeFirstDiscovery.js";
-import type { BusinessFunction, ProjectOverview } from "./businessFunctionCompiler.js";
+import type { BusinessFunction, BehaviorCoverageDimension, ProjectOverview } from "./businessFunctionCompiler.js";
 import { mergeRuntimeBusinessPaths, type RuntimePathObservation } from "./businessRuntimePathMerge.js";
 
 export type PlanningPhase = "clarifying" | "draft-ready";
@@ -46,6 +47,8 @@ export interface PlannedBusinessFlow {
   sourceLocations?: BusinessSourceLocation[];
   runtimeObserved?: boolean;
   runtimeEvidenceRefs?: string[];
+  behaviorCoverage?: BehaviorCoverageDimension[];
+  businessPathKind?: BusinessPathKind;
 }
 
 export interface PlanningConversationResult {
@@ -59,6 +62,7 @@ export interface PlanningConversationResult {
   projectOverview?: ProjectOverview;
   businessFunctionCount?: number;
   technicalPathCount?: number;
+  technicalPaths?: BusinessPath[];
   businessFunctionSnapshotHash?: string;
   businessFunctionConfidence?: BusinessFunction["confidence"];
   businessFunctionPage?: {
@@ -265,7 +269,9 @@ function buildFlows(input: {
         sourceCount: path.sourceNodeIds.length,
         sourceLocations: path.sourceLocations,
         runtimeObserved: path.runtimeObserved,
-        runtimeEvidenceRefs: path.runtimeEvidenceRefs
+        runtimeEvidenceRefs: path.runtimeEvidenceRefs,
+        behaviorCoverage: (path.surfaces.includes("page") ? ["happy-path", "negative", ...(path.risk === "high" ? ["permission", "recovery"] : []), ...(path.actionCandidates.some((action) => /创建|新增|编辑|删除|create|add|edit|delete/i.test(action)) ? ["boundary", "data-consistency"] : [])] : ["happy-path", "negative"]) as BehaviorCoverageDimension[],
+        businessPathKind: path.kind
       });
     }
     // Existing verified scenarios are retained as separate executable

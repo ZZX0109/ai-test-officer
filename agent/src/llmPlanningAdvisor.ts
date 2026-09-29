@@ -204,7 +204,10 @@ export async function createLlmPlanningAdvice(input: {
     policyId: `planning-${input.project.id}`,
     subject: "llm-planner",
     projectId: input.project.id,
-    allowedNamespaces: ["project_context", "failure_history", "repair_history"],
+    // The advisor is still a Planner surface. Give it the same server-owned
+    // run/evidence context as the executable planner so its prioritisation
+    // cannot be based on a stale client-only summary.
+    allowedNamespaces: ["project_context", "run_status", "evidence", "failure_history", "repair_history"],
     maxContextTokens: 8_000,
     redactSecrets: true,
     redactPII: true,

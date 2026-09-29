@@ -14,15 +14,31 @@ import {
   type ExperienceMemoryQuery,
   type MemoryStatistics
 } from "@ai-test-officer/contracts";
-import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { getDatabasePool } from "../databaseRuntime.js";
 
-/**
- * This identifier is intentionally a compatibility marker, not an embedding
- * provider name. Consumers must not present its results as semantic retrieval.
- */
-export const DETERMINISTIC_HASH_RETRIEVAL_PLACEHOLDER = "deterministic-hash-v0";
+export interface EmbeddingProvider {
+  model: string;
+  embed(text: string, signal?: AbortSignal): Promise<number[]>;
+}
+
+/** OpenAI-compatible embeddings endpoint; configured explicitly, never guessed. */
+export class HttpEmbeddingProvider implements EmbeddingProvider {
+  constructor(private readonly endpoint: string, private readonly apiKey: string, public readonly model: string) {}
+  async embed(text: string, signal?: AbortSignal) {
+    const response = await fetch(this.endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify({ model: this.model, input: text }),
+      signal: signal ?? AbortSignal.timeout(10_000)
+    });
+    if (!response.ok) throw new Error(`embedding_provider_http_${response.status}`);
+    const payload = await response.json() as { data?: Array<{ embedding?: number[] }> };
+    const vector = payload.data?.[0]?.embedding;
+    if (!Array.isArray(vector) || vector.length === 0 || vector.some((value) => typeof value !== "number")) throw new Error("embedding_provider_invalid_response");
+    return vector;
+  }
+}
 
 function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length || a.length === 0) return 0;
@@ -37,14 +53,17 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return normA && normB ? dot / Math.sqrt(normA * normB) : 0;
 }
 
-/**
- * Compatibility-only retrieval fingerprint. This is intentionally not called
- * an embedding: SHA-256 has no semantic geometry. A real provider can supply
- * `embeddingVector` and `embeddingModel` through the contract later.
- */
-function textToDeterministicFingerprint(text: string, dims = 64): number[] {
-  const hash = createHash("sha256").update(text).digest();
-  return Array.from({ length: dims }, (_, index) => (hash[index % hash.length] - 128) / 128);
+function keywordTokens(text: string) {
+  return new Set((text.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((token) => token.length > 1));
+}
+
+function keywordSimilarity(query: string, candidate: string) {
+  const left = keywordTokens(query);
+  const right = keywordTokens(candidate);
+  if (!left.size || !right.size) return 0;
+  let overlap = 0;
+  for (const token of left) if (right.has(token)) overlap += 1;
+  return overlap / Math.max(left.size, right.size);
 }
 
 interface MemoryStore {
@@ -59,10 +78,18 @@ function createStore(): MemoryStore {
 export class MemoryService {
   private readonly store: MemoryStore;
   private readonly pool?: Pool;
+  private readonly embeddingProvider?: EmbeddingProvider;
+  private embeddingProviderDegraded = false;
 
-  constructor(store?: MemoryStore, connectionString = process.env.DATABASE_URL) {
+  constructor(store?: MemoryStore, connectionString = process.env.DATABASE_URL, embeddingProvider?: EmbeddingProvider) {
     this.store = store ?? createStore();
     this.pool = !store ? getDatabasePool(connectionString) : undefined;
+    this.embeddingProvider = embeddingProvider ?? (() => {
+      const endpoint = process.env.MEMORY_EMBEDDING_URL;
+      const apiKey = process.env.MEMORY_EMBEDDING_API_KEY;
+      const model = process.env.MEMORY_EMBEDDING_MODEL;
+      return endpoint && apiKey && model ? new HttpEmbeddingProvider(endpoint, apiKey, model) : undefined;
+    })();
   }
 
   async upsertProjectEntry(entry: ProjectMemoryEntry): Promise<void> {
@@ -108,11 +135,25 @@ export class MemoryService {
       entry.rootCauseDescription,
       entry.repairDescription
     ].join(" ");
+    let embeddingVector = entry.embeddingVector;
+    let embeddingModel = entry.embeddingModel;
+    if (!embeddingVector?.length && this.embeddingProvider) {
+      try {
+        embeddingVector = await this.embeddingProvider.embed(embeddingText);
+        embeddingModel = this.embeddingProvider.model;
+        this.embeddingProviderDegraded = false;
+      } catch {
+        // Retrieval remains keyword-only and explicitly reports that fact.
+        embeddingVector = undefined;
+        embeddingModel = undefined;
+        this.embeddingProviderDegraded = true;
+      }
+    }
     const normalized = experienceMemoryEntrySchema.parse({
       ...entry,
       embeddingText,
-      embeddingVector: entry.embeddingVector?.length ? entry.embeddingVector : textToDeterministicFingerprint(embeddingText),
-      embeddingModel: entry.embeddingModel ?? DETERMINISTIC_HASH_RETRIEVAL_PLACEHOLDER
+      embeddingVector,
+      embeddingModel
     });
     if (this.pool) {
       await this.pool.query(
@@ -152,12 +193,27 @@ export class MemoryService {
     if (query.validationResult?.length) entries = entries.filter((entry) => query.validationResult!.includes(entry.validationResult));
     if (query.tags?.length) entries = entries.filter((entry) => query.tags!.some((tag) => entry.tags.includes(tag)));
     if (query.severity?.length) entries = entries.filter((entry) => query.severity!.includes(entry.severity));
+    if (query.businessDomain) entries = entries.filter((entry) => entry.businessDomain === query.businessDomain);
+    if (query.projectVersion) entries = entries.filter((entry) => entry.projectVersion === query.projectVersion);
     if (!query.includeUnvalidated) entries = entries.filter((entry) => entry.validationResult !== "pending");
 
     if (query.semanticQuery) {
-      const vector = textToDeterministicFingerprint(query.semanticQuery);
+      let queryVector: number[] | undefined;
+      if (this.embeddingProvider) {
+        try {
+          queryVector = await this.embeddingProvider.embed(query.semanticQuery);
+          this.embeddingProviderDegraded = false;
+        } catch {
+          queryVector = undefined;
+          this.embeddingProviderDegraded = true;
+        }
+      }
       entries = entries
-        .map((entry) => ({ entry, score: cosineSimilarity(vector, entry.embeddingVector ?? []) }))
+        .map((entry) => {
+          const lexical = keywordSimilarity(query.semanticQuery!, `${entry.failureType} ${entry.rootCauseCategory} ${entry.rootCauseDescription} ${entry.repairDescription} ${entry.tags.join(" ")}`);
+          const semantic = queryVector && entry.embeddingVector ? cosineSimilarity(queryVector, entry.embeddingVector) : 0;
+          return { entry, score: queryVector && entry.embeddingVector ? semantic * 0.7 + lexical * 0.3 : lexical, lexical, semantic };
+        })
         .filter((item) => item.score >= query.semanticThreshold)
         .sort((a, b) => b.score - a.score)
         .slice(0, query.semanticLimit)
@@ -178,17 +234,19 @@ export class MemoryService {
     });
   }
 
-  /**
-   * Exposed to every tool caller so the placeholder cannot silently acquire a
-   * semantic-RAG claim. Real providers must replace this descriptor and pass
-   * the fixed retrieval evaluation before being labelled semantic.
-   */
+  /** Explicitly exposes whether a real provider is active; keyword fallback is never
+   * presented as semantic RAG. */
   retrievalDescriptor() {
     return {
-      mode: DETERMINISTIC_HASH_RETRIEVAL_PLACEHOLDER,
-      label: "Deterministic Hash Retrieval Placeholder",
-      semantic: false,
-      evaluationRequired: ["Recall@5", "Recall@10", "MRR", "false-recall-rate", "source-traceability"]
+      mode: this.embeddingProvider && !this.embeddingProviderDegraded ? "hybrid-embedding-v1" as const : "keyword-v1" as const,
+      label: this.embeddingProvider && !this.embeddingProviderDegraded
+        ? "Embedding + Keyword Hybrid Retrieval"
+        : this.embeddingProvider
+          ? "Keyword Retrieval (embedding provider unavailable)"
+          : "Keyword Retrieval (embedding provider not configured)",
+      semantic: Boolean(this.embeddingProvider && !this.embeddingProviderDegraded),
+      evaluationRequired: ["Recall@5", "Recall@10", "MRR", "false-recall-rate", "source-traceability"],
+      ...(this.embeddingProvider && !this.embeddingProviderDegraded ? { providerModel: this.embeddingProvider.model } : {})
     } as const;
   }
 
@@ -232,7 +290,7 @@ export class MemoryService {
       overallSuccessRate: total ? success / total : 0,
       strategySuccessRates,
       mostEffectiveStrategies,
-      retrievalMode: DETERMINISTIC_HASH_RETRIEVAL_PLACEHOLDER,
+      retrievalMode: this.embeddingProvider && !this.embeddingProviderDegraded ? "hybrid-embedding-v1" : "keyword-v1",
       generatedAt: new Date().toISOString()
     };
   }

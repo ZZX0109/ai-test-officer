@@ -26,6 +26,8 @@ import { mirrorArtifactsToConfiguredStore } from "../artifactObjectStore.js";
 import { buildProofGraph, writeProofArtifacts } from "../proofGraph.js";
 import { finalizeProofBundle, proofCredibility, type MachineGateDraft } from "../proof/proofBundleService.js";
 import { finalizeMachineGate } from "./machineGateFinalization.js";
+import { calculateTestQualityMetrics } from "../qualityMetrics.js";
+import { evaluateBusinessFunctionPass } from "../businessFunctionCompiler.js";
 import { linkCommittedAttemptArtifacts } from "../proof/evidenceArtifactLinker.js";
 
 type Scenario = ReturnType<typeof getScenario>;
@@ -171,6 +173,48 @@ export async function finalizeVisualRun(input: RunFinalizationInput): Promise<Vi
     { differential: false }
   );
   const riskCoverageMatrix = buildRiskCoverageMatrix({ assertions }, latestEvidence, scenario);
+  // Apply the same business-capability contract used by dynamic browser
+  // execution to deterministic/static runs. A green assertion alone cannot
+  // pass a capability that had no executable entry, key action, expected
+  // result or linked evidence.
+  const businessGateReasons = riskCoverageMatrix.flatMap((item) => {
+    const itemOracles = oracles.filter((oracle) => item.pathIds.includes(oracle.pathId));
+    const pathResults = itemOracles.length > 0 ? [{
+      status: item.covered ? "completed" : "blocked",
+      oracleResults: itemOracles.map((oracle) => ({
+        passed: assertions.find((assertion) => assertion.name === oracle.assertionName)?.passed === true,
+        evidenceRefs: oracle.evidenceRefs
+      })),
+      evidenceRefs: item.evidenceRefs
+    }] : [];
+    const gate = evaluateBusinessFunctionPass({
+      capability: {
+        id: item.riskId,
+        name: item.riskTitle,
+        risk: "high",
+        pathIds: [item.riskId],
+        passCriteria: ["executable-entry", "key-action", "expected-result", "executed-oracle", "valid-evidence", "no-unresolved-high-risk"]
+      },
+      paths: [{
+        id: item.riskId,
+        status: item.covered ? "auto-bindable" : "coverage-gap",
+        actionCandidates: item.pathIds,
+        oracleCandidates: itemOracles.map((oracle) => oracle.id),
+        requiredEvidenceKinds: requiredKinds,
+        risk: "high"
+      }],
+      coverage: {
+        disposition: item.covered ? "executed" : "blocked",
+        actionPathIds: item.pathIds,
+        oracleIds: itemOracles.map((oracle) => oracle.id),
+        requiredEvidenceKinds: requiredKinds,
+        dispositionReason: item.notes
+      },
+      results: pathResults,
+      evidenceKinds: new Set(artifactsV2.map((artifact) => artifact.kind))
+    });
+    return gate.passed ? [] : gate.reasons.map((reason) => `${reason}:${item.riskId}`);
+  });
   const conflictPacket = buildConflictPacket({ assertions, steps }, latestEvidence);
   const runScenarioFingerprint = scenarioFingerprint({
     id: scenario.id,
@@ -231,6 +275,7 @@ export async function finalizeVisualRun(input: RunFinalizationInput): Promise<Vi
       result: judgeResult,
       evidence: latestEvidence,
       runId: id,
+      projectId: runInput.projectId,
       experimentId: runInput.experimentId,
       requireLlm: true,
       llmBudget: runInput.llmBudget,
@@ -261,7 +306,8 @@ export async function finalizeVisualRun(input: RunFinalizationInput): Promise<Vi
     network,
     judgeReport: assistedJudgeReport,
     oracleStatus: oracleEvaluation.status,
-    oracleReasons: oracleEvaluation.decisions.flatMap((decision) => decision.reasons)
+    oracleReasons: oracleEvaluation.decisions.flatMap((decision) => decision.reasons),
+    businessGateReasons
   });
   const failureAttributions = buildFailureAttributions({
     assertions,
@@ -362,6 +408,15 @@ export async function finalizeVisualRun(input: RunFinalizationInput): Promise<Vi
   result.conclusions = proofGraph.conclusions;
   result.proofNodes = proofGraph.proofNodes;
   result.proofEdges = proofGraph.proofEdges;
+  result.qualityMetrics = calculateTestQualityMetrics({
+    metricId: `${id}:quality`,
+    start: startedAt,
+    end: finishedAt,
+    projectId: runInput.projectId,
+    functions: [],
+    coverage: proofGraph.coverageItems,
+    results: assertions.map((assertion) => ({ status: assertion.passed ? "completed" : "failed", oracleResults: [{ passed: assertion.passed }], evidenceRefs: assertion.fact?.evidenceRefs }))
+  });
   if (proofGraph.errors.length > 0 && result.finalStatus === "pass") {
     const degradedDraft: MachineGateDraft = {
       status: "needs-human-review",

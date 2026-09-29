@@ -311,7 +311,14 @@ export async function testProjectConnection(
         };
       }))
   ]);
-  const reason = projectHealthReason({ pathOk, credentialOk: credential.ok && apiCredential.ok, frontend, backend, health, processHealth });
+  // A deny-mode OCI sandbox deliberately has no host route.  The host fetches
+  // above remain useful diagnostic detail, but cannot decide the health of an
+  // otherwise running isolated target.  Verify its declared health endpoint
+  // from inside the managed container before reporting the connection failed.
+  const isolatedProbe = await probeIsolatedSandboxHealth(runtimeProject, Math.min(timeoutMs, 5_000));
+  const reason = isolatedProbe?.ok
+    ? "none"
+    : projectHealthReason({ pathOk, credentialOk: credential.ok && apiCredential.ok, frontend, backend, health, processHealth });
   const ok = reason === "none";
   return {
     projectId: project.id,
@@ -322,11 +329,17 @@ export async function testProjectConnection(
     apiCredential,
     frontend,
     backend,
-    health,
+    health: isolatedProbe?.ok
+      ? { ok: true, status: isolatedProbe.status, url: isolatedProbe.url }
+      : health,
     processHealth,
     checkedAt: now(),
     durationMs: Date.now() - startedAt,
-    message: ok ? "Project connection is healthy." : `Project connection failed: ${reason}.`
+    message: ok
+      ? isolatedProbe?.ok
+        ? "Project connection is healthy (in-container probe on the isolated network)."
+        : "Project connection is healthy."
+      : `Project connection failed: ${reason}.`
   };
 }
 

@@ -64,8 +64,9 @@ npm run memory:eval:dataset
 npm run capacity:control-plane
 ```
 
-The current code explicitly labels the default memory retrieval as
-`deterministic-hash-v0`; it is not semantic embedding retrieval. Structured
+The current code explicitly labels memory retrieval as `hybrid-embedding-v1`
+when an embedding provider is configured, and `keyword-v1` otherwise; it never
+uses a deterministic hash as a semantic substitute. Structured
 manifest paths and executable dynamic page paths have per-path child runs and
 outbox-backed parent dispatch. Runtime binding for dynamic controls still
 finishes during the child Observation phase; unbound non-page candidates remain

@@ -11,6 +11,10 @@ const crossProjectCases = cases.filter((item) => item?.projectType === "external
 
 if (dataset.schemaVersion !== "1.0") throw new Error("memory_dataset_schema_invalid");
 if (dataset.status !== "labels-ready-provider-run-required") throw new Error("memory_dataset_must_not_claim_provider_completion");
+const thresholdKeys = ["recallAt5Min", "recallAt10Min", "meanReciprocalRankMin", "falseRecallRateAt10Max", "sourceTraceabilityRateMin"];
+if (!dataset.thresholds || thresholdKeys.some((key) => typeof dataset.thresholds[key] !== "number" || dataset.thresholds[key] < 0 || dataset.thresholds[key] > 1)) {
+  throw new Error("memory_dataset_thresholds_invalid");
+}
 if (dataset.queryCount !== 50 || cases.length !== 50 || ids.size !== 50) throw new Error("memory_dataset_requires_50_unique_queries");
 if (paraphraseGroups.size !== 10 || crossProjectCases.length !== 20) throw new Error("memory_dataset_missing_paraphrase_or_cross_project_coverage");
 if (!cases.every((item) => Array.isArray(item?.relevantEntryIds) && item.relevantEntryIds.length > 0
@@ -25,5 +29,6 @@ console.log(JSON.stringify({
   paraphraseGroups: paraphraseGroups.size,
   crossProjectCases: crossProjectCases.length,
   status: dataset.status,
-  providerRun: "required"
+  providerRun: "required",
+  thresholds: dataset.thresholds
 }, null, 2));

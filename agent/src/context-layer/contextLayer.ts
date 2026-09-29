@@ -18,7 +18,7 @@ import type {
   RunStatusContext
 } from "@ai-test-officer/contracts";
 import { contextLayerOutputSchema } from "@ai-test-officer/contracts";
-import { redactAll, estimateTokenCount, truncateByTokenBudget } from "./redaction.js";
+import { redactAll, estimateTokenCount } from "./redaction.js";
 
 // ─── 上下文摘要策略 ──────────────────────────────────────────────
 
@@ -29,6 +29,54 @@ const CONTEXT_STRATEGY = {
   maxFailureSummaryLength: 400,
   maxRepairSummaryLength: 400,
 } as const;
+
+function compactContextResults(results: Record<string, unknown>, maxTokens: number) {
+  // Preserve contract shape while dropping the least valuable list entries in
+  // a deterministic order. The old implementation called truncateByTokenBudget
+  // but discarded its return value, so an over-budget prompt still contained
+  // the complete evidence/history payload.
+  const compact = JSON.parse(JSON.stringify(results)) as Record<string, unknown>;
+  const collections: Array<[string, string]> = [
+    ["repair_history", "repairs"], ["failure_history", "failures"],
+    ["run_status", "completedNodes"], ["run_status", "recentErrors"],
+    ["evidence", "assertions"], ["evidence", "artifacts"],
+    ["project_context", "testPaths"], ["project_context", "routing.apiEndpoints"],
+    ["project_context", "routing.frontendRoutes"]
+  ];
+  const read = (root: unknown, path: string): unknown => path.split(".").reduce((value: unknown, key) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    return (value as Record<string, unknown>)[key];
+  }, root);
+  const write = (root: unknown, path: string, value: unknown) => {
+    const parts = path.split(".");
+    const leaf = parts.pop()!;
+    const parent = parts.reduce((node: unknown, key) => {
+      if (!node || typeof node !== "object" || Array.isArray(node)) return undefined;
+      return (node as Record<string, unknown>)[key];
+    }, root);
+    if (parent && typeof parent === "object" && !Array.isArray(parent)) (parent as Record<string, unknown>)[leaf] = value;
+  };
+  let index = 0;
+  while (estimateTokenCount(JSON.stringify(compact)) > maxTokens && index < collections.length * 4) {
+    const [namespace, field] = collections[index % collections.length]!;
+    const value = read(compact[namespace], field);
+    if (Array.isArray(value) && value.length > 0) write(compact[namespace], field, value.slice(0, Math.max(0, Math.ceil(value.length / 2))));
+    index += 1;
+  }
+  if (estimateTokenCount(JSON.stringify(compact)) > maxTokens) {
+    for (const [namespace, field] of collections) {
+      if (Array.isArray(read(compact[namespace], field))) write(compact[namespace], field, []);
+    }
+    for (const namespace of Object.keys(compact)) {
+      const namespaceValue = compact[namespace];
+      if (namespaceValue && typeof namespaceValue === "object" && !Array.isArray(namespaceValue)) {
+        const summary = (namespaceValue as Record<string, unknown>).summary;
+        if (typeof summary === "string") (namespaceValue as Record<string, unknown>).summary = summary.slice(0, 160);
+      }
+    }
+  }
+  return compact;
+}
 
 function summarizeProject(ctx: ProjectContext): string {
   const parts: string[] = [];
@@ -183,26 +231,23 @@ export class ContextLayer {
 
     // 合并所有结果文本估算 token
     const allText = JSON.stringify(results);
-    const tokenEstimate = estimateTokenCount(allText);
+    let tokenEstimate = estimateTokenCount(allText);
 
     // 如果超出预算，截断
     if (tokenEstimate > policy.maxContextTokens) {
-      // 按优先级保留：project_context > evidence > failure > repair
-      // 超出预算则截断低优先级字段
-      if (estimateTokenCount(JSON.stringify(results)) > policy.maxContextTokens) {
-        // 简化策略：截断文本化结果
-        // Keep the contract-shaped result intact. Consumers use tokenEstimate to
-        // decide whether to ask for a narrower namespace set; never emit malformed
-        // partial objects that cannot be validated by the contracts package.
-        void truncateByTokenBudget(allText, policy.maxContextTokens);
-      }
+      const compacted = compactContextResults(resultRecord, policy.maxContextTokens);
+      for (const [key, value] of Object.entries(compacted)) resultRecord[key] = value;
+      tokenEstimate = estimateTokenCount(JSON.stringify(resultRecord));
     }
 
     return contextLayerOutputSchema.parse({
       schemaVersion: "1.0",
       policy,
       requestedNamespaces: [...requestedNamespaces],
-      results,
+      // Return the same compacted/redacted object that was budgeted above;
+      // returning the pre-compaction `results` object would silently re-expand
+      // the prompt after token accounting.
+      results: resultRecord,
       redactions: allRedactions,
       tokenEstimate,
       generatedAt: now

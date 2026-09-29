@@ -34,6 +34,11 @@ async function resolveRootRunId(run: Awaited<ReturnType<typeof runEventStore.get
   return current.id;
 }
 
+// This handler intentionally owns scope/cursor/compact pagination in one
+// place so the trajectory endpoint has one consistent authorization boundary.
+// Keep the complexity exception local; the pure parsing/visibility helpers
+// above remain independently lintable and testable.
+// eslint-disable-next-line complexity
 async function readTrajectoryPage(
   run: NonNullable<Awaited<ReturnType<typeof runEventStore.get>>>,
   request: Parameters<typeof authContext>[0]

@@ -3,6 +3,7 @@ import type { BusinessSourceLocation } from "./businessCapabilityGraph.js";
 import type { BusinessPath, BusinessPathStatus } from "./businessPathCompiler.js";
 
 export type BusinessFunctionStatus = "ready" | "needs-confirmation" | "blocked" | "unknown";
+export type BehaviorCoverageDimension = "happy-path" | "negative" | "boundary" | "permission" | "state-transition" | "data-consistency" | "idempotency" | "recovery";
 
 export interface BusinessFunction {
   id: string;
@@ -19,6 +20,14 @@ export interface BusinessFunction {
   technicalPathCount: number;
   branchCount: number;
   summary: string;
+  /** Only paths that represent a user-facing capability are counted here. */
+  kind?: "business-capability";
+  /** API/data/handler paths supporting this capability, never standalone UI rows. */
+  implementationEvidencePathIds?: string[];
+  /** Explicit gate contract shown to downstream proof evaluation. */
+  passCriteria?: ["executable-entry", "key-action", "expected-result", "executed-oracle", "valid-evidence", "no-unresolved-high-risk"];
+  /** Required test-design dimensions; path coverage alone is insufficient. */
+  behaviorCoverage?: BehaviorCoverageDimension[];
 }
 
 export interface ProjectOverview {
@@ -36,6 +45,8 @@ export interface ProjectOverview {
 export interface BusinessFunctionCompilation {
   functions: BusinessFunction[];
   overview: ProjectOverview;
+  /** Technical inventory remains available to the Agent but is not a business function. */
+  technicalPaths?: BusinessPath[];
 }
 
 function stableId(value: string) {
@@ -89,6 +100,11 @@ function semanticName(path: BusinessPath) {
 }
 
 function isTechnicalPath(path: BusinessPath) {
+  if (path.kind === "business-capability") return false;
+  if (path.kind === "api" || path.kind === "technical-resource" || path.kind === "runtime-observation"
+    || (path.surfaces.includes("api") && !path.surfaces.includes("page"))) {
+    return path.implementationEvidence !== false;
+  }
   const text = `${path.title} ${path.summary}`;
   // Routed shell pages are implementation scaffolding, not user capabilities.
   // Keep them in the internal inventory so the Agent can use them as context,
@@ -128,6 +144,18 @@ function purposeFor(name: string, paths: BusinessPath[]) {
   return `${name}，涉及${surfaceText.join("、") || "待确认实现"}。`;
 }
 
+function behaviorDimensionsFor(paths: BusinessPath[]): BehaviorCoverageDimension[] {
+  const text = paths.map((path) => `${path.title} ${path.summary} ${path.actionCandidates.join(" ")}`).join(" ").toLowerCase();
+  const dimensions = new Set<BehaviorCoverageDimension>(["happy-path", "negative"]);
+  if (paths.some((path) => path.risk === "high") || /(登录|权限|认证|approve|auth|permission|role)/i.test(text)) dimensions.add("permission");
+  if (/(创建|新增|编辑|删除|更新|create|add|edit|delete|update|数量|金额|边界|limit|count)/i.test(text)) dimensions.add("boundary");
+  if (/(状态|进行中|完成|失败|审批|队列|任务|state|status|workflow|job)/i.test(text)) dimensions.add("state-transition");
+  if (/(数据|保存|列表|详情|同步|一致|database|record|data)/i.test(text)) dimensions.add("data-consistency");
+  if (/(重复|幂等|重试|retry|duplicate|idempot)/i.test(text)) dimensions.add("idempotency");
+  if (/(恢复|回滚|异常|失败|recovery|rollback|error)/i.test(text)) dimensions.add("recovery");
+  return [...dimensions];
+}
+
 /**
  * Converts technical execution paths into a small, user-facing function list.
  * This compiler is deterministic: LLMs may improve wording later, but never
@@ -139,25 +167,37 @@ export function compileBusinessFunctions(input: {
   snapshotHash?: string;
   projectName?: string;
   projectDescription?: string;
+  capabilityHints?: Array<{ id: string; name: string; purpose?: string; pathIds?: string[]; routePrefixes?: string[]; risk?: "low" | "medium" | "high" }>;
 }): BusinessFunctionCompilation {
   const groups = new Map<string, BusinessPath[]>();
+  const hints = input.capabilityHints ?? [];
+  const hintFor = (path: BusinessPath) => hints.find((hint) =>
+    hint.pathIds?.includes(path.id)
+    || (hint.routePrefixes?.length && hint.routePrefixes.some((prefix) => `${path.title} ${path.summary}`.includes(prefix)))
+  );
   let technicalPathCount = 0;
+  const technicalPaths: BusinessPath[] = [];
   for (const path of input.paths) {
-    if (isTechnicalPath(path)) {
+    const hint = hintFor(path);
+    // A manifest mapping is an explicit business declaration; it may promote
+    // an otherwise technical API path while preserving the API as evidence.
+    const classifiedPath = hint ? { ...path, kind: "business-capability" as const, implementationEvidence: false } : path;
+    if (isTechnicalPath(classifiedPath)) {
       technicalPathCount += 1;
+      technicalPaths.push(classifiedPath);
       continue;
     }
-    const name = semanticName(path);
-    groups.set(name, [...(groups.get(name) ?? []), path]);
+    const name = hint?.name ?? semanticName(path);
+    groups.set(name, [...(groups.get(name) ?? []), classifiedPath]);
   }
-  // API-only projects still need user-visible functions. If every path was
-  // technical, expose the least ambiguous API groups rather than an empty UI.
-  if (!groups.size && input.paths.length) {
-    for (const path of input.paths.filter((candidate) => candidate.surfaces.includes("api"))) {
-      const name = semanticName(path);
-      groups.set(name, [...(groups.get(name) ?? []), path]);
-    }
-    technicalPathCount = Math.max(0, technicalPathCount - groups.size);
+  // An API can be implementation evidence for an already identified page
+  // capability (for example Login page + POST /api/login). Attach it to that
+  // capability, but keep it in the technical inventory and never create a
+  // new user-facing row from the endpoint alone.
+  for (const path of technicalPaths) {
+    if (!path.surfaces.includes("api")) continue;
+    const name = semanticName(path);
+    if (groups.has(name)) groups.set(name, [...groups.get(name)!, path]);
   }
   const functions = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right, "zh-CN")).map(([name, paths]) => {
     const sourceLocations = [...new Map(paths.flatMap((path) => path.sourceLocations).map((location) => [`${location.file}:${location.line ?? 0}:${location.sourceHash}`, location])).values()];
@@ -165,12 +205,15 @@ export function compileBusinessFunctions(input: {
     const status = statusFor(paths);
     const confidence = confidenceFor(paths);
     const pathIds = paths.map((path) => path.id);
+    const implementationEvidencePathIds = paths
+      .filter((path) => path.surfaces.includes("api") || path.implementationEvidence)
+      .map((path) => path.id);
     return {
       id: stableId(`${input.snapshotHash ?? "unknown"}:${name}:${pathIds.sort().join(",")}`),
       name,
-      purpose: purposeFor(name, paths),
+      purpose: hints.find((hint) => hint.name === name)?.purpose ?? purposeFor(name, paths),
       roles,
-      risk: paths.some((path) => path.risk === "high") ? "high" : paths.some((path) => path.risk === "medium") ? "medium" : "low",
+      risk: hints.find((hint) => hint.name === name)?.risk ?? (paths.some((path) => path.risk === "high") ? "high" : paths.some((path) => path.risk === "medium") ? "medium" : "low"),
       status,
       confidence,
       pathIds,
@@ -180,7 +223,11 @@ export function compileBusinessFunctions(input: {
       // counted once at compilation level and remain available in inventory.
       technicalPathCount: 0,
       branchCount: paths.length,
-      summary: `${paths.length} 条内部测试路径，${paths.flatMap((path) => path.actionCandidates).slice(0, 3).join("；") || "等待运行时绑定"}`
+      summary: `${paths.length} 条内部测试路径，${paths.flatMap((path) => path.actionCandidates).slice(0, 3).join("；") || "等待运行时绑定"}`,
+      kind: "business-capability" as const,
+      implementationEvidencePathIds,
+      passCriteria: ["executable-entry", "key-action", "expected-result", "executed-oracle", "valid-evidence", "no-unresolved-high-risk"] as const,
+      behaviorCoverage: behaviorDimensionsFor(paths)
     } satisfies BusinessFunction;
   });
   const description = input.projectDescription?.trim();
@@ -206,8 +253,44 @@ export function compileBusinessFunctions(input: {
       unknownCount,
       statusCounts,
       snapshotHash: input.snapshotHash
-    }
+    },
+    technicalPaths
   };
+}
+
+/**
+ * Business-level pass contract. A green run is not enough: every capability
+ * must have an executable entry, a real action, an explicit oracle and linked
+ * evidence, and high-risk paths may not remain unresolved.
+ */
+export function evaluateBusinessFunctionPass(input: {
+  capability: Pick<BusinessFunction, "id" | "name" | "risk" | "pathIds" | "passCriteria">;
+  paths: Array<Pick<BusinessPath, "id" | "status" | "actionCandidates" | "oracleCandidates" | "requiredEvidenceKinds" | "risk">>;
+  coverage: { disposition: string; actionPathIds?: string[]; oracleIds?: string[]; requiredEvidenceKinds?: string[]; dispositionReason?: string };
+  results: Array<{ status: string; oracleResults?: Array<{ passed: boolean; evidenceRefs?: string[] }>; evidenceRefs?: string[] }>;
+  evidenceKinds: Set<string>;
+}) {
+  const reasons: string[] = [];
+  const paths = input.paths.filter((path) => input.capability.pathIds.includes(path.id));
+  const executable = paths.some((path) => path.status === "auto-bindable");
+  const action = paths.some((path) => path.actionCandidates.length > 0)
+    && (input.coverage.actionPathIds?.length ?? 0) > 0;
+  const expected = paths.some((path) => path.oracleCandidates.length > 0)
+    && (input.coverage.oracleIds?.length ?? 0) > 0;
+  const completed = input.results.filter((result) => result.status === "completed");
+  const oraclePassed = completed.length > 0
+    && completed.every((result) => (result.oracleResults ?? []).length > 0 && (result.oracleResults ?? []).every((oracle) => oracle.passed));
+  const validEvidence = (input.coverage.requiredEvidenceKinds ?? []).every((kind) => input.evidenceKinds.has(kind))
+    && (completed.some((result) => (result.evidenceRefs ?? []).length > 0 || (result.oracleResults ?? []).some((oracle) => (oracle.evidenceRefs ?? []).length > 0)));
+  const unresolvedHighRisk = input.capability.risk === "high"
+    && (input.coverage.disposition === "blocked" || input.coverage.disposition === "pending" || input.coverage.disposition === "binding" || input.coverage.disposition === "executing");
+  if (!executable) reasons.push("business_executable_entry_missing");
+  if (!action) reasons.push("business_key_action_missing");
+  if (!expected) reasons.push("business_expected_result_missing");
+  if (!oraclePassed) reasons.push("business_oracle_not_executed_or_failed");
+  if (!validEvidence) reasons.push("business_valid_evidence_missing");
+  if (unresolvedHighRisk) reasons.push("business_high_risk_unresolved");
+  return { passed: reasons.length === 0, reasons };
 }
 
 function sourceLocationsFor(functions: BusinessFunction[]) {

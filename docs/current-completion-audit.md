@@ -1,6 +1,8 @@
 # 当前目标书逐项审计
 
-更新时间：2026-08-25。本文把“代码已经存在”“本地测试通过”和“目标书要求的外部证据”分开记录。没有报告或外部输入的项目不标记为完成。
+更新时间：2026-08-31。本文把“代码已经存在”“本地测试通过”和“目标书要求的外部证据”分开记录。没有报告或外部输入的项目不标记为完成。
+
+2026-08-31 增补：业务能力编译已区分 capability/page/API/technical/runtime 五类；API-only 路径默认只进入技术实现清单，只有 `ProjectManifest.businessCapabilities` 的显式映射才可提升为业务能力。业务级 Gate 现在要求可执行入口、关键动作、预期结果、已执行 Oracle、有效证据和无未解决高风险路径，并同时应用于动态浏览器和普通结构化运行。ContextLayer 的服务端适配、预算裁剪、行为覆盖维度、Repair 交付物和业务质量指标已接入代码，真实 embedding provider 仍需在部署环境配置并运行 sealed 评测。
 
 ## 状态摘要
 
@@ -10,7 +12,7 @@
 | P0-2 God File 拆分 | 代码门禁完成，职责迁移仍可继续 | 四个基线和 50% 上限已写入 `scripts/god-file-baselines.json`，`size-guard` 会阻止回退；新增/未跟踪源码超过 800 行也会失败。当前 `App.tsx` 3,172、`server.ts` 1,544、`agentGraphService.ts` 1,264、`testRunner.ts` 1,181 行均在门限内，Run control 路由已迁移到独立模块。完整职责审查仍以模块责任表为准。 |
 | P0-3 Typed Subgraph | 代码级完成 | `docs/typed-subgraphs.md`、`packages/agent-orchestration/src/subgraphs.ts`、状态 Contract、直接子图测试和当前 `shadow:run` 100/100。Shadow 只证明编排拓扑，不证明外部项目泛化。 |
 | P0-4 数据所有权/一致性 | 代码级完成，隔离服务故障证据完成 | `docs/data-ownership.md`、Shared Database Runtime、Transactional Outbox、幂等 Consumer、Artifact 对账实现和生产摘要；Data Executor、Readiness 检查已统一借用共享 Pool；生产 Compose 验收已覆盖 PostgreSQL/Redis/MinIO 重启与恢复，仍不等同持续生产演练。 |
-| P0-5 Experience Memory | 明确降级完成 | 默认模式是 `deterministic-hash-v0`，对外标记 `semantic: false`，并提供 `Recall@5/10`、MRR 等评测接口；已补齐 `data/memory/retrieval-eval-v1.json` 的 50 条标签集和完整性门禁，但尚未接入真实 Embedding 或运行 Provider 评测。 |
+| P0-5 Experience Memory | 混合检索已接入，Provider 评测仍需配置 | 不再生成哈希伪向量；配置 `MEMORY_EMBEDDING_URL/API_KEY/MODEL` 时使用真实 embedding + 关键词混合排序，未配置时明确为 `keyword-v1`。50 条 sealed 标签集与 Recall/MRR 评测接口保留，仍需用真实 provider 跑一次质量基线。 |
 | P0-6 Runtime Binding/全面扫描 | 控制面与 Child 规格证据完成，真实执行规模仍待外部负载 | `runtimeBinding`、CoverageItem disposition、Parent/Child Run、独立预算和外部项目动态发现 smoke 已存在；`reports/capacity-control-plane/latest.json` 现在还验证每条 200 路径都有唯一 Child Run 规格、独立预算、Silent Drop Rate 0。该报告仍不是 200 个浏览器/Worker 实际执行的生产负载证据。 |
 | P0-7 故障注入 | 隔离 Production Compose 矩阵完成，长期/生产统计仍待补 | `scripts/production-acceptance.mjs` 覆盖多类 SIGKILL、Outbox、Lease、Artifact 和幂等写入；`scripts/fault-injection-audit.mjs` 将 14 个目标崩溃窗口映射到 `reports/fault-injection/latest.json`，输出场景覆盖率、恢复证明覆盖率、重复副作用证明覆盖率和孤儿对账证明覆盖率。该报告仍不等同持续生产 SLO 或外部项目故障注入。 |
 | P0-8 外部真实项目/盲测 | 原生预检完成，正式盲测未完成 | 五个锁定项目的 provenance、原生检查和 lane 记录都存在，但 `reports/external-acceptance/latest.json` 的 fail-closed 审计为 `passed=false`：全部非原生 lane 停在 `waiting-user / needs-human-review`，密封 evaluator 报告目录未配置，且部分证据自身声明没有挂载密封标签或比较 lane。审计现在要求每个 lane 的终态记录以及仓库外 evaluator 报告的哈希和 run 绑定，不能再由自报字段升级为通过。 |

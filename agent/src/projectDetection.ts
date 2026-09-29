@@ -681,6 +681,7 @@ function sandboxManifest(input: {
     // egress-only network. The worker fails closed if that binding is absent.
     network: { mode: "allow-target", allowedHosts: ["127.0.0.1", "localhost"], enforcement: "external-egress-proxy" },
     fixtures: [],
+    businessCapabilities: [],
     apiOperations: [],
     dataSources: [],
     backgroundTasks: [],
@@ -915,9 +916,16 @@ export async function detectProject(projectPathInput: string): Promise<ProjectDe
             : packageManagers.includes("npm")
               ? hasNpmLock ? "npm ci" : "npm install"
               : "");
+  // A standalone Express app is its own browser/API target.  It has no Vite
+  // development server on 5173, so use Express's conventional port for the
+  // process health check and the Workbench target URL.  Vite still takes
+  // precedence for full-stack Node projects that include both dependencies.
+  const defaultFrontendPort = detectedStack.includes("next") || (detectedStack.includes("express") && !detectedStack.includes("vite"))
+    ? 3000
+    : 5173;
   const frontendPort = ecosystemLaunch?.port
     ?? workspaceFrontend?.port
-    ?? configuredFrontendPort(scripts, frontendConfigText, detectedStack.includes("next") ? 3000 : 5173);
+    ?? configuredFrontendPort(scripts, frontendConfigText, defaultFrontendPort);
   const backendPort = orchestratedWorkspace
     ? workspaceBackend?.port
     : ecosystemLaunch?.processName === "api"

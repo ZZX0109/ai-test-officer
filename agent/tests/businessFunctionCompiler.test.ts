@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { compileBusinessFunctions } from "../src/businessFunctionCompiler.js";
+import { compileBusinessFunctions, evaluateBusinessFunctionPass } from "../src/businessFunctionCompiler.js";
 import type { BusinessPath } from "../src/businessPathCompiler.js";
 
 function makePath(input: Partial<BusinessPath> & Pick<BusinessPath, "id" | "title">): BusinessPath {
@@ -51,4 +51,30 @@ export function testBusinessFunctionCompiler() {
 
   const unknown = result.functions.find((item) => item.pathIds.includes("unknown"));
   assert.equal(unknown?.status, "unknown");
+
+  const apiOnly = compileBusinessFunctions({ paths: [makePath({ id: "orders-api", title: "GET /api/orders 接口业务流程", surfaces: ["api"] })] });
+  assert.equal(apiOnly.functions.length, 0, "an API implementation must not become a business capability by itself");
+  assert.equal(apiOnly.technicalPaths?.length, 1);
+  const explicitlyMapped = compileBusinessFunctions({
+    paths: [makePath({ id: "orders-api", title: "GET /api/orders 接口业务流程", surfaces: ["api"] })],
+    capabilityHints: [{ id: "orders", name: "订单查询", pathIds: ["orders-api"], risk: "medium" }]
+  });
+  assert.deepEqual(explicitlyMapped.functions[0]?.pathIds, ["orders-api"]);
+
+  const gate = evaluateBusinessFunctionPass({
+    capability: { id: "orders", name: "订单查询", risk: "medium", pathIds: ["orders"], passCriteria: ["executable-entry", "key-action", "expected-result", "executed-oracle", "valid-evidence", "no-unresolved-high-risk"] },
+    paths: [{ id: "orders", status: "auto-bindable", actionCandidates: ["click-search"], oracleCandidates: ["orders-visible"], requiredEvidenceKinds: ["screenshot"], risk: "medium" }],
+    coverage: { disposition: "executed", actionPathIds: ["click-search"], oracleIds: ["orders-visible"], requiredEvidenceKinds: ["screenshot"] },
+    results: [{ status: "completed", oracleResults: [{ passed: true, evidenceRefs: ["assertion-1"] }], evidenceRefs: ["operation-1"] }],
+    evidenceKinds: new Set(["screenshot"])
+  });
+  assert.equal(gate.passed, true);
+  const missingOracle = evaluateBusinessFunctionPass({
+    capability: { id: "orders", name: "订单查询", risk: "medium", pathIds: ["orders"], passCriteria: ["executable-entry", "key-action", "expected-result", "executed-oracle", "valid-evidence", "no-unresolved-high-risk"] },
+    paths: [{ id: "orders", status: "auto-bindable", actionCandidates: ["click-search"], oracleCandidates: ["orders-visible"], requiredEvidenceKinds: ["screenshot"], risk: "medium" }],
+    coverage: { disposition: "executed", actionPathIds: ["click-search"], oracleIds: [], requiredEvidenceKinds: ["screenshot"] },
+    results: [{ status: "completed", oracleResults: [], evidenceRefs: ["operation-1"] }],
+    evidenceKinds: new Set(["screenshot"])
+  });
+  assert.ok(missingOracle.reasons.includes("business_expected_result_missing"));
 }

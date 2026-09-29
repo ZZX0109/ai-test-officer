@@ -19,6 +19,39 @@ export interface MemoryRetrievalEvaluation {
   sourceTraceabilityRate: number;
 }
 
+/** Minimum quality bar for the sealed retrieval set. These thresholds are
+ * intentionally explicit so a provider swap cannot silently lower recall or
+ * source traceability. The dataset carries the same values for external
+ * evaluators. */
+export interface MemoryRetrievalThresholds {
+  recallAt5Min: number;
+  recallAt10Min: number;
+  meanReciprocalRankMin: number;
+  falseRecallRateAt10Max: number;
+  sourceTraceabilityRateMin: number;
+}
+
+export const defaultMemoryRetrievalThresholds: MemoryRetrievalThresholds = {
+  recallAt5Min: 0.8,
+  recallAt10Min: 0.9,
+  meanReciprocalRankMin: 0.75,
+  falseRecallRateAt10Max: 0.2,
+  sourceTraceabilityRateMin: 1
+};
+
+export function evaluateMemoryRetrievalThresholds(
+  metrics: MemoryRetrievalEvaluation,
+  thresholds: MemoryRetrievalThresholds = defaultMemoryRetrievalThresholds
+) {
+  const failures: string[] = [];
+  if (metrics.recallAt5 < thresholds.recallAt5Min) failures.push("recall_at_5_below_threshold");
+  if (metrics.recallAt10 < thresholds.recallAt10Min) failures.push("recall_at_10_below_threshold");
+  if (metrics.meanReciprocalRank < thresholds.meanReciprocalRankMin) failures.push("mrr_below_threshold");
+  if (metrics.falseRecallRateAt10 > thresholds.falseRecallRateAt10Max) failures.push("false_recall_at_10_above_threshold");
+  if (metrics.sourceTraceabilityRate < thresholds.sourceTraceabilityRateMin) failures.push("source_traceability_below_threshold");
+  return { passed: failures.length === 0, failures };
+}
+
 function recallAt(results: MemoryRetrievalResult[], relevant: Set<string>, limit: number) {
   if (relevant.size === 0) return 0;
   const hits = results.slice(0, limit).filter((result) => relevant.has(result.entryId)).length;
