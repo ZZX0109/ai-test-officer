@@ -34,6 +34,8 @@ export function finalizeMachineGate(input: {
   /** V2 Oracle governance is an additional fail-closed gate. */
   oracleStatus?: "pass" | "fail" | "blocked" | "needs-human-review";
   oracleReasons?: string[];
+  /** Business-capability gate failures are deterministic input, not Judge prose. */
+  businessGateReasons?: string[];
 }) {
   const qualityReasons = input.evidenceQuality.assertions
     .filter((item) => item.passed && item.status !== "grounded")
@@ -56,6 +58,8 @@ export function finalizeMachineGate(input: {
     const status = typeof candidate.status === "number" ? candidate.status : "network-error";
     return `environment_network_failure:${method}:${url}:${status}`;
   });
+  const businessGateReasons = input.businessGateReasons ?? [];
+  const businessGateBlocking = businessGateReasons.some((reason) => !reason.startsWith("business_oracle_not_executed_or_failed:"));
   const artifactGate = assessArtifactGate({ artifacts: input.artifacts, requiredKinds: input.requiredKinds });
   const machineGateStatus = artifactGate.status !== "pass"
     ? artifactGate.status
@@ -63,9 +67,11 @@ export function finalizeMachineGate(input: {
       ? "blocked" as const
       : environmentFailures.length > 0
         ? "blocked" as const
-        : input.oracleStatus === "blocked"
-          ? "blocked" as const
-          : input.executionError
+          : input.oracleStatus === "blocked"
+            ? "blocked" as const
+            : businessGateBlocking
+              ? "blocked" as const
+            : input.executionError
             ? "needs-human-review" as const
             : input.oracleStatus === "fail" || input.failed
               ? "fail" as const
@@ -73,6 +79,8 @@ export function finalizeMachineGate(input: {
                 ? "needs-human-review" as const
                 : qualityReasons.length || uncoveredRequirementRisks.length
                   ? "needs-human-review" as const
+                  : businessGateReasons.length
+                    ? "fail" as const
                   : input.attempts.length > 1
                     ? "needs-human-review" as const
                     : "pass" as const;
@@ -96,6 +104,7 @@ export function finalizeMachineGate(input: {
       ...environmentReasons,
       ...qualityReasons,
       ...uncoveredRequirementRisks,
+      ...businessGateReasons,
       ...(input.oracleReasons ?? []).map((reason) => `oracle:${reason}`)
     ],
     reasonDetails: [
@@ -104,6 +113,7 @@ export function finalizeMachineGate(input: {
       ...environmentReasons,
       ...qualityReasons,
       ...uncoveredRequirementRisks,
+      ...businessGateReasons,
       ...(input.oracleReasons ?? []).map((reason) => `oracle:${reason}`)
     ].map((reason) => ({
       code: reason.split(":")[0] || "machine_gate_reason",

@@ -340,6 +340,11 @@ export const coverageItemSchema = z.object({
   actionPathIds: z.array(z.string()).default([]),
   oracleIds: z.array(z.string()).default([]),
   requiredEvidenceKinds: z.array(artifactKindV2Schema).default([]),
+  /** Behaviour matrix is separate from path coverage. */
+  behaviorDimensions: z.array(z.enum(["happy-path", "negative", "boundary", "permission", "state-transition", "data-consistency", "idempotency", "recovery"])).default(["happy-path"]),
+  /** Dimensions actually exercised by the persisted run; never inferred from
+   * the requested matrix after the fact. */
+  coveredBehaviorDimensions: z.array(z.enum(["happy-path", "negative", "boundary", "permission", "state-transition", "data-consistency", "idempotency", "recovery"])).default([]),
   /** Runtime Binding Compiler output. `pending` means observation/manifest
    * binding is still required; it is never equivalent to a verified binding. */
   binding: z.object({

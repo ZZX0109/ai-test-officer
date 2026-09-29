@@ -153,9 +153,11 @@ export function createBrowserExecutionHooks(input: { node: WrapNode }) {
         decision = await decideNextBrowserActions({
           observation, coverageItemId: state.currentCoverageItemId,
           goal: [run.input.requirement, item?.module, item?.dispositionReason].filter(Boolean).join("\n"),
+          behaviorDimensions: item?.behaviorDimensions,
           credentialId: modelProfileId, allowedRouteIds: ["project-root"],
           previousResults: prior.map((result) => ({ action: result.actionId, status: result.status, summary: result.summary })),
-          budget: browserBudget.success ? browserBudget.data : undefined
+          budget: browserBudget.success ? browserBudget.data : undefined,
+          projectId: state.projectId
         });
       } catch (error) {
         const code = error instanceof Error ? error.message : "browser_llm_decision_failed";
@@ -363,8 +365,42 @@ export function createBrowserExecutionHooks(input: { node: WrapNode }) {
         dispositionReason = result.summary;
       }
       if (!terminalDisposition) return { browserLoopComplete: false };
+      // The dynamic inventory is created before the Browser Agent has a
+      // concrete action/Oracle proposal, so it starts with an empty
+      // `oracleIds` list. Persist the runtime binding once a decision has
+      // actually produced an action and the broker has evaluated its Oracle
+      // results. This keeps the business-level pass gate grounded in the
+      // real action/expected-result pair rather than a front-end summary.
+      const observedActionPathIds = decision?.actions.map((action) => action.actionId) ?? [];
+      const observedOracleIds = [
+        ...(decision?.actions.flatMap((action) => action.oracleIds) ?? []),
+        ...(result?.oracleResults.map((oracle) => oracle.oracleId) ?? [])
+      ];
       coverage[currentIndex] = {
         ...coverage[currentIndex], disposition: terminalDisposition, dispositionReason,
+        actionPathIds: Array.from(new Set([
+          ...(coverage[currentIndex].actionPathIds ?? []),
+          ...observedActionPathIds
+        ])),
+        oracleIds: Array.from(new Set([
+          ...(coverage[currentIndex].oracleIds ?? []),
+          ...observedOracleIds
+        ])),
+        binding: coverage[currentIndex].binding
+          ? {
+              ...coverage[currentIndex].binding,
+              status: terminalDisposition === "executed" || terminalDisposition === "failed" ? "bound" : coverage[currentIndex].binding.status,
+              actionPathIds: Array.from(new Set([
+                ...(coverage[currentIndex].binding.actionPathIds ?? []),
+                ...observedActionPathIds
+              ])),
+              oracleIds: Array.from(new Set([
+                ...(coverage[currentIndex].binding.oracleIds ?? []),
+                ...observedOracleIds
+              ])),
+              ...(observedActionPathIds.length || observedOracleIds.length ? { boundAt: new Date().toISOString() } : {})
+            }
+          : undefined,
         scenarioId: dynamicBrowserScenarioId(state.runId), attemptId: state.currentAttemptId, updatedAt: new Date().toISOString()
       };
       await saveCoverageItems(state.runId, coverage);

@@ -219,6 +219,17 @@ export const repairValidationSchema = z.object({
 });
 export type RepairValidation = z.infer<typeof repairValidationSchema>;
 
+export const repairDeliverableSchema = z.object({
+  patchSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  impactSummary: z.string().max(2_000).default(""),
+  targetedValidation: z.enum(["not-run", "passed", "failed", "blocked"]).default("not-run"),
+  regressionValidation: z.enum(["not-run", "passed", "failed", "blocked"]).default("not-run"),
+  validationArtifactIds: z.array(z.string().min(1)).default([]),
+  mergeEligibility: z.enum(["not-eligible", "eligible", "applied"]).default("not-eligible"),
+  generatedAt: z.string().datetime().optional()
+});
+export type RepairDeliverable = z.infer<typeof repairDeliverableSchema>;
+
 export const repairSessionSchema = z.object({
   schemaVersion: z.literal("1.0"),
   id: z.string().min(1),
@@ -231,6 +242,8 @@ export const repairSessionSchema = z.object({
   failureClass: z.enum(["product-bug", "test-script", "environment", "evidence", "unknown"]).default("unknown"),
   files: z.array(repairFileChangeSchema).max(20).default([]),
   validation: repairValidationSchema.optional(),
+  /** Auditable hand-off package: patch, impact, validations and merge gate. */
+  deliverable: repairDeliverableSchema.optional(),
   iteration: z.number().int().min(0).max(2).default(0),
   maxFiles: z.number().int().positive().max(20).default(20),
   maxChangedLines: z.number().int().positive().max(2000).default(2000),

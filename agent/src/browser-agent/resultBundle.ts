@@ -2,7 +2,8 @@ import type {
   ArtifactV2,
   CoverageItem,
   MachineGate,
-  RunOutcomeSummaryV2
+  RunOutcomeSummaryV2,
+  TestQualityMetrics
 } from "@ai-test-officer/contracts";
 import { writeRunBundle } from "../evidenceStore.js";
 import { persistExecutionResult } from "../executionPersistence.js";
@@ -106,6 +107,7 @@ export async function persistDynamicBrowserResult(input: {
   outcomeSummary: RunOutcomeSummaryV2;
   proof: Pick<FinalizeProofBundleResult, "verdict" | "gateEligible">;
   modelExecution?: VisualRunResult["modelExecution"];
+  qualityMetrics?: TestQualityMetrics;
 }) {
   const oracleById = new Map(input.decisions.flatMap((decision) => decision.oracles).map((oracle) => [oracle.id, oracle]));
   const assertionRows = input.actionResults.flatMap((result) => result.oracleResults.map((oracle) => ({ result, oracle })));
@@ -218,6 +220,7 @@ export async function persistDynamicBrowserResult(input: {
     machineGate: input.machineGate,
     finalStatus: input.machineGate.status,
     outcomeSummary: input.outcomeSummary,
+    qualityMetrics: input.qualityMetrics,
     modelExecution: input.modelExecution,
     judgeReport,
     judgeRouting: { route: "deterministic", reason: "Dynamic actions are advisory; deterministic proof controls the verdict.", signals: ["browser-agent"] },

@@ -9,6 +9,7 @@ import {
   repairExportSchema,
   repairFileChangeSchema,
   repairSessionSchema,
+  repairDeliverableSchema,
   repairWorkspaceFileSchema,
   repairValidationSchema,
   type ArtifactV2,
@@ -478,7 +479,17 @@ export async function buildRepairPatch(id: string) {
       file.status
     ));
   }
-  return { session: await persistSession({ ...session, files, updatedAt: new Date().toISOString() }), patch: chunks.join("\n") };
+  const patch = chunks.join("\n");
+  const generatedAt = new Date().toISOString();
+  const deliverable = repairDeliverableSchema.parse({
+    ...(session.deliverable ?? {}),
+    patchSha256: createHash("sha256").update(patch).digest("hex"),
+    impactSummary: files.length
+      ? `拟修改 ${files.length} 个文件（新增 ${files.reduce((sum, file) => sum + file.additions, 0)} 行，删除 ${files.reduce((sum, file) => sum + file.deletions, 0)} 行）；高风险文件 ${files.filter((file) => file.risk === "high").length} 个。`
+      : "当前沙盒没有可交付的源码变更。",
+    generatedAt
+  });
+  return { session: await persistSession({ ...session, files, deliverable, updatedAt: generatedAt }), patch };
 }
 
 async function createArtifact(input: {
@@ -859,9 +870,11 @@ export async function validateRepairSession(
   project: ProjectConfig,
   options: { allowNetworkInstall?: boolean } = {}
 ) {
-  const session = await readRepairSession(id);
+  let session = await readRepairSession(id);
   if (!session) throw new Error("repair_session_not_found");
-  const files = await scanChanges(session);
+  const patchResult = await buildRepairPatch(id);
+  session = patchResult.session;
+  const files = session.files.length ? session.files : await scanChanges(session);
   if (!files.length) throw new Error("repair_has_no_changes");
   if (files.some((item) => item.risk === "forbidden")) throw new Error("repair_contains_forbidden_change");
   const configuredFullCommand = project.testCommandSpec ?? project.manifest?.commands.test;
@@ -877,7 +890,7 @@ export async function validateRepairSession(
       startedAt: timestamp,
       finishedAt: timestamp
     });
-    return persistSession({ ...session, status: "blocked", files, validation, updatedAt: timestamp });
+    return persistSession({ ...session, status: "blocked", files, validation, deliverable: repairDeliverableSchema.parse({ ...(session.deliverable ?? {}), targetedValidation: "blocked", regressionValidation: "blocked", validationArtifactIds: [], mergeEligibility: "not-eligible" }), updatedAt: timestamp });
   }
   const fullCommand = await constrainRepairValidationCommand(
     commandSpecSchema.parse(configuredFullCommand),
@@ -896,7 +909,7 @@ export async function validateRepairSession(
       startedAt: timestamp,
       finishedAt: timestamp
     });
-    return persistSession({ ...session, status: "blocked", files, validation, updatedAt: timestamp });
+    return persistSession({ ...session, status: "blocked", files, validation, deliverable: repairDeliverableSchema.parse({ ...(session.deliverable ?? {}), targetedValidation: "blocked", regressionValidation: "blocked", validationArtifactIds: [], mergeEligibility: "not-eligible" }), updatedAt: timestamp });
   }
   const dependencyCache = await prepareSandboxDependencyCache(project, workspaceDir(id), {
     dependencyDescriptorRoot: options.allowNetworkInstall && dependencyDescriptorsChanged
@@ -923,7 +936,7 @@ export async function validateRepairSession(
       startedAt: timestamp,
       finishedAt: timestamp
     });
-    return persistSession({ ...session, status: "blocked", files, validation, updatedAt: timestamp });
+    return persistSession({ ...session, status: "blocked", files, validation, deliverable: repairDeliverableSchema.parse({ ...(session.deliverable ?? {}), targetedValidation: "blocked", regressionValidation: "blocked", validationArtifactIds: [], mergeEligibility: "not-eligible" }), updatedAt: timestamp });
   }
   const startedAt = new Date().toISOString();
   const childRunId = await createValidationRun(session, project);
@@ -1096,6 +1109,14 @@ export async function validateRepairSession(
     status: passed ? "ready-for-review" : "failed",
     files,
     validation,
+    deliverable: repairDeliverableSchema.parse({
+      ...(session.deliverable ?? {}),
+      targetedValidation: targetedPassed ? "passed" : "failed",
+      regressionValidation: regressionPassed ? "passed" : "failed",
+      validationArtifactIds: [artifact.id],
+      mergeEligibility: passed ? "eligible" : "not-eligible",
+      generatedAt: finishedAt
+    }),
     iteration: Math.min(2, session.iteration + 1),
     updatedAt: finishedAt
   });
@@ -1133,7 +1154,7 @@ export async function applyRepairSession(id: string, project: ProjectConfig, opt
       maxLogBytes: 2 * 1024 * 1024
     });
     if (applied.exitCode !== 0) throw new Error(`repair_git_apply_failed:${applied.stderr || applied.stdout}`);
-    return persistSession({ ...session, status: "applied", files, updatedAt: new Date().toISOString() });
+    return persistSession({ ...session, status: "applied", files, deliverable: repairDeliverableSchema.parse({ ...(session.deliverable ?? {}), mergeEligibility: "applied" }), updatedAt: new Date().toISOString() });
   }
   const backups = new Map<string, Buffer | undefined>();
   try {
@@ -1160,5 +1181,5 @@ export async function applyRepairSession(id: string, project: ProjectConfig, opt
     }
     throw error;
   }
-  return persistSession({ ...session, status: "applied", files, updatedAt: new Date().toISOString() });
+  return persistSession({ ...session, status: "applied", files, deliverable: repairDeliverableSchema.parse({ ...(session.deliverable ?? {}), mergeEligibility: "applied" }), updatedAt: new Date().toISOString() });
 }

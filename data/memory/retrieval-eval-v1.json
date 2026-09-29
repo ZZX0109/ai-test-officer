@@ -11,6 +11,13 @@
     "false-recall-rate",
     "source-traceability"
   ],
+  "thresholds": {
+    "recallAt5Min": 0.8,
+    "recallAt10Min": 0.9,
+    "meanReciprocalRankMin": 0.75,
+    "falseRecallRateAt10Max": 0.2,
+    "sourceTraceabilityRateMin": 1.0
+  },
   "cases": [
     {
       "queryId": "memory_q_001",

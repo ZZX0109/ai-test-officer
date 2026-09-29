@@ -4,6 +4,12 @@ import { businessNodeTokens } from "./businessCapabilityGraph.js";
 
 export type BusinessPathSurface = "page" | "api" | "data" | "background-task";
 export type BusinessPathStatus = "auto-bindable" | "needs-input" | "coverage-gap";
+/**
+ * A path is deliberately classified before it reaches the planning UI.  This
+ * prevents implementation resources (API routes, handlers and data entities)
+ * from silently becoming user-facing business capabilities.
+ */
+export type BusinessPathKind = "business-capability" | "page" | "api" | "technical-resource" | "runtime-observation";
 
 export interface BusinessPath {
   id: string;
@@ -21,6 +27,10 @@ export interface BusinessPath {
   sourceNodeIds: string[];
   sourceLocations: BusinessSourceLocation[];
   reason: string;
+  /** Canonical semantic role. Kept optional for older persisted inventories. */
+  kind?: BusinessPathKind;
+  /** True when this path is implementation evidence attached to a capability. */
+  implementationEvidence?: boolean;
 }
 
 function stableId(value: string) {
@@ -147,10 +157,11 @@ function relevance(path: BusinessPath, goal: string) {
  * intentionally separate: a static path becomes executable only after the
  * runtime binder can attach real controls/API fixtures/oracles.
  *
- * Entry discipline: a user-testable business function starts at a real page
- * (or, for API-only projects, at an API surface group). API routes, data
- * entities, credential definitions and route params are folded INTO the page
- * flows that exercise them — they never become standalone pseudo flows.
+ * Entry discipline: a user-testable business function starts at a real page.
+ * API routes, data entities, credential definitions and route params are
+ * implementation evidence folded INTO the page flow that exercises them;
+ * orphan technical resources remain in the internal inventory and require an
+ * explicit business-capability declaration before execution.
  */
 export function compileBusinessPaths(input: {
   graph: BusinessCapabilityGraph;
@@ -243,7 +254,11 @@ export function compileBusinessPaths(input: {
         ? "该路径来自正则启发式解析，需运行时确认实际路由或处理器绑定后才能自动执行。"
         : hasAction
         ? `由 ${nodes.length} 个代码节点组成，入口、交互、接口和后续处理关系均保留可追溯来源；运行时会验证实际操作和预期结果。`
-        : "已从代码中识别出该功能，等待在实际页面中确认操作步骤和预期结果。"
+        : "已从代码中识别出该功能，等待在实际页面中确认操作步骤和预期结果。",
+      kind: surfaces.includes("page") ? "business-capability"
+        : surfaces.includes("api") ? "api"
+          : "technical-resource",
+      implementationEvidence: surfaces.includes("api") && !surfaces.includes("page")
     };
     paths.push(path);
     nodes.forEach((node) => represented.add(node.id));
@@ -254,9 +269,8 @@ export function compileBusinessPaths(input: {
     // flow, carrying the controls, calls, routes and handlers it reaches.
     for (const entry of pageEntries) makePath(entry, connectedNodeIds(adjacency, entry.id));
 
-    // Backend surface not exercised by any page stays auditable, but grouped
-    // by API prefix — one row per resource group, never one pseudo flow per
-    // internal route. Owner-less frontend calls join the same groups.
+    // Backend surface not exercised by any page stays auditable, grouped by
+    // API prefix in the technical inventory. It is not a business function.
     const orphanRoutes = input.graph.nodes.filter((node) =>
       (node.kind === "api-route" || node.kind === "frontend-call") && !represented.has(node.id));
     const routeGroups = new Map<string, BusinessCapabilityNode[]>();
@@ -301,8 +315,9 @@ export function compileBusinessPaths(input: {
       makePath(synthetic, new Set(orphanData.map((node) => node.id)));
     }
   } else {
-    // API-only project: the API surface IS the business inventory. Group by
-    // resource prefix so large backends stay reviewable.
+    // API-only project: expose a technical inventory only. A business
+    // capability must be supplied by a manifest or explicit user mapping;
+    // an endpoint name is not enough to invent one.
     const routeGroups = new Map<string, BusinessCapabilityNode[]>();
     for (const node of input.graph.nodes.filter((item) => item.kind === "api-route")) {
       const key = apiGroupKey(node);

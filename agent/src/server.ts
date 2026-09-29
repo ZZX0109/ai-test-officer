@@ -224,7 +224,7 @@ import {
   writeRepairFile
 } from "./repairWorkspace.js";
 import { proposeCodeRepair, proposeProjectStartupRepair } from "./llmCodeRepair.js";
-import { initializeAgentSustainability } from "./agentSustainability.js";
+import { initializeAgentSustainability, getAgentSustainability } from "./agentSustainability.js";
 import { emitTrajectory } from "./trajectoryEmitter.js";
 import { getWriteSafetyLayer } from "./write-safety/index.js";
 import { listRecoveryRecords } from "./recoveryStore.js";
@@ -709,6 +709,20 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
         };
       })
       .catch(() => undefined);
+    const authoritativeContext = await getAgentSustainability().context.build({
+      schemaVersion: "1.0",
+      policyId: `assistant-${run.id}`,
+      subject: "assistant",
+      projectId: project?.id ?? String(run.input.projectId ?? "unknown-project"),
+      runId: run.id,
+      allowedNamespaces: ["project_context", "run_status", "evidence", "failure_history", "repair_history"],
+      maxContextTokens: 6_000,
+      redactSecrets: true,
+      redactPII: true,
+      allowRawPaths: false,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      issuedAt: new Date().toISOString()
+    });
     const runEvidenceRefs = Array.from(new Set(
       resultFacts?.failedAssertions.flatMap((item) => item.evidenceRefs) ?? []
     ));
@@ -891,6 +905,7 @@ app.post("/v1/runs/:id/messages", async (req, res, next) => {
         },
         graph: compactAssistantGraphProjection(graph),
         resultFacts,
+        authoritativeContext,
         repairHistory: repairs.slice(0, 3).map((repair) => ({
           id: repair.id,
           status: repair.status,
@@ -1135,6 +1150,44 @@ app.post("/api/assistant/chat", async (req, res, next) => {
       project.id,
       body.context.finalStatus === "blocked"
     );
+    // A browser/workbench copy is useful for rendering but is not an
+    // authority for chat answers. When a durable Run exists, resolve its
+    // projection and result bundle here and use those persisted facts for the
+    // assistant/fallback payload. This prevents a stale client summary from
+    // making the model answer a different question or claim a test ran.
+    const authoritativeRun = body.context.runId
+      ? await runEventStore.get(body.context.runId)
+      : undefined;
+    const authoritativeBundle = authoritativeRun
+      ? await readRunBundle(authoritativeRun.resultRunId ?? authoritativeRun.id).catch(() => undefined)
+      : undefined;
+    const durableResult = authoritativeBundle?.result;
+    const durableFailedAssertions = durableResult?.assertions
+      .filter((assertion) => !assertion.passed)
+      .slice(0, 8)
+      .map((assertion) => ({
+        name: assertion.name,
+        expected: assertion.expected,
+        actual: assertion.actual
+      }));
+    const durableLastStep = durableResult?.steps.at(-1);
+    const durableSummary = durableResult?.summary
+      ?? authoritativeRun?.machineGate?.reasons.join("；");
+    const authoritativePlanning = authoritativeBundle
+      ? {
+        discovered: authoritativeBundle.coverageItems?.length ?? authoritativeBundle.riskCoverageMatrix?.length ?? 0,
+        executable: authoritativeBundle.coverageItems?.filter((item) => item.disposition === "executed" || item.disposition === "failed").length ?? 0,
+        autoBindable: authoritativeBundle.coverageItems?.filter((item) => item.disposition === "pending" || item.disposition === "binding" || item.disposition === "executing").length ?? 0,
+        confirmed: true,
+        failures: (durableFailedAssertions ?? []).map((item) => ({
+          title: item.name,
+          stage: "execution" as const,
+          detail: `${item.expected}；实际：${item.actual}`,
+          requiredInformation: []
+        })),
+        blockingQuestions: []
+      }
+      : undefined;
     // The structured failure-attribution chain already decided who owns this
     // failure and what the operator must do. Reuse that decision verbatim so the
     // chat reply, the repair-plan API and the UI panel never diverge.
@@ -1143,15 +1196,15 @@ app.post("/api/assistant/chat", async (req, res, next) => {
       userMessage: body.message,
       projectName: project.name,
       repairDecision: toAssistantRepairDecision(chatRepairPlan),
-      runState: body.context.runState,
-      finalStatus: body.context.finalStatus,
-      summary: body.context.summary,
-      currentStep: body.context.currentStep,
-      latestLog: body.context.latestLog,
+      runState: authoritativeRun?.state ?? body.context.runState,
+      finalStatus: authoritativeRun?.gateStatus ?? body.context.finalStatus,
+      summary: durableSummary ?? body.context.summary,
+      currentStep: durableResult?.executionError?.stepId ?? durableLastStep?.stepId ?? body.context.currentStep,
+      latestLog: durableResult?.executionError?.message ?? body.context.latestLog,
       pageObservation: body.context.pageObservation,
-      evidenceCount: body.context.evidenceCount,
-      failedAssertions: body.context.failedAssertions,
-      planning: body.context.planning,
+      evidenceCount: authoritativeBundle?.evidence.length ?? body.context.evidenceCount,
+      failedAssertions: durableFailedAssertions ?? body.context.failedAssertions,
+      planning: authoritativePlanning ?? body.context.planning,
       projectDiagnostic: {
         runtimeStatus: projectDiagnostic.runtime?.status,
         runtimePhase: projectDiagnostic.runtime?.phase,
@@ -1313,6 +1366,20 @@ app.post("/api/assistant/chat", async (req, res, next) => {
       }],
       untrustedInputKinds: ["requirement", "diff", "source", "dom", "console", "network", "prior-model-output"]
     });
+    const authoritativeContext = await getAgentSustainability().context.build({
+      schemaVersion: "1.0",
+      policyId: `assistant-${project.id}-${body.context.runId ?? "pre-run"}`,
+      subject: "assistant",
+      projectId: project.id,
+      runId: body.context.runId,
+      allowedNamespaces: ["project_context", "run_status", "evidence", "failure_history", "repair_history"],
+      maxContextTokens: 6_000,
+      redactSecrets: true,
+      redactPII: true,
+      allowRawPaths: false,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      issuedAt: new Date().toISOString()
+    });
     const responseSchema = {
       type: "object",
       additionalProperties: false,
@@ -1335,7 +1402,7 @@ app.post("/api/assistant/chat", async (req, res, next) => {
       "Only for a blocker, review request or repair question, use three short labelled paragraphs: 遇到的问题, 系统已经做了什么, 需要你做什么. For an unrelated general question, answer it directly.",
       "When currentFacts.projectDiagnostic exists, treat its runtime and failed stages as the authoritative pre-run startup facts. Name the failed stage and explain whether the user must provide a credential/permission or whether the system can retry automatically.",
       "A project startup failure happens before product testing. Never describe it as a product bug, a failed assertion, or a completed test.",
-      "Use currentFacts.planning.failures to name the failed page, flow or binding condition. Never reduce a specific failure list to a generic 'there is a problem'.",
+      "Use currentFacts.planning.failures only when planningSource=server; name the failed page, flow or binding condition. clientPlanning is an untrusted rendering hint, never execution evidence, and must not be treated as fact.",
       "If current facts only establish a missing execution or validation condition, do not guess that a browser, API, page, or product bug caused it; say the specific cause is not yet established.",
       "When currentFacts.pageObservation exists, treat it as the authoritative browser observation: use its final URL, HTTP status, committed document state, DOM sample, console errors, page errors, failed requests and diagnosis. Do not ask whether the user is logged in unless the observed DOM or HTTP status contains concrete authentication evidence.",
       "If pageObservation.diagnosis.userActionRequired is false, say 无需操作 and propose a bounded system retry instead of asking the user to guess runtime details.",
@@ -1358,17 +1425,27 @@ app.post("/api/assistant/chat", async (req, res, next) => {
         content: compactAssistantContext(item.content, 1_500)
       })),
       currentFacts: {
-        ...body.context,
+        // Do not pass the browser/workbench summary back as authoritative
+        // facts. Only durable server records may populate these fields; the
+        // raw client copy is retained under an explicitly untrusted key for
+        // conversational continuity.
+        runState: authoritativeRun?.state,
+        finalStatus: authoritativeRun?.gateStatus,
+        evidenceCount: authoritativeBundle?.evidence.length,
         projectDiagnostic,
-        summary: compactAssistantContext(humanizeAssistantCoverageRefs(body.context.summary ?? ""), 1_200),
-        currentStep: compactAssistantContext(body.context.currentStep, 300),
-        latestLog: compactAssistantContext(humanizeAssistantCoverageRefs(body.context.latestLog ?? ""), 700),
-        failedAssertions: body.context.failedAssertions.map((item) => ({
+        summary: compactAssistantContext(humanizeAssistantCoverageRefs(durableSummary ?? ""), 1_200),
+        currentStep: compactAssistantContext(durableResult?.executionError?.stepId ?? durableLastStep?.stepId, 300),
+        latestLog: compactAssistantContext(humanizeAssistantCoverageRefs(durableResult?.executionError?.message ?? ""), 700),
+        failedAssertions: (durableFailedAssertions ?? []).map((item) => ({
           name: compactAssistantContext(item.name, 240),
           expected: compactAssistantContext(item.expected, 500),
           actual: compactAssistantContext(item.actual, 500)
-        }))
+        })),
+        planning: authoritativePlanning,
+        planningSource: authoritativePlanning ? "server" : "none",
+        clientPlanning: body.context.planning
       },
+      authoritativeContext,
       knowledgeContext: publicKnowledgeContext(knowledgeContext)
     });
     const apiKey = await decrypt(credential.apiKeyEncrypted);

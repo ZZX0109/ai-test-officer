@@ -17,6 +17,7 @@ import {
   knowledgeBoundarySystemPolicy
 } from "../knowledgeBoundary.js";
 import { executeKnowledgeBoundedLlm } from "../knowledge-boundary/executeKnowledgeBoundedLlm.js";
+import { getAgentSustainability } from "../agentSustainability.js";
 
 const proposedActionSchema = z.object({
   action: z.enum(["click-control", "fill-control", "select-control", "check-control", "press-key", "scroll-to-control", "wait-for-control", "navigate-route", "submit-form", "evaluate-oracle"]),
@@ -292,7 +293,9 @@ export async function decideNextBrowserActions(input: {
   credentialId?: string;
   allowedRouteIds: string[];
   previousResults: Array<{ action: string; status: string; summary: string }>;
+  behaviorDimensions?: Array<"happy-path" | "negative" | "boundary" | "permission" | "state-transition" | "data-consistency" | "idempotency" | "recovery">;
   budget?: Partial<LlmBudget>;
+  projectId?: string;
 }): Promise<BrowserActionDecision> {
   if (!input.credentialId) return browserActionDecisionSchema.parse({
     schemaVersion: "1.0", decisionId: `browser_decision_${randomUUID()}`,
@@ -324,12 +327,28 @@ export async function decideNextBrowserActions(input: {
     untrustedInputKinds: ["dom", "console", "network", "requirement", "prior-model-output"]
   });
   const page = compactBrowserObservationForDecision(input.observation);
+  const runContext = await getAgentSustainability().context.build({
+    schemaVersion: "1.0",
+    policyId: `browser-action-${input.observation.runId}`,
+    subject: "browser-agent",
+    projectId: input.projectId ?? "unknown-project",
+    runId: input.observation.runId,
+    allowedNamespaces: ["project_context", "run_status", "evidence", "failure_history", "repair_history"],
+    maxContextTokens: 6_000,
+    redactSecrets: true,
+    redactPII: true,
+    allowRawPaths: false,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    issuedAt: new Date().toISOString()
+  });
   const prompt = JSON.stringify({
     task: "Choose the single next safe browser action required to test the supplied goal.",
     goal: input.goal,
+    behaviorDimensions: input.behaviorDimensions ?? ["happy-path", "negative"],
     page,
     allowedRouteIds: input.allowedRouteIds,
     previousResults: input.previousResults.slice(-8),
+    authoritativeRunContext: runContext,
     rules: [
       "Use only controlId values present in page.controls and routeId values in allowedRouteIds.",
       "Never output selectors, JavaScript, shell commands, SQL, arbitrary URLs, raw credentials, or literal secrets.",
@@ -337,6 +356,7 @@ export async function decideNextBrowserActions(input: {
       "Propose at most one action. The page will be observed again before you choose another action.",
       "The current page has already been observed by the system; choose a real bounded action, complete, blocked, or needs-confirmation.",
       "Every action that claims a result must bind at least one deterministic oracle.",
+      "Design the action for the listed behavior dimensions. Do not claim a dimension is covered unless the selected action and its Oracle actually exercise it; a normal successful click only covers happy-path.",
       "If the goal is complete return complete. If facts are insufficient return blocked or needs-confirmation.",
       "Knowledge toolRequests and proposedActions must be empty; browser actions belong only in actions."
     ],

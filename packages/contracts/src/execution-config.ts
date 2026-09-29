@@ -48,6 +48,16 @@ export const projectManifestSchema = z.object({
     enforcement: z.enum(["none", "external-egress-proxy"]).default("none")
   }).default({}),
   fixtures: z.array(z.object({ id: z.string().min(1), path: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/), destructive: z.boolean().default(false) })).default([]),
+  /** Optional human-owned mapping for API-only products. An endpoint is not a
+   * business function unless it is explicitly attached to one of these names. */
+  businessCapabilities: z.array(z.object({
+    id: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
+    name: z.string().min(1).max(160),
+    purpose: z.string().max(500).optional(),
+    pathIds: z.array(z.string()).default([]),
+    routePrefixes: z.array(z.string().startsWith("/")).default([]),
+    risk: z.enum(["low", "medium", "high"]).default("medium")
+  })).default([]),
   apiOperations: z.array(z.object({
     operationId: z.string().regex(/^[a-zA-Z0-9_.:-]+$/),
     method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),

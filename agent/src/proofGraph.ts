@@ -83,7 +83,16 @@ function evidenceRefsForAssertion(
 
 function buildCoverageItems(result: VisualRunResult, scenarioId: string, attemptId: string): CoverageItem[] {
   const now = result.finishedAt;
-  return result.riskCoverageMatrix.map((item) => coverageItemSchema.parse({
+  return result.riskCoverageMatrix.map((item) => {
+    // Preserve the planned behaviour matrix when a result is finalized more
+    // than once (for example after a repair or an aggregate projection). The
+    // proof graph is a presentation/provenance projection; it must not turn a
+    // required negative/boundary/permission path back into happy-path-only.
+    const planned = result.coverageItems?.find((candidate) =>
+      candidate.flowId === item.riskId
+      || candidate.actionPathIds?.some((pathId) => item.pathIds.includes(pathId))
+    );
+    return coverageItemSchema.parse({
     schemaVersion: "1.0",
     id: stableId("coverage", result.id, item.riskId),
     runId: result.id,
@@ -94,13 +103,16 @@ function buildCoverageItems(result: VisualRunResult, scenarioId: string, attempt
     actionPathIds: item.pathIds,
     oracleIds: result.oracles.filter((oracle) => item.pathIds.includes(oracle.pathId)).map((oracle) => oracle.id),
     requiredEvidenceKinds: ["screenshot", "dom", "trace"],
+    behaviorDimensions: planned?.behaviorDimensions ?? ["happy-path", "negative"],
+    coveredBehaviorDimensions: planned?.coveredBehaviorDimensions ?? [],
     disposition: item.covered ? "executed" : "blocked",
     dispositionReason: item.notes,
     scenarioId,
     attemptId,
     createdAt: now,
     updatedAt: now
-  }));
+    });
+  });
 }
 
 function addEdge(
